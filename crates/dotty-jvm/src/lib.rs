@@ -63,7 +63,8 @@ pub enum JvmReturnType {
     Void,
 }
 
-/// The control-flow result of lowering one expression.
+/// The result of lowering one expression, including its normal fallthrough
+/// stack state or the fact that every path terminates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmExpressionFlow {
     /// A value remains on the operand stack at the expression's fallthrough.
@@ -73,6 +74,9 @@ pub enum JvmExpressionFlow {
         /// JVM operand category exposed to parent lowering.
         category: JvmValueCategory,
     },
+    /// The expression completes normally and leaves no value on the operand
+    /// stack, matching Scala `Unit`.
+    Unit,
     /// Every reachable path terminates through a supported explicit return.
     Diverges,
 }
@@ -90,7 +94,7 @@ impl JvmLoweredExpression {
         &self.code
     }
 
-    /// Value or terminating-flow result for parent lowering.
+    /// Value, no-value `Unit`, or terminating-flow result for parent lowering.
     pub const fn flow(&self) -> JvmExpressionFlow {
         self.flow
     }
@@ -406,6 +410,17 @@ pub enum JvmCodegenError {
         expected: JvmReturnType,
         found: Option<JvmType>,
     },
+    /// A normally completing no-value expression is incompatible with a
+    /// value-returning method body.
+    MethodBodyFlowMismatch {
+        method: SymbolId,
+        tree: TreeId<Typed>,
+        expected: JvmReturnType,
+        found: JvmExpressionFlow,
+    },
+    /// A no-value `Unit` flow was attached to a typed tree with a different
+    /// semantic type.
+    UnitFlowTypeMismatch { tree: TreeId<Typed>, ty: TypeId },
     /// Recursive typed-tree lowering exceeded its fixed depth budget.
     ExpressionDepthExceeded {
         tree: TreeId<Typed>,
@@ -713,10 +728,12 @@ pub fn lower_value_expression(
 
 /// Lowers one supported typed expression without appending a method epilogue.
 ///
-/// Integer/Boolean leaves and nested `If`/local `Return` nodes are supported.
-/// The returned flow states whether a value remains on the stack or every path
-/// terminates. The expression is built into a fresh method-local instruction
-/// builder, so an error never exposes partial code.
+/// Integer/Boolean leaves, the `Unit` literal, and nested `If`/local `Return`
+/// nodes are supported. `Value` leaves one correctly typed value on the JVM
+/// stack; `Unit` completes normally with no stack value; `Diverges` has no
+/// reachable fallthrough.
+/// The expression is built into a fresh method-local instruction builder, so
+/// an error never exposes partial code.
 pub fn lower_expression(
     store: &SemanticStore,
     typed_ast: &TypedAst,
@@ -731,8 +748,8 @@ pub fn lower_expression(
 /// terminal return required by its reachable fallthrough.
 ///
 /// The returned builder is method-local and is discarded on any lowering
-/// error. Int and Boolean results use `ireturn`; Unit is accepted only for a
-/// body consisting of supported explicit void-return flow.
+/// error. Int and Boolean values use `ireturn`; a normally completing Unit body
+/// gets `return`; a body whose paths all terminate gets no additional epilogue.
 pub fn lower_method_body(
     store: &SemanticStore,
     typed_ast: &TypedAst,

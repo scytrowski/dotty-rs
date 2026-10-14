@@ -1,7 +1,7 @@
 //! Lowering for the first, value-producing typed expression leaves.
 
 use dotty_classfile::bytecode::CodeBuilder;
-use dotty_core::ast::{TreeKind, Typed, TypedAst};
+use dotty_core::ast::{Tree, TreeKind, Typed, TypedAst};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId, TypeId};
 use dotty_core::store::SemanticStore;
@@ -17,7 +17,70 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Flow {
     Value(JvmType),
+    Unit,
     Diverges,
+}
+
+enum ExpressionShape {
+    Leaf,
+    If,
+    Return,
+    Unsupported(&'static str),
+}
+
+/// Read-only semantic inputs shared by every recursive lowering step.
+struct JvmLoweringContext<'a> {
+    store: &'a SemanticStore,
+    typed_ast: &'a TypedAst,
+    definitions: &'a Definitions,
+    method: &'a JvmMethodMetadata,
+    node_visits: usize,
+}
+
+impl<'a> JvmLoweringContext<'a> {
+    fn new(
+        store: &'a SemanticStore,
+        typed_ast: &'a TypedAst,
+        definitions: &'a Definitions,
+        method: &'a JvmMethodMetadata,
+    ) -> Self {
+        Self {
+            store,
+            typed_ast,
+            definitions,
+            method,
+            node_visits: 0,
+        }
+    }
+
+    fn tree(&self, tree: TreeId<Typed>) -> Result<&Tree<Typed>, JvmCodegenError> {
+        self.typed_ast
+            .try_get(tree)
+            .ok_or(JvmCodegenError::UnsupportedTypedExpression {
+                tree,
+                node: "missing tree",
+            })
+    }
+
+    fn visit(&mut self, tree: TreeId<Typed>, depth: usize) -> Result<(), JvmCodegenError> {
+        let node = self.tree(tree)?;
+        if depth >= JVM_EXPRESSION_DEPTH_LIMIT {
+            return Err(JvmCodegenError::ExpressionDepthExceeded {
+                tree,
+                position: node.position,
+                limit: JVM_EXPRESSION_DEPTH_LIMIT,
+            });
+        }
+        if self.node_visits >= JVM_EXPRESSION_NODE_BUDGET {
+            return Err(JvmCodegenError::ExpressionNodeBudgetExceeded {
+                tree,
+                limit: JVM_EXPRESSION_NODE_BUDGET,
+            });
+        }
+        validate_tree_type(self.store, tree, node.ty)?;
+        self.node_visits += 1;
+        Ok(())
+    }
 }
 
 pub(super) fn lower_value_expression(
@@ -28,16 +91,19 @@ pub(super) fn lower_value_expression(
     tree_id: TreeId<Typed>,
     code: &mut CodeBuilder,
 ) -> Result<JvmValueCategory, JvmCodegenError> {
-    let tree = typed_ast
-        .try_get(tree_id)
-        .ok_or(JvmCodegenError::UnsupportedTypedExpression {
+    let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
+    context.visit(tree_id, 0)?;
+    match lower_leaf(&context, tree_id, code)? {
+        Flow::Value(value) => Ok(value.category()),
+        Flow::Unit => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
-            node: "missing tree",
-        })?;
-    validate_tree_type(store, tree_id, tree.ty)?;
-
-    lower_leaf(store, typed_ast, definitions, method, tree_id, code)?;
-    Ok(JvmValueCategory::IntLike)
+            node: "Unit in value-producing lowering",
+        }),
+        Flow::Diverges => Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree: tree_id,
+            node: "diverging leaf flow",
+        }),
+    }
 }
 
 pub(super) fn lower_expression(
@@ -48,17 +114,8 @@ pub(super) fn lower_expression(
     tree: TreeId<Typed>,
 ) -> Result<JvmLoweredExpression, JvmCodegenError> {
     let mut code = CodeBuilder::new();
-    let mut node_visits = 0;
-    let flow = emit_expression(
-        store,
-        typed_ast,
-        definitions,
-        method,
-        tree,
-        &mut code,
-        0,
-        &mut node_visits,
-    )?;
+    let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
+    let flow = emit_expression(&mut context, tree, &mut code, 0)?;
     Ok(JvmLoweredExpression {
         code,
         flow: public_flow(flow),
@@ -73,32 +130,32 @@ pub(super) fn lower_method_body(
     body: TreeId<Typed>,
 ) -> Result<CodeBuilder, JvmCodegenError> {
     let mut code = CodeBuilder::new();
-    let mut node_visits = 0;
-    let flow = emit_expression(
-        store,
-        typed_ast,
-        definitions,
-        method,
-        body,
-        &mut code,
-        0,
-        &mut node_visits,
-    )?;
+    let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
+    let flow = emit_expression(&mut context, body, &mut code, 0)?;
     match (method.descriptor().result(), flow) {
         (JvmReturnType::Value(expected), Flow::Value(found)) if expected == found => {
             code.ireturn()
                 .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
         }
+        (JvmReturnType::Void, Flow::Unit) => {
+            code.return_void()
+                .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
+        }
         (JvmReturnType::Value(_), Flow::Diverges) | (JvmReturnType::Void, Flow::Diverges) => {}
-        (expected, found) => {
+        (expected, Flow::Unit) => {
+            return Err(JvmCodegenError::MethodBodyFlowMismatch {
+                method: method.symbol(),
+                tree: body,
+                expected,
+                found: JvmExpressionFlow::Unit,
+            });
+        }
+        (expected, Flow::Value(found)) => {
             return Err(JvmCodegenError::MethodBodyTypeMismatch {
                 method: method.symbol(),
                 tree: body,
                 expected,
-                found: match found {
-                    Flow::Value(value_type) => Some(value_type),
-                    Flow::Diverges => None,
-                },
+                found: Some(found),
             });
         }
     }
@@ -106,24 +163,25 @@ pub(super) fn lower_method_body(
 }
 
 fn lower_leaf(
-    store: &SemanticStore,
-    typed_ast: &TypedAst,
-    definitions: &Definitions,
-    method: &JvmMethodMetadata,
+    context: &JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
     code: &mut CodeBuilder,
-) -> Result<JvmType, JvmCodegenError> {
-    let tree = typed_ast
-        .try_get(tree_id)
-        .ok_or(JvmCodegenError::UnsupportedTypedExpression {
-            tree: tree_id,
-            node: "missing tree",
-        })?;
+) -> Result<Flow, JvmCodegenError> {
+    let tree = context.tree(tree_id)?;
     match &tree.kind {
         TreeKind::Literal(literal) => {
             let (value, primitive) = match literal.value {
                 Constant::Int(value) => (value, JvmType::Int),
                 Constant::Boolean(value) => (i32::from(value), JvmType::Boolean),
+                Constant::Unit => {
+                    if !is_unit_type(context.store, tree.ty, context.definitions) {
+                        return Err(JvmCodegenError::UnsupportedTypedExpression {
+                            tree: tree_id,
+                            node: "Unit literal with a non-Unit type",
+                        });
+                    }
+                    return Ok(Flow::Unit);
+                }
                 _ => {
                     return Err(JvmCodegenError::UnsupportedTypedExpression {
                         tree: tree_id,
@@ -131,8 +189,8 @@ fn lower_leaf(
                     });
                 }
             };
-            let typed_primitive = primitive_type(store, tree.ty, definitions);
-            let matches_constant_type = match store.types.try_get(tree.ty) {
+            let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
+            let matches_constant_type = match context.store.types.try_get(tree.ty) {
                 Some(Type::Constant(typed_value)) => typed_value == &literal.value,
                 _ => typed_primitive == Some(primitive),
             };
@@ -148,10 +206,10 @@ fn lower_leaf(
                     tree: tree_id,
                     error,
                 })?;
-            Ok(primitive)
+            Ok(Flow::Value(primitive))
         }
         TreeKind::Ident(_) => {
-            let symbol = match store.types.try_get(tree.ty) {
+            let symbol = match context.store.types.try_get(tree.ty) {
                 Some(Type::TermRef {
                     target: TermRefTarget::Symbol(symbol),
                     ..
@@ -159,7 +217,8 @@ fn lower_leaf(
                 _ => None,
             };
             let Some(parameter) = symbol.and_then(|symbol| {
-                method
+                context
+                    .method
                     .parameters()
                     .iter()
                     .find(|parameter| parameter.symbol() == symbol)
@@ -170,26 +229,27 @@ fn lower_leaf(
                     symbol,
                 });
             };
-            if !store.symbols.contains(parameter.symbol()) {
+            if !context.store.symbols.contains(parameter.symbol()) {
                 return Err(JvmCodegenError::InvalidParameterReference {
                     tree: tree_id,
                     symbol: Some(parameter.symbol()),
                 });
             }
-            let parameter_symbol = store.symbols.get(parameter.symbol());
+            let parameter_symbol = context.store.symbols.get(parameter.symbol());
             if parameter_symbol.kind != dotty_core::symbols::SymbolKind::Parameter
-                || parameter_symbol.owner != Some(method.symbol())
+                || parameter_symbol.owner != Some(context.method.symbol())
             {
                 return Err(JvmCodegenError::InvalidParameterReference {
                     tree: tree_id,
                     symbol: Some(parameter.symbol()),
                 });
             }
-            let symbol_type = match store.symbols.info(parameter.symbol()) {
+            let symbol_type = match context.store.symbols.info(parameter.symbol()) {
                 SymbolInfo::Complete(ty) => Some(*ty),
                 SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => None,
             };
-            let found = symbol_type.and_then(|ty| primitive_type(store, ty, definitions));
+            let found =
+                symbol_type.and_then(|ty| primitive_type(context.store, ty, context.definitions));
             if found != Some(parameter.ty()) {
                 return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
                     tree: tree_id,
@@ -204,7 +264,7 @@ fn lower_leaf(
                     error,
                 }
             })?;
-            Ok(parameter.ty())
+            Ok(Flow::Value(parameter.ty()))
         }
         kind => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
@@ -213,112 +273,61 @@ fn lower_leaf(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_expression(
-    store: &SemanticStore,
-    typed_ast: &TypedAst,
-    definitions: &Definitions,
-    method: &JvmMethodMetadata,
+    context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
     code: &mut CodeBuilder,
     depth: usize,
-    node_visits: &mut usize,
 ) -> Result<Flow, JvmCodegenError> {
-    let tree = typed_ast
-        .try_get(tree_id)
-        .ok_or(JvmCodegenError::UnsupportedTypedExpression {
+    context.visit(tree_id, depth)?;
+    let shape = {
+        let tree = context.tree(tree_id)?;
+        match &tree.kind {
+            TreeKind::Literal(_) | TreeKind::Ident(_) => ExpressionShape::Leaf,
+            TreeKind::If(_) => ExpressionShape::If,
+            TreeKind::Return(_) => ExpressionShape::Return,
+            kind => ExpressionShape::Unsupported(tree_kind_name(kind)),
+        }
+    };
+    match shape {
+        ExpressionShape::Leaf => lower_leaf(context, tree_id, code),
+        ExpressionShape::If => emit_if(context, tree_id, code, depth),
+        ExpressionShape::Return => emit_return(context, tree_id, code, depth),
+        ExpressionShape::Unsupported(node) => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
-            node: "missing tree",
-        })?;
-    if depth >= JVM_EXPRESSION_DEPTH_LIMIT {
-        return Err(JvmCodegenError::ExpressionDepthExceeded {
-            tree: tree_id,
-            position: tree.position,
-            limit: JVM_EXPRESSION_DEPTH_LIMIT,
-        });
-    }
-    if *node_visits >= JVM_EXPRESSION_NODE_BUDGET {
-        return Err(JvmCodegenError::ExpressionNodeBudgetExceeded {
-            tree: tree_id,
-            limit: JVM_EXPRESSION_NODE_BUDGET,
-        });
-    }
-    *node_visits += 1;
-    validate_tree_type(store, tree_id, tree.ty)?;
-    match &tree.kind {
-        TreeKind::Literal(_) | TreeKind::Ident(_) => Ok(Flow::Value(lower_leaf(
-            store,
-            typed_ast,
-            definitions,
-            method,
-            tree_id,
-            code,
-        )?)),
-        TreeKind::If(if_tree) => emit_if(
-            store,
-            typed_ast,
-            definitions,
-            method,
-            tree_id,
-            tree.ty,
-            if_tree.cond,
-            if_tree.then_branch,
-            if_tree.else_branch,
-            code,
-            depth,
-            node_visits,
-        ),
-        TreeKind::Return(return_tree) => emit_return(
-            store,
-            typed_ast,
-            definitions,
-            method,
-            tree_id,
-            tree.ty,
-            return_tree.expr,
-            return_tree.from,
-            code,
-            depth,
-            node_visits,
-        ),
-        kind => Err(JvmCodegenError::UnsupportedTypedExpression {
-            tree: tree_id,
-            node: tree_kind_name(kind),
+            node,
         }),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_if(
-    store: &SemanticStore,
-    typed_ast: &TypedAst,
-    definitions: &Definitions,
-    method: &JvmMethodMetadata,
+    context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
-    result_ty: TypeId,
-    condition: TreeId<Typed>,
-    then_branch: TreeId<Typed>,
-    else_branch: TreeId<Typed>,
     code: &mut CodeBuilder,
     depth: usize,
-    node_visits: &mut usize,
 ) -> Result<Flow, JvmCodegenError> {
-    let condition_flow = emit_expression(
-        store,
-        typed_ast,
-        definitions,
-        method,
-        condition,
-        code,
-        depth + 1,
-        node_visits,
-    )?;
+    let (result_ty, condition, then_branch, else_branch) = {
+        let tree = context.tree(tree_id)?;
+        let TreeKind::If(if_tree) = &tree.kind else {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: tree_id,
+                node: tree_kind_name(&tree.kind),
+            });
+        };
+        (
+            tree.ty,
+            if_tree.cond,
+            if_tree.then_branch,
+            if_tree.else_branch,
+        )
+    };
+    let condition_flow = emit_expression(context, condition, code, depth + 1)?;
     if condition_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::InvalidIfCondition {
             tree: condition,
             found: match condition_flow {
                 Flow::Value(value_type) => Some(value_type),
-                Flow::Diverges => None,
+                Flow::Unit | Flow::Diverges => None,
             },
         });
     }
@@ -334,17 +343,8 @@ fn emit_if(
             tree: tree_id,
             error,
         })?;
-    let then_flow = emit_expression(
-        store,
-        typed_ast,
-        definitions,
-        method,
-        then_branch,
-        code,
-        depth + 1,
-        node_visits,
-    )?;
-    let join_label = if matches!(then_flow, Flow::Value(_)) {
+    let then_flow = emit_expression(context, then_branch, code, depth + 1)?;
+    let join_label = if matches!(then_flow, Flow::Value(_) | Flow::Unit) {
         let join_label = code
             .new_label()
             .map_err(|error| JvmCodegenError::CodeBuilder {
@@ -366,20 +366,9 @@ fn emit_if(
             tree: tree_id,
             error,
         })?;
-    let else_flow = emit_expression(
-        store,
-        typed_ast,
-        definitions,
-        method,
-        else_branch,
-        code,
-        depth + 1,
-        node_visits,
-    )?;
+    let else_flow = emit_expression(context, else_branch, code, depth + 1)?;
     let flow = merge_if_flows(
-        store,
-        typed_ast,
-        definitions,
+        context,
         tree_id,
         result_ty,
         then_branch,
@@ -397,11 +386,8 @@ fn emit_if(
     Ok(flow)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn merge_if_flows(
-    store: &SemanticStore,
-    typed_ast: &TypedAst,
-    definitions: &Definitions,
+    context: &JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
     result_ty: TypeId,
     then_tree: TreeId<Typed>,
@@ -409,9 +395,9 @@ fn merge_if_flows(
     else_tree: TreeId<Typed>,
     else_flow: Flow,
 ) -> Result<Flow, JvmCodegenError> {
-    validate_bottom_branch(store, typed_ast, definitions, then_tree, then_flow)?;
-    validate_bottom_branch(store, typed_ast, definitions, else_tree, else_flow)?;
-    let branch_value = match (then_flow, else_flow) {
+    validate_branch(context, then_tree, then_flow)?;
+    validate_branch(context, else_tree, else_flow)?;
+    let merged = match (then_flow, else_flow) {
         (Flow::Value(left), Flow::Value(right)) => {
             if left != right {
                 return Err(JvmCodegenError::IfBranchTypeMismatch {
@@ -421,102 +407,119 @@ fn merge_if_flows(
                     found: Some(right),
                 });
             }
-            Some(left)
+            Flow::Value(left)
         }
-        (Flow::Value(value), Flow::Diverges) | (Flow::Diverges, Flow::Value(value)) => Some(value),
-        (Flow::Diverges, Flow::Diverges) => None,
+        (Flow::Value(value), Flow::Diverges) | (Flow::Diverges, Flow::Value(value)) => {
+            Flow::Value(value)
+        }
+        (Flow::Unit, Flow::Unit | Flow::Diverges) | (Flow::Diverges, Flow::Unit) => Flow::Unit,
+        (Flow::Diverges, Flow::Diverges) => Flow::Diverges,
+        (Flow::Value(value), Flow::Unit) | (Flow::Unit, Flow::Value(value)) => {
+            return Err(JvmCodegenError::IfResultTypeMismatch {
+                tree,
+                expected: primitive_type(context.store, result_ty, context.definitions),
+                found: Some(value),
+            });
+        }
     };
-    let expected = primitive_type(store, result_ty, definitions);
-    match branch_value {
-        Some(found) if expected == Some(found) => Ok(Flow::Value(found)),
-        None if is_nothing_type(store, result_ty, definitions) => Ok(Flow::Diverges),
+    let expected = primitive_type(context.store, result_ty, context.definitions);
+    match merged {
+        Flow::Value(found) if expected == Some(found) => Ok(Flow::Value(found)),
+        Flow::Unit if is_unit_type(context.store, result_ty, context.definitions) => Ok(Flow::Unit),
+        Flow::Diverges => Ok(Flow::Diverges),
         found => Err(JvmCodegenError::IfResultTypeMismatch {
             tree,
             expected,
-            found,
+            found: match found {
+                Flow::Value(value) => Some(value),
+                Flow::Unit | Flow::Diverges => None,
+            },
         }),
     }
 }
 
-fn validate_bottom_branch(
-    store: &SemanticStore,
-    typed_ast: &TypedAst,
-    definitions: &Definitions,
+fn validate_branch(
+    context: &JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
     flow: Flow,
 ) -> Result<(), JvmCodegenError> {
-    let tree_ty = typed_ast.try_get(tree).map(|tree| tree.ty).ok_or(
-        JvmCodegenError::UnsupportedTypedExpression {
-            tree,
-            node: "missing tree",
-        },
-    )?;
+    let tree_ty = context.tree(tree)?.ty;
     match flow {
-        Flow::Diverges if is_nothing_type(store, tree_ty, definitions) => Ok(()),
-        Flow::Diverges => Err(JvmCodegenError::UnsupportedBottomFlow { tree }),
-        Flow::Value(_) if is_nothing_type(store, tree_ty, definitions) => {
+        Flow::Diverges => {
+            let diverges_with_supported_type =
+                is_nothing_type(context.store, tree_ty, context.definitions)
+                    || (is_unit_type(context.store, tree_ty, context.definitions)
+                        && matches!(&context.tree(tree)?.kind, TreeKind::If(_)));
+            if diverges_with_supported_type {
+                Ok(())
+            } else {
+                Err(JvmCodegenError::UnsupportedBottomFlow { tree })
+            }
+        }
+        Flow::Unit if is_unit_type(context.store, tree_ty, context.definitions) => Ok(()),
+        Flow::Unit => Err(JvmCodegenError::UnitFlowTypeMismatch { tree, ty: tree_ty }),
+        Flow::Value(_) if is_nothing_type(context.store, tree_ty, context.definitions) => {
             Err(JvmCodegenError::UnsupportedBottomFlow { tree })
         }
         Flow::Value(_) => Ok(()),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn emit_return(
-    store: &SemanticStore,
-    typed_ast: &TypedAst,
-    definitions: &Definitions,
-    method: &JvmMethodMetadata,
+    context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
-    return_ty: TypeId,
-    expr: Option<TreeId<Typed>>,
-    from: Option<TreeId<Typed>>,
     code: &mut CodeBuilder,
     depth: usize,
-    node_visits: &mut usize,
 ) -> Result<Flow, JvmCodegenError> {
+    let (return_ty, expr, from) = {
+        let tree = context.tree(tree_id)?;
+        let TreeKind::Return(return_tree) = &tree.kind else {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: tree_id,
+                node: tree_kind_name(&tree.kind),
+            });
+        };
+        (tree.ty, return_tree.expr, return_tree.from)
+    };
     if let Some(from) = from {
         return Err(JvmCodegenError::UnsupportedReturnTarget {
             tree: tree_id,
             from,
         });
     }
-    if !is_nothing_type(store, return_ty, definitions) {
+    if !is_nothing_type(context.store, return_ty, context.definitions) {
         return Err(JvmCodegenError::UnsupportedBottomFlow { tree: tree_id });
     }
-    match (expr, method.descriptor().result()) {
-        (Some(value), JvmReturnType::Value(expected)) => {
-            match emit_expression(
-                store,
-                typed_ast,
-                definitions,
-                method,
-                value,
-                code,
-                depth + 1,
-                node_visits,
-            )? {
-                Flow::Value(found) if found == expected => {
-                    code.ireturn()
-                        .map_err(|error| JvmCodegenError::CodeBuilder {
-                            tree: tree_id,
-                            error,
-                        })?;
-                    Ok(Flow::Diverges)
-                }
-                Flow::Diverges => Ok(Flow::Diverges),
-                Flow::Value(found) => Err(JvmCodegenError::ReturnValueTypeMismatch {
-                    tree: tree_id,
-                    expected: method.descriptor().result(),
-                    found: Some(found),
-                }),
+    match (expr, context.method.descriptor().result()) {
+        (Some(value), expected) => match emit_expression(context, value, code, depth + 1)? {
+            Flow::Diverges => Ok(Flow::Diverges),
+            Flow::Unit if expected == JvmReturnType::Void => {
+                code.return_void()
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                Ok(Flow::Diverges)
             }
-        }
-        (Some(_), expected) => Err(JvmCodegenError::ReturnValueTypeMismatch {
-            tree: tree_id,
-            expected,
-            found: None,
-        }),
+            Flow::Unit => Err(JvmCodegenError::ReturnValueTypeMismatch {
+                tree: tree_id,
+                expected,
+                found: None,
+            }),
+            Flow::Value(found) if expected == JvmReturnType::Value(found) => {
+                code.ireturn()
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                Ok(Flow::Diverges)
+            }
+            Flow::Value(found) => Err(JvmCodegenError::ReturnValueTypeMismatch {
+                tree: tree_id,
+                expected,
+                found: Some(found),
+            }),
+        },
         (None, JvmReturnType::Void) => {
             code.return_void()
                 .map_err(|error| JvmCodegenError::CodeBuilder {
@@ -539,8 +542,19 @@ fn public_flow(flow: Flow) -> JvmExpressionFlow {
             value_type,
             category: value_type.category(),
         },
+        Flow::Unit => JvmExpressionFlow::Unit,
         Flow::Diverges => JvmExpressionFlow::Diverges,
     }
+}
+
+fn is_unit_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) -> bool {
+    if matches!(
+        store.types.try_get(ty),
+        Some(Type::Constant(Constant::Unit))
+    ) {
+        return true;
+    }
+    type_symbol(store, definitions.unit).is_some_and(|unit| type_symbol(store, ty) == Some(unit))
 }
 
 fn is_nothing_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) -> bool {
@@ -1161,6 +1175,256 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first_class, encoded_class_bytes(&fixture, second));
+    }
+
+    #[test]
+    fn unit_literal_reports_no_stack_value_and_gets_a_void_epilogue() {
+        let mut fixture = Fixture::new(&[]);
+        let constant_unit_type = fixture.store.types.alloc(Type::Constant(Constant::Unit));
+        let unit = fixture.literal(Constant::Unit, constant_unit_type);
+        let lowered = lower_expression(
+            &fixture.store,
+            &fixture.ast,
+            &fixture.definitions,
+            &fixture.method,
+            unit,
+        )
+        .unwrap();
+        assert_eq!(lowered.flow(), JvmExpressionFlow::Unit);
+        fixture.set_result(JvmReturnType::Void);
+        let mut expression_code = lowered.into_code();
+        expression_code.return_void().unwrap();
+        assert_eq!(encoded_method_code(&fixture, expression_code), vec![0xb1]);
+
+        fixture.set_result(JvmReturnType::Value(JvmType::Int));
+        assert_eq!(
+            lower_method_body(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                unit,
+            )
+            .unwrap_err(),
+            JvmCodegenError::MethodBodyFlowMismatch {
+                method: fixture.method.symbol(),
+                tree: unit,
+                expected: JvmReturnType::Value(JvmType::Int),
+                found: JvmExpressionFlow::Unit,
+            }
+        );
+
+        fixture.set_result(JvmReturnType::Void);
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    unit,
+                )
+                .unwrap(),
+            ),
+            vec![0xb1]
+        );
+    }
+
+    #[test]
+    fn unit_if_branches_join_with_an_empty_operand_stack() {
+        let mut fixture = Fixture::new(&[JvmType::Boolean]);
+        fixture.set_result(JvmReturnType::Void);
+        let parameter = fixture.parameters[0];
+        let condition_type = fixture.store.types.alloc(Type::TermRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TermRefTarget::Symbol(parameter),
+        });
+        let condition = fixture.ident(condition_type);
+        let then_unit = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let else_unit = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let root = fixture.if_expr(condition, then_unit, else_unit, fixture.definitions.unit);
+
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                root,
+            )
+            .unwrap()
+            .flow(),
+            JvmExpressionFlow::Unit
+        );
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    root,
+                )
+                .unwrap(),
+            ),
+            vec![0x1b, 0x99, 0x00, 0x06, 0xa7, 0x00, 0x03, 0xb1]
+        );
+    }
+
+    #[test]
+    fn explicit_void_return_consumes_unit_literal_or_if_flow() {
+        let mut fixture = Fixture::new(&[JvmType::Boolean]);
+        fixture.set_result(JvmReturnType::Void);
+        let unit_literal = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let return_unit = fixture.return_expr(Some(unit_literal), None);
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    return_unit,
+                )
+                .unwrap(),
+            ),
+            vec![0xb1]
+        );
+
+        let condition_type = fixture.store.types.alloc(Type::TermRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TermRefTarget::Symbol(fixture.parameters[0]),
+        });
+        let condition = fixture.ident(condition_type);
+        let then_unit = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let else_unit = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let unit_if = fixture.if_expr(condition, then_unit, else_unit, fixture.definitions.unit);
+        let return_unit_if = fixture.return_expr(Some(unit_if), None);
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    return_unit_if,
+                )
+                .unwrap(),
+            ),
+            vec![0x1b, 0x99, 0x00, 0x06, 0xa7, 0x00, 0x03, 0xb1]
+        );
+    }
+
+    #[test]
+    fn unit_typed_if_with_only_returns_still_diverges_without_an_epilogue() {
+        let mut fixture = Fixture::new(&[JvmType::Boolean, JvmType::Int, JvmType::Int]);
+        let ids = fixture.parameters.clone();
+        let references = ids
+            .iter()
+            .copied()
+            .map(|symbol| {
+                let ty = fixture.store.types.alloc(Type::TermRef {
+                    prefix: fixture.definitions.no_prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                });
+                fixture.ident(ty)
+            })
+            .collect::<Vec<_>>();
+        let then_return = fixture.return_expr(Some(references[1]), None);
+        let else_return = fixture.return_expr(Some(references[2]), None);
+        let root = fixture.if_expr(
+            references[0],
+            then_return,
+            else_return,
+            fixture.definitions.unit,
+        );
+
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                root,
+            )
+            .unwrap()
+            .flow(),
+            JvmExpressionFlow::Diverges
+        );
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    root,
+                )
+                .unwrap(),
+            ),
+            vec![0x1b, 0x99, 0x00, 0x05, 0x1c, 0xac, 0x1d, 0xac]
+        );
+    }
+
+    #[test]
+    fn unit_typed_diverging_if_is_valid_as_a_nested_unit_branch() {
+        let mut fixture = Fixture::new(&[JvmType::Boolean, JvmType::Boolean]);
+        fixture.set_result(JvmReturnType::Void);
+        let parameters = fixture.parameters.clone();
+        let references = parameters
+            .into_iter()
+            .map(|symbol| {
+                let ty = fixture.store.types.alloc(Type::TermRef {
+                    prefix: fixture.definitions.no_prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                });
+                fixture.ident(ty)
+            })
+            .collect::<Vec<_>>();
+        let inner_then_return = fixture.return_expr(None, None);
+        let inner_else_return = fixture.return_expr(None, None);
+        let inner = fixture.if_expr(
+            references[1],
+            inner_then_return,
+            inner_else_return,
+            fixture.definitions.unit,
+        );
+        let outer_unit = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let root = fixture.if_expr(references[0], inner, outer_unit, fixture.definitions.unit);
+
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                root,
+            )
+            .unwrap()
+            .flow(),
+            JvmExpressionFlow::Unit
+        );
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    root,
+                )
+                .unwrap(),
+            ),
+            vec![
+                0x1b, 0x99, 0x00, 0x09, 0x1c, 0x99, 0x00, 0x04, 0xb1, 0xb1, 0xb1
+            ]
+        );
     }
 
     #[test]

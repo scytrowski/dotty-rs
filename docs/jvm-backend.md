@@ -56,9 +56,9 @@ classes, arrays, by-name and repeated types, non-primitive constants, Unit
 parameters, erased parameters, and varargs are rejected with structured
 errors. Unknown types never fall back to `java/lang/Object`.
 
-No general Scala type erasure, boxing, Unit-as-value, raw bytecode, source
-pipeline orchestration, TASTy integration, or macro support is part of this
-contract.
+No general Scala type erasure, reference boxing, Unit operand-stack
+representation, raw bytecode, source pipeline orchestration, TASTy integration,
+or macro support is part of this contract.
 
 ## Class and method metadata subset
 
@@ -155,23 +155,28 @@ at the metadata-assigned instance local slot. Both produce the `IntLike`
 category while Boolean descriptors remain `Z`. Literal types may be the
 matching singleton constant type or canonical `Definitions.int` / `.boolean`.
 
-`lower_expression` adds nested typed `If` expressions and local explicit
-`Return` nodes. A Boolean condition is evaluated once and followed by symbolic
-`ifeq`/`goto` labels. Value-producing branches agree on their `Int` or Boolean
-type and reach a stack-compatible join. A branch that terminates with an
-explicit local return contributes no placeholder value; a `Nothing` branch
-without supported return flow is rejected. Every emitted tree must be within
-the fixed depth budget `JVM_EXPRESSION_DEPTH_LIMIT` (64 nodes), and depth errors
-carry the offending `TreeId` and optional source span. Each lowering call also
-caps expanded node visits at `JVM_EXPRESSION_NODE_BUDGET` (4,096); repeated
-references to a shared subtree count each time they are expanded.
+`lower_expression` also supports a typed `Constant::Unit` literal. It emits no
+instruction and reports `JvmExpressionFlow::Unit`, distinct from an int-like
+value on the operand stack and from `Diverges`. Nested typed `If` expressions
+may join two Unit branches with an empty stack. A Boolean condition is evaluated
+once and followed by symbolic `ifeq`/`goto` labels. Value-producing branches
+agree on their `Int` or Boolean type and reach a stack-compatible join. A
+branch that terminates with an explicit local return contributes no placeholder
+value; a `Nothing` branch without supported return flow is rejected. Every
+emitted tree must be within the fixed depth budget
+`JVM_EXPRESSION_DEPTH_LIMIT` (64 nodes), and depth errors carry the offending
+`TreeId` and optional source span. The internal `JvmLoweringContext` shares the
+read-only semantic inputs and one expanded-node counter through recursive
+lowering. Each call caps expanded visits at `JVM_EXPRESSION_NODE_BUDGET` (4,096);
+repeated references to a shared subtree count each time they are expanded.
 
 `lower_method_body` checks the final flow against the method descriptor and
-adds `ireturn` for an `Int`/Boolean fallthrough. A body whose reachable paths
-all return gets no extra epilogue. Unit is accepted only when the body has
-supported explicit `return` flow; it emits JVM `return`. All APIs build into a
-fresh method-local `CodeBuilder`, so an error discards partial instructions.
-The classfile builder then validates reachable blocks, analyzes stack states,
+adds `ireturn` for an `Int`/Boolean value fallthrough. A Unit body that
+completes normally gets JVM `return`; a body whose reachable paths all return
+gets no extra epilogue. Unit never pushes a placeholder value. A Unit body is a
+typed flow mismatch for an `Int`/Boolean method. All APIs build into a fresh
+method-local `CodeBuilder`, so an error discards partial instructions. The
+classfile builder then validates reachable blocks, analyzes stack states,
 assembles labels, and writes `StackMapTable` frames.
 
 `Return.from = Some(...)` is rejected. `Select`, `Apply`, `TypeApply`, `Block`,
