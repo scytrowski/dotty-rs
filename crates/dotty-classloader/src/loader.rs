@@ -1305,6 +1305,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
     fn compiler_builtin_class(&self, name: &BinaryName) -> Option<SymbolId> {
         match name.as_internal() {
+            "scala/Int" => self
+                .store
+                .types
+                .get(self.definitions.int)
+                .reference_symbol(),
             "scala/Any" => Some(self.definitions.any_class),
             "scala/AnyRef" => Some(self.definitions.object_class),
             "scala/Nothing" => Some(self.definitions.nothing_class),
@@ -4562,11 +4567,35 @@ mod tests {
     }
 
     #[test]
-    fn scala_compiler_builtin_class_names_reuse_definitions_without_classpath_entries() {
+    fn scala_compiler_builtin_class_names_reuse_definitions_and_ignore_int_classpath_entry() {
+        let mut classes = HashMap::new();
+        classes.insert(
+            BinaryName::from_internal("scala/Int"),
+            synthetic_class("scala/Int", None),
+        );
         let mut store = SemanticStore::new();
-        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
         let definitions = loader.definitions();
+        let int_class = loader
+            .store
+            .types
+            .get(definitions.int)
+            .reference_symbol()
+            .unwrap();
+        let operators = definitions
+            .int_primitive_operator_symbols(loader.store)
+            .unwrap();
 
+        let int = loader
+            .load_class(&BinaryName::from_internal("scala/Int"))
+            .unwrap();
+        assert_eq!(int, int_class);
+        assert_eq!(
+            definitions
+                .int_primitive_operator_symbols(loader.store)
+                .unwrap(),
+            operators
+        );
         assert_eq!(
             loader
                 .load_class(&BinaryName::from_internal("scala/AnyRef"))
