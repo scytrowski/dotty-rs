@@ -1842,9 +1842,17 @@ fn typed_method_ident(
     fixture: &mut EmissionFixture,
     method: SymbolId,
 ) -> TreeId<dotty_core::ast::Typed> {
+    typed_method_ident_with_prefix(fixture, method, fixture.definitions.no_prefix)
+}
+
+fn typed_method_ident_with_prefix(
+    fixture: &mut EmissionFixture,
+    method: SymbolId,
+    prefix: dotty_core::TypeId,
+) -> TreeId<dotty_core::ast::Typed> {
     let name = fixture.store.symbols.get(method).name;
     let ty = fixture.store.types.alloc(Type::TermRef {
-        prefix: fixture.definitions.no_prefix,
+        prefix,
         target: TermRefTarget::Symbol(method),
     });
     fixture.ast.alloc(Tree {
@@ -2483,6 +2491,28 @@ fn rejects_non_this_receivers_non_current_this_and_nullary_methods() {
         Err(JvmCodegenError::UnsupportedJvmCallShape {
             tree: select,
             kind: UnsupportedJvmCallShapeKind::NonThisReceiver,
+        })
+    );
+
+    let ident_with_foreign_prefix =
+        typed_method_ident_with_prefix(&mut fixture, identity, receiver_type);
+    let call = typed_call(
+        &mut fixture,
+        ident_with_foreign_prefix,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture.unit().resolve_same_class_call(
+            fixture.class,
+            fixture.methods[1],
+            call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::UnsupportedJvmCallShape {
+            tree: ident_with_foreign_prefix,
+            kind: UnsupportedJvmCallShapeKind::UnsupportedReceiverPrefix,
         })
     );
 

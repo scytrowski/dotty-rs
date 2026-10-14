@@ -61,8 +61,8 @@ pub(super) fn resolve_same_class_call(
     }
 
     let function_tree = tree(unit.store, unit.typed_ast, function_id)?;
-    match &function_tree.kind {
-        TreeKind::Ident(_) => {}
+    let is_ident = match &function_tree.kind {
+        TreeKind::Ident(_) => true,
         TreeKind::Select(select) => {
             let receiver = tree(unit.store, unit.typed_ast, select.qualifier)?;
             if !matches!(receiver.kind, TreeKind::This(_)) {
@@ -80,6 +80,7 @@ pub(super) fn resolve_same_class_call(
                     UnsupportedJvmCallShapeKind::NonCurrentThis,
                 ));
             }
+            false
         }
         TreeKind::TypeApply(_) => {
             return Err(unsupported_call(
@@ -99,15 +100,26 @@ pub(super) fn resolve_same_class_call(
                 UnsupportedJvmCallShapeKind::UnsupportedFunctionTree,
             ));
         }
-    }
+    };
 
-    let method = match unit.store.types.try_get(function_tree.ty) {
+    let (prefix, method) = match unit.store.types.try_get(function_tree.ty) {
         Some(Type::TermRef {
+            prefix,
             target: TermRefTarget::Symbol(method),
-            ..
-        }) => *method,
+        }) => (*prefix, *method),
         _ => return Err(JvmCodegenError::UnresolvedJvmCallTarget { tree: function_id }),
     };
+    let supported_prefix = match unit.store.types.try_get(prefix) {
+        Some(Type::NoPrefix) => is_ident,
+        Some(Type::ThisType { class }) => *class == caller_class,
+        _ => false,
+    };
+    if !supported_prefix {
+        return Err(unsupported_call(
+            function_id,
+            UnsupportedJvmCallShapeKind::UnsupportedReceiverPrefix,
+        ));
+    }
     if !unit.store.symbols.contains(method) {
         return Err(JvmCodegenError::UnknownMethod { method });
     }

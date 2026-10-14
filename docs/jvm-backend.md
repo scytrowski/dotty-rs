@@ -89,7 +89,10 @@ can extend the layout contract without changing identity semantics.
 `JvmCompilationUnit::resolve_same_class_call` accepts a complete typed
 `Apply` tree plus the planned caller class and method. It resolves only a
 canonical `TermRefTarget::Symbol` carried by an `Ident` or a `Select` on that
-class's `this`, then requires the target to belong to the same class's
+class's `this`. Ident references must have either `NoPrefix` or that class's
+`ThisType` as their canonical term-reference prefix; selected references must
+have that class's `ThisType`. Other prefixes return a typed unsupported-shape
+error. The resolver then requires the target to belong to the same class's
 explicit emission plan and declaration scope. The result carries the exact
 owner internal name, JVM method name and descriptor, canonical method symbol,
 `Virtual` invocation kind, and result contract. The typed call result must

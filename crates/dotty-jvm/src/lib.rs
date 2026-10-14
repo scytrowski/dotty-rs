@@ -646,6 +646,8 @@ pub enum UnsupportedJvmCallShapeKind {
     NonThisReceiver,
     /// A selected member's `this` receiver is not the current class.
     NonCurrentThis,
+    /// The canonical term reference has a prefix outside this call subset.
+    UnsupportedReceiverPrefix,
 }
 
 /// Unsupported semantic type form in this descriptor projection.
