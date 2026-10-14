@@ -68,15 +68,21 @@ remain distinguishable by identity.
 
 | Source | Expected Scala target | Argument | Result | JVM operation or branch family | Current frontend stage | Backend status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `x + y` | canonical `scala.Int.+(Int): Int` | `Int` | `Int` | `iadd` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
-| `x - y` | canonical `scala.Int.-(Int): Int` | `Int` | `Int` | `isub` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
-| `x * y` | canonical `scala.Int.*(Int): Int` | `Int` | `Int` | `imul` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
-| `x / y` | canonical `scala.Int./(Int): Int` | `Int` | `Int` | `idiv` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
-| `x % y` | canonical `scala.Int.%(Int): Int` | `Int` | `Int` | `irem` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
-| `x < y` | canonical `scala.Int.<(Int): Boolean` | `Int` | `Boolean` | signed `if_icmplt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1121](https://github.com/scytrowski/dotty-rs/issues/1121) |
-| `x <= y` | canonical `scala.Int.<=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmple`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1121](https://github.com/scytrowski/dotty-rs/issues/1121) |
-| `x > y` | canonical `scala.Int.>(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpgt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1121](https://github.com/scytrowski/dotty-rs/issues/1121) |
-| `x >= y` | canonical `scala.Int.>=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpge`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1121](https://github.com/scytrowski/dotty-rs/issues/1121) |
+| `x + y` | canonical `scala.Int.+(Int): Int` | `Int` | `Int` | `iadd` | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+| `x - y` | canonical `scala.Int.-(Int): Int` | `Int` | `Int` | `isub` | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+| `x * y` | canonical `scala.Int.*(Int): Int` | `Int` | `Int` | `imul` | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+| `x / y` | canonical `scala.Int./(Int): Int` | `Int` | `Int` | `idiv` | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+| `x % y` | canonical `scala.Int.%(Int): Int` | `Int` | `Int` | `irem` | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+| `x < y` | canonical `scala.Int.<(Int): Boolean` | `Int` | `Boolean` | signed `if_icmplt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+| `x <= y` | canonical `scala.Int.<=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmple`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+| `x > y` | canonical `scala.Int.>(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpgt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+| `x >= y` | canonical `scala.Int.>=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpge`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | End-to-end source and JDK 21 verified by [#1123](https://github.com/scytrowski/dotty-rs/issues/1123) |
+
+The checked-in `tests/fixtures/jvm/Calculator.scala` exercises all nine
+operators through the real source frontend. CI decodes and validates the
+emitted class, inspects instructions and stack maps, then compiles a Java caller
+and runs it with `java -Xverify:all` on JDK 21+. Two fresh frontend sessions
+must produce byte-identical class files.
 
 The read-only `dotty-jvm::resolve_int_intrinsic` resolver maps those nine
 registered `SymbolId`s to `JvmIntIntrinsic` variants. It accepts only a regular
@@ -103,7 +109,7 @@ intrinsic.
 
 Resolution is read-only and returns a descriptor only. It does not select or
 emit bytecode instructions, mutate the constant pool, infer types, or load
-classes. Planned method-body lowering consumes the arithmetic descriptors and
+classes. JVM method-body lowering consumes the arithmetic descriptors and
 emits JVM integer instructions. Relational descriptors emit signed conditional
 branches and explicit Boolean `0`/`1` values through symbolic labels; branch
 offsets and stack-map frames remain owned by `dotty-classfile`.
@@ -119,7 +125,9 @@ Scala `Boolean` is represented as JVM `0` or `1`; branch-based comparison
 lowering must materialize exactly those values on both control-flow paths.
 
 The equality operators `==` and `!=`, unary operators, numeric widening and
-boxing are not part of this audit.
+boxing, Long/Float/Double operations, arbitrary library operators, arbitrary
+reference calls inside branched CFGs, Java classpath loading, TASTy emission,
+and the full Scala ABI are not part of this audit.
 
 ## Registration and backend boundary
 
