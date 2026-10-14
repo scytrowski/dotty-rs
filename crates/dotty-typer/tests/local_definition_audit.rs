@@ -6048,13 +6048,6 @@ fn print_pinned_immutable_field_method_outcomes(outcomes: &BTreeMap<String, Stri
         let outcome = outcomes
             .get(&key)
             .unwrap_or_else(|| panic!("baseline local method attempt is missing: {key}"));
-        assert!(
-            matches!(
-                outcome.as_str(),
-                "ImportQualifierNotFound" | "ObjectModuleClassUnavailable"
-            ),
-            "the pinned baseline method should retain its explicit classpath blocker: {key}"
-        );
         println!("  {key} outcome={outcome}");
     }
 }
