@@ -120,11 +120,19 @@ subsets:
 | Generated class | Typed operations exercised |
 | --- | --- |
 | `Calculator` | `iload`, `iadd`, `ireturn` |
+| `IntegerArithmetic` | `isub`, `imul`, `idiv`, `irem`; signed operands, truncation toward zero, minimum-int division overflow, and division/remainder by zero |
 | `Calculator.max` | `if_icmpge`, both branches, and equality; executed for `(20,22)`, `(22,20)`, and `(22,22)` |
 | `Calculator.sumTo` | loop back-edge, `goto`, integer locals, and merge frames; executed for `0`, `1`, and `10` |
 | `Calculator.nested` | nested integer conditionals, four branch targets, and a shared join of initialized integer locals |
 | `Box` | `aload`, `iload`, `invokespecial`, `putfield`, `getfield`, `return`, `ireturn` |
 | `Caller` | integer constants, `invokestatic`, `new`, `dup`, `iload`, `invokespecial`, `areturn`, `ireturn` |
+
+These integer instructions operate directly on JVM 32-bit values. Subtraction
+and multiplication wrap modulo 2^32; division truncates toward zero; remainder
+has the dividend's sign. `idiv` and `irem` throw `ArithmeticException` for a
+zero divisor, and `Integer.MIN_VALUE / -1` evaluates to `Integer.MIN_VALUE`
+with remainder zero. The classfile builder does not evaluate or pre-check
+these arithmetic operations.
 
 Every class is built with `ClassFileBuilder` and `CodeBuilder`; the fixture
 does not embed complete class bytes, constant-pool indices, or caller-provided

@@ -99,6 +99,94 @@ fn pop_updates_branch_stack_state_and_preserves_stack_map_offsets() {
 }
 
 #[test]
+fn integer_arithmetic_preserves_loop_and_if_join_frames_deterministically() {
+    let mut sequence = CodeSequence::new();
+    let loop_head = sequence.new_label().unwrap();
+    let choose_division = sequence.new_label().unwrap();
+    let otherwise = sequence.new_label().unwrap();
+    let join = sequence.new_label().unwrap();
+
+    sequence.instruction(Instruction::ILoad(local(0)));
+    sequence.instruction(Instruction::IStore(local(1)));
+    sequence.bind(loop_head.clone()).unwrap();
+    sequence.instruction(Instruction::ILoad(local(1)));
+    sequence.branch(BranchInstruction::IfEq(choose_division.clone()));
+    sequence.instruction(Instruction::ILoad(local(1)));
+    sequence.instruction(Instruction::IConst(SmallIntConstant::One));
+    sequence.instruction(Instruction::ISub);
+    sequence.instruction(Instruction::IStore(local(1)));
+    sequence.branch(BranchInstruction::Goto(loop_head.clone()));
+
+    sequence.bind(choose_division.clone()).unwrap();
+    sequence.instruction(Instruction::ILoad(local(0)));
+    sequence.branch(BranchInstruction::IfEq(otherwise.clone()));
+    sequence.instruction(Instruction::ILoad(local(0)));
+    sequence.instruction(Instruction::IConst(SmallIntConstant::Two));
+    sequence.instruction(Instruction::IMul);
+    sequence.branch(BranchInstruction::Goto(join.clone()));
+
+    sequence.bind(otherwise.clone()).unwrap();
+    sequence.instruction(Instruction::ILoad(local(0)));
+    sequence.instruction(Instruction::IConst(SmallIntConstant::Two));
+    sequence.instruction(Instruction::IDiv);
+    sequence.bind(join.clone()).unwrap();
+    sequence.instruction(Instruction::IConst(SmallIntConstant::Three));
+    sequence.instruction(Instruction::IRem);
+    sequence.instruction(Instruction::IReturn);
+
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let first = CfgCodeAnalyzer::analyze(&graph, "(I)I", true, &ConstantPool::default()).unwrap();
+    let second = CfgCodeAnalyzer::analyze(&graph, "(I)I", true, &ConstantPool::default()).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.max_stack, 2);
+    assert_eq!(first.max_locals, 2);
+    for label in [&loop_head, &join] {
+        let state = first
+            .entry_state(graph.block_for_label(label).unwrap())
+            .unwrap();
+        assert_eq!(
+            state.locals,
+            [FlowLocalState::Integer, FlowLocalState::Integer]
+        );
+    }
+    let assembled = assemble_labeled(&sequence, &ConstantPool::default()).unwrap();
+    let first_frames = generate_stack_map_frames(&first, &graph, &assembled).unwrap();
+    let second_frames = generate_stack_map_frames(&second, &graph, &assembled).unwrap();
+    assert_eq!(first_frames, second_frames);
+    assert_eq!(
+        first_frames.code_analysis,
+        dotty_classfile::bytecode::CodeAnalysis {
+            max_stack: 2,
+            max_locals: 2,
+        }
+    );
+}
+
+#[test]
+fn integer_arithmetic_underflow_is_reported_by_cfg_analysis() {
+    for operation in [
+        Instruction::ISub,
+        Instruction::IMul,
+        Instruction::IDiv,
+        Instruction::IRem,
+    ] {
+        let mut sequence = CodeSequence::new();
+        sequence.instruction(operation);
+        sequence.instruction(Instruction::IReturn);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze(&graph, "()I", true, &ConstantPool::default()),
+            Err(AnalysisError::StackUnderflow {
+                instruction: 0,
+                needed: 1,
+                available: 0,
+            }),
+            "{operation:?}"
+        );
+    }
+}
+
+#[test]
 fn two_early_returns_and_nested_conditionals_have_stable_states() {
     let mut sequence = CodeSequence::new();
     let outer_else = sequence.new_label().unwrap();

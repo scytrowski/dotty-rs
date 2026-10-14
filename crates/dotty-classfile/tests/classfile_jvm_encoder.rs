@@ -770,3 +770,119 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
         "Calculator.add=42\nCalculator.max=22,22,22\nCalculator.sumTo=55,0,1\nCalculator.nested=100,10,1,0\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42"
     );
 }
+
+#[test]
+fn integer_arithmetic_instructions_execute_with_jvm_signed_semantics() {
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut arithmetic = ClassFileBuilder::new("IntegerArithmetic", version)
+        .expect("Java 21 class builder is supported");
+    arithmetic
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    for (name, operation, opcode) in [
+        ("subtract", 0u8, 0x64u8),
+        ("multiply", 1, 0x68),
+        ("divide", 2, 0x6c),
+        ("remainder", 3, 0x70),
+    ] {
+        arithmetic
+            .add_static_method(name, "(II)I", move |code| {
+                code.iload(0)?;
+                code.iload(1)?;
+                match operation {
+                    0 => code.isub()?,
+                    1 => code.imul()?,
+                    2 => code.idiv()?,
+                    3 => code.irem()?,
+                    _ => unreachable!(),
+                };
+                code.ireturn()?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(opcode, [0x64, 0x68, 0x6c, 0x70][operation as usize]);
+    }
+    arithmetic
+        .add_static_method("divideByZero", "()I", |code| {
+            code.iconst(1)?;
+            code.iconst(0)?;
+            code.idiv()?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    arithmetic
+        .add_static_method("remainderByZero", "()I", |code| {
+            code.iconst(1)?;
+            code.iconst(0)?;
+            code.irem()?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    let bytes = arithmetic
+        .encode()
+        .expect("integer arithmetic class is generated through typed code builder");
+    let class = decode_and_validate(&bytes);
+    assert_eq!(class.methods.len(), 6);
+    for (index, opcode) in [0x64, 0x68, 0x6c, 0x70].into_iter().enumerate() {
+        let method_code = code(&class.methods[index]);
+        assert_eq!((method_code.max_stack, method_code.max_locals), (2, 2));
+        assert_eq!(method_code.code, [0x1a, 0x1b, opcode, 0xac]);
+    }
+    assert_eq!(code(&class.methods[4]).code, [0x04, 0x03, 0x6c, 0xac]);
+    assert_eq!(code(&class.methods[5]).code, [0x04, 0x03, 0x70, 0xac]);
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let class_path = directory.path().join("IntegerArithmetic.class");
+    fs::write(&class_path, bytes)
+        .unwrap_or_else(|error| panic!("write {}: {error}", class_path.display()));
+    let harness_path = directory.path().join("IntegerArithmeticHarness.java");
+    fs::write(
+        &harness_path,
+        "public final class IntegerArithmeticHarness {\n    public static void main(String[] args) {\n        if (IntegerArithmetic.subtract(2, 5) != -3 || IntegerArithmetic.subtract(-2, -5) != 3) throw new AssertionError(\"isub\");\n        if (IntegerArithmetic.multiply(-7, 3) != -21) throw new AssertionError(\"imul\");\n        if (IntegerArithmetic.divide(-7, 3) != -2 || IntegerArithmetic.divide(7, -3) != -2) throw new AssertionError(\"idiv signed truncation\");\n        if (IntegerArithmetic.divide(Integer.MIN_VALUE, -1) != Integer.MIN_VALUE) throw new AssertionError(\"idiv overflow case\");\n        if (IntegerArithmetic.remainder(-7, 3) != -1 || IntegerArithmetic.remainder(7, -3) != 1) throw new AssertionError(\"irem signed remainder\");\n        if (IntegerArithmetic.remainder(Integer.MIN_VALUE, -1) != 0) throw new AssertionError(\"irem overflow case\");\n        try { IntegerArithmetic.divideByZero(); throw new AssertionError(\"idiv by zero returned\"); } catch (ArithmeticException expected) { }\n        try { IntegerArithmetic.remainderByZero(); throw new AssertionError(\"irem by zero returned\"); } catch (ArithmeticException expected) { }\n        System.out.println(\"integer arithmetic semantics ok\");\n    }\n}\n",
+    )
+    .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
+    let directory_arg = directory.path().to_string_lossy().into_owned();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            &directory_arg,
+            "-d",
+            &directory_arg,
+            harness_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for arithmetic harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            &directory_arg,
+            "IntegerArithmeticHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed to execute arithmetic class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "integer arithmetic semantics ok"
+    );
+}

@@ -43,6 +43,10 @@
 //! | `LStore` | [`lstore`, `lstore_0`..`lstore_3`, `wide lstore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lstore) `0x37`, `0x3f`..`0x42`, `0xc4` | 0, 1, or `wide` + 2 | `[long] -> []` |
 //! | `AStore` | [`astore`, `astore_0`..`astore_3`, `wide astore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.astore) `0x3a`, `0x4b`..`0x4e`, `0xc4` | 0, 1, or `wide` + 2 | `[reference] -> []` |
 //! | `IAdd` | [`iadd`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iadd) `0x60` | 0 | `[int, int] -> [int]` |
+//! | `ISub` | [`isub`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.isub) `0x64` | 0 | `[int, int] -> [int]` |
+//! | `IMul` | [`imul`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.imul) `0x68` | 0 | `[int, int] -> [int]` |
+//! | `IDiv` | [`idiv`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.idiv) `0x6c` | 0 | `[int, int] -> [int]` |
+//! | `IRem` | [`irem`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.irem) `0x70` | 0 | `[int, int] -> [int]` |
 //! | `Dup` | [`dup`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.dup) `0x59` | 0 | `[category-1] -> [category-1, category-1]` |
 //! | `Pop` | [`pop`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.pop) `0x57` | 0 | `[category-1] -> []` |
 //! | `GetField(FieldReference)` | [`getfield`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.getfield) `0xb4` | 2 | `[reference] -> [field value]` |
@@ -365,6 +369,14 @@ pub enum Instruction {
     AStore(LocalIndex),
     /// Adds two integers.
     IAdd,
+    /// Subtracts the second integer from the first.
+    ISub,
+    /// Multiplies two integers.
+    IMul,
+    /// Divides the first integer by the second, truncating toward zero.
+    IDiv,
+    /// Computes the signed remainder after integer division.
+    IRem,
     /// Duplicates the top category-one stack value.
     Dup,
     /// Removes the top category-one stack value.
@@ -484,6 +496,10 @@ mod tests {
             Instruction::LStore(local),
             Instruction::AStore(local),
             Instruction::IAdd,
+            Instruction::ISub,
+            Instruction::IMul,
+            Instruction::IDiv,
+            Instruction::IRem,
             Instruction::Dup,
             Instruction::GetField(field),
             Instruction::PutField(field),
@@ -525,6 +541,10 @@ mod tests {
                 Instruction::LStore(local),
                 Instruction::AStore(local),
                 Instruction::IAdd,
+                Instruction::ISub,
+                Instruction::IMul,
+                Instruction::IDiv,
+                Instruction::IRem,
                 Instruction::Dup,
                 Instruction::GetField(FieldReference::new(cp(1))),
                 Instruction::PutField(FieldReference::new(cp(1))),

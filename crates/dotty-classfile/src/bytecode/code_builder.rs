@@ -427,6 +427,30 @@ impl CodeBuilder {
         Ok(self)
     }
 
+    /// Subtracts the top integer from the next integer on the stack.
+    pub fn isub(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::ISub);
+        Ok(self)
+    }
+
+    /// Multiplies the top two integers on the stack.
+    pub fn imul(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::IMul);
+        Ok(self)
+    }
+
+    /// Divides the next integer on the stack by the top integer, truncating toward zero.
+    pub fn idiv(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::IDiv);
+        Ok(self)
+    }
+
+    /// Computes the signed remainder of the next integer divided by the top integer.
+    pub fn irem(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::IRem);
+        Ok(self)
+    }
+
     /// Duplicates the top category-one value.
     pub fn dup(&mut self) -> Result<&mut Self, CodeBuilderError> {
         self.push(Instruction::Dup);
@@ -791,6 +815,30 @@ mod tests {
                 ))),
                 SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::Pop)),
                 SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::Return)),
+            ]
+        ));
+    }
+
+    #[test]
+    fn integer_arithmetic_methods_append_exact_typed_instructions() {
+        let mut builder = CodeBuilder::new();
+        builder
+            .isub()
+            .unwrap()
+            .imul()
+            .unwrap()
+            .idiv()
+            .unwrap()
+            .irem()
+            .unwrap();
+
+        assert!(matches!(
+            builder.elements.as_slice(),
+            [
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::ISub)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IMul)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IDiv)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IRem)),
             ]
         ));
     }
