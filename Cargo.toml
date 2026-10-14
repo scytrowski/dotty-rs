@@ -36,3 +36,4 @@ dotty-typer = { path = "crates/dotty-typer" }
 
 [dev-dependencies]
 dotty-lexer = { path = "crates/dotty-lexer" }
+dotty-jvm = { path = "crates/dotty-jvm" }
