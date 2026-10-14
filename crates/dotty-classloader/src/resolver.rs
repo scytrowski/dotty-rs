@@ -1756,6 +1756,20 @@ mod tests {
             .module_class;
         assert!(store.symbols.contains(object));
         assert!(store.symbols.contains(module_class));
+        assert_eq!(
+            resolver
+                .session
+                .module_by_object(object)
+                .map(|identity| identity.module_class),
+            Some(module_class)
+        );
+        assert_eq!(
+            resolver
+                .session
+                .module_by_class(module_class)
+                .map(|identity| identity.object),
+            Some(object)
+        );
 
         resolver.rollback_to(&mut store, resolver_mark);
         store.rollback_to(store_mark);
@@ -1763,6 +1777,8 @@ mod tests {
         assert!(!store.symbols.contains(object));
         assert!(!store.symbols.contains(module_class));
         assert!(resolver.session.modules.is_empty());
+        assert_eq!(resolver.session.module_by_object(object), None);
+        assert_eq!(resolver.session.module_by_class(module_class), None);
         let resolved_again = resolver
             .resolve_member(
                 &mut store,
@@ -1776,6 +1792,13 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(resolved_again, object);
+        assert_eq!(
+            resolver
+                .session
+                .module_by_object(resolved_again)
+                .map(|identity| identity.module_class),
+            Some(module_class)
+        );
     }
 
     #[test]

@@ -720,6 +720,12 @@ classfile alone do not prove module identity. The API records the pair in the
 shared `LoadingSession`, so sequential loaders over the same semantic store
 reuse the same `SymbolId`s.
 
+The session keeps the canonical module table keyed by binary object name and
+private reverse indexes from the object and `ModuleClass` `SymbolId`s back to
+that name. Resolver operations use these indexes instead of scanning every
+cached module. Index updates share the session's checkpoint and rollback
+lifecycle, so a failed operation cannot leave a stale symbol-to-module entry.
+
 `ClassLoader::complete_module` completes that existing `ModuleClass` in
 place. It selects the `OBJECT`-marked `ObjectClass` `TypeDef` from the same
 TASTy package, publishes its real hierarchy and declared fields/methods in a
