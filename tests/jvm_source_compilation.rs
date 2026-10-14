@@ -727,6 +727,73 @@ fn source_primitive_local_initializers_emit_load_store_and_correct_max_locals() 
 }
 
 #[test]
+fn initialized_mutable_primitive_locals_support_assignments() {
+    let output = TestOutputDirectory::new("primitive-local-assignments");
+    let artifact = compile_source(
+        "class LocalAssignment { def next(): Int = 42; def changed(): Int = { var current = 10; current = next(); current }; def booleanLocal(): Int = { var flag = true; flag = false; if flag then 1 else 2 }; def shadowed(): Int = { var value = 1; { var value = 10; value = 42; value } } }\n",
+        "LocalAssignment.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("LocalAssignment should decode");
+    let changed = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("changed"))
+        .expect("changed method should be emitted");
+    let Attribute::Code(changed_code) = &changed.attributes[0] else {
+        panic!("changed method has no Code attribute")
+    };
+    assert_eq!(
+        changed_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xb6)
+            .count(),
+        1
+    );
+    assert_eq!(changed_code.max_locals, 2);
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 temporary path");
+        let harness_path = output.path().join("LocalAssignmentHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class LocalAssignmentHarness { public static void main(String[] args) { LocalAssignment local = new LocalAssignment(); System.out.println(local.changed() + \":\" + local.booleanLocal() + \":\" + local.shadowed()); } }\n",
+        )
+        .expect("write local assignment harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected LocalAssignmentHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "LocalAssignmentHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected LocalAssignment\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42:2:42");
+    }
+}
+
+#[test]
 fn nested_same_named_source_locals_keep_distinct_slots_after_parameter_shadowing() {
     let output = TestOutputDirectory::new("nested-shadowed-local-initializers");
     let artifact = compile_source(

@@ -54,9 +54,14 @@ lookup is by `SymbolId` only. Reserving a slot does not establish definite
 initialization. Planned method lowering accepts ordinary local `ValDef`
 statements with an initializer: it lowers the RHS once, checks the resulting
 primitive type, then emits one `istore` and marks that symbol initialized.
+Assignments to already initialized mutable `Int` and `Boolean` locals inspect
+the exact local symbol without loading it, lower the RHS once, and emit one
+`istore`; the expression leaves Unit on the operand stack. Immutable locals,
+parameters, fields, selections, unsupported types, and locals not initialized
+on every reachable path are rejected.
 Missing bindings, missing initializers, unsupported types and modifiers,
 initializer type mismatches, and detectable reads before the store fail with
-typed errors. Assignments, loops, and `PatDef` remain unsupported. Initialized
+typed errors. Loops and `PatDef` remain unsupported. Initialized
 local reads lower through the same canonical `SymbolId` lookup to one `iload`
 from the allocated slot. Local loads require the current method's validated
 layout, a completed supported semantic type, and a preceding store on every
@@ -174,9 +179,9 @@ If a stat definitely returns, lowering stops there and omits the unreachable
 suffix, so dead instructions do not reach CFG analysis. A normally completing
 Unit method receives one trailing `return`; explicit returns remain terminal.
 The block's declared type is checked against its final expression flow.
-Planned method lowering supports initialized primitive `ValDef` statements;
-standalone expression lowering, assignment, loops, and other unsupported stats
-return structured errors.
+Planned method lowering supports initialized primitive `ValDef` statements
+and assignments to initialized mutable primitive locals; standalone expression
+lowering, loops, and other unsupported stats return structured errors.
 
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
