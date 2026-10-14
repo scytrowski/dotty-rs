@@ -2,6 +2,7 @@ use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::manifest;
 use crate::zip_archive::ZipArchive;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 const MANIFEST_ENTRY_NAME: &str = "META-INF/MANIFEST.MF";
@@ -40,6 +41,7 @@ pub struct JarClassPath {
     archive: ZipArchive,
     release_version: u16,
     multi_release: bool,
+    package_prefixes: HashSet<String>,
 }
 
 impl JarClassPath {
@@ -51,12 +53,17 @@ impl JarClassPath {
             Some(manifest_bytes) => manifest::declares_multi_release(&manifest_bytes),
             None => false,
         };
+        let mut package_prefixes = archive.package_prefixes_under("");
+        if multi_release {
+            package_prefixes.extend(archive.versioned_package_prefixes(release_version));
+        }
 
         Ok(Self {
             path,
             archive,
             release_version,
             multi_release,
+            package_prefixes,
         })
     }
 
@@ -141,21 +148,35 @@ impl ClassPathEntry for JarClassPath {
         }
         Ok(false)
     }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !super::class_path::safe_package_segments(package) {
+            return Ok(false);
+        }
+        Ok(self.package_prefixes.contains(&package.join("/")))
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn fixture_path(relative_path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path)
     }
 
-    /// A minimal, single-entry, STORED-only ZIP archive holding `entries`
+    /// A minimal STORED-only ZIP archive holding `entries`
     /// (name, contents) — just enough for [`JarClassPath`] threading
     /// tests, not a general-purpose ZIP writer (see `zip_archive.rs`'s own
     /// tests for archive-format coverage).
-    fn minimal_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    pub(crate) fn minimal_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        minimal_zip_with_compression_method(entries, 0)
+    }
+
+    fn minimal_zip_with_compression_method(
+        entries: &[(&str, &[u8])],
+        compression_method: u16,
+    ) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut central_directory = Vec::new();
 
@@ -166,7 +187,7 @@ mod tests {
             bytes.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // local file header signature
             bytes.extend_from_slice(&0u16.to_le_bytes()); // version needed to extract
             bytes.extend_from_slice(&0u16.to_le_bytes()); // general purpose bit flag
-            bytes.extend_from_slice(&0u16.to_le_bytes()); // compression method: stored
+            bytes.extend_from_slice(&compression_method.to_le_bytes());
             bytes.extend_from_slice(&0u16.to_le_bytes()); // last mod file time
             bytes.extend_from_slice(&0u16.to_le_bytes()); // last mod file date
             bytes.extend_from_slice(&crc.to_le_bytes());
@@ -181,7 +202,7 @@ mod tests {
             central_directory.extend_from_slice(&0u16.to_le_bytes()); // version made by
             central_directory.extend_from_slice(&0u16.to_le_bytes()); // version needed to extract
             central_directory.extend_from_slice(&0u16.to_le_bytes()); // general purpose bit flag
-            central_directory.extend_from_slice(&0u16.to_le_bytes()); // compression method: stored
+            central_directory.extend_from_slice(&compression_method.to_le_bytes());
             central_directory.extend_from_slice(&0u16.to_le_bytes()); // last mod file time
             central_directory.extend_from_slice(&0u16.to_le_bytes()); // last mod file date
             central_directory.extend_from_slice(&crc.to_le_bytes());
@@ -238,6 +259,138 @@ mod tests {
         .unwrap();
         assert_eq!(resource.bytes(), expected.as_slice());
         assert!(matches!(resource.origin(), ClassOrigin::Jar(_)));
+    }
+
+    #[test]
+    fn package_prefix_index_finds_nested_class_and_tasty_resources_only() {
+        let jar_bytes = minimal_stored_zip(&[
+            ("a/b/c/Leaf.class", b"class bytes"),
+            ("a/d/e/Leaf.tasty", b"tasty bytes"),
+            ("a/beta/Only.scala", b"source only"),
+            ("a/Only.txt", b"text only"),
+            ("a/Only.jar", b"nested archive only"),
+            ("a/empty/", b"directory only"),
+            ("META-INF/Only.class", b"metadata only"),
+            (
+                "META-INF/versions/11/meta/Hidden.class",
+                b"versioned metadata only",
+            ),
+            ("a/../escape/Unsafe.class", b"unsafe path"),
+            ("a//empty/Unsafe.class", b"empty path segment"),
+            ("a\\escape\\Unsafe.class", b"backslash path"),
+            ("a:escape/Unsafe.class", b"colon path"),
+        ]);
+        let jar_path = write_temp_jar("package_prefix_index", &jar_bytes);
+        let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+
+        assert!(!class_path.contains_package(&["a"]).unwrap());
+        assert!(class_path.contains_package_prefix(&[]).unwrap());
+        assert!(class_path.contains_package_prefix(&["a"]).unwrap());
+        assert!(class_path.contains_package_prefix(&["a", "b"]).unwrap());
+        assert!(
+            class_path
+                .contains_package_prefix(&["a", "b", "c"])
+                .unwrap()
+        );
+        assert!(
+            class_path
+                .contains_package_prefix(&["a", "d", "e"])
+                .unwrap()
+        );
+        assert!(!class_path.contains_package_prefix(&["a", "beta"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["a", "empty"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["META-INF"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["escape"]).unwrap());
+        assert!(
+            !class_path
+                .contains_package_prefix(&["a", "..", "escape"])
+                .unwrap()
+        );
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
+    fn package_prefix_matching_uses_slash_segment_boundaries() {
+        let jar_bytes = minimal_stored_zip(&[("a/beta/Leaf.class", b"class bytes")]);
+        let jar_path = write_temp_jar("package_prefix_boundary", &jar_bytes);
+        let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+
+        assert!(class_path.contains_package_prefix(&["a", "beta"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["a", "b"]).unwrap());
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
+    fn package_prefix_index_does_not_decompress_class_entries() {
+        let jar_bytes =
+            minimal_zip_with_compression_method(&[("a/b/Unsupported.class", b"opaque bytes")], 99);
+        let jar_path = write_temp_jar("package_prefix_no_decompression", &jar_bytes);
+        let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+
+        assert!(class_path.contains_package_prefix(&["a"]).unwrap());
+        let error = class_path
+            .find_class(&BinaryName::from_internal("a/b/Unsupported"))
+            .expect_err("class lookup should encounter the unsupported method");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported ZIP compression method 99")
+        );
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
+    fn multi_release_package_prefixes_respect_manifest_and_target_release() {
+        let entries = [
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\nMulti-Release: true\n".as_slice(),
+            ),
+            ("META-INF/versions/11/a/b/FromV11.class", b"v11".as_slice()),
+            ("META-INF/versions/17/x/y/FromV17.tasty", b"v17".as_slice()),
+        ];
+        let jar_path = write_temp_jar("package_prefix_mr", &minimal_stored_zip(&entries));
+
+        let below = JarClassPath::new(&jar_path, 10).unwrap();
+        assert!(!below.contains_package_prefix(&["a"]).unwrap());
+        assert!(!below.contains_package_prefix(&["x"]).unwrap());
+        let at_v11 = JarClassPath::new(&jar_path, 11).unwrap();
+        assert!(at_v11.contains_package_prefix(&["a"]).unwrap());
+        assert!(at_v11.contains_package_prefix(&["a", "b"]).unwrap());
+        assert!(!at_v11.contains_package_prefix(&["x"]).unwrap());
+        let at_v17 = JarClassPath::new(&jar_path, 17).unwrap();
+        assert!(at_v17.contains_package_prefix(&["x"]).unwrap());
+        assert!(at_v17.contains_package_prefix(&["x", "y"]).unwrap());
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
+    fn multi_release_entries_are_not_logical_packages_without_true_manifest() {
+        for (name, manifest) in [
+            (
+                "package_prefix_mr_false",
+                Some(b"Multi-Release: false\n".as_slice()),
+            ),
+            ("package_prefix_mr_missing", None),
+        ] {
+            let mut entries = vec![(
+                "META-INF/versions/11/a/b/Versioned.class",
+                b"v11".as_slice(),
+            )];
+            if let Some(manifest) = manifest {
+                entries.push(("META-INF/MANIFEST.MF", manifest));
+            }
+            let jar_path = write_temp_jar(name, &minimal_stored_zip(&entries));
+            let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+
+            assert!(!class_path.contains_package_prefix(&["a"]).unwrap());
+
+            std::fs::remove_file(&jar_path).unwrap();
+        }
     }
 
     #[test]
