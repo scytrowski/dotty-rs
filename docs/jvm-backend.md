@@ -36,10 +36,26 @@ their containing method plan. Validation rejects stale or non-`ValDef` trees,
 foreign owners, duplicate declaration or symbol IDs, parameter reuse,
 incomplete types, type or mutability disagreement, and unsupported lazy,
 given, implicit, or erased flags. The semantic store and typed arena remain
-borrowed and read-only. This identity contract adds no local slots, initial
-stores, loads, assignments, or loop lowering; source methods containing locals
-remain outside whole-class emission until those operations have their own
-backend contract.
+borrowed and read-only. The binding contract adds no initial stores, loads,
+assignments, or loop lowering; source methods containing locals remain outside
+whole-class emission until those operations have their own backend contract.
+
+`JvmCompilationUnit::local_layout` builds a deterministic storage layout for a
+planned method after validating the complete unit. The explicit
+`local_layout_for` entry point accepts that unit's projected
+`JvmMethodMetadata` and exact local binding slice; stale metadata or a binding
+slice that differs from the method plan is rejected. Locals are projected only
+from completed `Int` and `Boolean` semantic types. The instance receiver stays
+in slot zero, parameter slots retain their descriptor-derived positions, and
+locals receive one category-one slot each in typed declaration ID order. The
+allocator is monotonic and does not reuse slots for shadowed locals. Its
+`max_locals` count includes the receiver and parameters and is checked against
+the u16 class-file field before each slot is published. The layout carries the
+canonical `SymbolId`, typed declaration ID, primitive type, and mutability;
+lookup is by `SymbolId` only. Reserving a slot does not establish definite
+initialization: reads remain invalid until later code generation emits a
+store, and this increment adds no bytecode reads, writes, or control-flow
+handling for locals.
 
 The initial plan subset accepts `SymbolKind::Class`, `SymbolKind::Method`, and
 `SymbolKind::Parameter`; other kinds return a structured unsupported-kind
