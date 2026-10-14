@@ -129,6 +129,30 @@ pub struct SourceTyper<'a> {
     synthetic_package_entries: Vec<(ScopeId, SymbolId)>,
 }
 
+/// Canonical identity for one successfully typed ordinary local value.
+///
+/// The declaration is the exact typed `ValDef` recorded for its source tree;
+/// the symbol is the local identity entered by the typer. Consumers should
+/// keep this pair together rather than trying to recover the symbol from the
+/// declaration's printed name or source position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TypedLocalBinding {
+    declaration: TreeId<Typed>,
+    symbol: SymbolId,
+}
+
+impl TypedLocalBinding {
+    /// Typed `ValDef` declaration in this typer's arena.
+    pub const fn declaration(self) -> TreeId<Typed> {
+        self.declaration
+    }
+
+    /// Canonical local symbol entered by this typer.
+    pub const fn symbol(self) -> SymbolId {
+        self.symbol
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SourceTreeLocation {
     tree_index: u32,
@@ -485,6 +509,47 @@ impl<'a> SourceTyper<'a> {
     /// The typer-owned identities assigned to successfully typed block locals.
     pub fn local_symbol_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<SymbolId> {
         self.local_symbols.get(&(source, tree)).copied()
+    }
+
+    /// Returns the exact typed declaration and canonical symbol for a
+    /// successfully typed ordinary local `val` or `var`.
+    ///
+    /// The typed identity comes from [`SourceTypedIndex`], while the symbol
+    /// comes from the typer's local declaration index. Unsupported or failed
+    /// local declarations have no binding. Both indexes participate in the
+    /// same expression transaction and are rolled back together.
+    pub fn typed_local_binding_at(
+        &self,
+        source: SourceId,
+        tree: TreeId<Untyped>,
+    ) -> Option<TypedLocalBinding> {
+        let declaration = self.typed_index.get(source, tree)?;
+        if !matches!(
+            self.typed_arena.try_get(declaration)?.kind,
+            TreeKind::ValDef(_)
+        ) {
+            return None;
+        }
+        let symbol = self.local_symbol_at(source, tree)?;
+        if !self
+            .store
+            .symbols
+            .get(symbol)
+            .flags
+            .intersection(
+                SymbolFlags::LAZY
+                    .union(SymbolFlags::GIVEN)
+                    .union(SymbolFlags::IMPLICIT)
+                    .union(SymbolFlags::ERASED),
+            )
+            .is_empty()
+        {
+            return None;
+        }
+        Some(TypedLocalBinding {
+            declaration,
+            symbol,
+        })
     }
 
     /// Returns the typer-owned symbol introduced by a source pattern binding.

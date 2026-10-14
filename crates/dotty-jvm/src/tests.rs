@@ -7,6 +7,7 @@ use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_core::ast::{
     Apply, ApplyKind, Block, Ident, If, Literal, Select, This, Tree, TreeKind, TypeApply, TypedAst,
+    ValDef,
 };
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId};
@@ -24,10 +25,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind, JvmMethodPlan,
-    JvmNameKind, JvmReturnType, JvmType, JvmValueCategory, SymbolRole, UnsupportedJvmCallShapeKind,
-    UnsupportedJvmClassKind, UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind,
-    UnsupportedMethodShapeKind, emit_class,
+    JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind, JvmLocalBinding,
+    JvmMethodPlan, JvmNameKind, JvmReturnType, JvmType, JvmValueCategory, SymbolRole,
+    UnsupportedJvmCallShapeKind, UnsupportedJvmClassKind, UnsupportedJvmLocalFlag,
+    UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind, UnsupportedMethodShapeKind, emit_class,
 };
 
 struct Fixture {
@@ -75,12 +76,366 @@ impl Fixture {
                 methods: vec![JvmMethodPlan {
                     method: self.method,
                     parameters: vec![self.parameter],
+                    locals: Vec::new(),
                     body: Some(self.body),
                 }],
                 initialization: JvmClassInitializationPlan::Unsupported,
             }],
         }
     }
+}
+
+fn add_local_binding(fixture: &mut Fixture, name: &str, mutable: bool) -> JvmLocalBinding {
+    let name_id = fixture.store.names.intern(name);
+    let symbol = alloc_symbol(
+        &mut fixture.store,
+        SymbolKind::Local,
+        Some(fixture.method),
+        fixture.value_type,
+    );
+    if mutable {
+        fixture.store.symbols.get_mut(symbol).flags = SymbolFlags::MUTABLE;
+    }
+    let declaration = fixture.ast.alloc(Tree {
+        kind: TreeKind::ValDef(ValDef {
+            name: TermName::new(name_id),
+            tpt: fixture.body,
+            rhs: Some(fixture.body),
+            metadata: (),
+        }),
+        position: None,
+        ty: fixture.value_type,
+    });
+    let previous_body = fixture.body;
+    fixture.body = fixture.ast.alloc(Tree {
+        kind: TreeKind::Block(Block {
+            stats: vec![declaration],
+            expr: previous_body,
+        }),
+        position: None,
+        ty: fixture.value_type,
+    });
+    JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable,
+    }
+}
+
+#[test]
+fn validates_canonical_immutable_and_mutable_local_bindings() {
+    let mut fixture = Fixture::new();
+    let immutable = add_local_binding(&mut fixture, "saved", false);
+    let mutable = add_local_binding(&mut fixture, "saved", true);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![immutable, mutable];
+
+    assert_eq!(unit.validate(), Ok(()));
+    assert_eq!(unit.classes[0].methods[0].locals(), &[immutable, mutable]);
+}
+
+#[test]
+fn rejects_stale_duplicate_foreign_and_parameter_local_bindings() {
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    let checkpoint = fixture.ast.checkpoint();
+    let stale_declaration = fixture.ast.alloc(Tree {
+        kind: TreeKind::ValDef(ValDef {
+            name: TermName::new(fixture.store.names.intern("stale")),
+            tpt: fixture.body,
+            rhs: Some(fixture.body),
+            metadata: (),
+        }),
+        position: None,
+        ty: fixture.value_type,
+    });
+    fixture.ast.rollback_to(checkpoint);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![JvmLocalBinding {
+        declaration: stale_declaration,
+        ..binding
+    }];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::UnknownLocalDeclaration {
+            method: fixture.method,
+            declaration: stale_declaration,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![binding, binding];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::DuplicateLocalDeclaration {
+            declaration: binding.declaration,
+            method: fixture.method,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let first = add_local_binding(&mut fixture, "first", false);
+    let second = add_local_binding(&mut fixture, "second", false);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![
+        first,
+        JvmLocalBinding {
+            symbol: first.symbol,
+            ..second
+        },
+    ];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::DuplicateLocalSymbol {
+            symbol: first.symbol,
+            method: fixture.method,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![JvmLocalBinding {
+        declaration: fixture.body,
+        ..binding
+    }];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::InvalidLocalDeclaration {
+            method: fixture.method,
+            declaration: fixture.body,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    let other_type = fixture.store.types.alloc(Type::Constant(Constant::Int(7)));
+    fixture
+        .store
+        .symbols
+        .set_info(binding.symbol, SymbolInfo::Complete(other_type));
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![binding];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::LocalTypeMismatch {
+            declaration: binding.declaration,
+            symbol: binding.symbol,
+            declaration_type: fixture.value_type,
+            symbol_type: other_type,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    let mut local = fixture.store.symbols.get(binding.symbol).clone();
+    local.kind = SymbolKind::Value;
+    let wrong_kind = fixture.store.symbols.alloc(local);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![binding];
+    unit.classes[0].methods[0].locals[0].symbol = wrong_kind;
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::UnsupportedSymbolKind {
+            symbol: wrong_kind,
+            expected: SymbolRole::Local,
+            found: SymbolKind::Value,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    let checkpoint = fixture.store.checkpoint();
+    let stale_symbol = alloc_symbol(
+        &mut fixture.store,
+        SymbolKind::Local,
+        Some(fixture.method),
+        fixture.value_type,
+    );
+    fixture.store.rollback_to(checkpoint);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![JvmLocalBinding {
+        symbol: stale_symbol,
+        ..binding
+    }];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::UnknownLocalSymbol {
+            method: fixture.method,
+            symbol: stale_symbol,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let first = add_local_binding(&mut fixture, "first", false);
+    let second = add_local_binding(&mut fixture, "second", false);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![second, first];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::UnorderedLocalBindings {
+            method: fixture.method,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let other_method = alloc_symbol(
+        &mut fixture.store,
+        SymbolKind::Method,
+        Some(fixture.class),
+        fixture.value_type,
+    );
+    let foreign_local = alloc_symbol(
+        &mut fixture.store,
+        SymbolKind::Local,
+        Some(other_method),
+        fixture.value_type,
+    );
+    let binding = add_local_binding(&mut fixture, "foreign", false);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![JvmLocalBinding {
+        declaration: binding.declaration,
+        symbol: foreign_local,
+        mutable: false,
+    }];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::WrongOwner {
+            symbol: foreign_local,
+            expected: fixture.method,
+            actual: Some(other_method),
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let symbol = alloc_symbol(
+        &mut fixture.store,
+        SymbolKind::Local,
+        Some(fixture.method),
+        fixture.value_type,
+    );
+    let declaration = fixture.ast.alloc(Tree {
+        kind: TreeKind::ValDef(ValDef {
+            name: TermName::new(fixture.store.names.intern("foreignTree")),
+            tpt: fixture.body,
+            rhs: Some(fixture.body),
+            metadata: (),
+        }),
+        position: None,
+        ty: fixture.value_type,
+    });
+    let binding = JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable: false,
+    };
+    let other_method = alloc_symbol(
+        &mut fixture.store,
+        SymbolKind::Method,
+        Some(fixture.class),
+        fixture.value_type,
+    );
+    let other_body = fixture.ast.alloc(Tree {
+        kind: TreeKind::Block(Block {
+            stats: vec![binding.declaration],
+            expr: fixture.body,
+        }),
+        position: None,
+        ty: fixture.value_type,
+    });
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![binding];
+    unit.classes[0].methods.push(JvmMethodPlan {
+        method: other_method,
+        parameters: Vec::new(),
+        locals: Vec::new(),
+        body: Some(other_body),
+    });
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::LocalDeclarationOutsideMethod {
+            method: fixture.method,
+            declaration,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "parameter", false);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![JvmLocalBinding {
+        declaration: binding.declaration,
+        symbol: fixture.parameter,
+        mutable: false,
+    }];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::LocalIsMethodParameter {
+            method: fixture.method,
+            symbol: fixture.parameter,
+        })
+    );
+}
+
+#[test]
+fn rejects_invalid_local_type_info_flags_and_mutability() {
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    fixture.store.symbols.get_mut(binding.symbol).info = SymbolInfo::Missing;
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![binding];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::MissingSemanticInfo {
+            symbol: binding.symbol,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    let no_type = fixture.store.types.alloc(Type::NoType);
+    fixture.ast.get_mut(binding.declaration).ty = no_type;
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![binding];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::InvalidTreeType {
+            tree: binding.declaration,
+            ty: no_type,
+            reason: InvalidTypeReason::NoType,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", true);
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![JvmLocalBinding {
+        mutable: false,
+        ..binding
+    }];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::LocalMutabilityMismatch {
+            declaration: binding.declaration,
+            symbol: binding.symbol,
+            recorded_mutable: false,
+            symbol_mutable: true,
+        })
+    );
+
+    let mut fixture = Fixture::new();
+    let binding = add_local_binding(&mut fixture, "saved", false);
+    fixture.store.symbols.get_mut(binding.symbol).flags = SymbolFlags::LAZY;
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![binding];
+    assert_eq!(
+        unit.validate(),
+        Err(JvmCodegenError::UnsupportedLocalFlag {
+            symbol: binding.symbol,
+            flag: UnsupportedJvmLocalFlag::Lazy,
+        })
+    );
 }
 
 fn alloc_symbol(
@@ -483,6 +838,7 @@ impl SignatureFixture {
         let plan = JvmMethodPlan {
             method,
             parameters: parameters.clone(),
+            locals: Vec::new(),
             body: None,
         };
         Self {
@@ -1076,6 +1432,7 @@ fn same_named_method_from_a_different_owner_cannot_replace_the_planned_symbol() 
     let other_plan = JvmMethodPlan {
         method: other_method,
         parameters: Vec::new(),
+        locals: Vec::new(),
         body: None,
     };
 
@@ -1105,6 +1462,7 @@ fn rejects_duplicate_emitted_method_names_and_descriptors() {
     let duplicate_plan = JvmMethodPlan {
         method: duplicate,
         parameters: Vec::new(),
+        locals: Vec::new(),
         body: None,
     };
 
@@ -1686,6 +2044,7 @@ impl EmissionFixture {
             .map(|((method, parameters), body)| JvmMethodPlan {
                 method,
                 parameters: parameters.clone(),
+                locals: Vec::new(),
                 body: Some(body),
             })
             .collect();

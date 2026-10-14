@@ -47,7 +47,7 @@ pub use typer::{
     MAX_MEMBER_LOOKUP_DEPTH, MAX_SOURCE_FUNCTION_ARITY, MAX_TYPE_RELATION_DEPTH,
     MAX_TYPE_RELATION_VIEWS, MAX_UNION_RELATION_COMPARISONS, MemberCandidate, MemberLookupError,
     PatternKind, SourceFunctionFamily, SourceFunctionKind, SourceFunctionPurity, SourceTyper,
-    TypeArgumentBoundSide, TypeRelationError, TyperError,
+    TypeArgumentBoundSide, TypeRelationError, TypedLocalBinding, TyperError,
 };
 pub use types::{
     MAX_TYPE_NORMALIZATION_DEPTH, SymbolInfoState, TypeNormalizeError, TypeNormalizer,
