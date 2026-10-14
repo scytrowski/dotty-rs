@@ -1,7 +1,7 @@
 # Scala `Int` operator contract for JVM intrinsics
 
-This document records the source-to-typed-tree contract that must be in place
-before JVM lowering recognizes Scala `Int` operators. The Scala reference is
+This document records the source-to-typed-tree contract used by the JVM
+intrinsic resolver. The Scala reference is
 the pinned Scala 3.9.0 revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
 
@@ -22,7 +22,7 @@ spelling such as `+` is not enough to establish an intrinsic.
 - [Pinned `ScalaPrimitives.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/backend/ScalaPrimitives.scala)
 - [Pinned `ScalaPrimitivesOps.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/backend/ScalaPrimitivesOps.scala)
 
-For this compiler, a future intrinsic is valid only when the selected function
+For this compiler, an intrinsic is valid only when the selected function
 is a typed `Select` whose `Type::TermRef` targets the registered canonical
 method `SymbolId`, that symbol is owned by the canonical `Definitions.int`
 class symbol, its completed `MethodType` is the audited ordinary one-argument
@@ -78,8 +78,32 @@ remain distinguishable by identity.
 | `x > y` | canonical `scala.Int.>(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpgt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
 | `x >= y` | canonical `scala.Int.>=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpge`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
 
-[#1118](https://github.com/scytrowski/dotty-rs/issues/1118) owns the read-only
-JVM intrinsic resolver. Opcode emission remains a later step.
+The read-only `dotty-jvm::resolve_int_intrinsic` resolver maps those nine
+registered `SymbolId`s to `JvmIntIntrinsic` variants. It accepts only a regular
+one-argument `Apply` whose function is a typed `Select`, whose receiver and
+argument have canonical `Int` semantic values, and whose result matches the
+selected operator's canonical result. Int singleton constants and term
+references whose completed symbol type is canonical `Int` are accepted. A
+non-registered method returns `Ok(None)` and remains eligible for ordinary
+same-class call resolution. Malformed calls that claim a registered builtin
+produce `JvmIntIntrinsicError`; no source text is used to classify an
+intrinsic.
+
+| `JvmIntIntrinsic` | Registered method | Operand values | Result value | JVM operation family |
+| --- | --- | --- | --- | --- |
+| `IntAdd` | canonical `scala.Int.+` | Int, Int | Int | `iadd` |
+| `IntSubtract` | canonical `scala.Int.-` | Int, Int | Int | `isub` |
+| `IntMultiply` | canonical `scala.Int.*` | Int, Int | Int | `imul` |
+| `IntDivide` | canonical `scala.Int./` | Int, Int | Int | `idiv` |
+| `IntRemainder` | canonical `scala.Int.%` | Int, Int | Int | `irem` |
+| `IntLessThan` | canonical `scala.Int.<` | Int, Int | Boolean | signed `if_icmplt`, materialized as `0`/`1` |
+| `IntLessOrEqual` | canonical `scala.Int.<=` | Int, Int | Boolean | signed `if_icmple`, materialized as `0`/`1` |
+| `IntGreaterThan` | canonical `scala.Int.>` | Int, Int | Boolean | signed `if_icmpgt`, materialized as `0`/`1` |
+| `IntGreaterOrEqual` | canonical `scala.Int.>=` | Int, Int | Boolean | signed `if_icmpge`, materialized as `0`/`1` |
+
+Resolution is read-only and returns a descriptor only. It does not select or
+emit bytecode instructions, mutate the constant pool, infer types, or load
+classes. Opcode emission remains a later step.
 
 ## JVM semantics and limits
 
