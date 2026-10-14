@@ -61,7 +61,7 @@ parameters, fields, selections, unsupported types, and locals not initialized
 on every reachable path are rejected.
 Missing bindings, missing initializers, unsupported types and modifiers,
 initializer type mismatches, and detectable reads before the store fail with
-typed errors. Loops and `PatDef` remain unsupported. Initialized
+typed errors. `PatDef` remains unsupported. Initialized
 local reads lower through the same canonical `SymbolId` lookup to one `iload`
 from the allocated slot. Local loads require the current method's validated
 layout, a completed supported semantic type, and a preceding store on every
@@ -179,9 +179,20 @@ If a stat definitely returns, lowering stops there and omits the unreachable
 suffix, so dead instructions do not reach CFG analysis. A normally completing
 Unit method receives one trailing `return`; explicit returns remain terminal.
 The block's declared type is checked against its final expression flow.
-Planned method lowering supports initialized primitive `ValDef` statements
-and assignments to initialized mutable primitive locals; standalone expression
-lowering, loops, and other unsupported stats return structured errors.
+Planned method lowering supports initialized primitive `ValDef` statements,
+assignments to initialized mutable primitive locals, and typed `While` loops
+with Boolean conditions. A loop evaluates its condition at the symbolic header
+on every iteration, branches to its exit when false, and emits a back-edge only
+when the body can fall through. Unit bodies leave the stack empty; Int/Boolean
+body values are discarded once. The condition and body share the existing
+depth/node budgets and control-flow call restriction. Since a loop may execute
+zero times, initialization performed only in its body is not considered
+definite after the loop; the class-file CFG analyzer verifies header/back-edge
+local states and generates stack-map frames. Nested loops and integer-only
+`If`/`Block`/`Assign` bodies are supported when their verifier states merge.
+Same-class calls in loop control flow, reference-bearing states, `PatDef`, and
+general comparison/arithmetic remain unsupported. Standalone expression
+lowering and other unsupported stats return structured errors.
 
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
@@ -236,13 +247,15 @@ conditional lowering. `Delegator` covers same-class direct and explicit
 that discards the first call result and returns the second. Its output is
 compared byte-for-byte across independent frontend runs; decoded class-file
 references and instruction order are checked without hand-authored typed
-trees or constant-pool indexes. A Java harness then checks each result under
-`java -Xverify:all`.
+trees or constant-pool indexes. `WhileLocals` exercises zero and one iteration,
+mutable Boolean conditions, nested `If`/`While`, returning bodies, and discarded
+primitive body values. Java harnesses check each result under `java -Xverify:all`.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
-Negative source tests verify that field initialization, local `val`, `while`,
-private construction, and parser diagnostics fail at their actual pipeline
-stage without leaving a `.class` file. Existing backend typed-tree tests cover
+Negative source tests verify that field initialization, local `val`, invalid
+while conditions, same-class calls inside loop control flow, private
+construction, and parser diagnostics fail at their actual pipeline stage
+without leaving a `.class` file. Existing backend typed-tree tests cover
 unsupported receivers, `using` calls, static/extension methods, mismatched
 method references and arguments, and other unsupported call shapes. Run the
 test locally with `cargo test --test jvm_source_compilation --locked`; without

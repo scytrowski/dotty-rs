@@ -28,6 +28,7 @@ enum ExpressionShape {
     Leaf,
     Block,
     If,
+    While,
     Return,
     Apply,
     Assign,
@@ -488,6 +489,7 @@ fn emit_expression(
             TreeKind::Literal(_) | TreeKind::Ident(_) => ExpressionShape::Leaf,
             TreeKind::Block(_) => ExpressionShape::Block,
             TreeKind::If(_) => ExpressionShape::If,
+            TreeKind::While(_) => ExpressionShape::While,
             TreeKind::Return(_) => ExpressionShape::Return,
             TreeKind::Apply(_) => ExpressionShape::Apply,
             TreeKind::Assign(_) => ExpressionShape::Assign,
@@ -498,6 +500,7 @@ fn emit_expression(
         ExpressionShape::Leaf => lower_leaf(context, tree_id, code),
         ExpressionShape::Block => emit_block(context, tree_id, code, depth),
         ExpressionShape::If => emit_if(context, tree_id, code, depth),
+        ExpressionShape::While => emit_while(context, tree_id, code, depth),
         ExpressionShape::Return => emit_return(context, tree_id, code, depth),
         ExpressionShape::Apply => emit_apply(context, tree_id, code, depth),
         ExpressionShape::Assign => emit_assignment(context, tree_id, code, depth),
@@ -997,6 +1000,111 @@ fn emit_if_body(
             })?;
     }
     Ok(flow)
+}
+
+fn emit_while(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    context.control_flow_depth += 1;
+    let result = emit_while_body(context, tree_id, code, depth);
+    context.control_flow_depth -= 1;
+    result
+}
+
+fn emit_while_body(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let (result_type, condition, body) = {
+        let tree = context.tree(tree_id)?;
+        let TreeKind::While(loop_tree) = &tree.kind else {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: tree_id,
+                node: tree_kind_name(&tree.kind),
+            });
+        };
+        (tree.ty, loop_tree.cond, loop_tree.body)
+    };
+    if !is_unit_type(context.store, result_type, context.definitions) {
+        return Err(JvmCodegenError::WhileResultTypeMismatch {
+            tree: tree_id,
+            ty: result_type,
+        });
+    }
+
+    let header = code
+        .new_label()
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    let exit = code
+        .new_label()
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    // Give a loop at method offset zero a non-entry frame target for its back-edge.
+    code.goto(header.clone())
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    code.mark(header.clone())
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+
+    let initialized_before_loop = context.initialized_locals.clone();
+    let condition_flow = emit_expression(context, condition, code, depth + 1)?;
+    if condition_flow != Flow::Value(JvmType::Boolean) {
+        return Err(JvmCodegenError::InvalidWhileCondition {
+            tree: condition,
+            found: match condition_flow {
+                Flow::Value(value) => Some(value),
+                Flow::Unit | Flow::Diverges => None,
+            },
+        });
+    }
+    code.ifeq(exit.clone())
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+
+    let body_flow = emit_expression(context, body, code, depth + 1)?;
+    match body_flow {
+        Flow::Value(_) => {
+            code.pop()
+                .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
+            code.goto(header)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+        }
+        Flow::Unit => {
+            code.goto(header)
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+        }
+        Flow::Diverges => {}
+    }
+    code.mark(exit)
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    context.initialized_locals = initialized_before_loop;
+    Ok(Flow::Unit)
 }
 
 fn merge_if_flows(
@@ -2256,7 +2364,6 @@ mod tests {
     fn block_rejects_unhandled_statements_and_missing_children() {
         let mut fixture = Fixture::new(&[]);
         let value = fixture.literal(Constant::Int(1), fixture.definitions.int);
-        let condition = fixture.literal(Constant::Boolean(true), fixture.definitions.boolean);
         let unsupported = [
             (
                 fixture.ast.alloc(Tree {
@@ -2281,17 +2388,6 @@ mod tests {
                     ty: fixture.definitions.unit,
                 }),
                 "Assign",
-            ),
-            (
-                fixture.ast.alloc(Tree {
-                    kind: TreeKind::While(dotty_core::ast::While {
-                        cond: condition,
-                        body: value,
-                    }),
-                    position: None,
-                    ty: fixture.definitions.unit,
-                }),
-                "While",
             ),
         ];
         for (stat, node) in unsupported {
@@ -2679,6 +2775,85 @@ mod tests {
     }
 
     #[test]
+    fn while_requires_a_boolean_condition_and_unit_result() {
+        let mut fixture = Fixture::new(&[]);
+        let int_condition = fixture.literal(Constant::Int(1), fixture.definitions.int);
+        let unit_condition = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let boolean_condition =
+            fixture.literal(Constant::Boolean(false), fixture.definitions.boolean);
+        let unit_body = fixture.literal(Constant::Unit, fixture.definitions.unit);
+
+        let invalid_condition = fixture.ast.alloc(Tree {
+            kind: TreeKind::While(dotty_core::ast::While {
+                cond: int_condition,
+                body: unit_body,
+            }),
+            position: None,
+            ty: fixture.definitions.unit,
+        });
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                invalid_condition,
+            )
+            .unwrap_err(),
+            JvmCodegenError::InvalidWhileCondition {
+                tree: int_condition,
+                found: Some(JvmType::Int),
+            }
+        );
+
+        let unit_condition_loop = fixture.ast.alloc(Tree {
+            kind: TreeKind::While(dotty_core::ast::While {
+                cond: unit_condition,
+                body: unit_body,
+            }),
+            position: None,
+            ty: fixture.definitions.unit,
+        });
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                unit_condition_loop,
+            )
+            .unwrap_err(),
+            JvmCodegenError::InvalidWhileCondition {
+                tree: unit_condition,
+                found: None,
+            }
+        );
+
+        let wrong_result_type = fixture.ast.alloc(Tree {
+            kind: TreeKind::While(dotty_core::ast::While {
+                cond: boolean_condition,
+                body: unit_body,
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                wrong_result_type,
+            )
+            .unwrap_err(),
+            JvmCodegenError::WhileResultTypeMismatch {
+                tree: wrong_result_type,
+                ty: fixture.definitions.int,
+            }
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_bottom_nodes_and_excessive_expression_depth() {
         let mut fixture = Fixture::new(&[]);
         let condition = fixture.literal(Constant::Boolean(true), fixture.definitions.boolean);
@@ -2706,9 +2881,9 @@ mod tests {
                 root,
             )
             .unwrap_err(),
-            JvmCodegenError::UnsupportedTypedExpression {
+            JvmCodegenError::WhileResultTypeMismatch {
                 tree: unsupported_bottom,
-                node: "While",
+                ty: fixture.definitions.nothing_type,
             }
         );
 

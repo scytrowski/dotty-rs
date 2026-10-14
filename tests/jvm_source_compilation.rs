@@ -549,7 +549,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
     while offset < code.len() {
         let opcode = code[offset];
         let length = match opcode {
-            0x04..=0x0f | 0x1a..=0x1d | 0x2a | 0x3b..=0x3e | 0x57 | 0xac | 0xb1 => 1,
+            0x03..=0x0f | 0x1a..=0x1d | 0x2a | 0x3b..=0x3e | 0x57 | 0xac | 0xb1 => 1,
             0x10 | 0x15 | 0x36 => 2,
             0x99 | 0xa7 | 0xb6..=0xb8 => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
@@ -629,7 +629,7 @@ fn verify_delegator_with_jdk(output_directory: &Path) {
 }
 
 #[test]
-fn initialized_local_reads_work_and_while_remains_unsupported_at_codegen() {
+fn initialized_local_reads_work_and_while_lowers_with_a_symbolic_back_edge() {
     let local_output = TestOutputDirectory::new("initialized-local-val");
     let local_artifact = compile_source(
         "class LocalVal { def run(x: Int): Int = { val y = x; y } }\n",
@@ -650,18 +650,24 @@ fn initialized_local_reads_work_and_while_remains_unsupported_at_codegen() {
     assert_eq!(code.code, &[0x1b, 0x3d, 0x1c, 0xac]);
     assert_eq!(code.max_locals, 3);
 
-    let while_output = TestOutputDirectory::new("unsupported-while");
-    let while_error = compile_source(
+    let while_output = TestOutputDirectory::new("supported-while-back-edge");
+    let while_artifact = compile_source(
         "class Loop { def run(): Unit = { while true do () } }\n",
         "Loop.scala",
         while_output.path(),
     )
-    .unwrap_err();
-    assert!(matches!(
-        while_error,
-        PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression { node: "While", .. })
-    ));
-    assert!(while_output.class_files().is_empty());
+    .unwrap();
+    let mut reader = Reader::new(while_artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("Loop should decode");
+    let run = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("run"))
+        .expect("run method should be emitted");
+    let Attribute::Code(code) = &run.attributes[0] else {
+        panic!("run method has no Code attribute")
+    };
+    assert_opcode_sequence(code.code, &[0xa7, 0x04, 0x99, 0xa7, 0xb1]);
 }
 
 #[test]
@@ -856,6 +862,151 @@ fn assignment_branches_accept_proven_terminal_rhs_flow() {
         );
         assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "4:2:5:3");
     }
+}
+
+#[test]
+fn primitive_local_while_loops_have_verified_back_edges_and_zero_iteration_paths() {
+    let output = TestOutputDirectory::new("primitive-local-while");
+    let artifact = compile_source(
+        "class WhileLocals { def runOnce(flag: Boolean): Int = { var seen = 0; var running = flag; while running do { seen = 1; running = false }; seen }; def nestedIf(flag: Boolean): Int = { var seen = 0; var running = flag; while running do { if running then seen = 1 else seen = 2; running = false }; seen }; def nestedLoop(flag: Boolean): Int = { var seen = 0; var outer = flag; while outer do { var inner = true; while inner do { seen = 1; inner = false }; outer = false }; seen }; def loopFalse(): Int = { var seen = 0; while false do { seen = 1 }; seen }; def returnFromBody(): Int = { while true do return 9; 0 }; def discardInt(): Int = { while false do 7; 42 } }\n",
+        "WhileLocals.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("WhileLocals should decode");
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("runOnce"))
+        .expect("runOnce method should be emitted");
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("runOnce should contain one Code attribute")
+    };
+    assert_opcode_sequence(
+        code.code,
+        &[
+            0x03, 0x3d, 0x1b, 0x3e, 0xa7, 0x1d, 0x99, 0x04, 0x3d, 0x03, 0x3e, 0xa7, 0x1c, 0xac,
+        ],
+    );
+    assert_eq!(
+        code.code,
+        &[
+            0x03, 0x3d, 0x1b, 0x3e, 0xa7, 0x00, 0x03, 0x1d, 0x99, 0x00, 0x0a, 0x04, 0x3d, 0x03,
+            0x3e, 0xa7, 0xff, 0xf8, 0x1c, 0xac,
+        ]
+    );
+    assert_eq!(code.max_stack, 1);
+    assert_eq!(code.max_locals, 4);
+    assert!(code.attributes.iter().any(|attribute| {
+        let Attribute::Other(raw) = attribute else {
+            return false;
+        };
+        class.constant_pool.utf8(raw.name_index).ok() == Some("StackMapTable")
+    }));
+    let return_method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("returnFromBody"))
+        .expect("returnFromBody method should be emitted");
+    let [Attribute::Code(return_code)] = return_method.attributes.as_slice() else {
+        panic!("returnFromBody should contain one Code attribute")
+    };
+    assert_opcode_sequence(
+        return_code.code,
+        &[0xa7, 0x04, 0x99, 0x10, 0xac, 0x03, 0xac],
+    );
+    assert_eq!(
+        decode_subset_instructions(return_code.code)
+            .iter()
+            .filter(|(_, opcode)| *opcode == 0xa7)
+            .count(),
+        1,
+        "a definitely returning loop body must not emit a back-edge"
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 temporary path");
+        let javap = Command::new("javap")
+            .args(["-c", "-v", "-classpath", output_path, "WhileLocals"])
+            .output()
+            .expect("start javap");
+        assert!(
+            javap.status.success(),
+            "javap rejected WhileLocals\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap_output = String::from_utf8_lossy(&javap.stdout);
+        for expected in ["ifeq", "goto", "StackMapTable"] {
+            assert!(
+                javap_output.contains(expected),
+                "javap output omitted {expected:?}:\n{javap_output}"
+            );
+        }
+        let harness_path = output.path().join("WhileLocalsHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class WhileLocalsHarness { public static void main(String[] args) { WhileLocals value = new WhileLocals(); System.out.println(value.runOnce(false) + \":\" + value.runOnce(true) + \":\" + value.nestedIf(false) + \":\" + value.nestedIf(true) + \":\" + value.nestedLoop(false) + \":\" + value.nestedLoop(true) + \":\" + value.loopFalse() + \":\" + value.returnFromBody() + \":\" + value.discardInt()); } }\n",
+        )
+        .expect("write while loop harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected WhileLocalsHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "WhileLocalsHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected WhileLocals\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "0:1:0:1:0:1:0:9:42"
+        );
+    }
+}
+
+#[test]
+fn while_loops_reject_invalid_conditions_and_calls_inside_control_flow() {
+    let invalid_output = TestOutputDirectory::new("invalid-while-condition");
+    let invalid_condition = compile_source(
+        "class InvalidWhile { def run(): Unit = { while 1 do () } }\n",
+        "InvalidWhile.scala",
+        invalid_output.path(),
+    )
+    .unwrap_err();
+    assert!(matches!(invalid_condition, PipelineFailure::Typer(_)));
+    assert!(invalid_output.class_files().is_empty());
+
+    let call_output = TestOutputDirectory::new("while-call-control-flow");
+    let call_error = compile_source(
+        "class WhileCall { def next(): Boolean = false; def run(flag: Boolean): Int = { var running = flag; while running do running = next(); 0 } }\n",
+        "WhileCall.scala",
+        call_output.path(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        call_error,
+        PipelineFailure::Codegen(JvmCodegenError::JvmCallInUnsupportedControlFlow { .. })
+    ));
+    assert!(call_output.class_files().is_empty());
 }
 
 #[test]
