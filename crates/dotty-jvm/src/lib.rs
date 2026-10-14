@@ -368,6 +368,12 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         node: &'static str,
     },
+    /// A typed block's declared type disagrees with the final expression flow.
+    BlockResultTypeMismatch {
+        tree: TreeId<Typed>,
+        declared: TypeId,
+        found: JvmExpressionFlow,
+    },
     /// A supported integer/boolean literal disagrees with its typed type.
     LiteralTypeMismatch {
         tree: TreeId<Typed>,
@@ -851,10 +857,11 @@ pub fn lower_value_expression(
 
 /// Lowers one supported typed expression without appending a method epilogue.
 ///
-/// Integer/Boolean leaves, the `Unit` literal, and nested `If`/local `Return`
-/// nodes are supported. `Value` leaves one correctly typed value on the JVM
-/// stack; `Unit` completes normally with no stack value; `Diverges` has no
-/// reachable fallthrough.
+/// Integer/Boolean leaves, the `Unit` literal, ordered blocks, and nested
+/// `If`/local `Return` nodes are supported. `Value` leaves one correctly typed
+/// value on the JVM stack; `Unit` completes normally with no stack value;
+/// `Diverges` has no reachable fallthrough. Blocks discard unused primitive
+/// values with `pop` and stop lowering after a definitely diverging statement.
 /// The expression is built into a fresh method-local instruction builder, so
 /// an error never exposes partial code.
 pub fn lower_expression(

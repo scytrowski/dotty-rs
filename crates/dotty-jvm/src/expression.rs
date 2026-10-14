@@ -24,6 +24,7 @@ enum Flow {
 
 enum ExpressionShape {
     Leaf,
+    Block,
     If,
     Return,
     Apply,
@@ -414,6 +415,7 @@ fn emit_expression(
         let tree = context.tree(tree_id)?;
         match &tree.kind {
             TreeKind::Literal(_) | TreeKind::Ident(_) => ExpressionShape::Leaf,
+            TreeKind::Block(_) => ExpressionShape::Block,
             TreeKind::If(_) => ExpressionShape::If,
             TreeKind::Return(_) => ExpressionShape::Return,
             TreeKind::Apply(_) => ExpressionShape::Apply,
@@ -422,12 +424,71 @@ fn emit_expression(
     };
     match shape {
         ExpressionShape::Leaf => lower_leaf(context, tree_id, code),
+        ExpressionShape::Block => emit_block(context, tree_id, code, depth),
         ExpressionShape::If => emit_if(context, tree_id, code, depth),
         ExpressionShape::Return => emit_return(context, tree_id, code, depth),
         ExpressionShape::Apply => emit_apply(context, tree_id, code, depth),
         ExpressionShape::Unsupported(node) => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
             node,
+        }),
+    }
+}
+
+fn emit_block(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let (declared_type, stats, expr) = {
+        let tree = context.tree(tree_id)?;
+        let TreeKind::Block(block) = &tree.kind else {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: tree_id,
+                node: tree_kind_name(&tree.kind),
+            });
+        };
+        (tree.ty, block.stats.clone(), block.expr)
+    };
+
+    for stat in stats {
+        match emit_expression(context, stat, code, depth + 1)? {
+            Flow::Value(_) => {
+                code.pop()
+                    .map_err(|error| JvmCodegenError::CodeBuilder { tree: stat, error })?;
+            }
+            Flow::Unit => {
+                let stat_type = context.tree(stat)?.ty;
+                if !is_unit_type(context.store, stat_type, context.definitions) {
+                    return Err(JvmCodegenError::UnitFlowTypeMismatch {
+                        tree: stat,
+                        ty: stat_type,
+                    });
+                }
+            }
+            Flow::Diverges => return Ok(Flow::Diverges),
+        }
+    }
+
+    let flow = emit_expression(context, expr, code, depth + 1)?;
+    match flow {
+        Flow::Value(value)
+            if primitive_type(context.store, declared_type, context.definitions) == Some(value) =>
+        {
+            Ok(flow)
+        }
+        Flow::Unit if is_unit_type(context.store, declared_type, context.definitions) => Ok(flow),
+        Flow::Diverges
+            if is_nothing_type(context.store, declared_type, context.definitions)
+                || is_unit_type(context.store, declared_type, context.definitions) =>
+        {
+            Ok(flow)
+        }
+        _ => Err(JvmCodegenError::BlockResultTypeMismatch {
+            tree: tree_id,
+            declared: declared_type,
+            found: public_flow(flow),
         }),
     }
 }
@@ -1018,6 +1079,19 @@ mod tests {
             })
         }
 
+        fn block(
+            &mut self,
+            stats: Vec<TreeId<Typed>>,
+            expr: TreeId<Typed>,
+            ty: TypeId,
+        ) -> TreeId<Typed> {
+            self.ast.alloc(Tree {
+                kind: TreeKind::Block(dotty_core::ast::Block { stats, expr }),
+                position: None,
+                ty,
+            })
+        }
+
         fn return_expr(
             &mut self,
             expr: Option<TreeId<Typed>>,
@@ -1459,6 +1533,372 @@ mod tests {
                 .unwrap(),
             ),
             vec![0xb1]
+        );
+    }
+
+    #[test]
+    fn blocks_discard_value_stats_keep_unit_empty_and_preserve_final_result() {
+        let mut fixture = Fixture::new(&[]);
+        let int_stat = fixture.literal(Constant::Int(7), fixture.definitions.int);
+        let unit_stat = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let boolean_stat = fixture.literal(Constant::Boolean(true), fixture.definitions.boolean);
+        let result = fixture.literal(Constant::Int(42), fixture.definitions.int);
+        let block = fixture.block(
+            vec![int_stat, unit_stat, boolean_stat],
+            result,
+            fixture.definitions.int,
+        );
+
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    block,
+                )
+                .unwrap(),
+            ),
+            vec![0x10, 7, 0x57, 0x04, 0x57, 0x10, 42, 0xac]
+        );
+    }
+
+    #[test]
+    fn nested_blocks_discard_each_intermediate_result_once() {
+        let mut fixture = Fixture::new(&[]);
+        let first = fixture.literal(Constant::Int(20), fixture.definitions.int);
+        let inner_result = fixture.literal(Constant::Int(21), fixture.definitions.int);
+        let inner = fixture.block(vec![first], inner_result, fixture.definitions.int);
+        let outer_result = fixture.literal(Constant::Int(42), fixture.definitions.int);
+        let outer = fixture.block(vec![inner], outer_result, fixture.definitions.int);
+
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    outer,
+                )
+                .unwrap(),
+            ),
+            vec![0x10, 20, 0x57, 0x10, 21, 0x57, 0x10, 42, 0xac]
+        );
+    }
+
+    #[test]
+    fn block_with_unit_result_gets_only_a_void_return() {
+        let mut fixture = Fixture::new(&[]);
+        fixture.set_result(JvmReturnType::Void);
+        let int_stat = fixture.literal(Constant::Int(7), fixture.definitions.int);
+        let unit_stat = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let unit_result = fixture.literal(Constant::Unit, fixture.definitions.unit);
+        let block = fixture.block(
+            vec![int_stat, unit_stat],
+            unit_result,
+            fixture.definitions.unit,
+        );
+
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    block,
+                )
+                .unwrap(),
+            ),
+            vec![0x10, 7, 0x57, 0xb1]
+        );
+    }
+
+    #[test]
+    fn block_result_type_must_match_the_final_expression_flow() {
+        let mut fixture = Fixture::new(&[]);
+        let result = fixture.literal(Constant::Int(42), fixture.definitions.int);
+        let block = fixture.block(Vec::new(), result, fixture.definitions.boolean);
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                block,
+            )
+            .unwrap_err(),
+            JvmCodegenError::BlockResultTypeMismatch {
+                tree: block,
+                declared: fixture.definitions.boolean,
+                found: JvmExpressionFlow::Value {
+                    value_type: JvmType::Int,
+                    category: JvmValueCategory::IntLike,
+                },
+            }
+        );
+
+        let mut wrong_method_result = Fixture::new(&[]);
+        wrong_method_result.set_result(JvmReturnType::Value(JvmType::Boolean));
+        let value =
+            wrong_method_result.literal(Constant::Int(42), wrong_method_result.definitions.int);
+        let block =
+            wrong_method_result.block(Vec::new(), value, wrong_method_result.definitions.int);
+        assert_eq!(
+            lower_method_body(
+                &wrong_method_result.store,
+                &wrong_method_result.ast,
+                &wrong_method_result.definitions,
+                &wrong_method_result.method,
+                block,
+            )
+            .unwrap_err(),
+            JvmCodegenError::MethodBodyTypeMismatch {
+                method: wrong_method_result.method.symbol(),
+                tree: block,
+                expected: JvmReturnType::Value(JvmType::Boolean),
+                found: Some(JvmType::Int),
+            }
+        );
+
+        let mut wrong_unit = Fixture::new(&[]);
+        let unit = wrong_unit.literal(Constant::Unit, wrong_unit.definitions.unit);
+        let block = wrong_unit.block(Vec::new(), unit, wrong_unit.definitions.int);
+        assert_eq!(
+            lower_expression(
+                &wrong_unit.store,
+                &wrong_unit.ast,
+                &wrong_unit.definitions,
+                &wrong_unit.method,
+                block,
+            )
+            .unwrap_err(),
+            JvmCodegenError::BlockResultTypeMismatch {
+                tree: block,
+                declared: wrong_unit.definitions.int,
+                found: JvmExpressionFlow::Unit,
+            }
+        );
+
+        let mut invalid_literal = Fixture::new(&[]);
+        let unit = invalid_literal.literal(Constant::Unit, invalid_literal.definitions.int);
+        let block = invalid_literal.block(Vec::new(), unit, invalid_literal.definitions.int);
+        assert_eq!(
+            lower_expression(
+                &invalid_literal.store,
+                &invalid_literal.ast,
+                &invalid_literal.definitions,
+                &invalid_literal.method,
+                block,
+            )
+            .unwrap_err(),
+            JvmCodegenError::UnsupportedTypedExpression {
+                tree: unit,
+                node: "Unit literal with a non-Unit type",
+            }
+        );
+    }
+
+    #[test]
+    fn block_stops_after_a_diverging_stat_and_emits_no_unreachable_suffix() {
+        let mut fixture = Fixture::new(&[]);
+        let value = fixture.literal(Constant::Int(4), fixture.definitions.int);
+        let returned = fixture.return_expr(Some(value), None);
+        let condition = fixture.literal(Constant::Boolean(true), fixture.definitions.boolean);
+        let unreachable = fixture.ast.alloc(Tree {
+            kind: TreeKind::While(dotty_core::ast::While {
+                cond: condition,
+                body: value,
+            }),
+            position: None,
+            ty: fixture.definitions.unit,
+        });
+        let block = fixture.block(vec![returned], unreachable, fixture.definitions.int);
+
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    block,
+                )
+                .unwrap(),
+            ),
+            vec![0x07, 0xac]
+        );
+    }
+
+    #[test]
+    fn block_final_return_and_early_return_if_have_no_unreachable_epilogue() {
+        let mut fixture = Fixture::new(&[]);
+        let value = fixture.literal(Constant::Int(4), fixture.definitions.int);
+        let returned = fixture.return_expr(Some(value), None);
+        let block = fixture.block(Vec::new(), returned, fixture.definitions.nothing_type);
+        assert_eq!(
+            method_body_bytes(
+                &fixture,
+                lower_method_body(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    block,
+                )
+                .unwrap(),
+            ),
+            vec![0x07, 0xac]
+        );
+
+        let mut conditional = Fixture::new(&[JvmType::Boolean, JvmType::Int]);
+        let condition_type = conditional.store.types.alloc(Type::TermRef {
+            prefix: conditional.definitions.no_prefix,
+            target: TermRefTarget::Symbol(conditional.parameters[0]),
+        });
+        let result_type = conditional.store.types.alloc(Type::TermRef {
+            prefix: conditional.definitions.no_prefix,
+            target: TermRefTarget::Symbol(conditional.parameters[1]),
+        });
+        let condition = conditional.ident(condition_type);
+        let result = conditional.ident(result_type);
+        let return_value = conditional.literal(Constant::Int(4), conditional.definitions.int);
+        let return_then = conditional.return_expr(Some(return_value), None);
+        let if_expr =
+            conditional.if_expr(condition, return_then, result, conditional.definitions.int);
+        let block = conditional.block(Vec::new(), if_expr, conditional.definitions.int);
+        assert_eq!(
+            method_body_bytes(
+                &conditional,
+                lower_method_body(
+                    &conditional.store,
+                    &conditional.ast,
+                    &conditional.definitions,
+                    &conditional.method,
+                    block,
+                )
+                .unwrap(),
+            ),
+            vec![0x1b, 0x99, 0x00, 0x05, 0x07, 0xac, 0x1c, 0xac]
+        );
+    }
+
+    #[test]
+    fn block_nesting_obeys_the_existing_expression_depth_limit() {
+        let mut fixture = Fixture::new(&[]);
+        let leaf = fixture.literal(Constant::Int(1), fixture.definitions.int);
+        let mut nested = leaf;
+        for _ in 0..JVM_EXPRESSION_DEPTH_LIMIT {
+            nested = fixture.block(Vec::new(), nested, fixture.definitions.int);
+        }
+
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                nested,
+            )
+            .unwrap_err(),
+            JvmCodegenError::ExpressionDepthExceeded {
+                tree: leaf,
+                position: None,
+                limit: JVM_EXPRESSION_DEPTH_LIMIT,
+            }
+        );
+    }
+
+    #[test]
+    fn block_rejects_unhandled_statements_and_missing_children() {
+        let mut fixture = Fixture::new(&[]);
+        let value = fixture.literal(Constant::Int(1), fixture.definitions.int);
+        let condition = fixture.literal(Constant::Boolean(true), fixture.definitions.boolean);
+        let unsupported = [
+            (
+                fixture.ast.alloc(Tree {
+                    kind: TreeKind::ValDef(dotty_core::ast::ValDef {
+                        name: dotty_core::names::TermName::new(fixture.store.names.intern("local")),
+                        tpt: value,
+                        rhs: Some(value),
+                        metadata: (),
+                    }),
+                    position: None,
+                    ty: fixture.definitions.int,
+                }),
+                "ValDef",
+            ),
+            (
+                fixture.ast.alloc(Tree {
+                    kind: TreeKind::Assign(dotty_core::ast::Assign {
+                        lhs: value,
+                        rhs: value,
+                    }),
+                    position: None,
+                    ty: fixture.definitions.unit,
+                }),
+                "Assign",
+            ),
+            (
+                fixture.ast.alloc(Tree {
+                    kind: TreeKind::While(dotty_core::ast::While {
+                        cond: condition,
+                        body: value,
+                    }),
+                    position: None,
+                    ty: fixture.definitions.unit,
+                }),
+                "While",
+            ),
+        ];
+        for (stat, node) in unsupported {
+            let block = fixture.block(vec![stat], value, fixture.definitions.int);
+            assert_eq!(
+                lower_expression(
+                    &fixture.store,
+                    &fixture.ast,
+                    &fixture.definitions,
+                    &fixture.method,
+                    block,
+                )
+                .unwrap_err(),
+                JvmCodegenError::UnsupportedTypedExpression { tree: stat, node }
+            );
+        }
+
+        let mut foreign_ast = TypedAst::new();
+        let missing = (0..100)
+            .map(|_| {
+                foreign_ast.alloc(Tree {
+                    kind: TreeKind::Literal(dotty_core::ast::Literal {
+                        value: Constant::Int(9),
+                    }),
+                    position: None,
+                    ty: fixture.definitions.int,
+                })
+            })
+            .last()
+            .unwrap();
+        let block = fixture.block(vec![missing], value, fixture.definitions.int);
+        assert_eq!(
+            lower_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                block,
+            )
+            .unwrap_err(),
+            JvmCodegenError::UnsupportedTypedExpression {
+                tree: missing,
+                node: "missing tree",
+            }
         );
     }
 
