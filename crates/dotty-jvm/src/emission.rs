@@ -1,0 +1,207 @@
+//! Whole-class emission from a validated, frontend-owned plan.
+
+use std::collections::HashSet;
+
+use dotty_classfile::access_flags::{ACC_PUBLIC, MethodAccessFlags};
+use dotty_classfile::bytecode::CodeBuilder;
+use dotty_classfile::class_file::ClassFileVersion;
+use dotty_classfile::class_file_builder::ClassFileBuilder;
+use dotty_core::ids::SymbolId;
+use dotty_core::store::SemanticStore;
+use dotty_core::symbols::{SymbolInfo, SymbolKind};
+use dotty_core::types::{MethodType, Type, TypeRefTarget};
+
+use crate::{
+    GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmCodegenError,
+    JvmCompilationUnit,
+};
+
+pub(super) fn emit_class(
+    unit: &JvmCompilationUnit<'_>,
+    class_symbol: SymbolId,
+    definitions: &dotty_core::definitions::Definitions,
+) -> Result<GeneratedClass, JvmCodegenError> {
+    unit.validate()?;
+    let plan = unit
+        .classes
+        .iter()
+        .find(|plan| plan.class == class_symbol)
+        .ok_or(JvmCodegenError::MissingClassPlan {
+            class: class_symbol,
+        })?;
+    if plan.initialization != JvmClassInitializationPlan::ImplicitNoArg {
+        return Err(JvmCodegenError::UnsupportedConstructor {
+            class: class_symbol,
+        });
+    }
+
+    let metadata = plan.metadata(unit.store, definitions)?;
+    let class_info = super::identity::class_info(unit.store, class_symbol)?;
+    validate_emittable_class(plan, unit.store, definitions, class_info)?;
+
+    let mut builder = ClassFileBuilder::new(
+        metadata.identity().internal_name(),
+        ClassFileVersion {
+            major: JVM_CLASSFILE_MAJOR_VERSION,
+            minor: 0,
+        },
+    )
+    .map_err(|error| class_file_error(class_symbol, None, error))?;
+    builder
+        .set_access_flags(metadata.identity().access_flags())
+        .map_err(|error| class_file_error(class_symbol, None, error))?;
+
+    let constructor = empty_object_constructor(class_symbol)?;
+    builder
+        .add_prebuilt_code_method("<init>", "()V", MethodAccessFlags(ACC_PUBLIC), constructor)
+        .map_err(|error| class_file_error(class_symbol, None, error))?;
+
+    for (method_plan, method_metadata) in plan.methods.iter().zip(metadata.methods()) {
+        let body = method_plan.body.ok_or(JvmCodegenError::MissingTypedBody {
+            method: method_plan.method,
+        })?;
+        let code = crate::lower_method_body(
+            unit.store,
+            unit.typed_ast,
+            definitions,
+            method_metadata,
+            body,
+        )?;
+        builder
+            .add_prebuilt_code_method(
+                method_metadata.name(),
+                method_metadata.descriptor().as_str(),
+                method_metadata.access_flags(),
+                code,
+            )
+            .map_err(|error| class_file_error(class_symbol, Some(method_plan.method), error))?;
+    }
+
+    let bytes = builder
+        .encode()
+        .map_err(|error| class_file_error(class_symbol, None, error))?;
+    Ok(GeneratedClass {
+        internal_name: metadata.identity().internal_name().to_owned(),
+        bytes,
+    })
+}
+
+fn empty_object_constructor(class: SymbolId) -> Result<CodeBuilder, JvmCodegenError> {
+    let mut code = CodeBuilder::new();
+    code.aload(0)
+        .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
+    code.invokespecial("java/lang/Object", "<init>", "()V")
+        .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
+    code.return_void()
+        .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
+    Ok(code)
+}
+
+fn validate_emittable_class(
+    plan: &crate::JvmClassPlan,
+    store: &SemanticStore,
+    definitions: &dotty_core::definitions::Definitions,
+    class_info: &dotty_core::types::ClassInfo,
+) -> Result<(), JvmCodegenError> {
+    if let Some(self_type) = class_info.self_type {
+        return Err(JvmCodegenError::UnsupportedJvmSelfType {
+            class: plan.class,
+            self_type,
+        });
+    }
+
+    let parent = class_info.parents.first().copied();
+    let valid_object_definition = matches!(
+        store.types.try_get(definitions.object_type),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) if *symbol == definitions.object_class
+    );
+    if class_info.parents.len() != 1
+        || parent != Some(definitions.object_type)
+        || !valid_object_definition
+    {
+        return Err(JvmCodegenError::UnsupportedJvmSuperclass {
+            class: plan.class,
+            parent,
+        });
+    }
+
+    let declarations = store.scopes.get(class_info.declarations).entered_symbols();
+    let declared: HashSet<_> = declarations.collect();
+    for method in &plan.methods {
+        if !declared.contains(&method.method) {
+            return Err(JvmCodegenError::MethodNotInClassDeclarations {
+                class: plan.class,
+                method: method.method,
+            });
+        }
+    }
+
+    let mut constructors = Vec::new();
+    let mut owned_declarations = declared
+        .into_iter()
+        .filter(|symbol| store.symbols.get(*symbol).owner == Some(plan.class))
+        .collect::<Vec<_>>();
+    owned_declarations.sort_by_key(|symbol| symbol.index());
+    for member in owned_declarations {
+        let symbol = store.symbols.get(member);
+        match symbol.kind {
+            SymbolKind::Method => {}
+            SymbolKind::Constructor => constructors.push(member),
+            kind => {
+                return Err(JvmCodegenError::UnsupportedJvmClassMember {
+                    class: plan.class,
+                    member,
+                    kind,
+                });
+            }
+        }
+    }
+    if constructors.len() > 1 {
+        return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class });
+    }
+    if let Some(constructor) = constructors.first().copied() {
+        validate_primary_constructor(store, plan.class, constructor)?;
+    }
+    Ok(())
+}
+
+fn validate_primary_constructor(
+    store: &SemanticStore,
+    class: SymbolId,
+    constructor: SymbolId,
+) -> Result<(), JvmCodegenError> {
+    let symbol = store.symbols.get(constructor);
+    if store.names.try_resolve(symbol.name.text()) != Some("<init>") {
+        return Err(JvmCodegenError::UnsupportedConstructor { class });
+    }
+    match symbol.info {
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => Ok(()),
+        SymbolInfo::Error => Err(JvmCodegenError::UnsupportedConstructor { class }),
+        SymbolInfo::Complete(ty) => match store.types.try_get(ty) {
+            Some(Type::Method(MethodType { params, result, .. })) if params.is_empty() => {
+                match store.types.try_get(*result) {
+                    Some(Type::Method(_) | Type::Poly(_)) | None => {
+                        Err(JvmCodegenError::UnsupportedConstructor { class })
+                    }
+                    Some(_) => Ok(()),
+                }
+            }
+            _ => Err(JvmCodegenError::UnsupportedConstructor { class }),
+        },
+    }
+}
+
+fn class_file_error(
+    class: SymbolId,
+    method: Option<SymbolId>,
+    error: dotty_classfile::class_file_builder::ClassFileBuildError,
+) -> JvmCodegenError {
+    JvmCodegenError::ClassFileBuild {
+        class,
+        method,
+        error,
+    }
+}

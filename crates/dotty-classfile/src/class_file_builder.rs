@@ -42,7 +42,7 @@ use crate::bytecode::code_builder::{
 use crate::bytecode::{
     AnalysisError, AssembleError, BranchInstruction, CfgCodeAnalyzer, CodeSequence,
     ControlFlowGraph, Instruction, StackMapFrameGenerationError, StackMapTable,
-    generate_stack_map_frames,
+    generate_stack_map_frames_with_receiver,
 };
 use crate::class_file::{ClassFile, ClassFileVersion};
 use crate::constant_pool::ConstantPoolIndex;
@@ -568,6 +568,25 @@ impl ClassFileBuilder {
         Ok(self)
     }
 
+    /// Adds a method from an already-built symbolic instruction sequence.
+    ///
+    /// The code is validated and analyzed by the same path as
+    /// [`add_code_method`](Self::add_code_method) during class encoding.
+    /// This is useful when a higher-level backend lowers typed trees before it
+    /// creates the class builder.
+    pub fn add_prebuilt_code_method(
+        &mut self,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+        access_flags: MethodAccessFlags,
+        code: code_builder::CodeBuilder,
+    ) -> Result<&mut Self, ClassFileBuildError> {
+        self.add_code_method(name, descriptor, access_flags, move |builder| {
+            *builder = code;
+            Ok(())
+        })
+    }
+
     /// Finalizes and encodes the class by interning all symbolic references
     /// before freezing the constant pool, then using the existing class-file
     /// encoder.
@@ -739,6 +758,17 @@ impl ClassFileBuilder {
                         stack_map_table_name.ok_or(ClassFileBuildError::InvalidCodePlan)?;
                     let graph = ControlFlowGraph::build(&sequence)
                         .map_err(ClassFileBuildError::ControlFlow)?;
+                    if method.name == "<init>" {
+                        // The integer-only flow model does not track the
+                        // transition from `uninitializedThis` to the class
+                        // type after an invokespecial constructor call.
+                        return Err(ClassFileBuildError::StackMapFrames(
+                            StackMapFrameGenerationError::UnsupportedFlow {
+                                block: graph.entry_block(),
+                                state: crate::bytecode::UnsupportedStackMapState::InstanceReceiver,
+                            },
+                        ));
+                    }
                     CfgCodeAnalyzer::validate_all_instructions(&graph)
                         .map_err(ClassFileBuildError::Analysis)?;
                     let flow = CfgCodeAnalyzer::analyze_validated(
@@ -760,8 +790,14 @@ impl ClassFileBuilder {
                         &constant_pool,
                     )
                     .map_err(ClassFileBuildError::Assemble)?;
-                    let generated = generate_stack_map_frames(&flow, &graph, &assembled)
-                        .map_err(ClassFileBuildError::StackMapFrames)?;
+                    let generated = generate_stack_map_frames_with_receiver(
+                        &flow,
+                        &graph,
+                        &assembled,
+                        &constant_pool,
+                        this_class,
+                    )
+                    .map_err(ClassFileBuildError::StackMapFrames)?;
                     let payload = StackMapTable {
                         frames: generated.frames,
                     }

@@ -1,12 +1,13 @@
 # JVM backend boundary
 
 `dotty-jvm` is the adapter boundary between a completed typed frontend and
-future JVM lowering. It depends on `dotty-core` for canonical symbols, types,
+bounded JVM lowering. It depends on `dotty-core` for canonical symbols, types,
 and typed trees, and on `dotty-classfile` for class-file descriptor and output
-APIs. The crate validates a borrowed `JvmCompilationUnit` contract and
-projects one bounded method subset to JVM descriptors and lowers a first
-subset of typed expression leaves to the class-file crate's symbolic code
-builder. It does not assemble a source frontend or emit complete class files.
+APIs. The crate validates a borrowed `JvmCompilationUnit` contract, projects a
+bounded class and method subset to JVM metadata, lowers selected typed
+expressions to the class-file crate's symbolic code builder, and composes a
+complete class file when the frontend supplies sufficient initialization
+evidence. It does not assemble a source frontend.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -90,21 +91,91 @@ names, companion/module classes, trait forwarders, bridges, private-access
 semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
 forms must be handled by a separate contract before they can be emitted.
 
+## Whole-class emission
+
+`emit_class` composes one planned class into a class file at
+`JVM_CLASSFILE_MAJOR_VERSION` (65). The artifact contains a public ordinary
+class extending canonical `java/lang/Object`, one synthesized public
+`<init>()V`, and the public instance methods listed in `JvmClassPlan::methods`
+in plan order. Method bodies are lowered through the same typed expression
+path described above. The file is encoded into an owned `GeneratedClass` only
+after every method and class-file structure has been built successfully.
+
+The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
+proving the source class has no constructor parameters or body, superclass
+arguments, fields, or template initialization expressions. The backend checks
+that the class's completed `ClassInfo` has exactly its canonical `Object`
+parent, has no self type, declares no non-method members, and has at most one
+no-argument primary constructor. A missing plan, a plan marked `Unsupported`,
+or a class shape outside those checks returns a typed error; the backend does
+not infer initialization safety from an empty method list. The synthesized
+constructor calls `java/lang/Object.<init>()V` and returns.
+
+The emitted class has no fields, interfaces, class initializer, Scala/TASTy
+metadata, or unplanned methods. Constructors with parameters, additional
+constructors, field initializers, nested types, explicit superclass behavior,
+and other class initialization semantics remain unsupported. The API returns
+only after encoding succeeds, so a failure does not expose a partial artifact.
+The CI JVM gate writes this generated class to disk, inspects it with `javap`,
+compiles a small Java caller with `javac`, and executes it with
+`java -Xverify:all` on JDK 21 or newer.
+
+## Source frontend integration gate
+
+The root crate's `jvm_source_compilation` integration test is the bounded
+source-to-execution path. It reads `tests/fixtures/jvm/Answer.scala`, runs the
+shared source through the lexer, parser, namer, and typer, and builds JVM plans
+from canonical `SourceSemanticIndex` identities while preserving the source
+parameter order. The fixture uses an explicit empty parameter clause for its
+zero-argument `value()` method; the current typer represents a parameterless
+Scala method without that clause differently, and that shape is not accepted
+by the current JVM descriptor contract.
+
+The test decodes and validates the emitted version-65 class, checks its method
+descriptors and stack map, compares bytes from independent output directories,
+then uses JDK 21+ `javap`, `javac`, and `java -Xverify:all` to verify and execute
+it. CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail that
+gate. Two negative fixtures check that an unsupported field initializer and
+parser diagnostics produce no `.class` file. Run the test locally with
+`cargo test --test jvm_source_compilation --locked`; without the JDK it still
+runs the structural and negative checks and skips Java verification.
+
+This path targets the repository's pinned Scala 3.9.0 source compatibility
+reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
+only the explicitly supported frontend and JVM subset; the class has no
+`.tasty` payload and does not claim full Scala ABI or `scalac` compatibility.
+
 ## Typed expression leaves
 
-`lower_value_expression` accepts only typed `Literal` nodes containing
-`Constant::Int` or `Constant::Boolean`, and `Ident` nodes whose typed
-`TermRefTarget::Symbol` matches one of the method metadata's canonical
-parameter symbols. Int and Boolean literals lower through `CodeBuilder::iconst`
-and parameter references through `CodeBuilder::iload` at the metadata-assigned
-instance local slot. The result category is `IntLike` for both, while Boolean
-method descriptors remain `Z`. Literal constant types may be the matching
-singleton constant type or the canonical `Definitions.int` / `.boolean` type.
+`lower_value_expression` accepts typed `Literal` nodes containing `Constant::Int`
+or `Constant::Boolean`, and `Ident` nodes whose typed `TermRefTarget::Symbol`
+matches one of the method metadata's canonical parameter symbols. Literals
+lower through `CodeBuilder::iconst`; parameter references use `CodeBuilder::iload`
+at the metadata-assigned instance local slot. Both produce the `IntLike`
+category while Boolean descriptors remain `Z`. Literal types may be the
+matching singleton constant type or canonical `Definitions.int` / `.boolean`.
 
-The caller owns the `CodeBuilder` and is responsible for appending returns or
-other method epilogues. A rejected tree or failed instruction append leaves the
-builder unchanged. `Select`, `Apply`, `TypeApply`, `Block`, `If`, `While`,
-`Match`, `New`, closures, nested `DefDef`s, String/Long and other non-Int/
-Boolean literals, and all other typed nodes return a structured
-unsupported-expression error. No source name lookup, implicit boxing, boolean
-conversion, branch generation, or frontend dependency is performed.
+`lower_expression` adds nested typed `If` expressions and local explicit
+`Return` nodes. A Boolean condition is evaluated once and followed by symbolic
+`ifeq`/`goto` labels. Value-producing branches agree on their `Int` or Boolean
+type and reach a stack-compatible join. A branch that terminates with an
+explicit local return contributes no placeholder value; a `Nothing` branch
+without supported return flow is rejected. Every emitted tree must be within
+the fixed depth budget `JVM_EXPRESSION_DEPTH_LIMIT` (64 nodes), and depth errors
+carry the offending `TreeId` and optional source span. Each lowering call also
+caps expanded node visits at `JVM_EXPRESSION_NODE_BUDGET` (4,096); repeated
+references to a shared subtree count each time they are expanded.
+
+`lower_method_body` checks the final flow against the method descriptor and
+adds `ireturn` for an `Int`/Boolean fallthrough. A body whose reachable paths
+all return gets no extra epilogue. Unit is accepted only when the body has
+supported explicit `return` flow; it emits JVM `return`. All APIs build into a
+fresh method-local `CodeBuilder`, so an error discards partial instructions.
+The classfile builder then validates reachable blocks, analyzes stack states,
+assembles labels, and writes `StackMapTable` frames.
+
+`Return.from = Some(...)` is rejected. `Select`, `Apply`, `TypeApply`, `Block`,
+`While`, `Match`, `Try`, `New`, closures, nested `DefDef`s, String/Long and
+other non-Int/Boolean literals, object/reference joins, and all other typed
+nodes remain unsupported. No source name lookup, implicit boxing, boolean
+conversion, constant folding, or frontend dependency is introduced.

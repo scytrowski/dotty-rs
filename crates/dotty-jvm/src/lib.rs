@@ -1,11 +1,12 @@
 //! A JVM backend adapter boundary for already-typed compiler semantics.
 //!
-//! This crate currently defines and validates a borrowed compilation plan. It
-//! does not assemble a source frontend, infer identities from names, mutate
-//! the caller's stores, or emit bytecode. See `docs/jvm-backend.md` for the
-//! boundary and validation assumptions. Its bounded metadata projection
-//! covers public ordinary classes and instance methods whose signatures use
-//! primitive `Int`, `Boolean`, and result-only `Unit`.
+//! This crate defines and validates a borrowed compilation plan, projects
+//! bounded class/method metadata, lowers a small typed expression subset into
+//! `dotty-classfile`'s symbolic code builder, and can compose those results
+//! into a complete class file when the frontend proves the supported
+//! initialization shape. It does not assemble a source frontend, infer
+//! identities from names, or mutate the caller's stores. See
+//! `docs/jvm-backend.md` for its supported subset and boundary assumptions.
 
 use std::collections::HashSet;
 use std::error::Error;
@@ -19,8 +20,21 @@ use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
 mod descriptor;
+mod emission;
 mod expression;
 mod identity;
+
+/// Maximum number of nested typed expression nodes visited by JVM lowering.
+pub const JVM_EXPRESSION_DEPTH_LIMIT: usize = 64;
+
+/// Maximum expanded typed-tree node visits in one JVM lowering call.
+///
+/// Repeated references to a shared subtree count separately because lowering
+/// expands each occurrence into bytecode.
+pub const JVM_EXPRESSION_NODE_BUDGET: usize = 4_096;
+
+/// Class-file major version emitted by the current whole-class backend.
+pub const JVM_CLASSFILE_MAJOR_VERSION: u16 = 65;
 
 /// JVMS limit for a method's parameter slots, including `this` for instance
 /// methods.
@@ -47,6 +61,44 @@ pub enum JvmValueCategory {
 pub enum JvmReturnType {
     Value(JvmType),
     Void,
+}
+
+/// The control-flow result of lowering one expression.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmExpressionFlow {
+    /// A value remains on the operand stack at the expression's fallthrough.
+    Value {
+        /// Semantic primitive represented by the int-like stack value.
+        value_type: JvmType,
+        /// JVM operand category exposed to parent lowering.
+        category: JvmValueCategory,
+    },
+    /// Every reachable path terminates through a supported explicit return.
+    Diverges,
+}
+
+/// A standalone lowered expression and its fallthrough contract.
+#[derive(Debug)]
+pub struct JvmLoweredExpression {
+    code: dotty_classfile::bytecode::CodeBuilder,
+    flow: JvmExpressionFlow,
+}
+
+impl JvmLoweredExpression {
+    /// The generated symbolic instructions and labels.
+    pub const fn code(&self) -> &dotty_classfile::bytecode::CodeBuilder {
+        &self.code
+    }
+
+    /// Value or terminating-flow result for parent lowering.
+    pub const fn flow(&self) -> JvmExpressionFlow {
+        self.flow
+    }
+
+    /// Takes the generated method-local instruction builder.
+    pub fn into_code(self) -> dotty_classfile::bytecode::CodeBuilder {
+        self.code
+    }
 }
 
 /// Primitive JVM descriptor and value categories for one method signature.
@@ -92,6 +144,42 @@ pub struct JvmMethodMetadata {
 pub struct JvmClassMetadata {
     identity: JvmClassIdentity,
     methods: Vec<JvmMethodMetadata>,
+}
+
+/// Frontend evidence about class initialization for whole-class emission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmClassInitializationPlan {
+    /// The frontend proved that an empty `Object.<init>()V` constructor is
+    /// equivalent to the source class: no constructor parameters or body,
+    /// superclass arguments, fields, or template initializers are present.
+    ImplicitNoArg,
+    /// Constructor or class initialization is explicit or cannot be proven
+    /// safe by the supplied compilation plan.
+    Unsupported,
+}
+
+/// An owned generated class-file artifact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedClass {
+    internal_name: String,
+    bytes: Vec<u8>,
+}
+
+impl GeneratedClass {
+    /// JVM internal name encoded by this artifact.
+    pub fn internal_name(&self) -> &str {
+        &self.internal_name
+    }
+
+    /// Encoded class-file bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Takes ownership of the encoded class-file bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 /// Why a class symbol is outside the supported top-level class subset.
@@ -168,6 +256,9 @@ pub struct JvmClassPlan {
     pub class: SymbolId,
     /// Methods in deterministic frontend order.
     pub methods: Vec<JvmMethodPlan>,
+    /// Evidence that the synthesized minimal constructor preserves source
+    /// initialization behavior.
+    pub initialization: JvmClassInitializationPlan,
 }
 
 /// A method, its explicitly ordered parameter identities, and typed body root.
@@ -277,6 +368,52 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         error: dotty_classfile::bytecode::CodeBuilderError,
     },
+    /// A conditional expression does not have a Boolean condition.
+    InvalidIfCondition {
+        tree: TreeId<Typed>,
+        found: Option<JvmType>,
+    },
+    /// A reachable conditional branch does not match the other branch's value type.
+    IfBranchTypeMismatch {
+        tree: TreeId<Typed>,
+        branch: TreeId<Typed>,
+        expected: JvmType,
+        found: Option<JvmType>,
+    },
+    /// An If expression's declared type disagrees with its reachable branch values.
+    IfResultTypeMismatch {
+        tree: TreeId<Typed>,
+        expected: Option<JvmType>,
+        found: Option<JvmType>,
+    },
+    /// A typed `Nothing` branch is not backed by supported explicit return flow.
+    UnsupportedBottomFlow { tree: TreeId<Typed> },
+    /// A Return with an explicit target is outside the current local-return subset.
+    UnsupportedReturnTarget {
+        tree: TreeId<Typed>,
+        from: TreeId<Typed>,
+    },
+    /// A return value does not match the method's primitive JVM result.
+    ReturnValueTypeMismatch {
+        tree: TreeId<Typed>,
+        expected: JvmReturnType,
+        found: Option<JvmType>,
+    },
+    /// A method body value does not match its descriptor's return type.
+    MethodBodyTypeMismatch {
+        method: SymbolId,
+        tree: TreeId<Typed>,
+        expected: JvmReturnType,
+        found: Option<JvmType>,
+    },
+    /// Recursive typed-tree lowering exceeded its fixed depth budget.
+    ExpressionDepthExceeded {
+        tree: TreeId<Typed>,
+        position: Option<dotty_core::source::SourceSpan>,
+        limit: usize,
+    },
+    /// Lowering expanded too many typed-tree occurrences in one call.
+    ExpressionNodeBudgetExceeded { tree: TreeId<Typed>, limit: usize },
     /// A method has an unsupported single-clause or monomorphism shape.
     UnsupportedMethodShape {
         method: SymbolId,
@@ -374,6 +511,38 @@ pub enum JvmCodegenError {
         class: SymbolId,
         previous: SymbolId,
         internal_name: String,
+    },
+    /// The selected class symbol has no corresponding class plan in the unit.
+    MissingClassPlan { class: SymbolId },
+    /// The class plan cannot prove that synthesizing the minimal constructor is safe.
+    UnsupportedConstructor { class: SymbolId },
+    /// The class's parent list is not exactly its canonical `Object` type.
+    UnsupportedJvmSuperclass {
+        class: SymbolId,
+        parent: Option<TypeId>,
+    },
+    /// The class declares a self type outside this emission subset.
+    UnsupportedJvmSelfType { class: SymbolId, self_type: TypeId },
+    /// A declared field, initializer, nested type, or other member is outside
+    /// the single-class emission subset.
+    UnsupportedJvmClassMember {
+        class: SymbolId,
+        member: SymbolId,
+        kind: SymbolKind,
+    },
+    /// A selected method is owned by the class but absent from its declaration scope.
+    MethodNotInClassDeclarations { class: SymbolId, method: SymbolId },
+    /// ClassFileBuilder rejected staged output; `method` is present when the
+    /// failing operation was associated with a selected semantic method.
+    ClassFileBuild {
+        class: SymbolId,
+        method: Option<SymbolId>,
+        error: dotty_classfile::class_file_builder::ClassFileBuildError,
+    },
+    /// The fixed synthesized constructor could not be built symbolically.
+    ConstructorCodeBuilder {
+        class: SymbolId,
+        error: dotty_classfile::bytecode::CodeBuilderError,
     },
 }
 
@@ -540,6 +709,53 @@ pub fn lower_value_expression(
     code: &mut dotty_classfile::bytecode::CodeBuilder,
 ) -> Result<JvmValueCategory, JvmCodegenError> {
     expression::lower_value_expression(store, typed_ast, definitions, method, tree, code)
+}
+
+/// Lowers one supported typed expression without appending a method epilogue.
+///
+/// Integer/Boolean leaves and nested `If`/local `Return` nodes are supported.
+/// The returned flow states whether a value remains on the stack or every path
+/// terminates. The expression is built into a fresh method-local instruction
+/// builder, so an error never exposes partial code.
+pub fn lower_expression(
+    store: &SemanticStore,
+    typed_ast: &TypedAst,
+    definitions: &Definitions,
+    method: &JvmMethodMetadata,
+    tree: TreeId<Typed>,
+) -> Result<JvmLoweredExpression, JvmCodegenError> {
+    expression::lower_expression(store, typed_ast, definitions, method, tree)
+}
+
+/// Lowers a complete method body and adds only the descriptor-appropriate
+/// terminal return required by its reachable fallthrough.
+///
+/// The returned builder is method-local and is discarded on any lowering
+/// error. Int and Boolean results use `ireturn`; Unit is accepted only for a
+/// body consisting of supported explicit void-return flow.
+pub fn lower_method_body(
+    store: &SemanticStore,
+    typed_ast: &TypedAst,
+    definitions: &Definitions,
+    method: &JvmMethodMetadata,
+    body: TreeId<Typed>,
+) -> Result<dotty_classfile::bytecode::CodeBuilder, JvmCodegenError> {
+    expression::lower_method_body(store, typed_ast, definitions, method, body)
+}
+
+/// Emits one selected ordinary class as a complete JVM class-file artifact.
+///
+/// The class must have an explicit [`JvmClassPlan`] in `unit`. Its
+/// initialization plan must prove an implicit no-argument constructor is
+/// equivalent to the source class. The output is pinned to class-file version
+/// 65 and contains only the planned public instance methods, a minimal public
+/// constructor, and no TASTy or other Scala ABI metadata.
+pub fn emit_class(
+    unit: &JvmCompilationUnit<'_>,
+    class_symbol: SymbolId,
+    definitions: &Definitions,
+) -> Result<GeneratedClass, JvmCodegenError> {
+    emission::emit_class(unit, class_symbol, definitions)
 }
 
 impl JvmParameterLocal {

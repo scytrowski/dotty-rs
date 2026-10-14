@@ -385,6 +385,50 @@ fn builds_branched_integer_methods_with_one_stack_map_table_each() {
 }
 
 #[test]
+fn class_builder_accepts_prebuilt_symbolic_branch_code() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Prebuilt",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    let mut code = dotty_classfile::bytecode::CodeBuilder::new();
+    let otherwise = code.new_label().unwrap();
+    let join = code.new_label().unwrap();
+    code.iconst(1).unwrap();
+    code.ifeq(otherwise.clone()).unwrap();
+    code.iconst(2).unwrap();
+    code.goto(join.clone()).unwrap();
+    code.mark(otherwise).unwrap();
+    code.iconst(3).unwrap();
+    code.mark(join).unwrap();
+    code.ireturn().unwrap();
+    builder
+        .add_prebuilt_code_method(
+            "choose",
+            "()I",
+            MethodAccessFlags(ACC_PUBLIC | ACC_STATIC),
+            code,
+        )
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let method = method_named(&class_file, "choose");
+    let code = code_attribute(method);
+    assert_eq!(
+        code.code,
+        [0x04, 0x99, 0x00, 0x07, 0x05, 0xa7, 0x00, 0x04, 0x06, 0xac]
+    );
+    assert!(matches!(
+        code.attributes.as_slice(),
+        [Attribute::Other(attribute)] if utf8(&class_file, attribute.name_index) == "StackMapTable"
+    ));
+}
+
+#[test]
 fn rejects_unreachable_blocks_before_automatic_stack_map_emission() {
     let mut builder = ClassFileBuilder::new(
         "example/UnreachableIntegerBlock",
@@ -838,6 +882,41 @@ fn builds_constructor_and_instance_field_access_from_symbolic_code() {
             if code.max_stack == 2 && code.max_locals == 2
                 && code.code[0] == 0x2a && code.code[1] == 0x1b
                 && code.code[2] == 0xb5 && code.code[5] == 0xb1
+    ));
+}
+
+#[test]
+fn rejects_branched_constructors_without_uninitialized_this_flow() {
+    let mut builder = ClassFileBuilder::new(
+        "example/BranchedConstructor",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_instance_method("<init>", "()V", |code| {
+            let done = code.new_label()?;
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.iconst(0)?;
+            code.ifeq(done.clone())?;
+            code.return_void()?;
+            code.mark(done)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::StackMapFrames(
+            dotty_classfile::bytecode::StackMapFrameGenerationError::UnsupportedFlow {
+                state: dotty_classfile::bytecode::UnsupportedStackMapState::InstanceReceiver,
+                ..
+            }
+        ))
     ));
 }
 
