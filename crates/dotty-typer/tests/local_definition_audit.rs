@@ -2115,9 +2115,11 @@ fn source_expression_failure_rolls_back_completed_module_and_retries_cleanly() {
     let typed_before = typer.typed_ast().checkpoint();
 
     for _ in 0..2 {
-        assert!(typer
-            .type_expression_expected(rhs, context, definitions.int)
-            .is_err());
+        assert!(
+            typer
+                .type_expression_expected(rhs, context, definitions.int)
+                .is_err()
+        );
         assert_eq!(typer.store().checkpoint(), store_before);
         assert_eq!(typer.typed_ast().checkpoint(), typed_before);
         assert_eq!(typer.source_type_index().type_at(source, rhs), None);
@@ -2129,13 +2131,17 @@ fn source_expression_failure_rolls_back_completed_module_and_retries_cleanly() {
         .iter()
         .filter(|observation| {
             observation.operation == "complete_module_class"
-                && observation.module_class_identity.contains("scala/io/Source")
+                && observation
+                    .module_class_identity
+                    .contains("scala/io/Source")
         })
         .collect::<Vec<_>>();
     assert_eq!(source_module_completions.len(), 2);
-    assert!(source_module_completions
-        .iter()
-        .all(|observation| observation.transaction_state == "rolled_back"));
+    assert!(
+        source_module_completions
+            .iter()
+            .all(|observation| observation.transaction_state == "rolled_back")
+    );
 }
 
 fn module_audit_object(
