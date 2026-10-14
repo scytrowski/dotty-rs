@@ -4,6 +4,7 @@ use std::process::Command;
 
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
+use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader;
 use dotty_core::ast::{DefDef, Template, TreeKind, Untyped};
 use dotty_core::{
@@ -359,6 +360,281 @@ fn scala_answer_source_flows_through_the_frontend_into_a_verifiable_class() {
     if require_jdk_or_skip() {
         verify_with_jdk(first_output.path());
     }
+}
+
+#[test]
+fn scala_delegator_calls_and_blocks_flow_through_the_frontend_into_a_verifiable_class() {
+    let first_output = TestOutputDirectory::new("delegator-first");
+    let second_output = TestOutputDirectory::new("delegator-second");
+    let first = compile_fixture("Delegator.scala", first_output.path()).unwrap();
+    let second = compile_fixture("Delegator.scala", second_output.path()).unwrap();
+
+    assert_eq!(first.class.internal_name(), "Delegator");
+    assert_eq!(first.class.bytes(), second.class.bytes());
+    assert_eq!(first_output.class_files(), vec![first.path.clone()]);
+    assert_eq!(second_output.class_files(), vec![second.path.clone()]);
+
+    let mut reader = Reader::new(first.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("emitted Delegator should decode");
+    assert!(
+        reader.is_at_end(),
+        "decoder consumes the complete class file"
+    );
+    class
+        .validate_references()
+        .expect("Delegator constant-pool references should be valid");
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class),
+        Ok("Delegator")
+    );
+    assert!(class.access_flags.is_public());
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("<init>", "()V"),
+            ("identity", "(I)I"),
+            ("direct", "(I)I"),
+            ("explicit", "(I)I"),
+            ("chain", "(I)I"),
+            ("constant", "()I"),
+            ("zero", "()I"),
+            ("sequence", "(I)I"),
+        ]
+    );
+    for method in &class.methods {
+        assert!(method.access_flags.is_public());
+        assert!(matches!(method.attributes.as_slice(), [Attribute::Code(_)]));
+    }
+
+    assert_opcode_sequence(emitted_method_code(&class, "identity"), &[0x1b, 0xac]);
+    let direct = emitted_method_code(&class, "direct");
+    assert_opcode_sequence(direct, &[0x2a, 0x1b, 0xb6, 0xac]);
+    assert_virtual_invocations(&class, direct, &[("identity", "(I)I")]);
+
+    let explicit = emitted_method_code(&class, "explicit");
+    assert_eq!(explicit, direct);
+    assert_virtual_invocations(&class, explicit, &[("identity", "(I)I")]);
+
+    let chain = emitted_method_code(&class, "chain");
+    assert_opcode_sequence(chain, &[0x2a, 0x2a, 0x1b, 0xb6, 0xb6, 0xac]);
+    assert_virtual_invocations(&class, chain, &[("identity", "(I)I"), ("identity", "(I)I")]);
+
+    let constant = emitted_method_code(&class, "constant");
+    assert_opcode_sequence(constant, &[0x10, 0xac]);
+    assert_eq!(constant[1], 42);
+    let zero = emitted_method_code(&class, "zero");
+    assert_opcode_sequence(zero, &[0x2a, 0xb6, 0xac]);
+    assert_virtual_invocations(&class, zero, &[("constant", "()I")]);
+
+    let sequence = emitted_method_code(&class, "sequence");
+    assert_opcode_sequence(sequence, &[0x2a, 0x1b, 0xb6, 0x57, 0x2a, 0x10, 0xb6, 0xac]);
+    let instructions = decode_subset_instructions(sequence);
+    let (constant_offset, _) = instructions
+        .iter()
+        .find(|(_, opcode)| *opcode == 0x10)
+        .expect("sequence has one bipush instruction");
+    assert_eq!(sequence[constant_offset + 1], 42);
+    let calls = assert_virtual_invocations(
+        &class,
+        sequence,
+        &[("identity", "(I)I"), ("identity", "(I)I")],
+    );
+    let first_call_index = instructions
+        .iter()
+        .position(|(offset, opcode)| *opcode == 0xb6 && *offset == calls[0])
+        .unwrap();
+    let second_call_index = instructions
+        .iter()
+        .position(|(offset, opcode)| *opcode == 0xb6 && *offset == calls[1])
+        .unwrap();
+    assert_eq!(instructions[first_call_index + 1].1, 0x57);
+    assert_eq!(instructions[second_call_index + 1].1, 0xac);
+
+    if require_jdk_or_skip() {
+        verify_delegator_with_jdk(first_output.path());
+    }
+}
+
+fn emitted_method_code<'a>(class: &ClassFile<'a>, name: &str) -> &'a [u8] {
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+        .unwrap_or_else(|| panic!("missing method {name}"));
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("{name} should have one Code attribute");
+    };
+    code.code
+}
+
+fn assert_virtual_invocations(
+    class: &ClassFile<'_>,
+    code: &[u8],
+    expected: &[(&str, &str)],
+) -> Vec<usize> {
+    let instructions = decode_subset_instructions(code);
+    let calls = instructions
+        .iter()
+        .filter_map(|(offset, opcode)| (*opcode == 0xb6).then_some(*offset))
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), expected.len());
+    for (offset, (expected_name, expected_descriptor)) in calls.iter().zip(expected) {
+        let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+        let ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        } = class
+            .constant_pool
+            .get(ConstantPoolIndex(index))
+            .expect("invokevirtual constant-pool entry")
+        else {
+            panic!("invokevirtual must reference Methodref")
+        };
+        assert_eq!(
+            class.constant_pool.class_name(*class_index),
+            Ok("Delegator")
+        );
+        assert_eq!(
+            class.constant_pool.name_and_type(*name_and_type_index),
+            Ok((*expected_name, *expected_descriptor))
+        );
+    }
+    calls
+}
+
+fn assert_opcode_sequence(code: &[u8], expected: &[u8]) {
+    let instructions = decode_subset_instructions(code);
+    assert_eq!(
+        instructions
+            .iter()
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
+    let mut instructions = Vec::new();
+    let mut offset = 0;
+    while offset < code.len() {
+        let opcode = code[offset];
+        let length = match opcode {
+            0x1b | 0x2a | 0x57 | 0xac | 0xb1 => 1,
+            0x10 => 2,
+            0xb6..=0xb8 => 3,
+            other => panic!("unexpected opcode in Delegator fixture: {other:#04x}"),
+        };
+        assert!(
+            offset + length <= code.len(),
+            "truncated bytecode instruction"
+        );
+        instructions.push((offset, opcode));
+        offset += length;
+    }
+    instructions
+}
+
+fn verify_delegator_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 temporary path");
+    let javap = Command::new("javap")
+        .args(["-c", "-v", "-classpath", output_path, "Delegator"])
+        .output()
+        .expect("start javap");
+    assert!(
+        javap.status.success(),
+        "javap rejected Delegator.class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "invokevirtual",
+        "aload_0",
+        "pop",
+        "ireturn",
+        "sequence(int)",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap output omitted {expected:?}:\n{javap_output}"
+        );
+    }
+
+    let harness = output_directory.join("DelegatorHarness.java");
+    fs::write(
+        &harness,
+        "public final class DelegatorHarness { public static void main(String[] args) { Delegator d = new Delegator(); if (d.direct(7) != 7) throw new AssertionError(\"direct\"); if (d.explicit(8) != 8) throw new AssertionError(\"explicit\"); if (d.chain(9) != 9) throw new AssertionError(\"chain\"); if (d.zero() != 42) throw new AssertionError(\"zero\"); if (d.sequence(10) != 42) throw new AssertionError(\"sequence\"); System.out.println(d.direct(7) + \":\" + d.explicit(8) + \":\" + d.chain(9) + \":\" + d.constant() + \":\" + d.zero() + \":\" + d.sequence(10)); } }\n",
+    )
+    .expect("write Delegator Java harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness)
+        .output()
+        .expect("start javac");
+    assert!(
+        javac.status.success(),
+        "javac rejected DelegatorHarness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "DelegatorHarness",
+        ])
+        .output()
+        .expect("start java verifier");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected Delegator.class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "7:8:9:42:42:42"
+    );
+}
+
+#[test]
+fn unsupported_local_val_and_while_fail_at_the_jvm_codegen_stage() {
+    let local_output = TestOutputDirectory::new("unsupported-local-val");
+    let local_error = compile_source(
+        "class LocalVal { def run(x: Int): Int = { val y = x; y } }\n",
+        "LocalVal.scala",
+        local_output.path(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        local_error,
+        PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
+            node: "ValDef",
+            ..
+        })
+    ));
+    assert!(local_output.class_files().is_empty());
+
+    let while_output = TestOutputDirectory::new("unsupported-while");
+    let while_error = compile_source(
+        "class Loop { def run(): Unit = { while true do () } }\n",
+        "Loop.scala",
+        while_output.path(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        while_error,
+        PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression { node: "While", .. })
+    ));
+    assert!(while_output.class_files().is_empty());
 }
 
 #[test]

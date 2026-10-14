@@ -178,22 +178,27 @@ compiles a small Java caller with `javac`, and executes it with
 ## Source frontend integration gate
 
 The root crate's `jvm_source_compilation` integration test is the bounded
-source-to-execution path. It reads `tests/fixtures/jvm/Answer.scala`, runs the
-shared source through the lexer, parser, namer, and typer, and builds JVM plans
-from canonical `SourceSemanticIndex` identities while preserving the source
-parameter order. The fixture uses an explicit empty parameter clause for its
-zero-argument `value()` method; the current typer represents a parameterless
-Scala method without that clause differently, and that shape is not accepted
-by the current JVM descriptor contract.
+source-to-execution path. It reads `tests/fixtures/jvm/Answer.scala` and
+`Delegator.scala`, runs each through the lexer, parser, namer, and typer, and
+builds JVM plans from canonical `SourceSemanticIndex` identities while
+preserving source parameter order. `Answer` covers primitive results and
+conditional lowering. `Delegator` covers same-class direct and explicit
+`this` calls, nested calls, explicit empty-clause calls, and a statement block
+that discards the first call result and returns the second. Its output is
+compared byte-for-byte across independent frontend runs; decoded class-file
+references and instruction order are checked without hand-authored typed
+trees or constant-pool indexes. A Java harness then checks each result under
+`java -Xverify:all`.
 
-The test decodes and validates the emitted version-65 class, checks its method
-descriptors and stack map, compares bytes from independent output directories,
-then uses JDK 21+ `javap`, `javac`, and `java -Xverify:all` to verify and execute
-it. CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail that
-gate. Two negative fixtures check that an unsupported field initializer and
-parser diagnostics produce no `.class` file. Run the test locally with
-`cargo test --test jvm_source_compilation --locked`; without the JDK it still
-runs the structural and negative checks and skips Java verification.
+CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
+Negative source tests verify that field initialization, local `val`, `while`,
+private construction, and parser diagnostics fail at their actual pipeline
+stage without leaving a `.class` file. Existing backend typed-tree tests cover
+unsupported receivers, `using` calls, static/extension methods, mismatched
+method references and arguments, and other unsupported call shapes. Run the
+test locally with `cargo test --test jvm_source_compilation --locked`; without
+the JDK it still runs structural and negative checks and explicitly skips Java
+verification.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
