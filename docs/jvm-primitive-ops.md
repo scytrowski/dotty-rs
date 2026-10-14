@@ -66,17 +66,17 @@ remain distinguishable by identity.
 
 ## Operator matrix
 
-| Source | Expected Scala target | Argument | Result | JVM operation or branch family | Current frontend stage | Next issue |
+| Source | Expected Scala target | Argument | Result | JVM operation or branch family | Current frontend stage | Backend status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `x + y` | canonical `scala.Int.+(Int): Int` | `Int` | `Int` | `iadd` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
-| `x - y` | canonical `scala.Int.-(Int): Int` | `Int` | `Int` | `isub` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
-| `x * y` | canonical `scala.Int.*(Int): Int` | `Int` | `Int` | `imul` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
-| `x / y` | canonical `scala.Int./(Int): Int` | `Int` | `Int` | `idiv` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
-| `x % y` | canonical `scala.Int.%(Int): Int` | `Int` | `Int` | `irem` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
-| `x < y` | canonical `scala.Int.<(Int): Boolean` | `Int` | `Boolean` | signed `if_icmplt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
-| `x <= y` | canonical `scala.Int.<=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmple`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
-| `x > y` | canonical `scala.Int.>(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpgt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
-| `x >= y` | canonical `scala.Int.>=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpge`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x + y` | canonical `scala.Int.+(Int): Int` | `Int` | `Int` | `iadd` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
+| `x - y` | canonical `scala.Int.-(Int): Int` | `Int` | `Int` | `isub` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
+| `x * y` | canonical `scala.Int.*(Int): Int` | `Int` | `Int` | `imul` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
+| `x / y` | canonical `scala.Int./(Int): Int` | `Int` | `Int` | `idiv` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
+| `x % y` | canonical `scala.Int.%(Int): Int` | `Int` | `Int` | `irem` | Typed `Apply(Select(...))` with canonical operator symbol | Lowered in planned JVM methods by [#1120](https://github.com/scytrowski/dotty-rs/issues/1120) |
+| `x < y` | canonical `scala.Int.<(Int): Boolean` | `Int` | `Boolean` | signed `if_icmplt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | Recognized; Boolean lowering is unsupported |
+| `x <= y` | canonical `scala.Int.<=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmple`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | Recognized; Boolean lowering is unsupported |
+| `x > y` | canonical `scala.Int.>(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpgt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | Recognized; Boolean lowering is unsupported |
+| `x >= y` | canonical `scala.Int.>=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpge`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | Recognized; Boolean lowering is unsupported |
 
 The read-only `dotty-jvm::resolve_int_intrinsic` resolver maps those nine
 registered `SymbolId`s to `JvmIntIntrinsic` variants. It accepts only a regular
@@ -103,7 +103,9 @@ intrinsic.
 
 Resolution is read-only and returns a descriptor only. It does not select or
 emit bytecode instructions, mutate the constant pool, infer types, or load
-classes. Opcode emission remains a later step.
+classes. Planned method-body lowering consumes the arithmetic descriptors and
+emits JVM integer instructions; relational descriptors currently produce an
+explicit unsupported-intrinsic error.
 
 ## JVM semantics and limits
 
@@ -133,8 +135,8 @@ entry is a deterministic collision error. Classloader lookup aliases
 `scala.Int` to the canonical class symbol before classpath metadata can create
 a competing identity.
 
-The registration/accessor exposes the resulting canonical `SymbolId`s to a
-later backend-facing contract. The intrinsic resolver can then validate
+The registration/accessor exposes the resulting canonical `SymbolId`s to the
+backend-facing contract. The intrinsic resolver validates
 the symbol owner, one-parameter `Int` `MethodType`, result type, and typed
 operand types before returning an intrinsic descriptor. Same-named local or
 extension methods do not satisfy this contract.
