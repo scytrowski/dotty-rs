@@ -107,7 +107,7 @@ or macro support is part of this contract.
 
 ## Canonical `Int` arithmetic
 
-Planned method bodies resolve typed regular applications against the canonical
+Method bodies resolve typed regular applications against the canonical
 `scala.Int` operator `SymbolId`s before applying the ordinary same-class-call
 restrictions. `+`, `-`, `*`, `/`, and `%` lower their selected receiver first,
 then their sole argument, exactly once each, and emit `iadd`, `isub`, `imul`,
@@ -136,6 +136,14 @@ integer-like stack states there. Equality operators `==` and `!=` remain
 unsupported. JVM overflow, signed division/remainder, and division-by-zero
 behavior are preserved by emitting the corresponding JVM instruction without
 constant folding or prechecks.
+
+`tests/fixtures/jvm/Calculator.scala` validates this subset through the real
+lexer, parser, namer, typer, JVM backend, and JDK 21+ runtime. Its Java harness
+checks arithmetic overflow, signed comparison boundaries, divide-by-zero
+exceptions, and repeated `sumTo` loop execution with `java -Xverify:all`.
+General Scala library lowering, Long/Float/Double, Java classpath loading,
+TASTy emission, the full Scala ABI, equality operators, and arbitrary
+reference-bearing calls inside branched CFGs remain outside this subset.
 
 ## Class and method metadata subset
 

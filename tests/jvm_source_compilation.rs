@@ -13,7 +13,7 @@ use dotty_core::{
 };
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmLocalBinding, JvmMethodPlan, emit_class,
+    JvmCodegenError, JvmCompilationUnit, JvmLocalBinding, JvmMethodPlan, JvmNameKind, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -501,6 +501,292 @@ fn scala_delegator_calls_and_blocks_flow_through_the_frontend_into_a_verifiable_
     if require_jdk_or_skip() {
         verify_delegator_with_jdk(first_output.path());
     }
+}
+
+#[test]
+fn calculator_fixture_compiles_deterministically_and_executes_primitive_intrinsics() {
+    let first_output = TestOutputDirectory::new("calculator-first");
+    let second_output = TestOutputDirectory::new("calculator-second");
+    let first = compile_fixture("Calculator.scala", first_output.path()).unwrap();
+    let second = compile_fixture("Calculator.scala", second_output.path()).unwrap();
+
+    assert_eq!(first.class.internal_name(), "Calculator");
+    assert_eq!(first.class.bytes(), second.class.bytes());
+    assert_eq!(first_output.class_files(), vec![first.path.clone()]);
+    assert_eq!(second_output.class_files(), vec![second.path.clone()]);
+
+    let mut reader = Reader::new(first.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("Calculator should decode completely");
+    assert!(
+        reader.is_at_end(),
+        "decoder consumes the complete class file"
+    );
+    class
+        .validate_references()
+        .expect("Calculator constant-pool references should be valid");
+    assert_eq!(class.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    assert_eq!(
+        class.version.major, 65,
+        "Calculator targets JDK 21 class files"
+    );
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class),
+        Ok("Calculator")
+    );
+    assert!(class.access_flags.is_public());
+
+    let signatures = class
+        .methods
+        .iter()
+        .map(|method| {
+            method
+                .descriptor(&class.constant_pool)
+                .expect("method descriptor should parse");
+            (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signatures,
+        [
+            ("<init>", "()V"),
+            ("sumTo", "(I)I"),
+            ("add", "(II)I"),
+            ("subtract", "(II)I"),
+            ("multiply", "(II)I"),
+            ("divide", "(II)I"),
+            ("remainder", "(II)I"),
+            ("less", "(II)Z"),
+            ("lessOrEqual", "(II)Z"),
+            ("greater", "(II)Z"),
+            ("greaterOrEqual", "(II)Z"),
+        ]
+    );
+
+    let method_info = |name: &str| {
+        class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+            .unwrap_or_else(|| panic!("missing Calculator method {name}"))
+    };
+    for method in &class.methods {
+        assert!(method.access_flags.is_public());
+        assert!(
+            matches!(method.attributes.as_slice(), [Attribute::Code(_)]),
+            "{} has exactly one Code attribute",
+            class.constant_pool.utf8(method.name_index).unwrap()
+        );
+    }
+
+    let [Attribute::Code(constructor)] = method_info("<init>").attributes.as_slice() else {
+        panic!("Calculator should have a public no-argument constructor")
+    };
+    assert_eq!(constructor.max_locals, 1);
+    assert!(
+        constructor.code.contains(&0xb7),
+        "constructor calls Object.<init>"
+    );
+
+    let [Attribute::Code(sum_to)] = method_info("sumTo").attributes.as_slice() else {
+        panic!("sumTo should have Code")
+    };
+    assert_eq!((sum_to.max_stack, sum_to.max_locals), (2, 4));
+    let sum_to_instructions = decode_subset_instructions(sum_to.code);
+    for opcode in [0x60, 0xa4, 0xa7] {
+        assert!(
+            sum_to_instructions
+                .iter()
+                .any(|(_, found)| *found == opcode),
+            "sumTo is missing instruction {opcode:#04x}"
+        );
+    }
+    let targets = decode_branch_targets(sum_to.code);
+    let mut expected_frames = targets
+        .iter()
+        .map(|(_, _, target)| *target)
+        .collect::<Vec<_>>();
+    expected_frames.sort_unstable();
+    expected_frames.dedup();
+    assert_eq!(stack_map_frame_pcs(&class, "sumTo"), expected_frames);
+
+    for (name, opcode) in [
+        ("add", 0x60),
+        ("subtract", 0x64),
+        ("multiply", 0x68),
+        ("divide", 0x6c),
+        ("remainder", 0x70),
+        ("less", 0xa1),
+        ("lessOrEqual", 0xa4),
+        ("greater", 0xa3),
+        ("greaterOrEqual", 0xa2),
+    ] {
+        let [Attribute::Code(code)] = method_info(name).attributes.as_slice() else {
+            panic!("{name} should have Code")
+        };
+        assert_eq!((code.max_stack, code.max_locals), (2, 3));
+        assert!(
+            decode_subset_instructions(code.code)
+                .iter()
+                .any(|(_, found)| *found == opcode),
+            "{name} should use intrinsic opcode {opcode:#04x}"
+        );
+        assert_virtual_invocations(&class, code.code, &[]);
+    }
+
+    for index in 1..=u16::MAX {
+        let Some(ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        }) = class.constant_pool.get(ConstantPoolIndex(index))
+        else {
+            continue;
+        };
+        let owner = class
+            .constant_pool
+            .class_name(*class_index)
+            .expect("Methodref owner");
+        let (name, descriptor) = class
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .expect("Methodref name and descriptor");
+        assert!(
+            !["+", "-", "*", "/", "%", "<", "<=", ">", ">="].contains(&name),
+            "primitive operator {owner}.{name}{descriptor} must not be a Methodref"
+        );
+    }
+
+    if require_jdk_or_skip() {
+        let output_path = first_output.path().to_str().expect("UTF-8 output path");
+        let javap = Command::new("javap")
+            .args(["-v", "-c", "-classpath", output_path, "Calculator"])
+            .output()
+            .expect("start javap");
+        assert!(
+            javap.status.success(),
+            "javap rejected Calculator\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap_output = String::from_utf8_lossy(&javap.stdout);
+        for expected in [
+            "major version: 65",
+            "descriptor: (I)I",
+            "descriptor: (II)I",
+            "descriptor: (II)Z",
+            "iadd",
+            "isub",
+            "imul",
+            "idiv",
+            "irem",
+            "if_icmplt",
+            "if_icmple",
+            "if_icmpgt",
+            "if_icmpge",
+            "iload_1",
+            "istore_2",
+            "goto",
+            "StackMapTable",
+        ] {
+            assert!(
+                javap_output.contains(expected),
+                "javap output omitted {expected:?}:\n{javap_output}"
+            );
+        }
+
+        let harness_path = first_output.path().join("CalculatorHarness.java");
+        fs::write(
+            &harness_path,
+            r#"public final class CalculatorHarness {
+  public static void main(String[] args) {
+    Calculator value = new Calculator();
+    if (value.sumTo(0) != 0 || value.sumTo(1) != 1 || value.sumTo(10) != 55 || value.sumTo(100) != 5050) throw new AssertionError("sumTo");
+    if (value.multiply(6, 7) != 42) throw new AssertionError("multiply");
+    if (!value.lessOrEqual(3, 3) || value.lessOrEqual(5, 2)) throw new AssertionError("lessOrEqual");
+    if (value.add(Integer.MAX_VALUE, 1) != Integer.MIN_VALUE) throw new AssertionError("add overflow");
+    if (value.subtract(2, 5) != -3 || value.divide(-7, 3) != -2 || value.remainder(-7, 3) != -1) throw new AssertionError("arithmetic");
+    if (value.divide(Integer.MIN_VALUE, -1) != Integer.MIN_VALUE || value.remainder(Integer.MIN_VALUE, -1) != 0) throw new AssertionError("division overflow");
+    try { value.divide(1, 0); throw new AssertionError("division by zero returned"); } catch (ArithmeticException expected) { }
+    try { value.remainder(1, 0); throw new AssertionError("remainder by zero returned"); } catch (ArithmeticException expected) { }
+    if (!value.less(-2, -1) || value.less(1, 1) || !value.less(Integer.MIN_VALUE, Integer.MAX_VALUE) || value.less(Integer.MAX_VALUE, Integer.MIN_VALUE)) throw new AssertionError("less signed boundaries");
+    if (!value.lessOrEqual(5, 5) || value.lessOrEqual(6, 5) || !value.lessOrEqual(Integer.MIN_VALUE, Integer.MAX_VALUE)) throw new AssertionError("lessOrEqual signed boundaries");
+    if (!value.greater(1, -1) || value.greater(2, 2) || !value.greater(Integer.MAX_VALUE, Integer.MIN_VALUE) || value.greater(Integer.MIN_VALUE, Integer.MAX_VALUE)) throw new AssertionError("greater signed boundaries");
+    if (!value.greaterOrEqual(2, 2) || value.greaterOrEqual(-2, -1) || !value.greaterOrEqual(Integer.MAX_VALUE, Integer.MIN_VALUE)) throw new AssertionError("greaterOrEqual signed boundaries");
+    System.out.println("calculator intrinsics ok");
+  }
+}
+"#,
+        )
+        .expect("write Calculator Java harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected CalculatorHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "CalculatorHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected Calculator\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "calculator intrinsics ok"
+        );
+    }
+}
+
+#[test]
+fn invalid_calculator_sources_fail_at_the_typed_pipeline_stage_without_artifacts() {
+    for fixture in [
+        "InvalidCalculatorOperand.scala",
+        "InvalidCalculatorComparison.scala",
+    ] {
+        let output = TestOutputDirectory::new(fixture);
+        let error = compile_fixture(fixture, output.path())
+            .expect_err("ill-typed calculator fixture should fail");
+        assert!(
+            matches!(error, PipelineFailure::Typer(_)),
+            "{fixture} failed at unexpected pipeline stage: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{fixture} must not leave a partial class file"
+        );
+    }
+
+    let output = TestOutputDirectory::new("user-defined-plus");
+    let error = compile_fixture("UserDefinedPlus.scala", output.path())
+        .expect_err("user-defined operator name is outside the JVM subset");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InvalidJvmName {
+                kind: JvmNameKind::Method,
+                text,
+                ..
+            }) if text == "+"
+        ),
+        "user-defined operator should fail as a structured codegen error: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
 }
 
 #[test]
