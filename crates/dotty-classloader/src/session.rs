@@ -65,7 +65,9 @@ pub struct LoadingSession {
     pub(crate) identified: HashMap<BinaryName, SymbolId>,
     identified_order: Vec<BinaryName>,
     pub(crate) modules: HashMap<BinaryName, crate::loader::ModuleIdentity>,
-    module_order: Vec<BinaryName>,
+    module_by_object: HashMap<SymbolId, BinaryName>,
+    module_by_class: HashMap<SymbolId, BinaryName>,
+    module_undo: Vec<(BinaryName, Option<crate::loader::ModuleIdentity>)>,
     pub(crate) resolved: HashMap<BinaryName, SymbolId>,
     resolved_order: Vec<BinaryName>,
     pub(crate) packages: PackageRegistry,
@@ -112,7 +114,9 @@ impl LoadingSession {
             identified: HashMap::new(),
             identified_order: Vec::new(),
             modules: HashMap::new(),
-            module_order: Vec::new(),
+            module_by_object: HashMap::new(),
+            module_by_class: HashMap::new(),
+            module_undo: Vec::new(),
             resolved: HashMap::new(),
             resolved_order: Vec::new(),
             packages: PackageRegistry::new(),
@@ -127,7 +131,7 @@ impl LoadingSession {
     pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
         SessionCheckpoint {
             identified: self.identified_order.len(),
-            modules: self.module_order.len(),
+            modules: self.module_undo.len(),
             resolved: self.resolved_order.len(),
             metadata: self.metadata_order.len(),
             origins: self.origin_undo.len(),
@@ -157,9 +161,63 @@ impl LoadingSession {
         &mut self,
         name: BinaryName,
         identity: crate::loader::ModuleIdentity,
+    ) -> bool {
+        let previous = self.modules.get(&name).cloned();
+        if previous.as_ref() == Some(&identity) {
+            return true;
+        }
+        if self
+            .module_by_object
+            .get(&identity.object)
+            .is_some_and(|existing| existing != &name)
+            || self
+                .module_by_class
+                .get(&identity.module_class)
+                .is_some_and(|existing| existing != &name)
+        {
+            return false;
+        }
+        self.module_undo.push((name.clone(), previous));
+        self.replace_module(name, Some(identity));
+        true
+    }
+
+    pub(crate) fn module_by_object(
+        &self,
+        object: SymbolId,
+    ) -> Option<&crate::loader::ModuleIdentity> {
+        let name = self.module_by_object.get(&object)?;
+        let identity = self.modules.get(name)?;
+        (identity.object == object).then_some(identity)
+    }
+
+    pub(crate) fn module_by_class(
+        &self,
+        module_class: SymbolId,
+    ) -> Option<&crate::loader::ModuleIdentity> {
+        let name = self.module_by_class.get(&module_class)?;
+        let identity = self.modules.get(name)?;
+        (identity.module_class == module_class).then_some(identity)
+    }
+
+    fn replace_module(
+        &mut self,
+        name: BinaryName,
+        identity: Option<crate::loader::ModuleIdentity>,
     ) {
-        if self.modules.insert(name.clone(), identity).is_none() {
-            self.module_order.push(name);
+        if let Some(previous) = self.modules.remove(&name) {
+            if self.module_by_object.get(&previous.object) == Some(&name) {
+                self.module_by_object.remove(&previous.object);
+            }
+            if self.module_by_class.get(&previous.module_class) == Some(&name) {
+                self.module_by_class.remove(&previous.module_class);
+            }
+        }
+        if let Some(identity) = identity {
+            self.module_by_object.insert(identity.object, name.clone());
+            self.module_by_class
+                .insert(identity.module_class, name.clone());
+            self.modules.insert(name, identity);
         }
     }
 
@@ -193,9 +251,9 @@ impl LoadingSession {
             let name = self.identified_order.pop().expect("length checked");
             self.identified.remove(&name);
         }
-        while self.module_order.len() > checkpoint.modules {
-            let name = self.module_order.pop().expect("length checked");
-            self.modules.remove(&name);
+        while self.module_undo.len() > checkpoint.modules {
+            let (name, previous) = self.module_undo.pop().expect("length checked");
+            self.replace_module(name, previous);
         }
         while self.resolved_order.len() > checkpoint.resolved {
             let name = self.resolved_order.pop().expect("length checked");
@@ -243,6 +301,19 @@ mod tests {
         })
     }
 
+    fn module_identity(store: &mut SemanticStore, name: &str) -> crate::loader::ModuleIdentity {
+        let object = symbol(store, "Object");
+        let module_class = symbol(store, "Object$");
+        let object_name = BinaryName::from_internal(name);
+        crate::loader::ModuleIdentity {
+            object,
+            module_class,
+            companion_class: None,
+            object_name: object_name.clone(),
+            module_class_name: BinaryName::from_internal(format!("{name}$")),
+        }
+    }
+
     #[test]
     fn identified_shell_is_not_reported_as_fully_resolved() {
         let mut store = SemanticStore::new();
@@ -282,6 +353,94 @@ mod tests {
 
         assert!(!session.identified.contains_key(&name));
         assert!(!session.resolved.contains_key(&name));
+    }
+
+    #[test]
+    fn module_identity_indexes_return_the_canonical_session_entry() {
+        let mut store = SemanticStore::new();
+        let identity = module_identity(&mut store, "sample/Object");
+        let name = identity.object_name.clone();
+        let mut session = LoadingSession::new();
+
+        assert!(session.cache_module(name, identity.clone()));
+
+        assert_eq!(session.module_by_object(identity.object), Some(&identity));
+        assert_eq!(
+            session.module_by_class(identity.module_class),
+            Some(&identity)
+        );
+    }
+
+    #[test]
+    fn module_identity_replacement_and_rollback_restore_both_indexes() {
+        let mut store = SemanticStore::new();
+        let original = module_identity(&mut store, "sample/Object");
+        let name = original.object_name.clone();
+        let replacement = module_identity(&mut store, "sample/Object");
+        let mut session = LoadingSession::new();
+
+        assert!(session.cache_module(name.clone(), original.clone()));
+        let checkpoint = session.checkpoint();
+        assert!(session.cache_module(name, replacement.clone()));
+
+        assert_eq!(session.module_by_object(original.object), None);
+        assert_eq!(session.module_by_class(original.module_class), None);
+        assert_eq!(
+            session.module_by_object(replacement.object),
+            Some(&replacement)
+        );
+        assert_eq!(
+            session.module_by_class(replacement.module_class),
+            Some(&replacement)
+        );
+
+        session.rollback_to(&mut store, checkpoint);
+
+        assert_eq!(session.module_by_object(original.object), Some(&original));
+        assert_eq!(
+            session.module_by_class(original.module_class),
+            Some(&original)
+        );
+        assert_eq!(session.module_by_object(replacement.object), None);
+        assert_eq!(session.module_by_class(replacement.module_class), None);
+    }
+
+    #[test]
+    fn rollback_removes_module_identity_indexes_added_after_checkpoint() {
+        let mut store = SemanticStore::new();
+        let identity = module_identity(&mut store, "sample/Object");
+        let name = identity.object_name.clone();
+        let mut session = LoadingSession::new();
+        let checkpoint = session.checkpoint();
+
+        assert!(session.cache_module(name.clone(), identity.clone()));
+        session.rollback_to(&mut store, checkpoint);
+
+        assert!(!session.modules.contains_key(&name));
+        assert_eq!(session.module_by_object(identity.object), None);
+        assert_eq!(session.module_by_class(identity.module_class), None);
+    }
+
+    #[test]
+    fn module_identity_indexes_reject_symbol_collisions_without_replacing_entries() {
+        let mut store = SemanticStore::new();
+        let existing = module_identity(&mut store, "sample/Existing");
+        let mut object_collision = module_identity(&mut store, "sample/ObjectCollision");
+        object_collision.object = existing.object;
+        let mut class_collision = module_identity(&mut store, "sample/ClassCollision");
+        class_collision.module_class = existing.module_class;
+        let mut session = LoadingSession::new();
+
+        assert!(session.cache_module(existing.object_name.clone(), existing.clone()));
+        assert!(!session.cache_module(object_collision.object_name.clone(), object_collision));
+        assert!(!session.cache_module(class_collision.object_name.clone(), class_collision));
+
+        assert_eq!(session.modules.len(), 1);
+        assert_eq!(session.module_by_object(existing.object), Some(&existing));
+        assert_eq!(
+            session.module_by_class(existing.module_class),
+            Some(&existing)
+        );
     }
 
     #[test]

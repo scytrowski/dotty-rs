@@ -866,7 +866,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             object_name: name.clone(),
             module_class_name,
         };
-        self.session.cache_module(name.clone(), identity.clone());
+        if !self.session.cache_module(name.clone(), identity.clone()) {
+            return Err(ClassLoadError::IdentityConflict {
+                name: name.clone(),
+                reason: "module object or module-class symbol is already indexed for another binary name"
+                    .to_owned(),
+            });
+        }
         Ok(identity)
     }
 
