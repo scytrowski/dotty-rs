@@ -5542,6 +5542,58 @@ fn canonical_intrinsic_rejects_wrong_result_type() {
 }
 
 #[test]
+fn canonical_intrinsic_rejects_wrong_operand_type_and_using_application() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let method = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .plus;
+    let wrong_operand_call = fixture.call(method, fixture.definitions.int);
+    let argument = match &fixture.ast.get(wrong_operand_call).kind {
+        TreeKind::Apply(apply) => apply.args[0],
+        _ => unreachable!(),
+    };
+    fixture.ast.get_mut(argument).ty = fixture.definitions.boolean;
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            wrong_operand_call,
+            &fixture.definitions,
+        ),
+        Err(JvmIntIntrinsicError::WrongOperandType {
+            tree: wrong_operand_call,
+            operand: argument,
+        })
+    );
+
+    let regular_call = fixture.call(method, fixture.definitions.int);
+    let (function, args) = match &fixture.ast.get(regular_call).kind {
+        TreeKind::Apply(apply) => (apply.function, apply.args.clone()),
+        _ => unreachable!(),
+    };
+    let using_call = fixture.ast.alloc(Tree {
+        kind: TreeKind::Apply(Apply {
+            function,
+            args,
+            kind: ApplyKind::Using,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            using_call,
+            &fixture.definitions
+        ),
+        Err(JvmIntIntrinsicError::UnsupportedCallShape { tree: using_call })
+    );
+}
+
+#[test]
 fn canonical_intrinsic_reports_wrong_arity_and_owner() {
     let mut fixture = PrimitiveIntrinsicFixture::new();
     let method = fixture

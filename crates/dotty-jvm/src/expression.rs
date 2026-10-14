@@ -12,9 +12,9 @@ use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
 use crate::{
     InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmCallTarget,
-    JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind,
-    JvmLocalLayout, JvmLocalSlot, JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType,
-    JvmValueCategory, UnsupportedJvmCallShapeKind,
+    JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmIntIntrinsic,
+    JvmInvocationKind, JvmLocalLayout, JvmLocalSlot, JvmLoweredExpression, JvmMethodMetadata,
+    JvmReturnType, JvmType, JvmValueCategory, UnsupportedJvmCallShapeKind, resolve_int_intrinsic,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -826,6 +826,23 @@ fn emit_apply(
             method: context.method.symbol(),
         });
     };
+
+    let intrinsic = resolve_int_intrinsic(
+        context.store,
+        context.typed_ast,
+        tree_id,
+        context.definitions,
+    )
+    .map_err(|error| JvmCodegenError::IntIntrinsicResolution {
+        tree: tree_id,
+        error,
+    })?;
+    if let Some(intrinsic) = intrinsic {
+        return emit_int_intrinsic(
+            context, tree_id, function, &arguments, intrinsic, code, depth,
+        );
+    }
+
     if context.control_flow_depth > 0 {
         return Err(JvmCodegenError::JvmCallInUnsupportedControlFlow {
             tree: tree_id,
@@ -889,6 +906,81 @@ fn emit_apply(
         JvmReturnType::Value(value) => Flow::Value(value),
         JvmReturnType::Void => Flow::Unit,
     })
+}
+
+fn emit_int_intrinsic(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    function: TreeId<Typed>,
+    arguments: &[TreeId<Typed>],
+    intrinsic: JvmIntIntrinsic,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    match intrinsic {
+        JvmIntIntrinsic::IntAdd
+        | JvmIntIntrinsic::IntSubtract
+        | JvmIntIntrinsic::IntMultiply
+        | JvmIntIntrinsic::IntDivide
+        | JvmIntIntrinsic::IntRemainder => {}
+        JvmIntIntrinsic::IntLessThan
+        | JvmIntIntrinsic::IntLessOrEqual
+        | JvmIntIntrinsic::IntGreaterThan
+        | JvmIntIntrinsic::IntGreaterOrEqual => {
+            return Err(JvmCodegenError::UnsupportedIntIntrinsic {
+                tree: tree_id,
+                intrinsic,
+            });
+        }
+    }
+    let receiver = match &context.tree(function)?.kind {
+        TreeKind::Select(select) => select.qualifier,
+        _ => {
+            return Err(JvmCodegenError::IntIntrinsicResolution {
+                tree: tree_id,
+                error: crate::JvmIntIntrinsicError::UnsupportedFunctionShape { tree: function },
+            });
+        }
+    };
+    let [argument] = arguments else {
+        return Err(JvmCodegenError::IntIntrinsicResolution {
+            tree: tree_id,
+            error: crate::JvmIntIntrinsicError::WrongArity {
+                tree: tree_id,
+                expected: 1,
+                found: arguments.len(),
+            },
+        });
+    };
+
+    for (index, operand) in [receiver, *argument].into_iter().enumerate() {
+        let flow = emit_expression(context, operand, code, depth + 1)?;
+        if flow != Flow::Value(JvmType::Int) {
+            return Err(JvmCodegenError::IntIntrinsicOperandFlowMismatch {
+                tree: tree_id,
+                operand,
+                index,
+                found: public_flow(flow),
+            });
+        }
+    }
+
+    let instruction = match intrinsic {
+        JvmIntIntrinsic::IntAdd => code.iadd(),
+        JvmIntIntrinsic::IntSubtract => code.isub(),
+        JvmIntIntrinsic::IntMultiply => code.imul(),
+        JvmIntIntrinsic::IntDivide => code.idiv(),
+        JvmIntIntrinsic::IntRemainder => code.irem(),
+        JvmIntIntrinsic::IntLessThan
+        | JvmIntIntrinsic::IntLessOrEqual
+        | JvmIntIntrinsic::IntGreaterThan
+        | JvmIntIntrinsic::IntGreaterOrEqual => unreachable!("comparisons returned above"),
+    };
+    instruction.map_err(|error| JvmCodegenError::CodeBuilder {
+        tree: tree_id,
+        error,
+    })?;
+    Ok(Flow::Value(JvmType::Int))
 }
 
 fn emit_if(

@@ -105,6 +105,28 @@ No general Scala type erasure, reference boxing, Unit operand-stack
 representation, raw bytecode, source pipeline orchestration, TASTy integration,
 or macro support is part of this contract.
 
+## Canonical `Int` arithmetic
+
+Planned method bodies resolve typed regular applications against the canonical
+`scala.Int` operator `SymbolId`s before applying the ordinary same-class-call
+restrictions. `+`, `-`, `*`, `/`, and `%` lower their selected receiver first,
+then their sole argument, exactly once each, and emit `iadd`, `isub`, `imul`,
+`idiv`, or `irem`. Both operands and the application result must have the
+canonical `Int` semantic type and produce JVM `Int` values. Nested arithmetic,
+local initializers and assignments, and arithmetic in the existing integer
+`If`/`While` control-flow subset use the same recursive lowering path.
+
+These intrinsic calls do not emit `invokevirtual` or a method reference for the
+Scala operator. Calls whose symbol is not in the canonical registry continue
+through ordinary same-class call resolution and retain its receiver and
+control-flow restrictions. Generic expression lowering without a validated
+compilation unit still rejects applications because it has no intrinsic or
+call-target context. Canonical relational operators are recognized but return
+a structured unsupported-intrinsic error until Boolean comparison lowering is
+implemented. JVM overflow, signed division/remainder, and division-by-zero
+behavior are preserved by emitting the corresponding JVM instruction without
+constant folding or prechecks.
+
 ## Class and method metadata subset
 
 `JvmClassPlan::identity` derives top-level class names by following canonical
