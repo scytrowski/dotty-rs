@@ -233,6 +233,177 @@ fn method_parameter_shadows_a_class_member() {
 }
 
 #[test]
+fn typed_local_binding_preserves_the_source_declaration_and_symbol_identity() {
+    let mut fixture = Fixture::new("class C { def run(x: Int): Int = { val saved = x; saved } }");
+    let (_, method, rhs) = fixture.method("run");
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "saved")
+                .then_some(tree)
+        })
+        .unwrap();
+    let method_tree = fixture.method("run").0;
+    let parameter_tree = match &fixture.ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        _ => unreachable!(),
+    };
+    let parameter = fixture.index.symbol_at(SOURCE, parameter_tree).unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+
+    let binding = typer.typed_local_binding_at(SOURCE, local_tree).unwrap();
+    let typed_declaration = typer.typed_ast().get(binding.declaration());
+    assert!(matches!(typed_declaration.kind, TreeKind::ValDef(_)));
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, local_tree),
+        Some(binding.declaration())
+    );
+    assert_eq!(
+        typer.local_symbol_at(SOURCE, local_tree),
+        Some(binding.symbol())
+    );
+    assert_ne!(binding.symbol(), parameter);
+    let TreeKind::Block(block) = &typer
+        .typed_ast()
+        .get(typer.source_typed_index().get(SOURCE, rhs).unwrap())
+        .kind
+    else {
+        panic!("method body should remain a block")
+    };
+    assert_eq!(term_ref_symbol(&typer, block.expr), Some(binding.symbol()));
+    assert_eq!(
+        typer.store().symbols.get(binding.symbol()).owner,
+        Some(method)
+    );
+}
+
+#[test]
+fn typed_local_bindings_keep_parameter_and_nested_local_shadowing_distinct() {
+    let mut fixture = Fixture::new(
+        "class C { def run(x: Int): Int = { val x = 1; { val value = x; { val value = 2; value } } } }",
+    );
+    let (method_tree, method, rhs) = fixture.method("run");
+    let parameter_tree = match &fixture.ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        _ => unreachable!(),
+    };
+    let parameter = fixture.index.symbol_at(SOURCE, parameter_tree).unwrap();
+    let local_trees = fixture
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            (matches!(node.kind, TreeKind::ValDef(_))
+                && fixture.index.symbol_at(SOURCE, tree).is_none())
+            .then_some(tree)
+        })
+        .collect::<Vec<_>>();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+
+    let bindings = local_trees
+        .iter()
+        .map(|tree| {
+            typer
+                .typed_local_binding_at(SOURCE, *tree)
+                .unwrap_or_else(|| panic!("missing typed local binding for {tree:?}"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bindings.len(), 3);
+    assert_ne!(bindings[0].symbol(), parameter);
+    assert_ne!(bindings[0].symbol(), bindings[1].symbol());
+    assert_ne!(bindings[1].symbol(), bindings[2].symbol());
+    assert_ne!(bindings[0].declaration(), bindings[1].declaration());
+    assert_ne!(bindings[1].declaration(), bindings[2].declaration());
+    for binding in bindings {
+        assert_eq!(
+            typer.store().symbols.get(binding.symbol()).owner,
+            Some(method)
+        );
+        assert!(matches!(
+            typer.typed_ast().get(binding.declaration()).kind,
+            TreeKind::ValDef(_)
+        ));
+    }
+}
+
+#[test]
+fn failed_expression_transaction_does_not_publish_a_typed_local_binding() {
+    let mut fixture = Fixture::new("class C { def run(x: Int): Int = { val saved = x; missing } }");
+    let (_, method, rhs) = fixture.method("run");
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| matches!(node.kind, TreeKind::ValDef(_)).then_some(tree))
+        .unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+
+    assert!(typer.type_expression(rhs, context).is_err());
+    assert_eq!(typer.typed_local_binding_at(SOURCE, local_tree), None);
+    assert_eq!(typer.local_symbol_at(SOURCE, local_tree), None);
+    assert_eq!(typer.source_typed_index().get(SOURCE, local_tree), None);
+}
+
+#[test]
+fn local_binding_identity_order_is_deterministic_across_fresh_frontends() {
+    fn snapshot() -> Vec<(u32, u32)> {
+        let mut fixture = Fixture::new(
+            "class C { def run(x: Int): Int = { val saved = x; { val value = 1; { val value = 2; value } } } }",
+        );
+        let (_, method, rhs) = fixture.method("run");
+        let source_locals = fixture
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                (matches!(node.kind, TreeKind::ValDef(_))
+                    && fixture.index.symbol_at(SOURCE, tree).is_none())
+                .then_some(tree)
+            })
+            .collect::<Vec<_>>();
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        typer.type_expression(rhs, context).unwrap();
+        let mut bindings = source_locals
+            .into_iter()
+            .map(|tree| typer.typed_local_binding_at(SOURCE, tree).unwrap())
+            .map(|binding| (binding.declaration().index(), binding.symbol().index()))
+            .collect::<Vec<_>>();
+        bindings.sort_by_key(|(declaration, _)| *declaration);
+        bindings
+    }
+
+    assert_eq!(snapshot(), snapshot());
+}
+
+#[test]
+fn deferred_local_value_forms_are_not_exported_as_ordinary_bindings() {
+    let mut fixture = Fixture::new("class C { def run: Int = { lazy val value = 1; value } }");
+    let (_, method, rhs) = fixture.method("run");
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| matches!(node.kind, TreeKind::ValDef(_)).then_some(tree))
+        .unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    typer.type_expression(rhs, context).unwrap();
+
+    assert!(typer.local_symbol_at(SOURCE, local_tree).is_some());
+    assert_eq!(typer.typed_local_binding_at(SOURCE, local_tree), None);
+}
+
+#[test]
 fn local_method_forward_reference_resolves_to_its_later_declaration() {
     let mut fixture = Fixture::new(
         "object C { def outer: Int = { val before = later(); def later(): Int = 1; before } }",
