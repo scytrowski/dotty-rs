@@ -6,7 +6,7 @@ use crate::error::ClassLoadError;
 use crate::loader::{ClassLoadProfile, ClassLoader};
 use crate::session::{LoadingSession, SessionCheckpoint};
 use dotty_core::{
-    Definitions, MemberRequest, MemberSelector, MemberSpace, Namespace, ResolutionError,
+    Definitions, MemberRequest, MemberSelector, MemberSpace, Name, Namespace, ResolutionError,
     ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver,
     Type, TypeId, TypeRefTarget,
 };
@@ -68,6 +68,8 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
     collect_load_profiles: bool,
     module_profile: ModuleResolutionProfile,
     collect_module_resolution_profile: bool,
+    #[cfg(test)]
+    package_failure_after_segment: Option<usize>,
 }
 
 impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
@@ -81,6 +83,8 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             collect_load_profiles: false,
             module_profile: ModuleResolutionProfile::default(),
             collect_module_resolution_profile: false,
+            #[cfg(test)]
+            package_failure_after_segment: None,
         }
     }
 
@@ -933,30 +937,93 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
     fn resolve_package_inner(
         &mut self,
         store: &mut SemanticStore,
-        path: &[&str],
+        requested_path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError> {
-        if !safe_package_segments(path) {
+        let path = if requested_path.first() == Some(&"_root_") {
+            &requested_path[1..]
+        } else {
+            requested_path
+        };
+        if !safe_package_segments(path) || path.contains(&"_root_") {
             return Ok(None);
         }
         if let Some(package) = self.session.packages.get(path) {
             return Ok(Some(package));
         }
+        if path.is_empty() {
+            return Ok(Some(self.session.packages.resolve_package(store, "")));
+        }
         if !self
             .class_path
             .as_ref()
             .expect("resolver operation is exclusive")
-            .contains_package(path)
+            .contains_package_prefix(path)
             .map_err(|error| ResolutionError::Malformed {
                 reason: error.to_string(),
             })?
         {
             return Ok(None);
         }
-        Ok(Some(
-            self.session
+
+        let mut prefix = Vec::with_capacity(path.len());
+        let mut resolved = None;
+        for (index, segment) in path.iter().enumerate() {
+            prefix.push(*segment);
+            if let Some(package) = self.session.packages.get(&prefix) {
+                resolved = Some(package);
+                continue;
+            }
+
+            if let Some(parent) = self.session.packages.get(&prefix[..prefix.len() - 1]) {
+                let scope = self
+                    .session
+                    .packages
+                    .scope_of(parent)
+                    .filter(|scope| store.scopes.contains(*scope))
+                    .ok_or_else(|| ResolutionError::Malformed {
+                        reason: format!("package {prefix:?} has no valid parent declaration scope"),
+                    })?;
+                let name = Name::new(store.names.intern(segment), Namespace::Term);
+                let occupants = store.scopes.get(scope).lookup_all(&name);
+                if !occupants.is_empty() {
+                    let non_packages = occupants
+                        .iter()
+                        .filter(|symbol| {
+                            !store.symbols.contains(**symbol)
+                                || store.symbols.get(**symbol).kind != SymbolKind::Package
+                        })
+                        .count();
+                    if non_packages > 0 {
+                        return Err(ResolutionError::Ambiguous {
+                            candidates: occupants.len() + 1,
+                        });
+                    }
+                    return Err(ResolutionError::Malformed {
+                        reason: format!(
+                            "package path {prefix:?} has an unregistered package in its parent scope"
+                        ),
+                    });
+                }
+            } else if index > 0 {
+                return Err(ResolutionError::Malformed {
+                    reason: format!("package path {prefix:?} has no registered parent package"),
+                });
+            }
+
+            let package = self
+                .session
                 .packages
-                .resolve_package(store, &path.join("/")),
-        ))
+                .resolve_package(store, &prefix.join("/"));
+            resolved = Some(package);
+
+            #[cfg(test)]
+            if self.package_failure_after_segment == Some(index + 1) {
+                return Err(ResolutionError::Malformed {
+                    reason: "injected package-resolution failure".to_owned(),
+                });
+            }
+        }
+        Ok(resolved)
     }
 }
 
@@ -1339,13 +1406,19 @@ mod tests {
         }
 
         fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
-            let prefix = format!("{}/", package.join("/"));
             Ok(self
                 .entries
                 .lock()
                 .unwrap()
                 .keys()
-                .any(|name| name.as_internal().starts_with(&prefix)))
+                .any(|name| name.package_path().split('/').collect::<Vec<_>>() == package))
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(self.entries.lock().unwrap().keys().any(|name| {
+                let resource_package = name.package_path().split('/').collect::<Vec<_>>();
+                resource_package.starts_with(package)
+            }))
         }
     }
 
@@ -1382,6 +1455,23 @@ mod tests {
                 return Ok(true);
             }
             self.0.contains_package_prefix(package)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct DescendantOnlyClassPath;
+
+    impl ClassPathEntry for DescendantOnlyClassPath {
+        fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package(&self, _package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(false)
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(matches!(package, ["a"] | ["a", "b"] | ["a", "b", "c"]))
         }
     }
 
@@ -3240,6 +3330,256 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn descendant_only_prefixes_materialize_one_canonical_package_per_segment() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            DescendantOnlyClassPath,
+            definitions,
+            LoadingSession::new(),
+        );
+
+        assert!(!DescendantOnlyClassPath.contains_package(&["a"]).unwrap());
+        let leaf = resolver
+            .resolve_package(&mut store, &["a", "b", "c"])
+            .unwrap()
+            .unwrap();
+        let a = resolver
+            .resolve_package(&mut store, &["a"])
+            .unwrap()
+            .unwrap();
+        let ab = resolver
+            .resolve_package(&mut store, &["a", "b"])
+            .unwrap()
+            .unwrap();
+        let again = resolver
+            .resolve_package(&mut store, &["a", "b", "c"])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(leaf, again);
+        assert_eq!(store.symbols.get(leaf).kind, SymbolKind::Package);
+        assert_eq!(store.symbols.get(ab).kind, SymbolKind::Package);
+        assert_eq!(store.symbols.get(a).kind, SymbolKind::Package);
+        assert_eq!(store.symbols.get(leaf).name.namespace(), Namespace::Term);
+        assert_eq!(store.names.resolve(store.symbols.get(a).name.text()), "a");
+        assert_eq!(store.names.resolve(store.symbols.get(ab).name.text()), "b");
+        assert_eq!(
+            store.names.resolve(store.symbols.get(leaf).name.text()),
+            "c"
+        );
+        assert_eq!(store.symbols.get(ab).owner, Some(a));
+        assert_eq!(store.symbols.get(leaf).owner, Some(ab));
+        assert_eq!(
+            store.symbols.get(a).origin,
+            dotty_core::SymbolOrigin::Synthetic
+        );
+        assert_eq!(store.symbols.get(leaf).info, SymbolInfo::Missing);
+
+        let root = store.symbols.get(a).owner.expect("a is owned by root");
+        assert_eq!(store.symbols.get(root).owner, None);
+        for (package, name) in [(root, "a"), (a, "b"), (ab, "c")] {
+            let scope = resolver.session.packages.scope_of(package).unwrap();
+            assert_eq!(store.scopes.get(scope).owner, Some(package));
+            let name = Name::new(store.names.intern(name), Namespace::Term);
+            assert_eq!(
+                store.scopes.get(scope).lookup_all(&name),
+                [if package == root {
+                    a
+                } else if package == a {
+                    ab
+                } else {
+                    leaf
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn missing_descendant_evidence_does_not_allocate_root_or_partial_ancestors() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            DescendantOnlyClassPath,
+            definitions,
+            LoadingSession::new(),
+        );
+        let checkpoint = store.checkpoint();
+
+        assert!(
+            resolver
+                .resolve_package(&mut store, &["missing", "child"])
+                .unwrap()
+                .is_none()
+        );
+
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert!(resolver.session.packages.get::<&str>(&[]).is_none());
+        assert!(resolver.session.packages.get(&["missing"]).is_none());
+    }
+
+    #[test]
+    fn root_and_root_marker_use_the_canonical_root_without_a_marker_child() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            DescendantOnlyClassPath,
+            definitions,
+            LoadingSession::new(),
+        );
+
+        let root = resolver.resolve_package(&mut store, &[]).unwrap().unwrap();
+        let a = resolver
+            .resolve_package(&mut store, &["_root_", "a"])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(store.symbols.get(a).owner, Some(root));
+        assert_eq!(store.names.resolve(store.symbols.get(root).name.text()), "");
+        assert!(resolver.session.packages.get(&["_root_"]).is_none());
+    }
+
+    #[test]
+    fn source_and_tasty_packages_are_reused_with_their_original_identity_and_members() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = dotty_core::Packages::new();
+        let source = packages.enter(
+            &mut store,
+            dotty_core::SymbolOrigin::Source(SourceId::from_index(4)),
+            &["a"],
+        );
+        let source_a = source[0].symbol;
+        let retained_name = Name::new(store.names.intern("Retained"), Namespace::Term);
+        let retained_member = store.symbols.alloc(Symbol {
+            name: retained_name,
+            owner: Some(source_a),
+            kind: SymbolKind::Value,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Source(SourceId::from_index(4)),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(source[0].scope)
+            .enter(retained_name, retained_member);
+        let tasty_origin = dotty_core::SymbolOrigin::Tasty(store.origins.register_tasty());
+        let source_and_tasty = packages.enter(&mut store, tasty_origin, &["a", "b"]);
+        let tasty_b = source_and_tasty[1].symbol;
+        let mut resolver = ClasspathSymbolResolver::new(
+            DescendantOnlyClassPath,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+
+        assert_eq!(
+            resolver.resolve_package(&mut store, &["a"]),
+            Ok(Some(source_a))
+        );
+        assert_eq!(
+            resolver.resolve_package(&mut store, &["a", "b"]),
+            Ok(Some(tasty_b))
+        );
+        assert_eq!(
+            store.symbols.get(source_a).origin,
+            dotty_core::SymbolOrigin::Source(SourceId::from_index(4))
+        );
+        assert_eq!(store.symbols.get(tasty_b).origin, tasty_origin);
+        assert_eq!(
+            store.scopes.get(source[0].scope).lookup_all(&retained_name),
+            [retained_member]
+        );
+    }
+
+    #[test]
+    fn a_non_package_term_collision_is_reported_without_shadowing_the_term() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = dotty_core::Packages::new();
+        let entered = packages.enter(
+            &mut store,
+            dotty_core::SymbolOrigin::Source(SourceId::from_index(5)),
+            &["a"],
+        );
+        let package_a = entered[0].symbol;
+        let package_scope = entered[0].scope;
+        let name_b = Name::new(store.names.intern("b"), Namespace::Term);
+        let term_b = store.symbols.alloc(Symbol {
+            name: name_b,
+            owner: Some(package_a),
+            kind: SymbolKind::Object,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: dotty_core::Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: dotty_core::SymbolOrigin::Source(SourceId::from_index(5)),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store.scopes.get_mut(package_scope).enter(name_b, term_b);
+        let checkpoint = store.checkpoint();
+        let mut resolver = ClasspathSymbolResolver::new(
+            DescendantOnlyClassPath,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+
+        assert_eq!(
+            resolver.resolve_package(&mut store, &["a", "b"]),
+            Err(ResolutionError::Ambiguous { candidates: 2 })
+        );
+
+        assert_eq!(store.checkpoint(), checkpoint);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&name_b),
+            [term_b]
+        );
+        assert!(resolver.session.packages.get(&["a", "b"]).is_none());
+    }
+
+    #[test]
+    fn an_injected_failure_after_an_ancestor_is_entered_rolls_back_atomically() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            DescendantOnlyClassPath,
+            definitions,
+            LoadingSession::new(),
+        );
+        resolver.package_failure_after_segment = Some(1);
+        let store_checkpoint = store.checkpoint();
+        let resolver_checkpoint = resolver.checkpoint();
+
+        assert_eq!(
+            resolver.resolve_package(&mut store, &["a", "b"]),
+            Err(ResolutionError::Malformed {
+                reason: "injected package-resolution failure".to_owned()
+            })
+        );
+        assert_eq!(store.checkpoint(), store_checkpoint);
+        assert!(resolver.session.packages.get::<&str>(&[]).is_none());
+        assert!(resolver.session.packages.get(&["a"]).is_none());
+
+        resolver.package_failure_after_segment = None;
+        let package = resolver
+            .resolve_package(&mut store, &["a", "b"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.names.resolve(store.symbols.get(package).name.text()),
+            "b"
+        );
+        resolver.rollback_to(&mut store, resolver_checkpoint);
+        store.rollback_to(store_checkpoint);
+        assert!(resolver.session.packages.get::<&str>(&[]).is_none());
+        assert!(resolver.session.packages.get(&["a"]).is_none());
     }
 
     #[test]
