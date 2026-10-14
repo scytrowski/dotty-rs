@@ -56,9 +56,13 @@ statements with an initializer: it lowers the RHS once, checks the resulting
 primitive type, then emits one `istore` and marks that symbol initialized.
 Missing bindings, missing initializers, unsupported types and modifiers,
 initializer type mismatches, and detectable reads before the store fail with
-typed errors. Reads after initialization, assignments, loops, and `PatDef`
-remain unsupported. The existing bytecode analyzer remains responsible for
-verifier local state and stack-map frames.
+typed errors. Assignments, loops, and `PatDef` remain unsupported. Initialized
+local reads lower through the same canonical `SymbolId` lookup to one `iload`
+from the allocated slot. Local loads require the current method's validated
+layout, a completed supported semantic type, and a preceding store on every
+reachable path. Name-only references, foreign or unplanned locals, and reads before
+initialization return typed errors. The existing bytecode analyzer remains
+responsible for verifier local state and stack-map frames.
 
 The initial plan subset accepts `SymbolKind::Class`, `SymbolKind::Method`, and
 `SymbolKind::Parameter`; other kinds return a structured unsupported-kind
@@ -159,7 +163,10 @@ typed-result mismatches return structured errors, and a failed method does not
 produce a class artifact. Standalone expression/body lowering has no emission
 plan, so it cannot resolve `Apply` targets.
 
-Typed `Block` lowering evaluates supported stats from left to right, then
+Planned method-body lowering allows initialized primitive local references in
+the final expression or other value positions. Standalone expression APIs have
+no local layout and return `MissingLocalBinding` for local references. Typed
+`Block` lowering evaluates supported stats from left to right, then
 lowers the final expression once. An unused Int/Boolean value is discarded
 with one `pop`; Unit already leaves an empty operand stack and needs no pop.
 The final value remains available to its parent expression or method return.
@@ -167,8 +174,9 @@ If a stat definitely returns, lowering stops there and omits the unreachable
 suffix, so dead instructions do not reach CFG analysis. A normally completing
 Unit method receives one trailing `return`; explicit returns remain terminal.
 The block's declared type is checked against its final expression flow.
-`ValDef`, assignment, loops, and other unsupported stats return structured
-errors; local variable storage and mutation are outside this subset.
+Planned method lowering supports initialized primitive `ValDef` statements;
+standalone expression lowering, assignment, loops, and other unsupported stats
+return structured errors.
 
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access

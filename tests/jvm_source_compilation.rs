@@ -629,22 +629,26 @@ fn verify_delegator_with_jdk(output_directory: &Path) {
 }
 
 #[test]
-fn initialized_local_reads_and_while_remain_unsupported_at_codegen() {
-    let local_output = TestOutputDirectory::new("unsupported-local-val");
-    let local_error = compile_source(
+fn initialized_local_reads_work_and_while_remains_unsupported_at_codegen() {
+    let local_output = TestOutputDirectory::new("initialized-local-val");
+    let local_artifact = compile_source(
         "class LocalVal { def run(x: Int): Int = { val y = x; y } }\n",
         "LocalVal.scala",
         local_output.path(),
     )
-    .unwrap_err();
-    assert!(matches!(
-        local_error,
-        PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
-            node: "initialized local read",
-            ..
-        })
-    ));
-    assert!(local_output.class_files().is_empty());
+    .unwrap();
+    let mut reader = Reader::new(local_artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("LocalVal should decode");
+    let run = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("run"))
+        .expect("run method should be emitted");
+    let Attribute::Code(code) = &run.attributes[0] else {
+        panic!("run method has no Code attribute")
+    };
+    assert_eq!(code.code, &[0x1b, 0x3d, 0x1c, 0xac]);
+    assert_eq!(code.max_locals, 3);
 
     let while_output = TestOutputDirectory::new("unsupported-while");
     let while_error = compile_source(
@@ -664,30 +668,69 @@ fn initialized_local_reads_and_while_remain_unsupported_at_codegen() {
 fn source_primitive_local_initializers_emit_load_store_and_correct_max_locals() {
     let output = TestOutputDirectory::new("primitive-local-initializers");
     let artifact = compile_source(
-        "class LocalInit { def run(x: Int): Int = { val saved = x; var current = 42; x } }\n",
+        "class LocalInit { def immutable(x: Int): Int = { val saved = x; saved }; def mutable(x: Int): Int = { var current = x; current }; def booleanLocal(x: Boolean): Boolean = { val saved = x; saved } }\n",
         "LocalInit.scala",
         output.path(),
     )
     .unwrap();
     let mut reader = Reader::new(artifact.class.bytes());
     let class = ClassFile::decode(&mut reader).expect("LocalInit should decode");
-    let run = class
-        .methods
-        .iter()
-        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("run"))
-        .expect("run method should be emitted");
-    let Attribute::Code(code) = &run.attributes[0] else {
-        panic!("run method has no Code attribute")
-    };
-    assert_eq!(code.code, &[0x1b, 0x3d, 0x10, 42, 0x3e, 0x1b, 0xac]);
-    assert_eq!(code.max_locals, 4);
+    for method_name in ["immutable", "mutable", "booleanLocal"] {
+        let method = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index) == Ok(method_name))
+            .unwrap_or_else(|| panic!("{method_name} method should be emitted"));
+        let Attribute::Code(code) = &method.attributes[0] else {
+            panic!("{method_name} method has no Code attribute")
+        };
+        assert_eq!(code.code, &[0x1b, 0x3d, 0x1c, 0xac]);
+        assert_eq!(code.max_locals, 3);
+    }
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 temporary path");
+        let harness_path = output.path().join("LocalInitHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class LocalInitHarness { public static void main(String[] args) { LocalInit local = new LocalInit(); System.out.println(local.immutable(42) + \":\" + local.mutable(43) + \":\" + local.booleanLocal(true)); } }\n",
+        )
+        .expect("write local invocation harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected LocalInitHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "LocalInitHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected LocalInit\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42:43:true");
+    }
 }
 
 #[test]
 fn nested_same_named_source_locals_keep_distinct_slots_after_parameter_shadowing() {
     let output = TestOutputDirectory::new("nested-shadowed-local-initializers");
     let artifact = compile_source(
-        "class NestedLocal { def run(left: Int, value: Int): Int = { val value = left; { val value = 42; left } } }\n",
+        "class NestedLocal { def run(left: Int, value: Int): Int = { val value = left; { val value = 42; value } } }\n",
         "NestedLocal.scala",
         output.path(),
     )
@@ -702,7 +745,7 @@ fn nested_same_named_source_locals_keep_distinct_slots_after_parameter_shadowing
     let Attribute::Code(code) = &run.attributes[0] else {
         panic!("run method has no Code attribute")
     };
-    assert_eq!(code.code, &[0x1b, 0x3e, 0x10, 42, 0x36, 4, 0x1b, 0xac]);
+    assert_eq!(code.code, &[0x1b, 0x3e, 0x10, 42, 0x36, 4, 0x15, 4, 0xac]);
     assert_eq!(code.max_locals, 5);
 }
 
