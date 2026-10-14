@@ -415,13 +415,13 @@ impl ZipArchive {
             let Some(versioned_path) = resource.strip_prefix("META-INF/versions/") else {
                 continue;
             };
-            let Some((version, logical_path)) = versioned_path.split_once('/') else {
+            let Some((version_name, logical_path)) = versioned_path.split_once('/') else {
                 continue;
             };
-            let Ok(version) = version.parse::<u16>() else {
+            let Ok(version) = version_name.parse::<u16>() else {
                 continue;
             };
-            if !(9..=release_version).contains(&version) {
+            if version.to_string() != version_name || !(9..=release_version).contains(&version) {
                 continue;
             }
             add_resource_package_prefixes(logical_path, &mut packages);

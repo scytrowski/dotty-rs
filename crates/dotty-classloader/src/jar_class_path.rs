@@ -394,6 +394,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn multi_release_package_prefixes_ignore_noncanonical_version_directories() {
+        let entries = [
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\nMulti-Release: true\n".as_slice(),
+            ),
+            (
+                "META-INF/versions/011/a/b/FromLeadingZero.class",
+                b"leading zero".as_slice(),
+            ),
+            (
+                "META-INF/versions/+11/x/y/FromPlus.tasty",
+                b"plus sign".as_slice(),
+            ),
+        ];
+        let jar_path = write_temp_jar(
+            "package_prefix_mr_noncanonical_versions",
+            &minimal_stored_zip(&entries),
+        );
+        let class_path = JarClassPath::new(&jar_path, 11).unwrap();
+
+        assert!(!class_path.contains_package_prefix(&["a"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["x"]).unwrap());
+        assert!(
+            class_path
+                .find_class(&BinaryName::from_internal("a/b/FromLeadingZero"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            class_path
+                .find_class(&BinaryName::from_internal("x/y/FromPlus"))
+                .unwrap()
+                .is_none()
+        );
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
     fn rejects_a_path_traversal_name_instead_of_probing_the_archive() {
         let class_path = JarClassPath::new(
             fixture_path("tests/fixtures/pool_sample_jar/pool_sample_stored.jar"),
