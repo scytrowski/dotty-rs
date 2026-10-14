@@ -9,7 +9,7 @@ use dotty_classloader::classloader::{
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::ids::TreeId;
-use dotty_core::types::{Type, TypeRefTarget};
+use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, MemberRequest, MemberSelector, MemberSpace, Namespace, Packages, ResolutionError,
     ResolverCheckpoint, SemanticStore, SourceId, SourceText, SymbolId, SymbolResolver, TextRange,
@@ -2051,7 +2051,7 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
 }
 
 #[test]
-fn source_expression_failure_rolls_back_completed_module_and_retries_cleanly() {
+fn source_expression_failure_rolls_back_module_before_successful_member_retry() {
     let text = "object Audit { def use: Int = { scala.io.Source.stdin; true } }";
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
@@ -2084,6 +2084,16 @@ fn source_expression_failure_rolls_back_completed_module_and_retries_cleanly() {
             Some((definition.rhs?, index.symbol_at(source, tree)?))
         })
         .expect("fixture contains one method body");
+    let stdin_selection = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::Select(select) if store.names.resolve(select.name.text()) == "stdin" => {
+                Some(tree)
+            }
+            _ => None,
+        })
+        .expect("fixture contains the real Source.stdin selection");
     let metrics = Rc::new(RefCell::new(ResolverMetrics {
         current_file: "module-transaction.scala".to_owned(),
         current_method: "Audit.use".to_owned(),
@@ -2114,16 +2124,56 @@ fn source_expression_failure_rolls_back_completed_module_and_retries_cleanly() {
     let store_before = typer.store().checkpoint();
     let typed_before = typer.typed_ast().checkpoint();
 
-    for _ in 0..2 {
-        assert!(
-            typer
-                .type_expression_expected(rhs, context, definitions.int)
-                .is_err()
-        );
-        assert_eq!(typer.store().checkpoint(), store_before);
-        assert_eq!(typer.typed_ast().checkpoint(), typed_before);
-        assert_eq!(typer.source_type_index().type_at(source, rhs), None);
-    }
+    let error = typer
+        .type_expression_expected(rhs, context, definitions.int)
+        .expect_err("the final Boolean should fail the enclosing Int conformance check");
+    assert!(matches!(
+        error,
+        TyperError::ExpectedExpressionTypeMismatch {
+            source: error_source,
+            tree_index,
+            actual,
+            expected,
+        } if error_source == source
+            && tree_index == rhs.index()
+            && actual == definitions.boolean
+            && expected == definitions.int
+    ));
+    assert_eq!(typer.store().checkpoint(), store_before);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+    assert_eq!(typer.source_type_index().type_at(source, rhs), None);
+    assert_eq!(
+        typer.source_typed_index().get(source, stdin_selection),
+        None
+    );
+
+    let typed_stdin = typer
+        .type_expression(stdin_selection, context)
+        .expect("Source.stdin must type through SourceTyper and AuditResolver");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(stdin),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(typed_stdin).ty)
+    else {
+        panic!("Source.stdin should preserve the canonical member symbol");
+    };
+    let stdin = *stdin;
+    let stdin_entry = typer.store().symbols.get(stdin);
+    assert_eq!(
+        typer.store().names.resolve(stdin_entry.name.text()),
+        "stdin"
+    );
+    assert_eq!(
+        audit_symbol_path(typer.store(), stdin_entry.owner.unwrap()),
+        "scala.io.Source$"
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, stdin_selection),
+        Some(typed_stdin)
+    );
 
     let metrics = metrics.borrow();
     let source_module_completions = metrics
@@ -2137,11 +2187,16 @@ fn source_expression_failure_rolls_back_completed_module_and_retries_cleanly() {
         })
         .collect::<Vec<_>>();
     assert_eq!(source_module_completions.len(), 2);
-    assert!(
-        source_module_completions
-            .iter()
-            .all(|observation| observation.transaction_state == "rolled_back")
+    assert!(source_module_completions.iter().all(|observation| {
+        observation.result == "completed"
+            && observation.result_state == "Complete(ClassInfo)"
+            && observation.module_state == "Complete(ClassInfo)"
+    }));
+    assert_eq!(
+        source_module_completions[0].transaction_state,
+        "rolled_back"
     );
+    assert_eq!(source_module_completions[1].transaction_state, "observed");
 }
 
 fn module_audit_object(
