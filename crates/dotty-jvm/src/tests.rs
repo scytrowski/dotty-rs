@@ -23,6 +23,7 @@ use std::fs;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::locals::JvmLocalAllocator;
 use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind, JvmLocalBinding,
@@ -1318,6 +1319,195 @@ fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
             .unwrap(),
         metadata
     );
+}
+
+#[test]
+fn local_layout_allocates_after_parameters_by_canonical_identity() {
+    let mut fixture = EmissionFixture::new(false);
+    let method = fixture.methods[1];
+    let mut bindings = Vec::new();
+    let mut body = fixture.bodies[1];
+
+    for (mutable, ty) in [
+        (false, fixture.definitions.int),
+        (true, fixture.definitions.boolean),
+    ] {
+        let name = fixture.store.names.intern("same");
+        let symbol = fixture.store.symbols.alloc(Symbol {
+            name: Name::new(name, Namespace::Term),
+            owner: Some(method),
+            kind: SymbolKind::Local,
+            flags: if mutable {
+                SymbolFlags::MUTABLE
+            } else {
+                SymbolFlags::EMPTY
+            },
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(ty),
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let declaration = fixture.ast.alloc(Tree {
+            kind: TreeKind::ValDef(ValDef {
+                name: TermName::new(name),
+                tpt: body,
+                rhs: Some(body),
+                metadata: (),
+            }),
+            position: None,
+            ty,
+        });
+        body = fixture.ast.alloc(Tree {
+            kind: TreeKind::Block(Block {
+                stats: vec![declaration],
+                expr: body,
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        bindings.push(JvmLocalBinding {
+            declaration,
+            symbol,
+            mutable,
+        });
+    }
+    fixture.bodies[1] = body;
+
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[1].locals = bindings.clone();
+    let layout = unit
+        .local_layout(fixture.class, method, &fixture.definitions)
+        .unwrap();
+    let metadata = unit.metadata(&fixture.definitions).unwrap();
+    let method_metadata = &metadata[0].methods()[1];
+    assert_eq!(
+        unit.local_layout_for(method_metadata, &bindings, &fixture.definitions)
+            .unwrap(),
+        layout
+    );
+    assert_eq!(
+        unit.local_layout_for(method_metadata, &[], &fixture.definitions),
+        Err(JvmCodegenError::LocalLayoutInputMismatch { method })
+    );
+    assert_eq!(layout.method(), method);
+    assert_eq!(layout.max_locals(), 6);
+    assert_eq!(
+        layout
+            .locals()
+            .iter()
+            .map(|local| (local.symbol(), local.slot(), local.ty(), local.is_mutable()))
+            .collect::<Vec<_>>(),
+        vec![
+            (bindings[0].symbol, 4, JvmType::Int, false),
+            (bindings[1].symbol, 5, JvmType::Boolean, true),
+        ]
+    );
+    assert_eq!(
+        layout.local(bindings[0].symbol).unwrap().declaration(),
+        bindings[0].declaration
+    );
+    assert_eq!(layout.local(bindings[1].symbol).unwrap().slot(), 5);
+    assert_eq!(
+        layout.local(fixture.parameters[1][0]).unwrap_err(),
+        JvmCodegenError::UnknownLocalSlot {
+            method,
+            symbol: fixture.parameters[1][0],
+        }
+    );
+    assert_eq!(
+        layout,
+        unit.local_layout(fixture.class, method, &fixture.definitions)
+            .unwrap()
+    );
+}
+
+#[test]
+fn methods_without_locals_keep_receiver_and_parameter_layout_unchanged() {
+    let fixture = EmissionFixture::new(false);
+    let layout = fixture
+        .unit()
+        .local_layout(fixture.class, fixture.methods[1], &fixture.definitions)
+        .unwrap();
+    assert!(layout.locals().is_empty());
+    assert_eq!(layout.max_locals(), 4);
+}
+
+#[test]
+fn local_layout_rejects_unsupported_semantic_types() {
+    let mut fixture = EmissionFixture::new(false);
+    let method = fixture.methods[0];
+    let name = fixture.store.names.intern("reference");
+    let symbol = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(name, Namespace::Term),
+        owner: Some(method),
+        kind: SymbolKind::Local,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(fixture.definitions.object_type),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let body = fixture.bodies[0];
+    let declaration = fixture.ast.alloc(Tree {
+        kind: TreeKind::ValDef(ValDef {
+            name: TermName::new(name),
+            tpt: body,
+            rhs: Some(body),
+            metadata: (),
+        }),
+        position: None,
+        ty: fixture.definitions.object_type,
+    });
+    fixture.bodies[0] = fixture.ast.alloc(Tree {
+        kind: TreeKind::Block(Block {
+            stats: vec![declaration],
+            expr: body,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let binding = JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable: false,
+    };
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals.push(binding);
+
+    assert!(matches!(
+        unit.local_layout(fixture.class, method, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmType { symbol: found, .. }) if found == symbol
+    ));
+}
+
+#[test]
+fn local_slot_u16_boundary_does_not_publish_an_overflow_assignment() {
+    let fixture = Fixture::new();
+    let binding = JvmLocalBinding {
+        declaration: fixture.body,
+        symbol: fixture.parameter,
+        mutable: false,
+    };
+    let mut allocator = JvmLocalAllocator::empty(fixture.method);
+    allocator.next_slot = u16::MAX as usize - 1;
+
+    allocator.reserve(binding, JvmType::Int).unwrap();
+    assert_eq!(allocator.locals.last().unwrap().slot(), u16::MAX - 1);
+    assert_eq!(allocator.next_slot, u16::MAX as usize);
+
+    let before = allocator.locals.clone();
+    assert_eq!(
+        allocator.reserve(binding, JvmType::Int),
+        Err(JvmCodegenError::TooManyLocalSlots {
+            method: fixture.method,
+        })
+    );
+    assert_eq!(allocator.locals, before);
+    assert_eq!(allocator.by_symbol.get(&binding.symbol), Some(&0));
 }
 
 #[test]

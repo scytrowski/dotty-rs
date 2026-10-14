@@ -24,6 +24,7 @@ mod descriptor;
 mod emission;
 mod expression;
 mod identity;
+mod locals;
 
 /// Maximum number of nested typed expression nodes visited by JVM lowering.
 pub const JVM_EXPRESSION_DEPTH_LIMIT: usize = 64;
@@ -150,6 +151,29 @@ pub struct JvmParameterLocal {
     ty: JvmType,
     slot: u16,
     width: u8,
+}
+
+/// One ordinary method-local's reserved JVM slot and canonical identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmLocalSlot {
+    declaration: TreeId<Typed>,
+    symbol: SymbolId,
+    ty: JvmType,
+    slot: u16,
+    mutable: bool,
+}
+
+/// Deterministic, method-scoped JVM local storage layout.
+///
+/// Slots are assigned once in typed declaration ID order after the receiver
+/// and validated formal parameters. This layout reserves storage only; it
+/// does not imply that any local has been initialized.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmLocalLayout {
+    method: SymbolId,
+    locals: Vec<JvmLocalSlot>,
+    by_symbol: std::collections::HashMap<SymbolId, usize>,
+    max_locals: u16,
 }
 
 /// JVM method identity and parameter layout for an ordinary instance method.
@@ -581,6 +605,12 @@ pub enum JvmCodegenError {
     },
     /// A method descriptor exceeds the JVMS 255 parameter-slot limit.
     TooManyParameterSlots { method: SymbolId, slots: usize },
+    /// A local symbol is not present in the method's validated local layout.
+    UnknownLocalSlot { method: SymbolId, symbol: SymbolId },
+    /// The method's local variables exceed the u16 `max_locals` count.
+    TooManyLocalSlots { method: SymbolId },
+    /// Supplied method metadata or bindings do not match this validated unit.
+    LocalLayoutInputMismatch { method: SymbolId },
     /// A parameter modifier is not represented by this primitive-only slice.
     UnsupportedMethodParameter {
         method: SymbolId,
@@ -1009,6 +1039,61 @@ impl JvmParameterLocal {
     }
 }
 
+impl JvmLocalSlot {
+    /// Exact typed `ValDef` that supplied this canonical binding.
+    pub const fn declaration(self) -> TreeId<Typed> {
+        self.declaration
+    }
+
+    /// Canonical local symbol used as the identity for this slot.
+    pub const fn symbol(self) -> SymbolId {
+        self.symbol
+    }
+
+    /// Completed primitive type stored in this category-one slot.
+    pub const fn ty(self) -> JvmType {
+        self.ty
+    }
+
+    /// JVM local-variable slot reserved for this declaration.
+    pub const fn slot(self) -> u16 {
+        self.slot
+    }
+
+    /// Whether the source declaration is mutable.
+    pub const fn is_mutable(self) -> bool {
+        self.mutable
+    }
+}
+
+impl JvmLocalLayout {
+    /// Method whose receiver, parameters, and locals define this layout.
+    pub const fn method(&self) -> SymbolId {
+        self.method
+    }
+
+    /// Locals in deterministic typed declaration ID order.
+    pub fn locals(&self) -> &[JvmLocalSlot] {
+        &self.locals
+    }
+
+    /// JVMS `max_locals` count, including receiver and formal parameters.
+    pub const fn max_locals(&self) -> u16 {
+        self.max_locals
+    }
+
+    /// Finds a local only by its canonical symbol identity.
+    pub fn local(&self, symbol: SymbolId) -> Result<&JvmLocalSlot, JvmCodegenError> {
+        self.by_symbol
+            .get(&symbol)
+            .and_then(|index| self.locals.get(*index))
+            .ok_or(JvmCodegenError::UnknownLocalSlot {
+                method: self.method,
+                symbol,
+            })
+    }
+}
+
 impl JvmMethodPlan {
     /// Extracts this method's primitive-only JVM signature from canonical
     /// semantic types and this plan's explicitly ordered parameter symbols.
@@ -1037,6 +1122,34 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
         identity::unit_metadata(self, definitions)
+    }
+
+    /// Builds the deterministic JVM local layout for one planned method.
+    ///
+    /// The complete unit is validated first, then locals are projected from
+    /// their canonical semantic types and allocated in typed declaration ID
+    /// order. Reservation does not establish definite initialization.
+    pub fn local_layout(
+        &self,
+        class: SymbolId,
+        method: SymbolId,
+        definitions: &Definitions,
+    ) -> Result<JvmLocalLayout, JvmCodegenError> {
+        locals::method_local_layout(self, class, method, definitions)
+    }
+
+    /// Allocates locals for supplied metadata and bindings from this unit.
+    ///
+    /// The metadata and binding slice must exactly match a method plan in this
+    /// unit. They are checked against the current semantic store and typed AST
+    /// before any layout is returned.
+    pub fn local_layout_for(
+        &self,
+        method: &JvmMethodMetadata,
+        bindings: &[JvmLocalBinding],
+        definitions: &Definitions,
+    ) -> Result<JvmLocalLayout, JvmCodegenError> {
+        locals::method_local_layout_for(self, method, bindings, definitions)
     }
 
     /// Resolves a typed ordinary call to a planned same-class virtual target.

@@ -302,6 +302,30 @@ fn primitive_value_type(
     }
 }
 
+pub(super) fn primitive_local_type(
+    store: &SemanticStore,
+    definitions: &Definitions,
+    symbol: SymbolId,
+    ty: TypeId,
+) -> Result<JvmType, JvmCodegenError> {
+    validate_semantic_type(store, symbol, ty)?;
+    let int = builtin_symbol(store, definitions.int, PrimitiveBuiltin::Int)?;
+    let boolean = builtin_symbol(store, definitions.boolean, PrimitiveBuiltin::Boolean)?;
+    match store.types.try_get(ty) {
+        Some(Type::Constant(Constant::Int(_))) => Ok(JvmType::Int),
+        Some(Type::Constant(Constant::Boolean(_))) => Ok(JvmType::Boolean),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(target),
+            ..
+        }) if *target == int => Ok(JvmType::Int),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(target),
+            ..
+        }) if *target == boolean => Ok(JvmType::Boolean),
+        _ => Err(unsupported_type_error(store, symbol, ty)),
+    }
+}
+
 fn primitive_result_type(
     store: &SemanticStore,
     ty: TypeId,
