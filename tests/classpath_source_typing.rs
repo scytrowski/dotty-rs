@@ -193,6 +193,18 @@ fn write_demand_class(root: &Path, name: &str, parent: Option<&str>, fields: &[(
     fs::write(path, bytes).unwrap();
 }
 
+fn write_deep_both_tasty(root: &Path) {
+    let package = root.join("me/cytrowski/tastyfixtures/semantic");
+    fs::create_dir_all(&package).unwrap();
+    fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/dotty-tasty-unpickler/tests/fixtures/semantic/Both.tasty"),
+        package.join("Both.tasty"),
+    )
+    .unwrap();
+    write_stub_class(root, "java/lang/Object", None, 0x0021);
+}
+
 #[test]
 fn source_member_selection_completes_shells_on_demand_and_rolls_back_in_place() {
     let files = TemporaryDirectory::new("demand-shells");
@@ -880,6 +892,444 @@ fn source_typer_resolves_external_imports_and_types_member_applications() {
     let session = log.session.take().expect("resolver session survives typer");
     let shared_packages = session.into_packages();
     assert_eq!(shared_packages.symbol(&["external"]), Some(package));
+}
+
+#[test]
+fn source_import_resolves_a_class_through_descendant_only_packages() {
+    let files = TemporaryDirectory::new("descendant-only-class-import");
+    write_demand_class(files.path(), "a/b/c/Leaf", None, &[]);
+    let classpath = DirectoryClassPath::new(files.path().to_path_buf());
+    assert!(!classpath.contains_package(&["a"]).unwrap());
+    assert!(!classpath.contains_package(&["a", "b"]).unwrap());
+    assert!(classpath.contains_package_prefix(&["a"]).unwrap());
+    assert!(classpath.contains_package_prefix(&["a", "b"]).unwrap());
+
+    let source = SourceId::from_index(50);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "package a { class Existing }\npackage client { import a.b.c.Leaf\ndef use(value: Leaf): Leaf = value }",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let root = packages.symbol::<&str>(&[]).unwrap();
+    let source_package_a = packages.symbol(&["a"]).unwrap();
+    let existing_name = Name::new(store.names.intern("Existing"), Namespace::Type);
+    let parameter_type = unit
+        .parsed
+        .ast
+        .iter()
+        .find_map(|(_, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "use")
+                .then(|| definition.value_param_clauses[0][0])
+        })
+        .and_then(|parameter| match &unit.parsed.ast.get(parameter).kind {
+            TreeKind::ValDef(parameter) => Some(parameter.tpt),
+            _ => None,
+        })
+        .unwrap();
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(
+        ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            LoadingSession::with_packages(packages),
+        ),
+        Rc::clone(&log),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer
+        .type_expression(rhs, context)
+        .expect("the import qualifier should traverse the canonical package chain");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(parameter_symbol),
+        ..
+    } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+    else {
+        panic!(
+            "the typed expression should remain a reference to its parameter: {:?}",
+            typer.store().types.get(typer.typed_ast().get(typed).ty)
+        )
+    };
+    let parameter_symbol = *parameter_symbol;
+    let leaf = class_id(&log.borrow(), "Leaf");
+    assert_eq!(
+        typer.store().symbols.get(parameter_symbol).kind,
+        dotty_core::SymbolKind::Parameter
+    );
+    assert!(
+        matches!(
+            typer
+                .store()
+                .types
+                .get(typer.source_type_index().type_at(source, parameter_type).unwrap()),
+            Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. } if *symbol == leaf
+        ),
+        "parameter type={:?}, typed expression type={:?}, leaf={leaf:?}",
+        typer.store().types.get(
+            typer
+                .source_type_index()
+                .type_at(source, parameter_type)
+                .unwrap()
+        ),
+        typer.store().types.get(typer.typed_ast().get(typed).ty)
+    );
+    assert_eq!(
+        typer.store().symbols.get(leaf).kind,
+        dotty_core::SymbolKind::Class
+    );
+    let package_c = typer.store().symbols.get(leaf).owner.unwrap();
+    let package_b = typer.store().symbols.get(package_c).owner.unwrap();
+    let package_a = typer.store().symbols.get(package_b).owner.unwrap();
+    assert_eq!(typer.store().symbols.get(package_a).owner, Some(root));
+    assert_eq!(package_a, source_package_a);
+    assert!(matches!(
+        typer.store().symbols.get(package_a).origin,
+        dotty_core::SymbolOrigin::Source(_)
+    ));
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(package_a).name.text()),
+        "a"
+    );
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(package_b).name.text()),
+        "b"
+    );
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(package_c).name.text()),
+        "c"
+    );
+    let package_a_scope = unit
+        .index
+        .scope_of(package_a)
+        .expect("source package a should retain its declaration scope");
+    assert_eq!(
+        typer
+            .store()
+            .scopes
+            .get(package_a_scope)
+            .lookup_all(&existing_name)
+            .len(),
+        1,
+        "materializing a.b.c must preserve source declarations in a"
+    );
+    let package_ids: Vec<_> = log
+        .borrow()
+        .packages
+        .iter()
+        .map(|(_, symbol)| *symbol)
+        .collect();
+    assert!(package_ids.contains(&package_b));
+    assert!(package_ids.contains(&package_c));
+    drop(typer);
+    let session = log.borrow_mut().session.take().unwrap();
+    let shared = session.into_packages();
+    assert_eq!(shared.symbol(&["a"]), Some(package_a));
+    assert_eq!(shared.symbol(&["a", "b"]), Some(package_b));
+    assert_eq!(shared.symbol(&["a", "b", "c"]), Some(package_c));
+}
+
+#[test]
+fn source_import_resolves_a_real_tasty_object_member_through_deep_packages() {
+    let cases = [
+        "import me.cytrowski.tastyfixtures.semantic.Both.make\ndef use = make",
+        "import me.cytrowski.tastyfixtures.semantic.Both.{make => create}\ndef use = create",
+        "import me.cytrowski.tastyfixtures.semantic.Both.*\ndef use = make",
+        "def use = { import me.cytrowski.tastyfixtures.semantic.Both; Both.make }",
+    ];
+
+    for (index, source_text) in cases.into_iter().enumerate() {
+        let files = TemporaryDirectory::new(&format!("deep-tasty-object-import-{index}"));
+        write_deep_both_tasty(files.path());
+        let classpath = DirectoryClassPath::new(files.path().to_path_buf());
+        assert!(!classpath.contains_package(&["me"]).unwrap());
+        assert!(!classpath.contains_package(&["me", "cytrowski"]).unwrap());
+        assert!(
+            classpath
+                .contains_package_prefix(&["me", "cytrowski"])
+                .unwrap()
+        );
+
+        let source = SourceId::from_index(60 + index as u32);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let unit = parse_and_name(source_text, source, &mut store, &mut packages);
+        let log = Rc::new(RefCell::new(ResolutionLog::default()));
+        let resolver = RecordingResolver::new(
+            ClasspathSymbolResolver::new(
+                classpath,
+                definitions,
+                LoadingSession::with_packages(packages),
+            ),
+            Rc::clone(&log),
+        );
+        let typer_packages = Packages::new();
+        let mut typer = SourceTyper::new(
+            &unit.parsed.ast,
+            source,
+            &unit.index,
+            &mut store,
+            definitions,
+            &typer_packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("deep Object import {index} failed: {error:?}"));
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(member),
+            ..
+        } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+        else {
+            panic!("deep Object import {index} should retain a stable member reference")
+        };
+        let member = *member;
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(member).name.text()),
+            "make"
+        );
+        let module_class = typer.store().symbols.get(member).owner.unwrap();
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            dotty_core::SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            typer
+                .store()
+                .names
+                .resolve(typer.store().symbols.get(module_class).name.text()),
+            "Both$"
+        );
+        let package_ids: Vec<_> = log
+            .borrow()
+            .packages
+            .iter()
+            .map(|(_, symbol)| *symbol)
+            .collect();
+        assert!(package_ids.len() >= 4, "every package segment is observed");
+    }
+}
+
+#[test]
+fn root_qualified_import_bypasses_a_local_name_that_shadows_a_package() {
+    let cases = [
+        (
+            "def use: Int = { val me: Int = 1; import me.cytrowski.tastyfixtures.semantic.Both.make; 1 }",
+            false,
+        ),
+        (
+            "def use = { val me: Int = 1; import _root_.me.cytrowski.tastyfixtures.semantic.Both.make; make }",
+            true,
+        ),
+    ];
+
+    for (index, (source_text, succeeds)) in cases.into_iter().enumerate() {
+        let files = TemporaryDirectory::new(&format!("root-qualified-import-{index}"));
+        write_deep_both_tasty(files.path());
+        let source = SourceId::from_index(70 + index as u32);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let unit = parse_and_name(source_text, source, &mut store, &mut packages);
+        let resolver = ClasspathSymbolResolver::new(
+            DirectoryClassPath::new(files.path().to_path_buf()),
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+        let log = Rc::new(RefCell::new(ResolutionLog::default()));
+        let resolver = RecordingResolver::new(resolver, Rc::clone(&log));
+        let typer_packages = Packages::new();
+        let mut typer = SourceTyper::new(
+            &unit.parsed.ast,
+            source,
+            &unit.index,
+            &mut store,
+            definitions,
+            &typer_packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+        let context = typer.expression_context_for(method).unwrap();
+        let checkpoint = typer.store().checkpoint();
+        let typed_checkpoint = typer.typed_ast().checkpoint();
+        let result = typer.type_expression(rhs, context);
+        if succeeds {
+            result.expect("_root_ must reach the canonical classpath root");
+        } else {
+            assert!(matches!(
+                result,
+                Err(TyperError::ImportQualifierNotFound { .. })
+            ));
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+            assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+        }
+        drop(typer);
+        let packages = log.borrow_mut().session.take().unwrap().into_packages();
+        if succeeds {
+            let package_me = packages.symbol(&["me"]).unwrap();
+            let semantic = packages
+                .symbol(&["me", "cytrowski", "tastyfixtures", "semantic"])
+                .unwrap();
+            let scope = packages.scope_of(semantic).unwrap();
+            let object_name = Name::new(store.names.intern("Both"), Namespace::Term);
+            let class_name = Name::new(store.names.intern("Both"), Namespace::Type);
+            let object = store.scopes.get(scope).lookup(&object_name).unwrap();
+            let class = store.scopes.get(scope).lookup(&class_name).unwrap();
+            assert_eq!(
+                store.symbols.get(object).kind,
+                dotty_core::SymbolKind::Object
+            );
+            assert_eq!(store.symbols.get(class).kind, dotty_core::SymbolKind::Class);
+            assert_ne!(object, class);
+            assert_eq!(
+                store.symbols.get(package_me).kind,
+                dotty_core::SymbolKind::Package
+            );
+            assert_eq!(packages.symbol(&["_root_"]), None);
+        } else {
+            assert_eq!(packages.symbol(&["me"]), None);
+        }
+    }
+}
+
+#[test]
+fn failed_expression_rolls_back_a_deep_object_import_and_retry_is_canonical() {
+    let files = TemporaryDirectory::new("deep-object-import-rollback");
+    write_deep_both_tasty(files.path());
+    let source = SourceId::from_index(80);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "def broken: Int = { import me.cytrowski.tastyfixtures.semantic.Both.make; missing }\ndef valid = { import me.cytrowski.tastyfixtures.semantic.Both; Both.make }",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let root_package = packages.symbol::<&str>(&[]).unwrap();
+    let root_scope = packages.scope_of(root_package).unwrap();
+    let me_name = Name::new(store.names.intern("me"), Namespace::Term);
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(
+        ClasspathSymbolResolver::new(
+            DirectoryClassPath::new(files.path().to_path_buf()),
+            definitions,
+            LoadingSession::with_packages(packages),
+        ),
+        Rc::clone(&log),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    let (broken_method, broken_rhs) = method_rhs(&unit, typer.store(), "broken");
+    let broken_context = typer.expression_context_for(broken_method).unwrap();
+    let store_checkpoint = typer.store().checkpoint();
+    let typed_checkpoint = typer.typed_ast().checkpoint();
+    let source_mappings: Vec<_> = unit
+        .parsed
+        .ast
+        .iter()
+        .map(|(tree, _)| {
+            (
+                tree,
+                typer.source_typed_index().get(source, tree),
+                typer.source_type_index().type_at(source, tree),
+            )
+        })
+        .collect();
+    let error = typer
+        .type_expression(broken_rhs, broken_context)
+        .expect_err("the expression should fail after materializing its Object import");
+    assert!(
+        matches!(error, TyperError::TermNameNotFound { .. }),
+        "{error:?}"
+    );
+    assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+    assert!(
+        typer
+            .store()
+            .scopes
+            .get(root_scope)
+            .lookup_all(&me_name)
+            .is_empty()
+    );
+    for (tree, typed, ty) in source_mappings {
+        assert_eq!(typer.source_typed_index().get(source, tree), typed);
+        assert_eq!(typer.source_type_index().type_at(source, tree), ty);
+    }
+    let stale_import_ids: Vec<_> = log
+        .borrow()
+        .members
+        .iter()
+        .filter_map(|(name, symbol)| (name == "Both" || name == "make").then_some(*symbol))
+        .collect();
+    assert!(!stale_import_ids.is_empty());
+    assert!(
+        stale_import_ids
+            .iter()
+            .all(|symbol| !typer.store().symbols.contains(*symbol))
+    );
+
+    let (valid_method, valid_rhs) = method_rhs(&unit, typer.store(), "valid");
+    let valid_context = typer.expression_context_for(valid_method).unwrap();
+    let typed = typer.type_expression(valid_rhs, valid_context).unwrap();
+    assert_eq!(
+        typer.source_typed_index().get(source, valid_rhs),
+        Some(typed)
+    );
+    let live_both = log
+        .borrow()
+        .members
+        .iter()
+        .rev()
+        .find_map(|(name, symbol)| {
+            (name == "Both" && typer.store().symbols.contains(*symbol)).then_some(*symbol)
+        })
+        .expect("retry should publish one live canonical Object");
+    assert_eq!(
+        typer.store().symbols.get(live_both).kind,
+        dotty_core::SymbolKind::Object
+    );
 }
 
 #[test]
