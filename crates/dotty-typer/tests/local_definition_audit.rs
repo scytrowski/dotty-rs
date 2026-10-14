@@ -3840,6 +3840,7 @@ struct RootFailure {
     enclosing_method_tree: u32,
     failure: FailureClassification,
     import_qualifier_path: Option<Vec<String>>,
+    import_tree_index: Option<u32>,
     unsupported_type_tree: Option<u32>,
     missing_type_tree: Option<u32>,
     singleton_reference_tree: Option<u32>,
@@ -3883,6 +3884,42 @@ struct Audit {
     function_with_mods_inventory: FunctionWithModsInventory,
     impure_function_baseline_outcomes: BTreeSet<ImpureFunctionBaselineOutcome>,
     resolution_blocker_profile: ResolutionBlockerProfile,
+    import_prefix_profile: ImportPrefixProfile,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ImportPrefixProfile {
+    // A Vec intentionally retains repeated source observations. Rendering sorts
+    // a copy so corpus traversal order cannot affect the normalized report.
+    observations: Vec<ImportPrefixObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ImportPrefixObservation {
+    source_file: String,
+    method: String,
+    blocker_origin: String,
+    import_tree: String,
+    import_line: usize,
+    qualifier_source: String,
+    qualifier_segments: String,
+    context_owner: String,
+    context_package: String,
+    namespace: String,
+    source_lookup: String,
+    source_package_registry_lookup: String,
+    resolved_prefix: String,
+    first_failing_segment: String,
+    request_kind: String,
+    resolver_outcome: String,
+    target_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct BaselineImportAttempt {
+    file: String,
+    method_tree: u32,
+    blocker_origin_tree: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -4166,6 +4203,7 @@ impl Default for Audit {
             function_with_mods_inventory: FunctionWithModsInventory::default(),
             impure_function_baseline_outcomes: BTreeSet::new(),
             resolution_blocker_profile: ResolutionBlockerProfile::default(),
+            import_prefix_profile: ImportPrefixProfile::default(),
         }
     }
 }
@@ -5005,6 +5043,9 @@ impl Audit {
         self.resolution_blocker_profile
             .observations
             .extend(other.resolution_blocker_profile.observations);
+        self.import_prefix_profile
+            .observations
+            .extend(other.import_prefix_profile.observations);
         self.local_value_blocker_profile
             .observations
             .extend(other.local_value_blocker_profile.observations);
@@ -6151,6 +6192,87 @@ fn pinned_scala39_local_definition_audit() {
     print_singleton_source_inventory(&audit.singleton_source_inventory);
     print_singleton_projection_baseline(&singleton_projection_outcomes);
     println!("AUDIT_REPORT_END");
+}
+
+#[test]
+#[ignore = "run tools/typer-classpath-corpus-audit/run with the pinned Scala checkout and explicit JAVA_HOME"]
+fn pinned_scala39_import_prefix_typing_probe() {
+    let root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required"));
+    assert_eq!(
+        git_revision(&root),
+        "777528f19a58e794c9954a42f433373472ec57f8",
+        "import audit requires the repository's pinned Scala 3.9.0 source revision"
+    );
+    let report = PathBuf::from(
+        std::env::var_os("SCALA39_IMPORT_PREFIX_BASELINE_REPORT")
+            .expect("SCALA39_IMPORT_PREFIX_BASELINE_REPORT is required"),
+    );
+    let report = fs::read_to_string(report).expect("corrected baseline report should be readable");
+    let baseline_rows = baseline_import_blocker_attempts(&report);
+    assert_eq!(baseline_rows.len(), 2_573);
+    let mut methods_by_file = BTreeMap::<String, BTreeSet<u32>>::new();
+    for attempt in baseline_rows {
+        methods_by_file
+            .entry(attempt.file)
+            .or_default()
+            .insert(attempt.blocker_origin_tree);
+    }
+    let classpath = audit_classpath_from_environment();
+    let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
+    let mut audit = Audit::default();
+    let source_package_paths = audit_source_package_inventory_for_roots(&root);
+    for (index, (relative, method_trees)) in methods_by_file.iter().enumerate() {
+        if index % 25 == 0 {
+            eprintln!(
+                "profiled {index}/{} baseline import files",
+                methods_by_file.len()
+            );
+        }
+        let path = root.join(relative);
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {relative}: {error}"));
+        audit.merge(audit_import_prefix_source_for_methods(
+            &text,
+            relative,
+            classpath.clone(),
+            Rc::clone(&metrics),
+            method_trees,
+            &source_package_paths,
+        ));
+    }
+    let all_observations = audit.import_prefix_profile.observations;
+    let first_segment_observations = all_observations
+        .iter()
+        .filter(|row| {
+            row.resolver_outcome
+                .ends_with("::first segment/package unresolved")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let files = first_segment_observations
+        .iter()
+        .map(|row| row.source_file.as_str())
+        .collect::<BTreeSet<_>>();
+    let targets = first_segment_observations
+        .iter()
+        .map(|row| row.target_key.as_str())
+        .collect::<BTreeSet<_>>();
+    eprintln!(
+        "import-prefix totals: all={}, first-segment={}, files={}, targets={}",
+        all_observations.len(),
+        first_segment_observations.len(),
+        files.len(),
+        targets.len()
+    );
+    assert_eq!(all_observations.len(), 2_573);
+    assert_eq!(first_segment_observations.len(), 2_394);
+    assert_eq!(files.len(), 209);
+    assert_eq!(targets.len(), 30);
+    println!("AUDIT_IMPORT_PREFIX_BEGIN");
+    print_import_prefix_profile(&ImportPrefixProfile {
+        observations: first_segment_observations,
+    });
+    println!("AUDIT_IMPORT_PREFIX_END");
 }
 
 fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
@@ -8440,7 +8562,7 @@ fn unsupported_type_tree_failure_order_is_stable() {
 }
 
 fn audit_source(text: &str, path: &str) -> Audit {
-    audit_source_inner(text, path, None)
+    audit_source_inner(text, path, None, false)
 }
 
 fn audit_source_with_classpath(
@@ -8449,7 +8571,134 @@ fn audit_source_with_classpath(
     classpath: SharedClassPath,
     metrics: Rc<RefCell<ResolverMetrics>>,
 ) -> Audit {
-    audit_source_inner(text, path, Some((classpath, metrics)))
+    audit_source_inner(text, path, Some((classpath, metrics)), false)
+}
+
+fn audit_import_prefix_source_for_methods(
+    text: &str,
+    path: &str,
+    classpath: SharedClassPath,
+    metrics: Rc<RefCell<ResolverMetrics>>,
+    method_trees: &BTreeSet<u32>,
+    source_package_paths: &BTreeSet<String>,
+) -> Audit {
+    audit_source_inner_filtered(
+        text,
+        path,
+        Some((classpath, metrics)),
+        true,
+        Some(method_trees),
+        Some(source_package_paths),
+    )
+}
+
+fn audit_source_package_inventory_for_roots(root: &Path) -> BTreeSet<String> {
+    let mut files = Vec::new();
+    for relative_root in ["compiler/src", "library/src", "tasty/src"] {
+        collect_scala_sources(&root.join(relative_root), &mut files);
+    }
+    files.sort();
+    files
+        .into_iter()
+        .flat_map(|path| {
+            let relative = path
+                .strip_prefix(root)
+                .expect("source inventory path must be under its pinned root")
+                .to_string_lossy()
+                .into_owned();
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("cannot read source inventory {relative}: {error}"));
+            audit_source_package_inventory(&text, &relative)
+        })
+        .collect()
+}
+
+fn collect_scala_sources(directory: &Path, files: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(directory).unwrap_or_else(|error| {
+        panic!(
+            "cannot scan source inventory {}: {error}",
+            directory.display()
+        )
+    });
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| {
+            panic!(
+                "cannot enumerate source inventory {}: {error}",
+                directory.display()
+            )
+        });
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|error| panic!("cannot inspect {}: {error}", path.display()));
+        if file_type.is_dir() {
+            collect_scala_sources(&path, files);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "scala")
+        {
+            files.push(path);
+        }
+    }
+}
+
+fn audit_source_package_inventory(text: &str, path: &str) -> BTreeSet<String> {
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let _definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let scanner = ContextualScanner::new(text).expect("pinned Scala source should scan");
+    let parsed = parse_compilation_unit(
+        SourceText::new(text).expect("pinned source should be valid UTF-8"),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        path,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap_or_else(|error| panic!("cannot name source inventory {path}: {error:?}"));
+    let mut result = BTreeSet::new();
+    for (tree, node) in parsed.ast.iter() {
+        if matches!(&node.kind, TreeKind::PackageDef(_))
+            && let Some(symbol) = index.symbol_at(source, tree)
+            && store.symbols.get(symbol).kind == dotty_core::SymbolKind::Package
+        {
+            let package = source_package_path(&store, symbol);
+            if !package.starts_with('<') {
+                let segments = package.split('.').collect::<Vec<_>>();
+                for length in 1..=segments.len() {
+                    result.insert(segments[..length].join("."));
+                }
+            }
+        }
+        if !matches!(&node.kind, TreeKind::DefDef(_)) {
+            continue;
+        }
+        let Some(symbol) = index.symbol_at(source, tree) else {
+            continue;
+        };
+        let Some(context) = index.declaration_context_of(symbol) else {
+            continue;
+        };
+        let Some(source_context) = index.try_source_context(context) else {
+            continue;
+        };
+        let package = source_package_path(&store, source_context.owner);
+        if package.starts_with('<') {
+            continue;
+        }
+        let segments = package.split('.').collect::<Vec<_>>();
+        for length in 1..=segments.len() {
+            result.insert(segments[..length].join("."));
+        }
+    }
+    result
 }
 
 fn probe_supported_match_cases(
@@ -8756,6 +9005,18 @@ fn audit_source_inner(
     text: &str,
     path: &str,
     classpath: Option<(SharedClassPath, Rc<RefCell<ResolverMetrics>>)>,
+    import_prefix_only: bool,
+) -> Audit {
+    audit_source_inner_filtered(text, path, classpath, import_prefix_only, None, None)
+}
+
+fn audit_source_inner_filtered(
+    text: &str,
+    path: &str,
+    classpath: Option<(SharedClassPath, Rc<RefCell<ResolverMetrics>>)>,
+    import_prefix_only: bool,
+    method_tree_filter: Option<&BTreeSet<u32>>,
+    source_package_inventory: Option<&BTreeSet<String>>,
 ) -> Audit {
     if let Some((_, metrics)) = &classpath {
         metrics.borrow_mut().current_file = path.to_owned();
@@ -8826,7 +9087,7 @@ fn audit_source_inner(
             return audit;
         }
     };
-    if audit.local_defdefs == 0 && audit.patdef_profile.total == 0 {
+    if !import_prefix_only && audit.local_defdefs == 0 && audit.patdef_profile.total == 0 {
         return audit;
     }
     let probe_classpath = classpath.as_ref().map(|(classpath, _)| classpath.clone());
@@ -8844,6 +9105,12 @@ fn audit_source_inner(
             Some((method, tree, rhs, range))
         })
         .collect::<Vec<_>>();
+    let root_methods = method_tree_filter.map_or(root_methods.clone(), |allowed| {
+        root_methods
+            .into_iter()
+            .filter(|(_, tree, _, _)| allowed.contains(&tree.index()))
+            .collect()
+    });
 
     let local_method_trees = local_method_trees(&parsed.ast);
     let match_pattern_shapes = parsed
@@ -8860,6 +9127,8 @@ fn audit_source_inner(
         })
         .collect::<BTreeMap<_, _>>();
 
+    let empty_source_package_inventory = BTreeSet::new();
+    let source_package_paths = source_package_inventory.unwrap_or(&empty_source_package_inventory);
     let (typer_packages, resolver_packages) = if classpath.is_some() {
         (Packages::new(), Some(packages))
     } else {
@@ -9016,11 +9285,18 @@ fn audit_source_inner(
                 } => import_qualifier_path(&parsed.ast, &typer.store().names, *import_tree_index),
                 _ => None,
             };
+            let import_tree_index = match &error {
+                TyperError::ImportQualifierNotFound {
+                    import_tree_index, ..
+                } => Some(*import_tree_index),
+                _ => None,
+            };
             root_failures.push(RootFailure {
                 range,
                 enclosing_method_tree: method_tree.index(),
                 failure,
                 import_qualifier_path,
+                import_tree_index,
                 unsupported_type_tree,
                 missing_type_tree,
                 singleton_reference_tree,
@@ -9114,6 +9390,9 @@ fn audit_source_inner(
         let line = text[..start].bytes().filter(|byte| *byte == b'\n').count() + 1;
         let site = format!("{path}:{line}:{name}");
         if typer.source_typed_index().get(source, tree).is_some() {
+            if import_prefix_only {
+                continue;
+            }
             audit.typed_local_defdefs += 1;
             audit.local_method_attempts.insert(format!(
                 "method={path}#tree={}::site={site}::attempt={path}#tree={}::blocker=typed::typed=true",
@@ -9177,6 +9456,7 @@ fn audit_source_inner(
                 local_value_declaration,
                 blocker_method_tree,
                 import_qualifier_path,
+                import_tree_index,
                 unsupported_type_tree,
             ) = root_failures
                 .iter()
@@ -9193,6 +9473,7 @@ fn audit_source_inner(
                         failure.local_value_declaration,
                         Some(failure.enclosing_method_tree),
                         failure.import_qualifier_path.clone(),
+                        failure.import_tree_index,
                         failure.unsupported_type_tree,
                     )
                 })
@@ -9209,8 +9490,47 @@ fn audit_source_inner(
                         None,
                         None,
                         None,
+                        None,
                     )
                 });
+            if import_prefix_only {
+                if kind.bucket == "ImportQualifierNotFound"
+                    && let (Some(import_tree_index), Some(qualifier), Some(metrics)) = (
+                        import_tree_index,
+                        import_qualifier_path.as_deref(),
+                        request_metrics.as_ref(),
+                    )
+                {
+                    let request_method = blocker_method_tree
+                        .map(|method_tree| format!("{path}#tree={method_tree}::"));
+                    let trace = request_method.map_or_else(Vec::new, |prefix| {
+                        metrics
+                            .borrow()
+                            .resolver_requests_by_method
+                            .iter()
+                            .filter(|(method, _)| method.starts_with(&prefix))
+                            .flat_map(|(_, requests)| requests.iter().cloned())
+                            .collect()
+                    });
+                    if let Some(observation) = import_prefix_observation(
+                        &parsed.ast,
+                        typer.store(),
+                        &index,
+                        source,
+                        text,
+                        path,
+                        tree,
+                        blocker_method_tree,
+                        import_tree_index,
+                        qualifier,
+                        &trace,
+                        source_package_paths,
+                    ) {
+                        audit.import_prefix_profile.observations.push(observation);
+                    }
+                }
+                continue;
+            }
             let attempt = blocker_method_tree
                 .map_or_else(|| "<none>".to_owned(), |id| format!("{path}#tree={id}"));
             audit.local_method_attempts.insert(format!(
@@ -9406,6 +9726,9 @@ fn audit_source_inner(
             }
             record_failure(&mut audit, kind, path);
         }
+    }
+    if import_prefix_only {
+        return audit;
     }
     collect_source_function_method_outcomes(
         SourceFunctionMethodAudit {
@@ -10852,6 +11175,79 @@ fn print_resolution_blocker_profile(profile: &ResolutionBlockerProfile) {
             candidates.join(", ")
         );
     }
+}
+
+fn print_import_prefix_profile(profile: &ImportPrefixProfile) {
+    let mut observations = profile.observations.clone();
+    observations.sort();
+    println!("import_prefix_observations:");
+    println!("  observations={}", observations.len());
+    println!(
+        "  source_file\tmethod\tblocker_origin\timport_tree\tline\tqualifier_source\tqualifier_segments\tcontext_owner\tcontext_package\tnamespace\tsource_lookup\tsource_package_registry_lookup\tresolved_prefix\tfirst_failing_segment\trequest_kind\tresolver_outcome\ttarget_key"
+    );
+    for row in observations {
+        println!(
+            "  {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.source_file,
+            row.method,
+            row.blocker_origin,
+            row.import_tree,
+            row.import_line,
+            tsv_or_dash(&row.qualifier_source),
+            tsv_or_dash(&row.qualifier_segments),
+            tsv_or_dash(&row.context_owner),
+            tsv_or_dash(&row.context_package),
+            tsv_or_dash(&row.namespace),
+            tsv_or_dash(&row.source_lookup),
+            tsv_or_dash(&row.source_package_registry_lookup),
+            tsv_or_dash(&row.resolved_prefix),
+            tsv_or_dash(&row.first_failing_segment),
+            tsv_or_dash(&row.request_kind),
+            tsv_or_dash(&row.resolver_outcome),
+            tsv_or_dash(&row.target_key),
+        );
+    }
+}
+
+fn baseline_import_blocker_attempts(report: &str) -> BTreeSet<BaselineImportAttempt> {
+    let start = report
+        .rfind("local_method_attempts:")
+        .expect("corrected audit contains the local_method_attempts section");
+    let mut rows = BTreeSet::new();
+    for line in report[start..].lines().skip(1) {
+        let Some(line) = line.strip_prefix("  method=") else {
+            if line.starts_with("  ") {
+                continue;
+            }
+            break;
+        };
+        let fields = line.split("::").collect::<Vec<_>>();
+        if fields.get(3).copied() != Some("blocker=ImportQualifierNotFound") {
+            continue;
+        }
+        let (file, tree) = fields[0]
+            .rsplit_once("#tree=")
+            .expect("method attempt has a stable source tree key");
+        let method_tree = tree
+            .parse::<u32>()
+            .expect("method tree key contains a numeric source tree index");
+        let attempt = fields
+            .get(2)
+            .and_then(|field| field.strip_prefix("attempt="))
+            .expect("method attempt records its first-blocker origin");
+        let (_, origin_tree) = attempt
+            .rsplit_once("#tree=")
+            .expect("blocker origin contains a source tree index");
+        let blocker_origin_tree = origin_tree
+            .parse::<u32>()
+            .expect("blocker origin tree is numeric");
+        rows.insert(BaselineImportAttempt {
+            file: file.to_owned(),
+            method_tree,
+            blocker_origin_tree,
+        });
+    }
+    rows
 }
 
 fn print_dependency_profiles(metrics: &ResolverMetrics) {
@@ -12591,7 +12987,255 @@ fn import_qualifier_path(
     Some(segments)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn import_prefix_observation(
+    arena: &dotty_core::AstArena<Untyped>,
+    store: &SemanticStore,
+    index: &dotty_core::SourceSemanticIndex,
+    source: SourceId,
+    text: &str,
+    path: &str,
+    method_tree: TreeId<Untyped>,
+    blocker_method_tree: Option<u32>,
+    import_tree_index: u32,
+    qualifier: &[String],
+    trace: &[ResolverRequestObservation],
+    source_package_paths: &BTreeSet<String>,
+) -> Option<ImportPrefixObservation> {
+    let (import_tree, import_node) = arena.iter().find(|(tree, node)| {
+        tree.index() == import_tree_index && matches!(&node.kind, TreeKind::Import(_))
+    })?;
+    let TreeKind::Import(import) = &import_node.kind else {
+        return None;
+    };
+    let qualifier_node = arena.try_get(import.expr)?;
+    let qualifier_range = qualifier_node.position?.span().range();
+    let qualifier_start = qualifier_range.start() as usize;
+    let qualifier_end = qualifier_range.end() as usize;
+    let qualifier_source = text.get(qualifier_start..qualifier_end)?.to_owned();
+    let context_tree = blocker_method_tree
+        .and_then(|index_to_find| {
+            arena
+                .iter()
+                .find(|(tree, _)| tree.index() == index_to_find)
+                .map(|(tree, _)| tree)
+        })
+        .unwrap_or(method_tree);
+    let method_symbol = index
+        .symbol_at(source, method_tree)
+        .or_else(|| index.symbol_at(source, context_tree))?;
+    let mut context_id = index.declaration_context_of(method_symbol);
+    let mut selected_context = None;
+    while let Some(id) = context_id {
+        let context = index.try_source_context(id)?;
+        if context
+            .import
+            .is_some_and(|tree| tree.index() == import_tree_index)
+        {
+            selected_context = Some((id, context));
+            break;
+        }
+        if selected_context.is_none() {
+            selected_context = Some((id, context));
+        }
+        context_id = context.parent;
+    }
+    let context = selected_context.map(|(_, context)| context);
+    let context_owner = context.map_or_else(
+        || "<unavailable>".to_owned(),
+        |context| audit_symbol_path(store, context.owner),
+    );
+    let context_package = context.map_or_else(
+        || "<unavailable>".to_owned(),
+        |context| source_package_path(store, context.owner),
+    );
+    let lookup = qualifier_node_name(arena, import.expr);
+    let namespace = lookup.map_or_else(
+        || "<unavailable>".to_owned(),
+        |name| format!("{:?}", name.namespace()),
+    );
+    let source_lookup = match (selected_context, lookup) {
+        (Some((context_id, _)), Some(name)) => source_scoped_lookup(index, store, context_id, name),
+        _ => "unavailable".to_owned(),
+    };
+    let request = trace
+        .iter()
+        .rfind(|request| request.cause.is_some() && request_matches_qualifier(request, qualifier));
+    let target_key = request.map_or_else(
+        || format!("{}::<no-matching-request>", qualifier.join(".")),
+        |request| request.target.clone(),
+    );
+    let resolved_prefix = target_key
+        .split("::resolved-prefix=")
+        .nth(1)
+        .and_then(|suffix| suffix.split("::").next())
+        .unwrap_or("");
+    let first_failing_segment = target_key
+        .split("::first-missing=")
+        .nth(1)
+        .and_then(|suffix| suffix.split("::").next())
+        .or_else(|| qualifier.first().map(String::as_str))
+        .unwrap_or("<unknown>");
+    let failed_prefix = [
+        resolved_prefix
+            .split('.')
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>(),
+        first_failing_segment.split('.').collect::<Vec<_>>(),
+    ]
+    .concat()
+    .join(".");
+    let rooted = qualifier.first().is_some_and(|segment| segment == "_root_");
+    let relative_candidate = if rooted || context_package.starts_with('<') {
+        None
+    } else {
+        let candidate = format!("{context_package}.{failed_prefix}");
+        source_package_paths
+            .contains(&candidate)
+            .then_some(candidate)
+    };
+    let root_candidate = failed_prefix;
+    let source_package_registry_lookup = format!(
+        "relative={};root={}",
+        relative_candidate.as_deref().map_or_else(
+            || "missing".to_owned(),
+            |path| format!("found:Package@{path}")
+        ),
+        if source_package_paths.contains(&root_candidate) {
+            format!("found:Package@{root_candidate}")
+        } else {
+            "missing".to_owned()
+        }
+    );
+    let method = format!("{path}#tree={}", method_tree.index());
+    let blocker_origin = blocker_method_tree.map_or_else(
+        || "<unknown>".to_owned(),
+        |tree| {
+            if tree == method_tree.index() {
+                format!("direct:{path}#tree={tree}")
+            } else {
+                format!("inherited:{path}#tree={tree}")
+            }
+        },
+    );
+    let import_range = import_node.position?.span().range();
+    let import_start = import_range.start() as usize;
+    let import_line = text[..import_start.min(text.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1;
+    let resolver_outcome = request.map_or_else(
+        || "unknown:no matching failed request".to_owned(),
+        |request| {
+            let result = match request.outcome.as_str() {
+                "package unresolved" => "Ok(None)",
+                "package error" => "Err",
+                "package success" => "Ok(Some)",
+                _ => "unknown",
+            };
+            format!(
+                "{result}::{}::{}",
+                request.outcome,
+                request.cause.as_deref().unwrap_or("-")
+            )
+        },
+    );
+    Some(ImportPrefixObservation {
+        source_file: path.to_owned(),
+        method,
+        blocker_origin,
+        import_tree: format!("{path}#tree={}", import_tree.index()),
+        import_line,
+        qualifier_source,
+        qualifier_segments: qualifier.join("."),
+        context_owner,
+        context_package,
+        namespace,
+        source_lookup,
+        source_package_registry_lookup,
+        resolved_prefix: resolved_prefix.to_owned(),
+        first_failing_segment: first_failing_segment.to_owned(),
+        request_kind: "resolve_package".to_owned(),
+        resolver_outcome,
+        target_key,
+    })
+}
+
+fn qualifier_node_name(
+    arena: &dotty_core::AstArena<Untyped>,
+    mut tree: TreeId<Untyped>,
+) -> Option<dotty_core::Name> {
+    loop {
+        match &arena.try_get(tree)?.kind {
+            TreeKind::Ident(ident) => return Some(ident.name),
+            TreeKind::Select(select) => tree = select.qualifier,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => tree = parens.inner,
+            _ => return None,
+        }
+    }
+}
+
+fn source_scoped_lookup(
+    index: &dotty_core::SourceSemanticIndex,
+    store: &SemanticStore,
+    mut context: dotty_core::SourceContextId,
+    name: dotty_core::Name,
+) -> String {
+    let mut visited = HashSet::new();
+    while visited.insert(context.index()) {
+        let Some(source_context) = index.try_source_context(context) else {
+            return "unavailable".to_owned();
+        };
+        if let Some(symbol) = store.scopes.get(source_context.lexical_scope).lookup(&name) {
+            return format!(
+                "found:{:?}@{}",
+                store.symbols.get(symbol).kind,
+                audit_symbol_path(store, source_context.owner)
+            );
+        }
+        let Some(parent) = source_context.parent else {
+            break;
+        };
+        context = parent;
+    }
+    "missing".to_owned()
+}
+
+fn source_package_path(store: &SemanticStore, mut owner: SymbolId) -> String {
+    let mut parts = Vec::new();
+    let mut current = Some(owner);
+    let mut visited = HashSet::new();
+    while let Some(symbol) = current {
+        if !visited.insert(symbol) {
+            return "<owner-cycle>".to_owned();
+        }
+        let entry = store.symbols.get(symbol);
+        if matches!(entry.kind, dotty_core::SymbolKind::Package) {
+            let name = store.names.resolve(entry.name.text());
+            if !name.is_empty() {
+                parts.push(name.to_owned());
+            }
+        } else if !parts.is_empty() {
+            break;
+        }
+        owner = symbol;
+        current = store.symbols.get(owner).owner;
+    }
+    parts.reverse();
+    if parts.is_empty() {
+        "<root-or-unavailable>".to_owned()
+    } else {
+        parts.join(".")
+    }
+}
+
 fn request_matches_qualifier(request: &ResolverRequestObservation, qualifier: &[String]) -> bool {
+    let qualifier = if qualifier.first().map(String::as_str) == Some("_root_") {
+        &qualifier[1..]
+    } else {
+        qualifier
+    };
     for length in 1..=qualifier.len() {
         let package = qualifier[..length].join(".");
         if request.target == package || request.target.starts_with(&format!("{package}::")) {
@@ -13132,8 +13776,8 @@ fn singleton_source_inventory_counts_reference_categories_and_files() {
 fn local_method_signature_profile_classifies_feature_fixtures() {
     let by_name_source =
         "class C { def outer: Int = { def byName(value: => Int): Int = value; 0 } }";
-    let by_name = audit_source_inner(by_name_source, "ByName.scala", None);
-    let repeated_by_name = audit_source_inner(by_name_source, "ByName.scala", None);
+    let by_name = audit_source_inner(by_name_source, "ByName.scala", None, false);
+    let repeated_by_name = audit_source_inner(by_name_source, "ByName.scala", None, false);
     assert_eq!(
         by_name.local_method_signature_profile, repeated_by_name.local_method_signature_profile,
         "local method signature profile should be deterministic across repeated audits"
@@ -13144,6 +13788,7 @@ fn local_method_signature_profile_classifies_feature_fixtures() {
         "class C { def outer: Int = { def dependent(value: Int): value.type = value; 0 } }",
         "DependentResult.scala",
         None,
+        false,
     );
     let dependent_feature = dependent
         .local_method_signature_profile
@@ -13162,6 +13807,7 @@ fn local_method_signature_profile_classifies_feature_fixtures() {
         "class C { def outer: Int = { inline def modified(inline value: Int): Int = value; 0 } }",
         "InlineParameter.scala",
         None,
+        false,
     );
     assert!(
         inline_parameter
@@ -13174,6 +13820,7 @@ fn local_method_signature_profile_classifies_feature_fixtures() {
         "class C { def outer: Int = { def supported(value: Int): Int = value; supported(1) } }",
         "SupportedLocalMethod.scala",
         None,
+        false,
     );
     assert!(supported.local_method_signature_profile.features.is_empty());
 
@@ -13213,6 +13860,7 @@ fn local_method_signature_profile_classifies_feature_fixtures() {
         "class C { def accept(value: => Int): Int = value; def outer: Int = { def call: Int = accept(1); call } }",
         "ByNameCall.scala",
         None,
+        false,
     );
     assert!(
         !by_name_call
@@ -15664,6 +16312,53 @@ mod resolver_profile_tests {
                 "package resolved but member unresolved".to_owned()
             ])
         );
+    }
+
+    #[test]
+    fn import_prefix_profile_keeps_repeated_source_observations() {
+        let mut profile = ImportPrefixProfile::default();
+        let observation = ImportPrefixObservation {
+            source_file: "Use.scala".to_owned(),
+            method: "Use.scala#tree=7".to_owned(),
+            blocker_origin: "direct:Use.scala#tree=7".to_owned(),
+            import_tree: "Use.scala#tree=12".to_owned(),
+            import_line: 3,
+            qualifier_source: "missing.pkg".to_owned(),
+            qualifier_segments: "missing.pkg".to_owned(),
+            context_owner: "Use".to_owned(),
+            context_package: "<root-or-unavailable>".to_owned(),
+            namespace: "Type".to_owned(),
+            source_lookup: "missing".to_owned(),
+            source_package_registry_lookup: "missing".to_owned(),
+            resolved_prefix: "".to_owned(),
+            first_failing_segment: "missing".to_owned(),
+            request_kind: "resolve_package".to_owned(),
+            resolver_outcome: "package unresolved:first segment/package unresolved".to_owned(),
+            target_key: "missing.pkg::first-segment-unresolved".to_owned(),
+        };
+        profile.observations.push(observation.clone());
+        profile.observations.push(observation);
+        assert_eq!(profile.observations.len(), 2);
+        assert_eq!(
+            profile
+                .observations
+                .iter()
+                .map(|row| row.target_key.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn source_package_inventory_contains_namer_entered_package_paths() {
+        let inventory = audit_source_package_inventory(
+            "package alpha.beta\nobject Fixture { def method = 1 }\n",
+            "Fixture.scala",
+        );
+
+        assert!(inventory.contains("alpha"));
+        assert!(inventory.contains("alpha.beta"));
     }
 
     #[test]
