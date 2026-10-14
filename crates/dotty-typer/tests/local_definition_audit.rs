@@ -679,13 +679,22 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
         let prefix = prefix_profile(store, request.prefix);
-        let module_state_before = if prefix.target_kind == "ModuleClass" {
-            prefix.symbol.map_or("UnknownSymbol", |symbol| {
-                module_class_observed_state(store, symbol)
-            })
-        } else {
-            "NotModuleClass"
-        };
+        let module_class =
+            match prefix.target_kind {
+                "ModuleClass" => prefix.symbol,
+                "Object" => prefix.symbol.and_then(|object| {
+                    match self.module_class_of_object(store, object) {
+                        Ok(module_class) => module_class,
+                        Err(_) => None,
+                    }
+                }),
+                _ => None,
+            };
+        let module_class_identity =
+            module_class.map_or_else(String::new, |symbol| audit_symbol_path(store, symbol));
+        let module_state_before = module_class.map_or("NotModuleClass", |symbol| {
+            module_class_observed_state(store, symbol)
+        });
         let name = store.names.resolve(request.name.text()).to_owned();
         let namespace = match request.name.namespace() {
             Namespace::Type => "type",
@@ -854,7 +863,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let outcome = member_outcome(store, &result, request, &actual_target, target_completed);
         let current_file = metrics.current_file.clone();
         let current_method = metrics.current_method.clone();
-        if prefix.target_kind == "ModuleClass" && !current_method.is_empty() {
+        if module_class.is_some() && !current_method.is_empty() {
             let (result, result_symbol) = match &result {
                 Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
                     ("success", audit_symbol_path(store, *symbol))
@@ -868,16 +877,16 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .push(ModuleMemberObservation {
                     source_file: current_file.clone(),
                     enclosing_attempt: current_method.clone(),
-                    module_class_identity: prefix.identity.clone(),
+                    module_class_identity: module_class_identity.clone(),
                     request_key: format!(
                         "prefix={}::namespace={namespace}::name={name}::space={space}::selector={}",
-                        prefix.identity,
+                        module_class_identity,
                         request_selector(&request.selector)
                     ),
                     result,
                     result_symbol,
                     module_state_before,
-                    module_state_after: prefix.symbol.map_or("UnknownSymbol", |symbol| {
+                    module_state_after: module_class.map_or("UnknownSymbol", |symbol| {
                         module_class_observed_state(store, symbol)
                     }),
                     transaction_state: "observed",
@@ -1953,7 +1962,8 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
     let mut audit_store = SemanticStore::new();
     let (audit_definitions, mut audit) =
         source_audit_resolver(&mut audit_store, "scala.io.Source.scala", "Source.stdin");
-    let (actual, _) = scala_source_module_snapshot(&mut audit_store, audit_definitions, &mut audit);
+    let (actual, audit_module_class) =
+        scala_source_module_snapshot(&mut audit_store, audit_definitions, &mut audit);
 
     assert_eq!(
         actual, expected,
@@ -2000,15 +2010,18 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
         "normalized ClassInfo must observe changed declaration buckets"
     );
 
-    let observations = &audit.metrics.borrow().module_operation_observations;
+    let audit_metrics = audit.metrics.borrow();
+    let observations = &audit_metrics.module_operation_observations;
     let identity_lookups = observations
         .iter()
         .filter(|observation| observation.operation == "module_class_of_object")
         .collect::<Vec<_>>();
-    assert_eq!(identity_lookups.len(), 1);
-    assert_eq!(identity_lookups[0].result, "resolved");
-    assert_eq!(identity_lookups[0].source_file, "scala.io.Source.scala");
-    assert_eq!(identity_lookups[0].enclosing_attempt, "Source.stdin");
+    assert_eq!(identity_lookups.len(), 3);
+    assert!(identity_lookups.iter().all(|observation| {
+        observation.result == "resolved"
+            && observation.source_file == "scala.io.Source.scala"
+            && observation.enclosing_attempt == "Source.stdin"
+    }));
     let completions = observations
         .iter()
         .filter(|observation| observation.operation == "complete_module_class")
@@ -2018,6 +2031,24 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
         observation.result == "completed"
             && observation.source_file == "scala.io.Source.scala"
             && observation.enclosing_attempt == "Source.stdin"
+    }));
+    let members = audit_metrics.module_member_observations.clone();
+    assert_eq!(members.len(), 2);
+    assert!(members.iter().all(|observation| {
+        observation.source_file == "scala.io.Source.scala"
+            && observation.enclosing_attempt == "Source.stdin"
+            && observation.module_class_identity
+                == audit_symbol_path(&audit_store, audit_module_class)
+            && observation.module_state_before == "Complete(ClassInfo)"
+            && observation.module_state_after == "Complete(ClassInfo)"
+            && observation.transaction_state == "observed"
+    }));
+    assert!(members.iter().any(|observation| {
+        observation.request_key.contains("name=stdin::") && observation.result == "success"
+    }));
+    assert!(members.iter().any(|observation| {
+        observation.request_key.contains("name=noSuchMember::")
+            && observation.result == "unresolved"
     }));
 }
 
@@ -3056,6 +3087,17 @@ fn prefix_profile(store: &SemanticStore, ty: dotty_core::ids::TypeId) -> PrefixP
                 }
             }
             Type::TermRef { prefix, target } => match target {
+                dotty_core::types::TermRefTarget::Symbol(symbol)
+                    if store.symbols.get(*symbol).kind == dotty_core::SymbolKind::Object =>
+                {
+                    PrefixProfile {
+                        shape: "object TermRef",
+                        target_kind: "Object",
+                        identity: audit_symbol_path(store, *symbol),
+                        identity_known: true,
+                        symbol: Some(*symbol),
+                    }
+                }
                 dotty_core::types::TermRefTarget::Symbol(symbol) => PrefixProfile {
                     shape: "unsupported/other",
                     target_kind: "unsupported",
