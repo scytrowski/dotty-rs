@@ -240,6 +240,73 @@ impl DirectoryClassPath {
             Err(error) => Err(ClassPathError::from(error)),
         }
     }
+
+    fn contains_package_resource_at_or_below(
+        &self,
+        package: &[&str],
+    ) -> Result<bool, ClassPathError> {
+        if !safe_package_segments(package) {
+            return Ok(false);
+        }
+
+        let root_type = match std::fs::symlink_metadata(&self.root) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if root_type.is_symlink() || !root_type.is_dir() {
+            return Ok(false);
+        }
+
+        let mut package_directory = self.root.clone();
+        for segment in package {
+            package_directory.push(segment);
+            let file_type = match std::fs::symlink_metadata(&package_directory) {
+                Ok(metadata) => metadata.file_type(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            if file_type.is_symlink() || !file_type.is_dir() {
+                return Ok(false);
+            }
+        }
+
+        // Iterative traversal is limited to the requested package subtree.
+        // Symlinks are not followed, preventing both cycles and escapes from
+        // the classpath root.
+        let mut pending = vec![package_directory];
+        while let Some(directory) = pending.pop() {
+            let entries = match std::fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if file_type.is_dir() {
+                    pending.push(entry.path());
+                } else if file_type.is_file()
+                    && entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "class" || extension == "tasty")
+                {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
+    }
 }
 
 impl ClassPathEntry for DirectoryClassPath {
@@ -297,6 +364,10 @@ impl ClassPathEntry for DirectoryClassPath {
             }
         }
         Ok(false)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.contains_package_resource_at_or_below(package)
     }
 }
 
