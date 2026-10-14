@@ -74,7 +74,8 @@ struct ResolverMetrics {
     module_operation_observations: Vec<ModuleOperationObservation>,
     module_member_observations: Vec<ModuleMemberObservation>,
     module_objects_by_class: BTreeMap<String, String>,
-    module_operation_checkpoints: BTreeMap<u64, (usize, usize)>,
+    module_operation_checkpoints: BTreeMap<u64, (ResolverCheckpoint, usize, usize)>,
+    next_module_operation_checkpoint: u64,
     module_identity_resolver_calls: usize,
     module_identity_resolver_outcomes: BTreeMap<&'static str, usize>,
     module_completion_resolver_calls: usize,
@@ -625,45 +626,51 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
     }
 
     fn checkpoint(&self) -> ResolverCheckpoint {
-        let checkpoint = self.inner.checkpoint();
+        let inner_checkpoint = self.inner.checkpoint();
         let mut metrics = self.metrics.borrow_mut();
-        if !metrics.current_method.is_empty() {
-            let offsets = (
-                metrics.module_operation_observations.len(),
-                metrics.module_member_observations.len(),
-            );
-            metrics
-                .module_operation_checkpoints
-                .insert(checkpoint.token(), offsets);
-        }
-        checkpoint
+        metrics.next_module_operation_checkpoint = metrics
+            .next_module_operation_checkpoint
+            .checked_add(1)
+            .expect("audit resolver checkpoint token overflow");
+        let token = metrics.next_module_operation_checkpoint;
+        let offsets = (
+            metrics.module_operation_observations.len(),
+            metrics.module_member_observations.len(),
+        );
+        metrics
+            .module_operation_checkpoints
+            .insert(token, (inner_checkpoint, offsets.0, offsets.1));
+        ResolverCheckpoint::new(token)
     }
 
     fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
-        self.inner.rollback_to(store, checkpoint);
         let mut metrics = self.metrics.borrow_mut();
-        if let Some((operation_offset, member_offset)) = metrics
+        let Some((inner_checkpoint, operation_offset, member_offset)) = metrics
             .module_operation_checkpoints
             .remove(&checkpoint.token())
+        else {
+            return;
+        };
+        drop(metrics);
+        self.inner.rollback_to(store, inner_checkpoint);
+        let mut metrics = self.metrics.borrow_mut();
+        for observation in metrics
+            .module_operation_observations
+            .iter_mut()
+            .skip(operation_offset)
         {
-            for observation in metrics
-                .module_operation_observations
-                .iter_mut()
-                .skip(operation_offset)
-            {
-                observation.transaction_state = "rolled_back";
-            }
-            for observation in metrics
-                .module_member_observations
-                .iter_mut()
-                .skip(member_offset)
-            {
-                observation.transaction_state = "rolled_back";
-            }
-            metrics
-                .module_operation_checkpoints
-                .retain(|token, _| *token < checkpoint.token());
+            observation.transaction_state = "rolled_back";
         }
+        for observation in metrics
+            .module_member_observations
+            .iter_mut()
+            .skip(member_offset)
+        {
+            observation.transaction_state = "rolled_back";
+        }
+        metrics
+            .module_operation_checkpoints
+            .retain(|token, _| *token < checkpoint.token());
     }
 
     fn resolve_member(
@@ -2866,6 +2873,46 @@ fn missing_shell_member_observations_survive_completion_rollback() {
     assert!(metrics.dependency_profiles.iter().all(|observation| {
         observation.profile.root == "Ping" && observation.profile.full_completions > 0
     }));
+}
+
+#[test]
+fn audit_module_observations_keep_nested_checkpoints_with_repeated_inner_tokens() {
+    let mut store = SemanticStore::new();
+    let (definitions, mut resolver) =
+        module_audit_resolver(&mut store, true, "src/Fixture.scala", "Fixture.run()");
+    let object = module_audit_object(&mut store, definitions, &mut resolver);
+
+    let repeated_inner_token = resolver.inner.checkpoint().token();
+    let outer = resolver.checkpoint();
+    resolver
+        .module_class_of_object(&store, object)
+        .unwrap()
+        .expect("the fixture object has a canonical module class");
+    assert_eq!(
+        resolver.inner.checkpoint().token(),
+        repeated_inner_token,
+        "the identity lookup does not mutate the classpath resolver checkpoint"
+    );
+    let inner = resolver.checkpoint();
+    assert_ne!(
+        outer.token(),
+        inner.token(),
+        "audit checkpoints must distinguish nested observation boundaries even when the inner resolver token repeats"
+    );
+
+    resolver.rollback_to(&mut store, inner);
+    assert_eq!(
+        resolver.metrics.borrow().module_operation_observations[0].transaction_state,
+        "observed",
+        "rolling back the inner checkpoint must preserve observations that predate it"
+    );
+
+    resolver.rollback_to(&mut store, outer);
+    assert_eq!(
+        resolver.metrics.borrow().module_operation_observations[0].transaction_state,
+        "rolled_back",
+        "rolling back the outer checkpoint must include observations before the nested checkpoint"
+    );
 }
 
 #[test]
