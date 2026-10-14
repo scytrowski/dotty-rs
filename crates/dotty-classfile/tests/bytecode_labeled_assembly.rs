@@ -44,6 +44,28 @@ fn encodes_forward_backward_zero_and_conditional_offsets_from_opcode_pc() {
 }
 
 #[test]
+fn encodes_pop_with_exact_linear_and_labeled_offsets() {
+    let pool = empty_pool();
+    let instructions = [
+        Instruction::IConst(SmallIntConstant::One),
+        Instruction::Pop,
+        Instruction::Return,
+    ];
+    assert_eq!(assemble(&instructions, &pool).unwrap(), [0x04, 0x57, 0xb1]);
+
+    let mut sequence = CodeSequence::new();
+    for instruction in instructions {
+        sequence.instruction(instruction);
+    }
+    let first = assemble_labeled(&sequence, &pool).unwrap();
+    let second = assemble_labeled(&sequence, &pool).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first.bytes, [0x04, 0x57, 0xb1]);
+    assert_eq!(first.layout.instruction_offsets(), [0, 1, 2]);
+    assert_eq!(first.layout.code_length(), 3);
+}
+
+#[test]
 fn encodes_wide_goto_and_every_conditional_opcode() {
     let pool = empty_pool();
     let mut wide = CodeSequence::new();

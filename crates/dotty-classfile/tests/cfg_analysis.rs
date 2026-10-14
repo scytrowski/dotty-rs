@@ -1,7 +1,8 @@
 use dotty_classfile::bytecode::{
     AnalysisError, BranchInstruction, CfgCodeAnalyzer, CodeSequence, ControlFlowGraph,
     ControlFlowGraphError, FlowLocalState, Instruction, LocalIndex, SmallIntConstant,
-    SmallLongConstant, UnsupportedFlowInstructionKind, ValueKind,
+    SmallLongConstant, UnsupportedFlowInstructionKind, ValueKind, VerificationTypeInfo,
+    assemble_labeled, generate_stack_map_frames,
 };
 use dotty_classfile::classfile::ConstantPool;
 
@@ -36,6 +37,65 @@ fn diamond_merges_initialized_integer_locals_and_consumes_condition() {
     assert!(join_state.operand_stack.is_empty());
     assert_eq!(analysis.max_stack, 1);
     assert_eq!(analysis.max_locals, 1);
+}
+
+#[test]
+fn pop_updates_branch_stack_state_and_preserves_stack_map_offsets() {
+    let mut sequence = CodeSequence::new();
+    let otherwise = sequence.new_label().unwrap();
+    let join = sequence.new_label().unwrap();
+
+    sequence.instruction(Instruction::IConst(SmallIntConstant::Zero));
+    sequence.branch(BranchInstruction::IfEq(otherwise.clone()));
+    sequence.instruction(Instruction::IConst(SmallIntConstant::One));
+    sequence.instruction(Instruction::Pop);
+    sequence.instruction(Instruction::IConst(SmallIntConstant::Five));
+    sequence.branch(BranchInstruction::Goto(join.clone()));
+    sequence.bind(otherwise.clone()).unwrap();
+    sequence.instruction(Instruction::IConst(SmallIntConstant::Five));
+    sequence.bind(join.clone()).unwrap();
+    sequence.instruction(Instruction::IReturn);
+
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "()I", true, &ConstantPool::default()).unwrap();
+    let join_state = flow
+        .entry_state(graph.block_for_label(&join).unwrap())
+        .unwrap();
+    assert_eq!(join_state.operand_stack, [ValueKind::Int]);
+    assert_eq!(flow.max_stack, 1);
+
+    let assembled = assemble_labeled(&sequence, &ConstantPool::default()).unwrap();
+    assert_eq!(
+        assembled.bytes,
+        [
+            0x03, 0x99, 0x00, 0x09, 0x04, 0x57, 0x08, 0xa7, 0x00, 0x04, 0x08, 0xac
+        ]
+    );
+    assert_eq!(
+        assembled.layout.instruction_offsets(),
+        [0, 1, 4, 5, 6, 7, 10, 11]
+    );
+    assert_eq!(assembled.layout.label_offset(&otherwise), Some(10));
+    assert_eq!(assembled.layout.label_offset(&join), Some(11));
+
+    let frames = generate_stack_map_frames(&flow, &graph, &assembled).unwrap();
+    assert_eq!(
+        frames.code_analysis,
+        dotty_classfile::bytecode::CodeAnalysis {
+            max_stack: 1,
+            max_locals: 0,
+        }
+    );
+    assert_eq!(
+        frames
+            .frames
+            .iter()
+            .map(|frame| frame.pc)
+            .collect::<Vec<_>>(),
+        [10, 11]
+    );
+    assert!(frames.frames[0].stack.is_empty());
+    assert_eq!(frames.frames[1].stack, [VerificationTypeInfo::Integer]);
 }
 
 #[test]

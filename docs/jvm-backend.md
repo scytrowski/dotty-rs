@@ -153,6 +153,13 @@ metadata, or unplanned methods. Constructors with parameters, additional
 constructors, field initializers, nested types, explicit superclass behavior,
 and other class initialization semantics remain unsupported. The API returns
 only after encoding succeeds, so a failure does not expose a partial artifact.
+
+The lower-level `dotty-classfile::CodeBuilder::pop` operation discards one
+category-one JVM stack value. Linear analysis accepts represented
+category-one values and rejects category-two values; the current CFG analyzer
+supports it within its integer-only stack model. This bytecode primitive does
+not infer Scala expression effects or add source block lowering to `dotty-jvm`.
+
 The CI JVM gate writes this generated class to disk, inspects it with `javap`,
 compiles a small Java caller with `javac`, and executes it with
 `java -Xverify:all` on JDK 21 or newer.

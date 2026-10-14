@@ -289,6 +289,37 @@ fn builds_static_arithmetic_method_from_typed_instructions() {
 }
 
 #[test]
+fn builds_static_method_that_discards_one_category_one_value() {
+    let mut builder = ClassFileBuilder::new(
+        "example/PopValue",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("discard", "()V", |code| {
+            code.iconst(1)?;
+            code.pop()?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    assert_eq!(class_file.methods.len(), 1);
+    assert!(matches!(
+        class_file.methods[0].attributes.as_slice(),
+        [Attribute::Code(code)]
+            if code.max_stack == 1
+                && code.max_locals == 0
+                && code.code == [0x04, 0x57, 0xb1]
+    ));
+}
+
+#[test]
 fn builds_branched_integer_methods_with_one_stack_map_table_each() {
     let mut builder = ClassFileBuilder::new(
         "example/Branched",

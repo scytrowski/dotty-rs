@@ -433,6 +433,12 @@ impl CodeBuilder {
         Ok(self)
     }
 
+    /// Removes the top category-one stack value.
+    pub fn pop(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::Pop);
+        Ok(self)
+    }
+
     /// Reads an instance field by symbolic owner, name, and descriptor.
     pub fn getfield(
         &mut self,
@@ -740,4 +746,52 @@ pub(crate) fn integer_load(index: ConstantPoolIndex) -> Result<Instruction, Code
 
 pub(crate) fn long_load(index: ConstantPoolIndex) -> Result<Instruction, CodeBuilderError> {
     Ok(Instruction::Ldc2(Ldc2Constant::Long(operand(index)?)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CodeBuilder, SymbolicCodeElement, SymbolicInstruction};
+    use crate::bytecode::{Instruction, SmallIntConstant};
+
+    #[test]
+    fn pop_appends_one_deterministic_typed_instruction() {
+        let mut first = CodeBuilder::new();
+        first
+            .iconst(1)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .return_void()
+            .unwrap();
+
+        assert!(matches!(
+            first.elements.as_slice(),
+            [
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IConst(
+                    SmallIntConstant::One
+                ))),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::Pop)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::Return)),
+            ]
+        ));
+
+        let mut second = CodeBuilder::new();
+        second
+            .iconst(1)
+            .unwrap()
+            .pop()
+            .unwrap()
+            .return_void()
+            .unwrap();
+        assert!(matches!(
+            second.elements.as_slice(),
+            [
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IConst(
+                    SmallIntConstant::One
+                ))),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::Pop)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::Return)),
+            ]
+        ));
+    }
 }
