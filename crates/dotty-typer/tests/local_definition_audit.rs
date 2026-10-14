@@ -2050,6 +2050,94 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
     }));
 }
 
+#[test]
+fn source_expression_failure_rolls_back_completed_module_and_retries_cleanly() {
+    let text = "object Audit { def use: Int = { scala.io.Source.stdin; true } }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let mut namer_packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "module-transaction.scala",
+        &mut store,
+        &mut namer_packages,
+    )
+    .unwrap();
+    let (rhs, method) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            Some((definition.rhs?, index.symbol_at(source, tree)?))
+        })
+        .expect("fixture contains one method body");
+    let metrics = Rc::new(RefCell::new(ResolverMetrics {
+        current_file: "module-transaction.scala".to_owned(),
+        current_method: "Audit.use".to_owned(),
+        ..ResolverMetrics::default()
+    }));
+    let resolver = AuditResolver {
+        inner: ClasspathSymbolResolver::new(
+            ScalaSourceAuditPath,
+            definitions,
+            LoadingSession::with_packages(namer_packages),
+        )
+        .with_load_profile_collection()
+        .with_module_resolution_profile_collection(),
+        metrics: Rc::clone(&metrics),
+        class_path_probe: None,
+    };
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let context = typer.expression_context_for(method).unwrap();
+    let store_before = typer.store().checkpoint();
+    let typed_before = typer.typed_ast().checkpoint();
+
+    for _ in 0..2 {
+        assert!(typer
+            .type_expression_expected(rhs, context, definitions.int)
+            .is_err());
+        assert_eq!(typer.store().checkpoint(), store_before);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_before);
+        assert_eq!(typer.source_type_index().type_at(source, rhs), None);
+    }
+
+    let metrics = metrics.borrow();
+    let source_module_completions = metrics
+        .module_operation_observations
+        .iter()
+        .filter(|observation| {
+            observation.operation == "complete_module_class"
+                && observation.module_class_identity.contains("scala/io/Source")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source_module_completions.len(), 2);
+    assert!(source_module_completions
+        .iter()
+        .all(|observation| observation.transaction_state == "rolled_back"));
+}
+
 fn module_audit_object(
     store: &mut SemanticStore,
     definitions: Definitions,
