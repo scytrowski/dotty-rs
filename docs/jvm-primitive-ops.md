@@ -109,8 +109,8 @@ entry is a deterministic collision error. Classloader lookup aliases
 `scala.Int` to the canonical class symbol before classpath metadata can create
 a competing identity.
 
-The registration/accessor should expose the resulting canonical `SymbolId`s
-to a later backend-facing contract. The intrinsic resolver can then validate
+The registration/accessor exposes the resulting canonical `SymbolId`s to a
+later backend-facing contract. The intrinsic resolver can then validate
 the symbol owner, one-parameter `Int` `MethodType`, result type, and typed
 operand types before returning an intrinsic descriptor. Same-named local or
 extension methods do not satisfy this contract.
