@@ -2272,6 +2272,57 @@ fn audit_module_completion_failure_is_atomic() {
     assert_eq!(observations[1].error_category, Some("malformed"));
 }
 
+#[test]
+fn audit_module_completion_records_an_unowned_false_result() {
+    let mut store = SemanticStore::new();
+    let (definitions, mut direct) = direct_module_resolver(&mut store, true);
+    let object = module_audit_object(&mut store, definitions, &mut direct);
+    let module_class = direct
+        .module_class_of_object(&store, object)
+        .unwrap()
+        .unwrap();
+
+    let metrics = Rc::new(RefCell::new(ResolverMetrics {
+        current_file: "fixture.scala".to_owned(),
+        current_method: "unowned-module-completion()".to_owned(),
+        ..ResolverMetrics::default()
+    }));
+    let mut audit = AuditResolver {
+        inner: ClasspathSymbolResolver::new(
+            ModuleAuditPath {
+                include_object_class: true,
+            },
+            definitions,
+            LoadingSession::new(),
+        )
+        .with_load_profile_collection(),
+        metrics: Rc::clone(&metrics),
+        class_path_probe: None,
+    };
+    let checkpoint = store.checkpoint();
+    assert_eq!(
+        audit.complete_module_class(&mut store, module_class),
+        Ok(false)
+    );
+    assert_eq!(store.checkpoint(), checkpoint);
+
+    let metrics = metrics.borrow();
+    assert_eq!(metrics.module_completion_resolver_calls, 1);
+    assert_eq!(
+        metrics
+            .module_completion_resolver_outcomes
+            .get("unsupported"),
+        Some(&1)
+    );
+    let [observation] = metrics.module_operation_observations.as_slice() else {
+        panic!("the attempted unsupported completion should be retained");
+    };
+    assert_eq!(observation.operation, "complete_module_class");
+    assert_eq!(observation.result, "unsupported");
+    assert_eq!(observation.result_state, "Missing");
+    assert_eq!(observation.transaction_state, "observed");
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ModuleFailureSnapshot {
     unowned_result: String,
@@ -2500,6 +2551,89 @@ fn existing_module_shell_rollback_snapshot(
     )
 }
 
+fn existing_module_member_rollback_snapshot(
+    store: &mut SemanticStore,
+    definitions: Definitions,
+    resolver: &mut dyn SymbolResolver,
+) -> String {
+    let object = module_audit_object(store, definitions, resolver);
+    let module_class = resolver
+        .module_class_of_object(store, object)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing
+    );
+
+    let package = store.symbols.get(object).owner.unwrap();
+    let package_prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, package));
+    let object_prefix = store.types.alloc(Type::TermRef {
+        prefix: package_prefix,
+        target: dotty_core::TermRefTarget::Symbol(object),
+    });
+    let make_request = MemberRequest {
+        prefix: object_prefix,
+        name: dotty_core::Name::new(store.names.intern("make"), Namespace::Term),
+        selector: MemberSelector::Unique,
+        space: MemberSpace::Prefix,
+    };
+
+    let store_checkpoint = store.checkpoint();
+    let resolver_checkpoint = resolver.checkpoint();
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    let first_member = resolver
+        .resolve_member(store, &make_request)
+        .unwrap()
+        .expect("Both.make should resolve from the completed module");
+    assert_eq!(store.symbols.get(first_member).owner, Some(module_class));
+    let completed_checkpoint = store.checkpoint();
+    assert_eq!(
+        resolver.resolve_member(store, &make_request),
+        Ok(Some(first_member)),
+        "a repeated member lookup reuses its canonical symbol"
+    );
+    assert_eq!(store.checkpoint(), completed_checkpoint);
+
+    resolver.rollback_to(store, resolver_checkpoint);
+    store.rollback_to(store_checkpoint);
+    assert_eq!(store.checkpoint(), store_checkpoint);
+    assert_eq!(
+        store.symbols.get(module_class).info,
+        dotty_core::SymbolInfo::Missing,
+        "rollback restores the existing module shell"
+    );
+    assert!(!store.symbols.contains(first_member));
+    assert_eq!(
+        resolver.module_class_of_object(store, object),
+        Ok(Some(module_class))
+    );
+
+    assert!(resolver.complete_module_class(store, module_class).unwrap());
+    let retried_member = resolver
+        .resolve_member(store, &make_request)
+        .unwrap()
+        .expect("the same module member should resolve after rollback");
+    assert_eq!(store.symbols.get(retried_member).owner, Some(module_class));
+    let retried_checkpoint = store.checkpoint();
+    assert_eq!(
+        resolver.resolve_member(store, &make_request),
+        Ok(Some(retried_member)),
+        "a successful retry is stable and idempotent"
+    );
+    assert_eq!(store.checkpoint(), retried_checkpoint);
+    let entry = store.symbols.get(retried_member);
+    format!(
+        "{}|{}|{:?}|{}",
+        audit_symbol_path(store, object),
+        audit_symbol_path(store, module_class),
+        entry.kind,
+        audit_symbol_path(store, entry.owner.unwrap())
+    )
+}
+
 #[test]
 fn audit_and_classpath_resolvers_match_for_module_rollbacks_and_retry() {
     let mut direct_new_store = SemanticStore::new();
@@ -2566,6 +2700,47 @@ fn audit_and_classpath_resolvers_match_for_module_rollbacks_and_retry() {
         .filter(|observation| observation.operation == "complete_module_class")
         .count();
     assert_eq!(completion_observations, 3);
+
+    let mut direct_member_store = SemanticStore::new();
+    let (direct_member_definitions, mut direct_member) =
+        direct_module_resolver(&mut direct_member_store, true);
+    let expected_member = existing_module_member_rollback_snapshot(
+        &mut direct_member_store,
+        direct_member_definitions,
+        &mut direct_member,
+    );
+
+    let mut audit_member_store = SemanticStore::new();
+    let (audit_member_definitions, mut audit_member) = module_audit_resolver(
+        &mut audit_member_store,
+        true,
+        "fixture.scala",
+        "existing-shell-member-rollback()",
+    );
+    let actual_member = existing_module_member_rollback_snapshot(
+        &mut audit_member_store,
+        audit_member_definitions,
+        &mut audit_member,
+    );
+    assert_eq!(actual_member, expected_member);
+    let member_observations = audit_member.metrics.borrow();
+    let module_members = &member_observations.module_member_observations;
+    assert_eq!(module_members.len(), 4);
+    assert!(
+        module_members[..2]
+            .iter()
+            .all(|observation| observation.transaction_state == "rolled_back")
+    );
+    assert!(
+        module_members[2..]
+            .iter()
+            .all(|observation| observation.transaction_state == "observed")
+    );
+    assert!(module_members.iter().all(|observation| {
+        observation.request_key.contains("name=make::")
+            && observation.result == "success"
+            && observation.module_state_after == "Complete(ClassInfo)"
+    }));
 }
 
 #[test]
