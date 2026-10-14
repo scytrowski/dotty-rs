@@ -244,6 +244,24 @@ fn compile_source(
     Ok(EmittedArtifact { class, path })
 }
 
+fn assert_source_failure(
+    label: &str,
+    source: &str,
+    expected_stage: impl FnOnce(&PipelineFailure) -> bool,
+) {
+    let output = TestOutputDirectory::new(label);
+    let error = compile_source(source, &format!("{label}.scala"), output.path())
+        .expect_err("unsupported source must fail before publishing a class");
+    assert!(
+        expected_stage(&error),
+        "{label} failed at an unexpected pipeline stage: {error:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "{label} failure must not leave a partial class artifact"
+    );
+}
+
 fn find_single_source_class(
     ast: &dotty_core::AstArena<Untyped>,
     root: TreeId<Untyped>,
@@ -564,6 +582,71 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
     instructions
 }
 
+fn decode_branch_targets(code: &[u8]) -> Vec<(usize, u8, usize)> {
+    decode_subset_instructions(code)
+        .into_iter()
+        .filter(|(_, opcode)| matches!(*opcode, 0x99 | 0xa7))
+        .map(|(offset, opcode)| {
+            let displacement = i16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+            let target = offset as isize + isize::from(displacement);
+            assert!(target >= 0 && (target as usize) < code.len());
+            (offset, opcode, target as usize)
+        })
+        .collect()
+}
+
+fn decode_full_frame_pcs(payload: &[u8]) -> Vec<usize> {
+    fn read_u2(payload: &[u8], offset: &mut usize) -> u16 {
+        let bytes = payload
+            .get(*offset..*offset + 2)
+            .expect("complete u2 in StackMapTable payload");
+        *offset += 2;
+        u16::from_be_bytes([bytes[0], bytes[1]])
+    }
+
+    fn skip_verification_types(payload: &[u8], offset: &mut usize, entries: u16) {
+        for _ in 0..entries {
+            let tag = *payload
+                .get(*offset)
+                .expect("verification_type_info tag in StackMapTable");
+            *offset += 1;
+            match tag {
+                0..=6 => {}
+                7 | 8 => {
+                    let _ = read_u2(payload, offset);
+                }
+                _ => panic!("invalid verification_type_info tag {tag}"),
+            }
+        }
+    }
+
+    let mut offset = 0;
+    let frame_count = read_u2(payload, &mut offset);
+    let mut previous_pc = -1i32;
+    let mut pcs = Vec::with_capacity(usize::from(frame_count));
+    for _ in 0..frame_count {
+        let frame_type = *payload.get(offset).expect("frame_type in StackMapTable");
+        offset += 1;
+        assert_eq!(frame_type, 255, "backend emits explicit full_frame entries");
+        let delta = read_u2(payload, &mut offset);
+        let pc = previous_pc + i32::from(delta) + 1;
+        assert!(pc >= 0);
+        pcs.push(usize::try_from(pc).expect("nonnegative StackMapTable PC"));
+        previous_pc = pc;
+        let locals = read_u2(payload, &mut offset);
+        skip_verification_types(payload, &mut offset, locals);
+        let stack = read_u2(payload, &mut offset);
+        skip_verification_types(payload, &mut offset, stack);
+    }
+    assert_eq!(
+        offset,
+        payload.len(),
+        "StackMapTable payload has no trailing bytes"
+    );
+    assert!(pcs.windows(2).all(|pair| pair[0] < pair[1]));
+    pcs
+}
+
 fn verify_delegator_with_jdk(output_directory: &Path) {
     let output_path = output_directory.to_str().expect("UTF-8 temporary path");
     let javap = Command::new("javap")
@@ -729,6 +812,214 @@ fn source_primitive_local_initializers_emit_load_store_and_correct_max_locals() 
             String::from_utf8_lossy(&java.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42:43:true");
+    }
+}
+
+#[test]
+fn local_state_fixture_compiles_deterministically_and_executes_with_verified_slots() {
+    let first_output = TestOutputDirectory::new("local-state-first");
+    let second_output = TestOutputDirectory::new("local-state-second");
+    let first = compile_fixture("LocalState.scala", first_output.path()).unwrap();
+    let second = compile_fixture("LocalState.scala", second_output.path()).unwrap();
+    assert_eq!(first.class.internal_name(), "LocalState");
+    assert_eq!(first.class.bytes(), second.class.bytes());
+    assert_eq!(first_output.class_files(), vec![first.path.clone()]);
+    assert_eq!(second_output.class_files(), vec![second.path.clone()]);
+
+    let mut reader = Reader::new(first.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("LocalState should decode completely");
+    assert!(reader.is_at_end(), "decoder consumes the entire class file");
+    class
+        .validate_references()
+        .expect("LocalState constant-pool references should be valid");
+    assert_eq!(class.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    assert_eq!(
+        class.version.major, 65,
+        "fixture requires class-file version 65"
+    );
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class),
+        Ok("LocalState")
+    );
+
+    let signatures = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signatures,
+        [
+            ("<init>", "()V"),
+            ("copy", "(I)I"),
+            ("overwrite", "(I)I"),
+            ("runOnce", "(Z)I"),
+            ("parameterShadow", "(I)I"),
+            ("nestedShadow", "()I"),
+        ]
+    );
+    for method in &class.methods {
+        assert!(
+            matches!(method.attributes.as_slice(), [Attribute::Code(_)]),
+            "{} must have exactly one complete Code attribute",
+            class.constant_pool.utf8(method.name_index).unwrap()
+        );
+    }
+    let method_code = |name: &str| {
+        let method = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+            .unwrap_or_else(|| panic!("missing method {name}"));
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("{name} must have exactly one Code attribute")
+        };
+        code
+    };
+
+    let copy = method_code("copy");
+    assert_eq!(copy.code, [0x1b, 0x3d, 0x1c, 0xac]);
+    assert_eq!((copy.max_stack, copy.max_locals), (1, 3));
+
+    let overwrite = method_code("overwrite");
+    assert_eq!(overwrite.code, [0x1b, 0x3d, 0x10, 42, 0x3d, 0x1c, 0xac]);
+    assert_eq!((overwrite.max_stack, overwrite.max_locals), (1, 3));
+
+    let run_once = method_code("runOnce");
+    let run_once_opcodes = decode_subset_instructions(run_once.code)
+        .into_iter()
+        .map(|(_, opcode)| opcode)
+        .collect::<Vec<_>>();
+    assert!(
+        run_once_opcodes.contains(&0x1b),
+        "loads the Boolean parameter"
+    );
+    assert!(
+        run_once_opcodes.contains(&0x1d),
+        "loads local slot 3 for the condition"
+    );
+    assert!(
+        run_once_opcodes.contains(&0x3d),
+        "stores the Int local in slot 2"
+    );
+    assert!(
+        run_once_opcodes.contains(&0x3e),
+        "stores the Boolean local in slot 3"
+    );
+    assert_eq!((run_once.max_stack, run_once.max_locals), (1, 4));
+    let branch_targets = decode_branch_targets(run_once.code);
+    let header_targets = branch_targets
+        .iter()
+        .filter_map(|(_, opcode, target)| (*opcode == 0xa7).then_some(*target))
+        .collect::<Vec<_>>();
+    let exit_targets = branch_targets
+        .iter()
+        .filter_map(|(_, opcode, target)| (*opcode == 0x99).then_some(*target))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        header_targets.len(),
+        2,
+        "entry and back-edge target the loop header"
+    );
+    assert_eq!(header_targets[0], header_targets[1]);
+    assert_eq!(
+        exit_targets.len(),
+        1,
+        "false condition branches to the loop exit"
+    );
+    let [Attribute::Other(stack_map)] = run_once
+        .attributes
+        .iter()
+        .filter(|attribute| matches!(attribute, Attribute::Other(raw) if class.constant_pool.utf8(raw.name_index) == Ok("StackMapTable")))
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("runOnce should have one nested StackMapTable")
+    };
+    let frame_pcs = decode_full_frame_pcs(stack_map.bytes);
+    let mut expected_frame_pcs = vec![header_targets[0], exit_targets[0]];
+    expected_frame_pcs.sort_unstable();
+    expected_frame_pcs.dedup();
+    assert_eq!(frame_pcs, expected_frame_pcs);
+
+    let parameter_shadow = method_code("parameterShadow");
+    assert_eq!(parameter_shadow.code, [0x10, 42, 0x3d, 0x1c, 0xac]);
+    assert_eq!(parameter_shadow.max_locals, 3);
+
+    let nested_shadow = method_code("nestedShadow");
+    assert_eq!(
+        nested_shadow.code,
+        [0x04, 0x3c, 0x10, 42, 0x3d, 0x1c, 0x57, 0x1b, 0xac]
+    );
+    assert_eq!(nested_shadow.max_locals, 3);
+
+    if require_jdk_or_skip() {
+        let output_path = first_output.path().to_str().expect("UTF-8 output path");
+        let javap = Command::new("javap")
+            .args(["-c", "-v", "-classpath", output_path, "LocalState"])
+            .output()
+            .expect("start javap");
+        assert!(
+            javap.status.success(),
+            "javap rejected LocalState\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap_output = String::from_utf8_lossy(&javap.stdout);
+        for expected in [
+            "major version: 65",
+            "iload_3",
+            "istore_3",
+            "ifeq",
+            "goto",
+            "StackMapTable",
+        ] {
+            assert!(
+                javap_output.contains(expected),
+                "javap output omitted {expected:?}:\n{javap_output}"
+            );
+        }
+
+        let harness_path = first_output.path().join("LocalStateHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class LocalStateHarness { public static void main(String[] args) { LocalState value = new LocalState(); System.out.println(value.copy(17) + \":\" + value.overwrite(17) + \":\" + value.runOnce(false) + \":\" + value.runOnce(true) + \":\" + value.parameterShadow(17) + \":\" + value.nestedShadow()); } }\n",
+        )
+        .expect("write LocalState Java harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected LocalStateHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "LocalStateHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected LocalState\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "17:42:0:1:42:1"
+        );
     }
 }
 
@@ -1007,6 +1298,45 @@ fn while_loops_reject_invalid_conditions_and_calls_inside_control_flow() {
         PipelineFailure::Codegen(JvmCodegenError::JvmCallInUnsupportedControlFlow { .. })
     ));
     assert!(call_output.class_files().is_empty());
+}
+
+#[test]
+fn unsupported_local_source_shapes_fail_at_their_pipeline_stage_without_artifacts() {
+    assert_source_failure(
+        "immutable-local-assignment",
+        "class ImmutableAssignment { def run(): Int = { val fixed = 1; fixed = 2; fixed } }\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    assert_source_failure(
+        "missing-local-reference",
+        "class MissingLocal { def run(): Int = missing }\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    assert_source_failure(
+        "wrong-local-initializer-type",
+        "class WrongLocalInitializer { def run(): Int = { val flag: Boolean = 1; 0 } }\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    assert_source_failure(
+        "wrong-local-assignment-type",
+        "class WrongLocalAssignment { def run(): Int = { var value = 1; value = true; value } }\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    assert_source_failure(
+        "unsupported-unit-local",
+        "class UnitLocal { def run(): Int = { val empty = (); 0 } }\n",
+        |failure| matches!(failure, PipelineFailure::Codegen(_)),
+    );
+    assert_source_failure(
+        "deferred-reference-local",
+        "class ReferenceLocal { def run(): Int = { val text = \"text\"; 0 } }\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    assert_source_failure(
+        "unsupported-pattern-local",
+        "class PatternLocal { def run(): Int = { val (left, right) = (1, 2); left } }\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
 }
 
 #[test]
