@@ -549,10 +549,10 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
     while offset < code.len() {
         let opcode = code[offset];
         let length = match opcode {
-            0x1b | 0x2a | 0x57 | 0xac | 0xb1 => 1,
-            0x10 => 2,
-            0xb6..=0xb8 => 3,
-            other => panic!("unexpected opcode in Delegator fixture: {other:#04x}"),
+            0x04..=0x0f | 0x1a..=0x1d | 0x2a | 0x3b..=0x3e | 0x57 | 0xac | 0xb1 => 1,
+            0x10 | 0x15 | 0x36 => 2,
+            0x99 | 0xa7 | 0xb6..=0xb8 => 3,
+            other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };
         assert!(
             offset + length <= code.len(),
@@ -723,6 +723,138 @@ fn source_primitive_local_initializers_emit_load_store_and_correct_max_locals() 
             String::from_utf8_lossy(&java.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42:43:true");
+    }
+}
+
+#[test]
+fn initialized_mutable_primitive_locals_support_assignments() {
+    let output = TestOutputDirectory::new("primitive-local-assignments");
+    let artifact = compile_source(
+        "class LocalAssignment { def next(): Int = 42; def changed(): Int = { var current = 10; current = next(); current }; def booleanLocal(): Int = { var flag = true; flag = false; if flag then 1 else 2 }; def shadowed(): Int = { var value = 1; { var value = 10; value = 42; value } } }\n",
+        "LocalAssignment.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("LocalAssignment should decode");
+    let changed = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok("changed"))
+        .expect("changed method should be emitted");
+    let Attribute::Code(changed_code) = &changed.attributes[0] else {
+        panic!("changed method has no Code attribute")
+    };
+    assert_eq!(
+        changed_code
+            .code
+            .iter()
+            .filter(|opcode| **opcode == 0xb6)
+            .count(),
+        1
+    );
+    assert_eq!(changed_code.max_locals, 2);
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 temporary path");
+        let harness_path = output.path().join("LocalAssignmentHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class LocalAssignmentHarness { public static void main(String[] args) { LocalAssignment local = new LocalAssignment(); System.out.println(local.changed() + \":\" + local.booleanLocal() + \":\" + local.shadowed()); } }\n",
+        )
+        .expect("write local assignment harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected LocalAssignmentHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "LocalAssignmentHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected LocalAssignment\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42:2:42");
+    }
+}
+
+#[test]
+fn assignment_branches_accept_proven_terminal_rhs_flow() {
+    let output = TestOutputDirectory::new("assignment-terminal-branches");
+    let artifact = compile_source(
+        "class AssignmentTerminal { def terminal(flag: Boolean): Int = { var current = 1; if flag then current = { return 4 } else current = 2; current }; def terminalBlock(flag: Boolean): Int = { var current = 1; if flag then { current = { return 5 } } else { current = 3 }; current } }\n",
+        "AssignmentTerminal.scala",
+        output.path(),
+    )
+    .unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("AssignmentTerminal should decode");
+    let method_code = |name: &str| {
+        let method = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+            .unwrap_or_else(|| panic!("missing method {name}"));
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("{name} should contain one Code attribute")
+        };
+        code.code
+    };
+    assert_opcode_sequence(
+        method_code("terminal"),
+        &[0x04, 0x3d, 0x1b, 0x99, 0x07, 0xac, 0x05, 0x3d, 0x1c, 0xac],
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 temporary path");
+        let harness_path = output.path().join("AssignmentTerminalHarness.java");
+        fs::write(
+            &harness_path,
+            "public final class AssignmentTerminalHarness { public static void main(String[] args) { AssignmentTerminal value = new AssignmentTerminal(); System.out.println(value.terminal(true) + \":\" + value.terminal(false) + \":\" + value.terminalBlock(true) + \":\" + value.terminalBlock(false)); } }\n",
+        )
+        .expect("write terminal assignment harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected AssignmentTerminalHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "AssignmentTerminalHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected AssignmentTerminal\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "4:2:5:3");
     }
 }
 

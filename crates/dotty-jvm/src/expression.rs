@@ -30,6 +30,7 @@ enum ExpressionShape {
     If,
     Return,
     Apply,
+    Assign,
     Unsupported(&'static str),
 }
 
@@ -489,6 +490,7 @@ fn emit_expression(
             TreeKind::If(_) => ExpressionShape::If,
             TreeKind::Return(_) => ExpressionShape::Return,
             TreeKind::Apply(_) => ExpressionShape::Apply,
+            TreeKind::Assign(_) => ExpressionShape::Assign,
             kind => ExpressionShape::Unsupported(tree_kind_name(kind)),
         }
     };
@@ -498,9 +500,101 @@ fn emit_expression(
         ExpressionShape::If => emit_if(context, tree_id, code, depth),
         ExpressionShape::Return => emit_return(context, tree_id, code, depth),
         ExpressionShape::Apply => emit_apply(context, tree_id, code, depth),
+        ExpressionShape::Assign => emit_assignment(context, tree_id, code, depth),
         ExpressionShape::Unsupported(node) => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
             node,
+        }),
+    }
+}
+
+fn emit_assignment(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let (lhs, rhs, result_type) = {
+        let tree = context.tree(tree_id)?;
+        let TreeKind::Assign(assignment) = &tree.kind else {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: tree_id,
+                node: tree_kind_name(&tree.kind),
+            });
+        };
+        (assignment.lhs, assignment.rhs, tree.ty)
+    };
+    if !is_unit_type(context.store, result_type, context.definitions) {
+        return Err(JvmCodegenError::AssignmentResultTypeMismatch {
+            tree: tree_id,
+            ty: result_type,
+        });
+    }
+
+    context.visit(lhs, depth + 1)?;
+    let symbol = match context.tree(lhs)? {
+        Tree {
+            kind: TreeKind::Ident(_),
+            ty,
+            ..
+        } => match context.store.types.try_get(*ty) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) => *symbol,
+            _ => {
+                return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs });
+            }
+        },
+        _ => {
+            return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs });
+        }
+    };
+    let Some(local) = local_reference_slot(context, lhs, symbol)? else {
+        return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs });
+    };
+    let symbol_info = context.store.symbols.get(symbol);
+    let symbol_mutable = symbol_info
+        .flags
+        .contains(dotty_core::symbols::SymbolFlags::MUTABLE);
+    if symbol_mutable != local.is_mutable() {
+        return Err(JvmCodegenError::LocalMutabilityMismatch {
+            declaration: local.declaration(),
+            symbol,
+            recorded_mutable: local.is_mutable(),
+            symbol_mutable,
+        });
+    }
+    if !symbol_mutable {
+        return Err(JvmCodegenError::ImmutableLocalAssignment {
+            tree: tree_id,
+            symbol,
+        });
+    }
+    if !context.initialized_locals.contains(&symbol) {
+        return Err(JvmCodegenError::UninitializedLocalAssignment {
+            tree: tree_id,
+            symbol,
+        });
+    }
+
+    let flow = emit_expression(context, rhs, code, depth + 1)?;
+    match flow {
+        Flow::Diverges => Ok(Flow::Diverges),
+        Flow::Value(found) if found == local.ty() => {
+            code.istore(usize::from(local.slot())).map_err(|error| {
+                JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                }
+            })?;
+            Ok(Flow::Unit)
+        }
+        found => Err(JvmCodegenError::AssignmentValueFlowMismatch {
+            tree: tree_id,
+            symbol,
+            expected: local.ty(),
+            found: public_flow(found),
         }),
     }
 }
@@ -965,10 +1059,15 @@ fn validate_branch(
     let tree_ty = context.tree(tree)?.ty;
     match flow {
         Flow::Diverges => {
+            // Recursive lowering proves terminal flow before these Unit-valued
+            // forms can return Diverges; other Unit nodes remain unsupported.
             let diverges_with_supported_type =
                 is_nothing_type(context.store, tree_ty, context.definitions)
                     || (is_unit_type(context.store, tree_ty, context.definitions)
-                        && matches!(&context.tree(tree)?.kind, TreeKind::If(_)));
+                        && matches!(
+                            &context.tree(tree)?.kind,
+                            TreeKind::If(_) | TreeKind::Assign(_) | TreeKind::Block(_)
+                        ));
             if diverges_with_supported_type {
                 Ok(())
             } else {
@@ -2201,6 +2300,11 @@ mod tests {
                 JvmCodegenError::LocalDeclarationNotInPlan {
                     method: fixture.method.symbol(),
                     declaration: stat,
+                }
+            } else if node == "Assign" {
+                JvmCodegenError::InvalidAssignmentTarget {
+                    tree: stat,
+                    lhs: value,
                 }
             } else {
                 JvmCodegenError::UnsupportedTypedExpression { tree: stat, node }

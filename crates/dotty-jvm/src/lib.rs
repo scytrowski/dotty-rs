@@ -440,6 +440,30 @@ pub enum JvmCodegenError {
         expected: JvmType,
         found: JvmExpressionFlow,
     },
+    /// A typed assignment does not have the canonical Unit result type.
+    AssignmentResultTypeMismatch { tree: TreeId<Typed>, ty: TypeId },
+    /// The assignment target is not an identifier for an owned planned local.
+    InvalidAssignmentTarget {
+        tree: TreeId<Typed>,
+        lhs: TreeId<Typed>,
+    },
+    /// The assignment target is an ordinary local that is not mutable.
+    ImmutableLocalAssignment {
+        tree: TreeId<Typed>,
+        symbol: SymbolId,
+    },
+    /// The assignment target has not been initialized on every reachable path.
+    UninitializedLocalAssignment {
+        tree: TreeId<Typed>,
+        symbol: SymbolId,
+    },
+    /// The right hand side does not produce the target's primitive value type.
+    AssignmentValueFlowMismatch {
+        tree: TreeId<Typed>,
+        symbol: SymbolId,
+        expected: JvmType,
+        found: JvmExpressionFlow,
+    },
     /// An initializer reads its local before the corresponding store.
     UninitializedLocalRead {
         tree: TreeId<Typed>,

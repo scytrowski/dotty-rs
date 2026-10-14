@@ -1485,6 +1485,89 @@ fn local_layout_rejects_unsupported_semantic_types() {
 }
 
 #[test]
+fn assignments_reject_immutable_nonlocal_and_mistyped_targets_without_class_output() {
+    let emit_case =
+        |mutable: bool, parameter_target: bool, invalid_lhs: bool, boolean_rhs: bool| {
+            let mut fixture = EmissionFixture::new(false);
+            let method_index = 1;
+            let int_ty = fixture.definitions.int;
+            let local = add_emission_local_symbol(
+                &mut fixture,
+                method_index,
+                "current",
+                int_ty,
+                mutable,
+                SymbolFlags::EMPTY,
+            );
+            let initial_value = fixture.ast.alloc(Tree {
+                kind: TreeKind::Literal(Literal {
+                    value: Constant::Int(1),
+                }),
+                position: None,
+                ty: int_ty,
+            });
+            let declaration = add_emission_local_valdef(
+                &mut fixture,
+                method_index,
+                local,
+                int_ty,
+                Some(initial_value),
+            );
+            let local_binding = JvmLocalBinding {
+                declaration,
+                symbol: local,
+                mutable,
+            };
+            let lhs = if invalid_lhs {
+                initial_value
+            } else if parameter_target {
+                let parameter = fixture.parameters[method_index][1];
+                typed_emission_symbol_ident(&mut fixture, parameter)
+            } else {
+                typed_emission_symbol_ident(&mut fixture, local)
+            };
+            let (rhs_value, rhs_ty) = if boolean_rhs {
+                (Constant::Boolean(false), fixture.definitions.boolean)
+            } else {
+                (Constant::Int(2), int_ty)
+            };
+            let rhs = fixture.ast.alloc(Tree {
+                kind: TreeKind::Literal(Literal { value: rhs_value }),
+                position: None,
+                ty: rhs_ty,
+            });
+            let assignment = fixture.ast.alloc(Tree {
+                kind: TreeKind::Assign(dotty_core::ast::Assign { lhs, rhs }),
+                position: None,
+                ty: fixture.definitions.unit,
+            });
+            let result = typed_emission_symbol_ident(&mut fixture, local);
+            fixture.bodies[method_index] =
+                typed_block(&mut fixture, vec![declaration, assignment], result, int_ty);
+            let mut unit = fixture.unit();
+            unit.classes[0].methods[method_index].locals = vec![local_binding];
+            emit_class(&unit, fixture.class, &fixture.definitions)
+        };
+
+    assert!(matches!(
+        emit_case(false, false, false, false),
+        Err(JvmCodegenError::ImmutableLocalAssignment { .. })
+    ));
+    assert!(matches!(
+        emit_case(true, true, false, false),
+        Err(JvmCodegenError::InvalidAssignmentTarget { .. })
+    ));
+    assert!(matches!(
+        emit_case(true, false, false, true),
+        Err(JvmCodegenError::AssignmentValueFlowMismatch { .. })
+    ));
+    assert!(matches!(
+        emit_case(true, false, true, false),
+        Err(JvmCodegenError::InvalidAssignmentTarget { .. })
+    ));
+}
+
+#[test]
 fn emits_local_initializers_once_in_declaration_order_with_canonical_slots() {
     let mut fixture = EmissionFixture::new(false);
     let method_index = 1;
