@@ -13,7 +13,7 @@ use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use crate::{
     InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmCallTarget,
     JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind,
-    JvmLocalLayout, JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType,
+    JvmLocalLayout, JvmLocalSlot, JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType,
     JvmValueCategory, UnsupportedJvmCallShapeKind,
 };
 
@@ -356,24 +356,24 @@ fn lower_leaf(
                 }) => Some(*symbol),
                 _ => None,
             };
-            if let Some(symbol) = symbol.filter(|symbol| {
-                context.local_layout.is_some_and(|layout| {
-                    layout
-                        .locals()
-                        .iter()
-                        .any(|local| local.symbol() == *symbol)
-                })
-            }) {
+            if let Some(local) = match symbol {
+                Some(symbol) => local_reference_slot(context, tree_id, symbol)?,
+                None => None,
+            } {
+                let symbol = local.symbol();
                 if !context.initialized_locals.contains(&symbol) {
                     return Err(JvmCodegenError::UninitializedLocalRead {
                         tree: tree_id,
                         symbol,
                     });
                 }
-                return Err(JvmCodegenError::UnsupportedTypedExpression {
-                    tree: tree_id,
-                    node: "initialized local read",
-                });
+                code.iload(usize::from(local.slot())).map_err(|error| {
+                    JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    }
+                })?;
+                return Ok(Flow::Value(local.ty()));
             }
             let Some(parameter) = symbol.and_then(|symbol| {
                 context
@@ -430,6 +430,48 @@ fn lower_leaf(
             node: tree_kind_name(kind),
         }),
     }
+}
+
+fn local_reference_slot(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    symbol: SymbolId,
+) -> Result<Option<JvmLocalSlot>, JvmCodegenError> {
+    if !context.store.symbols.contains(symbol)
+        || context.store.symbols.get(symbol).kind != dotty_core::symbols::SymbolKind::Local
+    {
+        return Ok(None);
+    }
+    if context.store.symbols.get(symbol).owner != Some(context.method.symbol()) {
+        return Err(JvmCodegenError::InvalidLocalReference { tree, symbol });
+    }
+    let local = context
+        .local_layout
+        .ok_or(JvmCodegenError::MissingLocalBinding { tree, symbol })?
+        .local(symbol)
+        .map_err(|_| JvmCodegenError::MissingLocalBinding { tree, symbol })?;
+    let semantic_type = match context.store.symbols.info(symbol) {
+        SymbolInfo::Complete(ty) => *ty,
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol });
+        }
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol }),
+    };
+    let found = crate::descriptor::primitive_local_type(
+        context.store,
+        context.definitions,
+        symbol,
+        semantic_type,
+    )?;
+    if found != local.ty() {
+        return Err(JvmCodegenError::LocalReferenceTypeMismatch {
+            tree,
+            symbol,
+            expected: local.ty(),
+            found: Some(found),
+        });
+    }
+    Ok(Some(*local))
 }
 
 fn emit_expression(
@@ -619,6 +661,9 @@ fn block_value_type(
     else {
         return Ok(None);
     };
+    if let Some(local) = local_reference_slot(context, tree, *symbol)? {
+        return Ok(Some(local.ty()));
+    }
     let Some(parameter) = context
         .method
         .parameters()
@@ -1541,6 +1586,64 @@ mod tests {
             Err(JvmCodegenError::InvalidParameterReference {
                 tree,
                 symbol: Some(parameter),
+            })
+        );
+        assert_eq!(code_bytes(&fixture, &code), before);
+    }
+
+    #[test]
+    fn source_independent_lowering_rejects_locals_without_a_validated_layout() {
+        let mut fixture = Fixture::new(&[]);
+        let local = symbol(
+            &mut fixture.store,
+            SymbolKind::Local,
+            Some(fixture.method.symbol()),
+            fixture.definitions.int,
+        );
+        let reference_type = fixture.store.types.alloc(Type::TermRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TermRefTarget::Symbol(local),
+        });
+        let tree = fixture.ident(reference_type);
+        let mut code = CodeBuilder::new();
+        code.iconst(0).unwrap();
+        let before = code_bytes(&fixture, &code);
+
+        assert_eq!(
+            lower_value_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                tree,
+                &mut code,
+            ),
+            Err(JvmCodegenError::MissingLocalBinding {
+                tree,
+                symbol: local
+            })
+        );
+        assert_eq!(code_bytes(&fixture, &code), before);
+
+        let name_only_type = fixture.store.types.alloc(Type::TermRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TermRefTarget::Name(dotty_core::names::TermName::new(
+                fixture.store.names.intern("sameName"),
+            )),
+        });
+        let name_only = fixture.ident(name_only_type);
+        assert_eq!(
+            lower_value_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                name_only,
+                &mut code,
+            ),
+            Err(JvmCodegenError::InvalidParameterReference {
+                tree: name_only,
+                symbol: None,
             })
         );
         assert_eq!(code_bytes(&fixture, &code), before);

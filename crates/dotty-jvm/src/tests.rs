@@ -1583,6 +1583,229 @@ fn emits_local_initializers_once_in_declaration_order_with_canonical_slots() {
 }
 
 #[test]
+fn loads_initialized_local_by_symbol_slot_when_it_shadows_a_parameter() {
+    let mut fixture = EmissionFixture::new(false);
+    let method_index = 1;
+    let int_ty = fixture.definitions.int;
+    let parameter = fixture.parameters[method_index][1];
+    let initializer = typed_emission_symbol_ident(&mut fixture, parameter);
+    let local = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "left",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let declaration =
+        add_emission_local_valdef(&mut fixture, method_index, local, int_ty, Some(initializer));
+    let local_ref = typed_emission_symbol_ident(&mut fixture, local);
+    fixture.bodies[method_index] = typed_block(&mut fixture, vec![declaration], local_ref, int_ty);
+
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+        declaration,
+        symbol: local,
+        mutable: false,
+    }];
+    let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    let repeated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    assert_eq!(generated.bytes(), repeated.bytes());
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(
+        code,
+        &[0x1c, 0x36, 0x04, 0x15, 0x04, 0xac],
+        "load parameter slot two, store local slot four, then load that exact local slot"
+    );
+}
+
+#[test]
+fn nested_same_named_local_references_keep_their_canonical_slots() {
+    let mut fixture = EmissionFixture::new(false);
+    let method_index = 1;
+    let int_ty = fixture.definitions.int;
+    let parameter = fixture.parameters[method_index][1];
+    let outer_initializer = typed_emission_symbol_ident(&mut fixture, parameter);
+    let outer = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "value",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let outer_declaration = add_emission_local_valdef(
+        &mut fixture,
+        method_index,
+        outer,
+        int_ty,
+        Some(outer_initializer),
+    );
+    let inner_initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(42),
+        }),
+        position: None,
+        ty: int_ty,
+    });
+    let inner = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "value",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let inner_declaration = add_emission_local_valdef(
+        &mut fixture,
+        method_index,
+        inner,
+        int_ty,
+        Some(inner_initializer),
+    );
+    let inner_ref = typed_emission_symbol_ident(&mut fixture, inner);
+    let nested = typed_block(&mut fixture, vec![inner_declaration], inner_ref, int_ty);
+    fixture.bodies[method_index] =
+        typed_block(&mut fixture, vec![outer_declaration], nested, int_ty);
+
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[method_index].locals = vec![
+        JvmLocalBinding {
+            declaration: outer_declaration,
+            symbol: outer,
+            mutable: false,
+        },
+        JvmLocalBinding {
+            declaration: inner_declaration,
+            symbol: inner,
+            mutable: false,
+        },
+    ];
+    let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(
+        code,
+        &[0x1c, 0x36, 0x04, 0x10, 42, 0x36, 0x05, 0x15, 0x05, 0xac],
+        "same-text declarations use distinct slots and the inner symbol loads slot five"
+    );
+}
+
+#[test]
+fn rejects_local_identifiers_without_a_valid_method_binding() {
+    let mut missing = EmissionFixture::new(false);
+    let method_index = 1;
+    let int_ty = missing.definitions.int;
+    let local = add_emission_local_symbol(
+        &mut missing,
+        method_index,
+        "unplanned",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let local_ref = typed_emission_symbol_ident(&mut missing, local);
+    missing.bodies[method_index] = local_ref;
+    assert_eq!(
+        missing.emit(),
+        Err(JvmCodegenError::MissingLocalBinding {
+            tree: local_ref,
+            symbol: local,
+        })
+    );
+
+    let mut foreign = EmissionFixture::new(false);
+    let int_ty = foreign.definitions.int;
+    let local = add_emission_local_symbol(
+        &mut foreign,
+        0,
+        "foreign",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let local_ref = typed_emission_symbol_ident(&mut foreign, local);
+    foreign.bodies[1] = local_ref;
+    assert_eq!(
+        foreign.emit(),
+        Err(JvmCodegenError::InvalidLocalReference {
+            tree: local_ref,
+            symbol: local,
+        })
+    );
+}
+
+#[test]
+fn rejects_local_reads_when_a_control_flow_join_has_an_uninitialized_path() {
+    let mut fixture = EmissionFixture::new(false);
+    let method_index = 1;
+    let int_ty = fixture.definitions.int;
+    let unit_ty = fixture.definitions.unit;
+    let condition_symbol = fixture.parameters[method_index][0];
+    let condition = typed_emission_symbol_ident(&mut fixture, condition_symbol);
+    let local = add_emission_local_symbol(
+        &mut fixture,
+        method_index,
+        "conditional",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: int_ty,
+    });
+    let declaration =
+        add_emission_local_valdef(&mut fixture, method_index, local, int_ty, Some(initializer));
+    let unit_value = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Unit,
+        }),
+        position: None,
+        ty: unit_ty,
+    });
+    let then_branch = typed_block(&mut fixture, vec![declaration], unit_value, unit_ty);
+    let else_branch = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Unit,
+        }),
+        position: None,
+        ty: unit_ty,
+    });
+    let conditional = fixture.ast.alloc(Tree {
+        kind: TreeKind::If(If {
+            cond: condition,
+            then_branch,
+            else_branch,
+        }),
+        position: None,
+        ty: unit_ty,
+    });
+    let local_ref = typed_emission_symbol_ident(&mut fixture, local);
+    fixture.bodies[method_index] = typed_block(&mut fixture, vec![conditional], local_ref, int_ty);
+
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+        declaration,
+        symbol: local,
+        mutable: false,
+    }];
+    assert_eq!(
+        emit_class(&unit, fixture.class, &fixture.definitions),
+        Err(JvmCodegenError::UninitializedLocalRead {
+            tree: local_ref,
+            symbol: local,
+        })
+    );
+}
+
+#[test]
 fn rejects_missing_initializer_type_mismatch_and_self_reference() {
     let mut missing = EmissionFixture::new(false);
     let method_index = 0;
@@ -2847,6 +3070,25 @@ fn add_emission_local_valdef(
             tpt: fixture.bodies[method_index],
             rhs,
             metadata: (),
+        }),
+        position: None,
+        ty,
+    })
+}
+
+fn typed_emission_symbol_ident(
+    fixture: &mut EmissionFixture,
+    symbol: SymbolId,
+) -> TreeId<dotty_core::ast::Typed> {
+    let name = fixture.store.symbols.get(symbol).name;
+    let ty = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(symbol),
+    });
+    fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name,
+            backquoted: false,
         }),
         position: None,
         ty,

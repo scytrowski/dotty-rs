@@ -445,6 +445,23 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         symbol: SymbolId,
     },
+    /// A local identifier is not backed by the current method's validated layout.
+    MissingLocalBinding {
+        tree: TreeId<Typed>,
+        symbol: SymbolId,
+    },
+    /// A typed local identifier targets a symbol that is not an owned local.
+    InvalidLocalReference {
+        tree: TreeId<Typed>,
+        symbol: SymbolId,
+    },
+    /// A local identifier's completed semantic type disagrees with its allocated slot.
+    LocalReferenceTypeMismatch {
+        tree: TreeId<Typed>,
+        symbol: SymbolId,
+        expected: JvmType,
+        found: Option<JvmType>,
+    },
     /// A method plan does not name a typed body root.
     MissingTypedBody { method: SymbolId },
     /// A method body's typed root does not belong to the supplied arena.
@@ -999,7 +1016,8 @@ pub fn lower_value_expression(
 /// `Diverges` has no reachable fallthrough. Blocks discard unused primitive
 /// values with `pop` and stop lowering after a definitely diverging statement.
 /// The expression is built into a fresh method-local instruction builder, so
-/// an error never exposes partial code.
+/// an error never exposes partial code. This standalone API has no local
+/// binding layout; local `Ident` nodes return [`JvmCodegenError::MissingLocalBinding`].
 pub fn lower_expression(
     store: &SemanticStore,
     typed_ast: &TypedAst,
