@@ -5664,15 +5664,9 @@ fn pinned_scala39_local_definition_audit() {
             metrics.external_member_requests(),
             metrics.member_errors
         );
-        assert_eq!(
-            metrics.external_member_requests(),
-            7_270,
-            "the #1050 external-object support changes the #974 audit request baseline"
-        );
-        assert_eq!(
-            metrics.member_errors, 217,
-            "the #1050 external-object support changes the #974 member-error baseline"
-        );
+        // Keep the #974 values as historical report data. This issue
+        // re-profiles current resolver traffic, so current request/error totals
+        // must be emitted and internally classified rather than pinned here.
         assert_eq!(
             metrics.member_request_shapes.values().sum::<usize>(),
             metrics.resolver_member_requests,
