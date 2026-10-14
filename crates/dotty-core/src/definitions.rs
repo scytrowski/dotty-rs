@@ -83,6 +83,11 @@ pub enum IntPrimitiveOperatorRegistrationError {
         operator: &'static str,
         symbol: SymbolId,
     },
+    OperatorMethodNameMismatch {
+        operator: &'static str,
+        symbol: SymbolId,
+        actual: Name,
+    },
     OperatorMethodOwnerMismatch {
         operator: &'static str,
         symbol: SymbolId,
@@ -98,6 +103,10 @@ pub enum IntPrimitiveOperatorRegistrationError {
     },
     DuplicateOperatorSignature {
         operator: &'static str,
+    },
+    DuplicateOperatorSymbol {
+        operator: &'static str,
+        symbol: SymbolId,
     },
     IncompatibleOperatorSignature {
         operator: &'static str,
@@ -383,6 +392,15 @@ impl Definitions {
                         });
                     }
                     let candidate = store.symbols.get(symbol);
+                    if candidate.name != name {
+                        return Err(
+                            IntPrimitiveOperatorRegistrationError::OperatorMethodNameMismatch {
+                                operator: spec.spelling,
+                                symbol,
+                                actual: candidate.name,
+                            },
+                        );
+                    }
                     if candidate.kind != SymbolKind::Method {
                         return Err(
                             IntPrimitiveOperatorRegistrationError::OperatorNameIsNotMethod {
@@ -433,6 +451,14 @@ impl Definitions {
                             return Err(
                                 IntPrimitiveOperatorRegistrationError::DuplicateOperatorSignature {
                                     operator: spec.spelling,
+                                },
+                            );
+                        }
+                        if found[..index].contains(&Some(symbol)) {
+                            return Err(
+                                IntPrimitiveOperatorRegistrationError::DuplicateOperatorSymbol {
+                                    operator: spec.spelling,
+                                    symbol,
                                 },
                             );
                         }
@@ -571,6 +597,9 @@ impl Definitions {
                     return None;
                 }
                 let member = store.symbols.get(symbol);
+                if member.name != name {
+                    return None;
+                }
                 let SymbolInfo::Complete(member_info) = member.info else {
                     continue;
                 };
@@ -585,7 +614,8 @@ impl Definitions {
                     && !method.params[0].erased
                     && !method.params[0].varargs
                     && method.result == spec.result
-                    && ids[index].replace(symbol).is_some()
+                    && (ids[..index].contains(&Some(symbol))
+                        || ids[index].replace(symbol).is_some())
                 {
                     return None;
                 }
@@ -899,6 +929,53 @@ mod tests {
             )
         );
         assert_eq!(store.scopes.get(scope).lookup_all(&name), &[plus, plus]);
+    }
+
+    #[test]
+    fn operator_registry_rejects_a_symbol_entered_under_another_operator_name() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let before = definitions.int_primitive_operator_symbols(&store).unwrap();
+        let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
+        let SymbolInfo::Complete(info) = store.symbols.get(int_symbol).info else {
+            unreachable!();
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            unreachable!();
+        };
+        let scope = info.declarations;
+        let plus_name = Name::new(store.names.get("+").unwrap(), Namespace::Term);
+        let minus_name = Name::new(store.names.get("-").unwrap(), Namespace::Term);
+
+        store.scopes.get_mut(scope).remove(before.minus);
+        store.scopes.get_mut(scope).enter(minus_name, before.plus);
+
+        assert_eq!(
+            definitions.ensure_int_primitive_operators(&mut store),
+            Err(
+                IntPrimitiveOperatorRegistrationError::OperatorMethodNameMismatch {
+                    operator: "-",
+                    symbol: before.plus,
+                    actual: plus_name,
+                }
+            )
+        );
+        assert!(definitions.int_primitive_operator_symbols(&store).is_none());
+        assert_eq!(
+            store.scopes.get(scope).lookup_all(&plus_name),
+            &[before.plus]
+        );
+        assert_eq!(
+            store.scopes.get(scope).lookup_all(&minus_name),
+            &[before.plus]
+        );
+        assert!(
+            !store
+                .scopes
+                .get(scope)
+                .lookup_all(&minus_name)
+                .contains(&before.minus)
+        );
     }
 
     #[test]
