@@ -9,6 +9,7 @@ from import_prefix_profile import (
     logical_resources,
     package_resource_evidence,
     render_profile,
+    source_package_candidates,
 )
 
 
@@ -87,6 +88,36 @@ class ImportPrefixProfileTest(unittest.TestCase):
         )
         result = classify_target([row], [])
         self.assertIn("source_package_scope_resolver_registry_gap", result)
+
+    def test_enclosing_source_candidates_include_missing_paths_for_classpath_probe(self):
+        row = self.observation(
+            source_package_registry_lookup=(
+                "relative=missing@a.b.ast.core;"
+                "enclosing=a.b=found:Package@a.b.core,a=missing@a.core;root=missing"
+            )
+        )
+        self.assertEqual(
+            source_package_candidates(row),
+            {"a.b.ast.core", "a.b.core", "a.core"},
+        )
+
+    def test_qualified_source_candidate_is_probed_in_classpath(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = self.make_archive(
+                Path(temporary), "qualified.jar", {"a/b/c/Value.class": b"class"}
+            )
+            resources, versions, directories = logical_resources(archive, 21)
+            row = self.observation(
+                target_key="c::<first-segment-unresolved>",
+                qualifier_segments="c.Value",
+                source_package_registry_lookup=(
+                    "relative=missing@a.b.c;enclosing=a.b=missing@a.b.c;root=missing"
+                ),
+            )
+            _, evidence, _ = render_profile(
+                [row], [("JAR:qualified.jar", resources, versions, directories)]
+            )
+        self.assertIn("c::<first-segment-unresolved>\ta.b.c\tTrue\tFalse", evidence)
 
     def test_object_or_class_qualifier_is_not_misclassified_as_package(self):
         row = self.observation(

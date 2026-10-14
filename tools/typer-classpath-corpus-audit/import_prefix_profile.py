@@ -124,6 +124,19 @@ def failed_prefix(row: dict[str, str]) -> list[str]:
     return prefix
 
 
+def source_package_candidates(row: dict[str, str]) -> set[str]:
+    lookup = row["source_package_registry_lookup"]
+    candidates = set()
+    relative = lookup.partition("relative=")[2].split(";", 1)[0]
+    if "@" in relative:
+        candidates.add(relative.rsplit("@", 1)[1])
+    enclosing = lookup.partition("enclosing=")[2].split(";root=", 1)[0]
+    for candidate in enclosing.split(","):
+        if "@" in candidate:
+            candidates.add(candidate.rsplit("@", 1)[1])
+    return candidates
+
+
 def classify_target(
     rows: list[dict[str, str]],
     roots: list[tuple[str, set[str], dict[str, int], set[str]]],
@@ -146,9 +159,10 @@ def classify_target(
             categories.add("unknown_or_ambiguous_source_lookup")
     failed_evidence = []
     for row in rows:
-        prefix = failed_prefix(row)
-        if prefix:
-            failed_evidence.append(package_resource_evidence(prefix, roots))
+        prefixes = {".".join(failed_prefix(row)), *source_package_candidates(row)}
+        for prefix in prefixes:
+            if prefix:
+                failed_evidence.append(package_resource_evidence(prefix.split("."), roots))
     if any(item["direct"] for item in failed_evidence):
         categories.add("direct_class_or_tasty_evidence")
     if any(item["descendants"] and not item["direct"] for item in failed_evidence):
@@ -187,6 +201,7 @@ def render_profile(
                 if segment and segment != "_root_"
             ]
             prefixes.update(".".join(segments[:length]) for length in range(1, len(segments) + 1))
+            prefixes.update(source_package_candidates(row))
         for prefix in sorted(prefixes):
             package_segments = prefix.split(".")
             evidence = package_resource_evidence(package_segments, roots)
@@ -275,12 +290,16 @@ def main() -> int:
     )
     outcomes = sorted({row["resolver_outcome"] for row in observations})
     source_package_hits = sum(
-        "relative=found:Package" in row["source_package_registry_lookup"]
-        or "root=found:Package" in row["source_package_registry_lookup"]
+        "found:Package" in row["source_package_registry_lookup"]
         for row in observations
     )
     relative_package_hits = sum(
         "relative=found:Package" in row["source_package_registry_lookup"]
+        for row in observations
+    )
+    enclosing_package_hits = sum(
+        "found:Package"
+        in row["source_package_registry_lookup"].split("enclosing=", 1)[-1].split(";root=", 1)[0]
         for row in observations
     )
     ranked_targets = defaultdict(list)
@@ -291,7 +310,8 @@ def main() -> int:
         f"unique_blocker_origins={len(blocker_origins)} direct={direct} inherited={inherited} "
         f"unknown_origins={unknown_origins} root_qualified={root_qualified} "
         f"source_relative_candidates={source_relative} source_package_registry_hits={source_package_hits} "
-        f"relative_package_registry_hits={relative_package_hits} roots={len(roots)} "
+        f"relative_package_registry_hits={relative_package_hits} "
+        f"enclosing_package_registry_hits={enclosing_package_hits} roots={len(roots)} "
         f"classifications={categories} outcomes={outcomes}"
     )
     print("ranked_targets_by_weight:")

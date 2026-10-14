@@ -41,6 +41,7 @@ def main() -> int:
         output.mkdir()
         fixtures = {
             "Defs.scala": "package a.b\nclass C\nobject Obj { val value = 1 }\n",
+            "StackedCore.scala": "package a.core\nobject Obj { val value = 1 }\n",
             "Deep.scala": "package middle.deep.third\nclass Leaf\n",
             "RootLocal.scala": "package b\nobject Local { class Root }\n",
             "NestedLocal.scala": "package a.b\nobject Local { class Nested }\n",
@@ -53,6 +54,7 @@ def main() -> int:
             "ImportRoot.scala": "package fixture\nimport _root_.a.b.C\nobject ImportRoot { val value: C = new C }\n",
             "ImportIntermediate.scala": "package fixture\nimport _root_.middle.deep.third.Leaf\nobject ImportIntermediate { val value: Leaf = new Leaf }\n",
             "ImportSourceRelative.scala": "package a.consumer\nimport b.Local.Relative\nobject ImportSourceRelative { val value: Relative = new Relative }\n",
+            "ImportStackedPackage.scala": "package a\npackage ast\nimport core.Obj\nobject ImportStackedPackage { val value = Obj.value }\n",
             "ImportRootFallback.scala": "package z.consumer\nimport b.Local.Root\nobject ImportRootFallback { val value: Root = new Root }\n",
             "ImportPackage.scala": "package fixture\nimport collision.Target.FromPackage\nobject ImportPackage { val value: FromPackage = new FromPackage }\n",
         }
@@ -161,8 +163,8 @@ def main() -> int:
             raise SystemExit("Scala 3.9 did not prefer the lexical source package when both paths exist")
 
     print(
-        "scala=3.9.0 positive_imports=class,object,object_member,rename,_root_,root_package_from_nested_context,current_package_relative,descendant_only_intermediate "
-        "negative_imports=absent_root,missing_selected_member,source_relative_wins_collision,enclosing_package_not_searched,object_package_name_collision;root_fallback=success"
+        "scala=3.9.0 positive_imports=class,object,object_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate "
+        "negative_imports=absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision;root_fallback=success"
     )
     return 0
 

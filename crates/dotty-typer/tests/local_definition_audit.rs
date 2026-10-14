@@ -13086,21 +13086,47 @@ fn import_prefix_observation(
     .concat()
     .join(".");
     let rooted = qualifier.first().is_some_and(|segment| segment == "_root_");
-    let relative_candidate = if rooted || context_package.starts_with('<') {
-        None
+    let lexical_package_chain = selected_context
+        .map(|(context_id, _)| source_context_package_chain(index, store, context_id))
+        .unwrap_or_default();
+    let relative_candidate = lexical_package_chain
+        .first()
+        .filter(|_| !rooted)
+        .map(|package| format!("{package}.{failed_prefix}"));
+    let root_candidate = failed_prefix.clone();
+    let enclosing_candidates = if rooted {
+        Vec::new()
     } else {
-        let candidate = format!("{context_package}.{failed_prefix}");
-        source_package_paths
-            .contains(&candidate)
-            .then_some(candidate)
+        lexical_package_chain
+            .iter()
+            .skip(1)
+            .map(|package| {
+                let candidate = format!("{package}.{failed_prefix}");
+                if source_package_paths.contains(&candidate) {
+                    format!("{package}=found:Package@{candidate}")
+                } else {
+                    format!("{package}=missing@{candidate}")
+                }
+            })
+            .collect::<Vec<_>>()
     };
-    let root_candidate = failed_prefix;
     let source_package_registry_lookup = format!(
-        "relative={};root={}",
+        "relative={};enclosing={};root={}",
         relative_candidate.as_deref().map_or_else(
-            || "missing".to_owned(),
-            |path| format!("found:Package@{path}")
+            || "not-applicable".to_owned(),
+            |path| {
+                if source_package_paths.contains(path) {
+                    format!("found:Package@{path}")
+                } else {
+                    format!("missing@{path}")
+                }
+            }
         ),
+        if enclosing_candidates.is_empty() {
+            "none".to_owned()
+        } else {
+            enclosing_candidates.join(",")
+        },
         if source_package_paths.contains(&root_candidate) {
             format!("found:Package@{root_candidate}")
         } else {
@@ -13200,6 +13226,30 @@ fn source_scoped_lookup(
         context = parent;
     }
     "missing".to_owned()
+}
+
+fn source_context_package_chain(
+    index: &dotty_core::SourceSemanticIndex,
+    store: &SemanticStore,
+    mut context: dotty_core::SourceContextId,
+) -> Vec<String> {
+    let mut packages = Vec::new();
+    let mut visited_contexts = HashSet::new();
+    let mut visited_packages = BTreeSet::new();
+    while visited_contexts.insert(context.index()) {
+        let Some(source_context) = index.try_source_context(context) else {
+            break;
+        };
+        let package = source_package_path(store, source_context.owner);
+        if !package.starts_with('<') && visited_packages.insert(package.clone()) {
+            packages.push(package);
+        }
+        let Some(parent) = source_context.parent else {
+            break;
+        };
+        context = parent;
+    }
+    packages
 }
 
 fn source_package_path(store: &SemanticStore, mut owner: SymbolId) -> String {
@@ -16359,6 +16409,63 @@ mod resolver_profile_tests {
 
         assert!(inventory.contains("alpha"));
         assert!(inventory.contains("alpha.beta"));
+    }
+
+    #[test]
+    fn import_prefix_inventory_uses_actual_stacked_package_contexts() {
+        fn package_chain(source_text: &str) -> Vec<String> {
+            let source = SourceId::from_index(0);
+            let mut store = SemanticStore::new();
+            let _definitions = Definitions::bootstrap(&mut store);
+            let scanner = ContextualScanner::new(source_text).unwrap();
+            let parsed = parse_compilation_unit(
+                SourceText::new(source_text).unwrap(),
+                source,
+                scanner,
+                &mut store.names,
+            );
+            let mut packages = Packages::new();
+            let index = name_compilation_unit(
+                &parsed.ast,
+                parsed.root,
+                source,
+                "ImportPrefixContext.scala",
+                &mut store,
+                &mut packages,
+            )
+            .unwrap();
+            let import_tree = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| matches!(&node.kind, TreeKind::Import(_)).then_some(tree))
+                .unwrap();
+            let method = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    matches!(&node.kind, TreeKind::DefDef(_))
+                        .then(|| index.symbol_at(source, tree))
+                        .flatten()
+                })
+                .unwrap();
+            let mut context = index.declaration_context_of(method).unwrap();
+            loop {
+                let source_context = index.try_source_context(context).unwrap();
+                if source_context.import == Some(import_tree) {
+                    return source_context_package_chain(&index, &store, context);
+                }
+                context = source_context.parent.unwrap();
+            }
+        }
+
+        let stacked = package_chain(
+            "package a\npackage ast\nimport core.Obj\nobject Use { def run = Obj.value }\n",
+        );
+        assert_eq!(stacked, ["a.ast", "a"]);
+
+        let dotted =
+            package_chain("package a.ast\nimport core.Obj\nobject Use { def run = Obj.value }\n");
+        assert_eq!(dotted, ["a.ast"]);
     }
 
     #[test]
