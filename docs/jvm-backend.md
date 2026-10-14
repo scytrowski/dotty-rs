@@ -249,18 +249,34 @@ compared byte-for-byte across independent frontend runs; decoded class-file
 references and instruction order are checked without hand-authored typed
 trees or constant-pool indexes. `WhileLocals` exercises zero and one iteration,
 mutable Boolean conditions, nested `If`/`While`, returning bodies, and discarded
-primitive body values. Java harnesses check each result under `java -Xverify:all`.
+primitive body values. `LocalState.scala` is compiled twice through fresh
+frontend sessions and output directories; its complete class bytes must match.
+It covers parameter-copying `val`, reassignment of a mutable `var`, a source
+`while`, a local shadowing a parameter, and nested blocks with same-named
+locals. The test asserts method descriptors, slot-specific loads and stores,
+`max_stack`, `max_locals`, branch targets, sorted decoded `StackMapTable` frame
+PCs, class-file version 65, full class-file decoding, and reference validity.
+Java harnesses check all local-state results under `java -Xverify:all`.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
-Negative source tests verify that field initialization, local `val`, invalid
-while conditions, same-class calls inside loop control flow, private
-construction, and parser diagnostics fail at their actual pipeline stage
-without leaving a `.class` file. Existing backend typed-tree tests cover
-unsupported receivers, `using` calls, static/extension methods, mismatched
-method references and arguments, and other unsupported call shapes. Run the
-test locally with `cargo test --test jvm_source_compilation --locked`; without
-the JDK it still runs structural and negative checks and explicitly skips Java
-verification.
+Negative source tests verify that field initialization, invalid while
+conditions, same-class calls inside loop control flow, private
+construction, immutable-local assignment, missing local references, mismatched
+local initializers and assignments, Unit locals, deferred reference locals,
+pattern locals, and parser diagnostics fail at their actual pipeline stage
+without leaving a `.class` file. Backend unit tests reject missing, foreign, or
+wrong-owner local bindings.
+Existing backend typed-tree tests cover unsupported receivers, `using` calls,
+static/extension methods, mismatched method references and arguments, and other
+unsupported call shapes. Run the test locally with:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation --locked
+```
+
+Without the JDK it still runs structural and negative checks and explicitly
+skips Java verification. Primitive arithmetic, relational operators, and
+general reference-bearing control-flow states remain deferred.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
