@@ -1059,10 +1059,15 @@ fn validate_branch(
     let tree_ty = context.tree(tree)?.ty;
     match flow {
         Flow::Diverges => {
+            // Recursive lowering proves terminal flow before these Unit-valued
+            // forms can return Diverges; other Unit nodes remain unsupported.
             let diverges_with_supported_type =
                 is_nothing_type(context.store, tree_ty, context.definitions)
                     || (is_unit_type(context.store, tree_ty, context.definitions)
-                        && matches!(&context.tree(tree)?.kind, TreeKind::If(_)));
+                        && matches!(
+                            &context.tree(tree)?.kind,
+                            TreeKind::If(_) | TreeKind::Assign(_) | TreeKind::Block(_)
+                        ));
             if diverges_with_supported_type {
                 Ok(())
             } else {
