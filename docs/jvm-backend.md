@@ -123,6 +123,17 @@ typed-result mismatches return structured errors, and a failed method does not
 produce a class artifact. Standalone expression/body lowering has no emission
 plan, so it cannot resolve `Apply` targets.
 
+Typed `Block` lowering evaluates supported stats from left to right, then
+lowers the final expression once. An unused Int/Boolean value is discarded
+with one `pop`; Unit already leaves an empty operand stack and needs no pop.
+The final value remains available to its parent expression or method return.
+If a stat definitely returns, lowering stops there and omits the unreachable
+suffix, so dead instructions do not reach CFG analysis. A normally completing
+Unit method receives one trailing `return`; explicit returns remain terminal.
+The block's declared type is checked against its final expression flow.
+`ValDef`, assignment, loops, and other unsupported stats return structured
+errors; local variable storage and mutation are outside this subset.
+
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
 semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI

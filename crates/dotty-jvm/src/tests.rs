@@ -6,7 +6,7 @@ use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_core::ast::{
-    Apply, ApplyKind, Ident, If, Literal, Select, This, Tree, TreeKind, TypeApply, TypedAst,
+    Apply, ApplyKind, Block, Ident, If, Literal, Select, This, Tree, TreeKind, TypeApply, TypedAst,
 };
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId};
@@ -20,6 +20,7 @@ use dotty_core::types::{
 };
 use std::fs;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
@@ -1886,6 +1887,19 @@ fn typed_call(
     })
 }
 
+fn typed_block(
+    fixture: &mut EmissionFixture,
+    stats: Vec<TreeId<dotty_core::ast::Typed>>,
+    expr: TreeId<dotty_core::ast::Typed>,
+    ty: dotty_core::TypeId,
+) -> TreeId<dotty_core::ast::Typed> {
+    fixture.ast.alloc(Tree {
+        kind: TreeKind::Block(Block { stats, expr }),
+        position: None,
+        ty,
+    })
+}
+
 fn encode_receiver_code(code: dotty_classfile::bytecode::CodeBuilder) -> Vec<u8> {
     let mut class = ClassFileBuilder::new(
         "example/Receiver",
@@ -2328,6 +2342,182 @@ fn emits_nested_calls_and_evaluates_two_arguments_in_source_order() {
     assert_eq!(&code[..4], &[0x2a, 0x1d, 0x1c, 0xb6]);
     assert_eq!(code[6], 0xac);
     assert_virtual_method_ref(&class, code, 3, "example/Answer", "combine", "(II)I");
+}
+
+#[test]
+fn lowers_block_call_stats_in_source_order_with_exact_pop_and_invocations() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let identity =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let identity_parameter = fixture.parameters[2][0];
+    set_method_body_to_parameter(&mut fixture, identity, identity_parameter);
+
+    let select_left = fixture.parameters[1][1];
+    let prefix = fixture.definitions.no_prefix;
+    let left = typed_method_ident_with_prefix(&mut fixture, select_left, prefix);
+    let first_call = typed_call_to(&mut fixture, identity, vec![left], int_type, false);
+    let constant = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(42),
+        }),
+        position: None,
+        ty: int_type,
+    });
+    let final_call = typed_call_to(&mut fixture, identity, vec![constant], int_type, false);
+    fixture.bodies[1] = typed_block(&mut fixture, vec![first_call], final_call, int_type);
+
+    let generated = fixture.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(code.len(), 13);
+    assert_eq!(&code[..2], &[0x2a, 0x1c]);
+    assert_eq!(code[2], 0xb6);
+    assert_eq!(code[5], 0x57);
+    assert_eq!(&code[6..9], &[0x2a, 0x10, 42]);
+    assert_eq!(code[9], 0xb6);
+    assert_eq!(code[12], 0xac);
+    assert_virtual_method_ref(&class, code, 2, "example/Answer", "identity", "(I)I");
+    assert_virtual_method_ref(&class, code, 9, "example/Answer", "identity", "(I)I");
+
+    if require_jdk_or_skip() {
+        verify_emitted_call_class_with_jdk(
+            generated.bytes(),
+            "public class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); System.out.println(answer.select(true, 7, 9) + \":\" + answer.select(false, 11, 13)); } }\n",
+            "42:42",
+        );
+    }
+}
+
+#[test]
+fn lowers_nested_blocks_and_discards_each_intermediate_call_result() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let identity =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let identity_parameter = fixture.parameters[2][0];
+    set_method_body_to_parameter(&mut fixture, identity, identity_parameter);
+
+    let select_left = fixture.parameters[1][1];
+    let prefix = fixture.definitions.no_prefix;
+    let left = typed_method_ident_with_prefix(&mut fixture, select_left, prefix);
+    let first_call = typed_call_to(&mut fixture, identity, vec![left], int_type, false);
+    let twenty = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(20),
+        }),
+        position: None,
+        ty: int_type,
+    });
+    let inner_result = typed_call_to(&mut fixture, identity, vec![twenty], int_type, false);
+    let inner = typed_block(&mut fixture, vec![first_call], inner_result, int_type);
+    let forty_two = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(42),
+        }),
+        position: None,
+        ty: int_type,
+    });
+    let final_call = typed_call_to(&mut fixture, identity, vec![forty_two], int_type, false);
+    fixture.bodies[1] = typed_block(&mut fixture, vec![inner], final_call, int_type);
+
+    let generated = fixture.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert_eq!(code.len(), 20);
+    assert_eq!(&code[..2], &[0x2a, 0x1c]);
+    assert_eq!(code[2], 0xb6);
+    assert_eq!(code[5], 0x57);
+    assert_eq!(&code[6..9], &[0x2a, 0x10, 20]);
+    assert_eq!(code[9], 0xb6);
+    assert_eq!(code[12], 0x57);
+    assert_eq!(&code[13..16], &[0x2a, 0x10, 42]);
+    assert_eq!(code[16], 0xb6);
+    assert_eq!(code[19], 0xac);
+    for offset in [2, 9, 16] {
+        assert_virtual_method_ref(&class, code, offset, "example/Answer", "identity", "(I)I");
+    }
+}
+
+#[test]
+fn unit_call_stat_needs_no_pop_and_unit_block_ends_with_return() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let unit_type = fixture.definitions.unit;
+    let noop = add_call_target_method(&mut fixture, "noop", &[], unit_type);
+    let identity =
+        add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let identity_parameter = fixture.parameters[3][0];
+    set_method_body_to_parameter(&mut fixture, identity, identity_parameter);
+
+    let noop_call = typed_call_to(&mut fixture, noop, Vec::new(), unit_type, false);
+    let forty_two = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(42),
+        }),
+        position: None,
+        ty: int_type,
+    });
+    let final_call = typed_call_to(&mut fixture, identity, vec![forty_two], int_type, false);
+    fixture.bodies[1] = typed_block(&mut fixture, vec![noop_call], final_call, int_type);
+
+    let declarations = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => panic!("fixture class info should be ClassInfo"),
+        },
+        _ => panic!("fixture class info should be complete"),
+    };
+    let (only_unit, parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        "onlyUnit",
+        &[],
+        unit_type,
+    );
+    fixture.methods.push(only_unit);
+    fixture.parameters.push(parameters);
+    let unit_literal = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Unit,
+        }),
+        position: None,
+        ty: unit_type,
+    });
+    let only_unit_body = typed_block(&mut fixture, vec![noop_call], unit_literal, unit_type);
+    fixture.bodies.push(only_unit_body);
+
+    let generated = fixture.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let select_code = emitted_method_code(&class, "select");
+    assert_eq!(select_code.len(), 11);
+    assert_eq!(
+        &select_code[..4],
+        &[0x2a, 0xb6, select_code[2], select_code[3]]
+    );
+    assert_eq!(select_code[4], 0x2a);
+    assert_eq!(&select_code[5..7], &[0x10, 42]);
+    assert_eq!(select_code[7], 0xb6);
+    assert_eq!(select_code[10], 0xac);
+    assert_virtual_method_ref(&class, select_code, 1, "example/Answer", "noop", "()V");
+    assert_virtual_method_ref(&class, select_code, 7, "example/Answer", "identity", "(I)I");
+    assert_eq!(emitted_method_code(&class, "onlyUnit").len(), 5);
+    assert_eq!(
+        emitted_method_code(&class, "onlyUnit"),
+        [0x2a, 0xb6, select_code[2], select_code[3], 0xb1]
+    );
+
+    if require_jdk_or_skip() {
+        verify_emitted_call_class_with_jdk(
+            generated.bytes(),
+            "public class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); answer.onlyUnit(); System.out.println(answer.select(true, 7, 9)); } }\n",
+            "42",
+        );
+    }
 }
 
 #[test]
@@ -3504,8 +3694,7 @@ fn jdk_tool_major_version(tool: &str) -> Option<u32> {
 }
 
 fn verify_emitted_class_with_jdk(bytes: &[u8]) {
-    let directory = std::env::temp_dir().join(format!("dotty-jvm-emission-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
+    let directory = jdk_test_directory("emission");
     let class_directory = directory.join("example");
     fs::create_dir_all(&class_directory).unwrap();
     fs::write(class_directory.join("Answer.class"), bytes).unwrap();
@@ -3568,9 +3757,7 @@ fn verify_emitted_class_with_jdk(bytes: &[u8]) {
 }
 
 fn verify_emitted_call_class_with_jdk(bytes: &[u8], harness_source: &str, expected_output: &str) {
-    let directory =
-        std::env::temp_dir().join(format!("dotty-jvm-call-emission-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
+    let directory = jdk_test_directory("call-emission");
     let class_directory = directory.join("example");
     fs::create_dir_all(&class_directory).unwrap();
     fs::write(class_directory.join("Answer.class"), bytes).unwrap();
@@ -3616,6 +3803,15 @@ fn verify_emitted_call_class_with_jdk(bytes: &[u8], harness_source: &str, expect
         expected_output
     );
     fs::remove_dir_all(directory).unwrap();
+}
+
+fn jdk_test_directory(name: &str) -> std::path::PathBuf {
+    static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
+    let sequence = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "dotty-jvm-{name}-{}-{sequence}",
+        std::process::id()
+    ))
 }
 
 #[test]
