@@ -85,6 +85,24 @@ resolution.
   (ordered, first-match-wins). JAR/JMOD reading includes this crate's
   own ZIP central-directory reader and DEFLATE inflater — no external
   archive dependency.
+- Two package-evidence queries with distinct contracts:
+
+  | Check | Meaning |
+  | --- | --- |
+  | `contains_package` | A usable class/TASTy resource is directly in the package. |
+  | `contains_package_prefix` | A usable class/TASTy resource is in the package or any descendant package. |
+
+  Package-prefix evidence is based on logical `.class`/`.tasty` resource
+  names; it does not decode resource bytes, create package symbols, or prove
+  that the package has a direct class, module, or package-object term.
+  Directory entries must be files within the classpath root; archive package
+  prefixes are indexed from resource names, not ZIP directory records.
+  Multi-release JAR entries contribute to this query only when the manifest
+  declares `Multi-Release: true`, and only for versions from 9 through the
+  configured effective release. JMOD resources are considered only under
+  their `classes/` root. The empty path represents the unnamed/default
+  package boundary, while `_root_` is a Scala source lookup marker; these
+  classpath checks do not implement Scala default imports or source lookup.
 - Dual-format loading: a classpath entry reports `ClassFormat::Class` or
   `ClassFormat::Tasty` per `ClassResource`; `.tasty` is preferred when
   both exist for the same name.

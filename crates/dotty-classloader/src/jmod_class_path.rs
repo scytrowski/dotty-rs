@@ -1,6 +1,7 @@
 use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::zip_archive::ZipArchive;
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
@@ -19,6 +20,7 @@ const JMOD_MAGIC: [u8; 4] = [0x4A, 0x4D, 0x01, 0x00];
 pub struct JmodClassPath {
     path: PathBuf,
     archive: ZipArchive,
+    package_prefixes: HashSet<String>,
 }
 
 impl JmodClassPath {
@@ -35,8 +37,13 @@ impl JmodClassPath {
         bytes.drain(..JMOD_MAGIC.len());
 
         let archive = ZipArchive::open(bytes)?;
+        let package_prefixes = archive.package_prefixes_under("classes/");
 
-        Ok(Self { path, archive })
+        Ok(Self {
+            path,
+            archive,
+            package_prefixes,
+        })
     }
 }
 
@@ -70,6 +77,13 @@ impl ClassPathEntry for JmodClassPath {
         };
         Ok(self.archive.contains_package(&prefix))
     }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !crate::class_path::safe_package_segments(package) {
+            return Ok(false);
+        }
+        Ok(self.package_prefixes.contains(&package.join("/")))
+    }
 }
 
 #[cfg(test)]
@@ -78,6 +92,14 @@ mod tests {
 
     fn fixture_path(relative_path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path)
+    }
+
+    fn write_temp_jmod(unique_name: &str, entries: &[(&str, &[u8])]) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("dotty_classloader_jmod_{unique_name}.jmod"));
+        let mut bytes = JMOD_MAGIC.to_vec();
+        bytes.extend(crate::jar_class_path::tests::minimal_stored_zip(entries));
+        std::fs::write(&path, bytes).unwrap();
+        path
     }
 
     #[test]
@@ -122,6 +144,43 @@ mod tests {
             .unwrap();
 
         assert!(resource.is_none());
+    }
+
+    #[test]
+    fn package_prefix_uses_only_class_resources_under_the_jmod_classes_root() {
+        let path = write_temp_jmod(
+            "nested_package_prefix",
+            &[
+                ("classes/a/b/c/Leaf.class", b"class bytes"),
+                ("classes/a/d/e/Leaf.tasty", b"tasty bytes"),
+                ("classes/a/beta/Only.scala", b"source only"),
+                ("classes/META-INF/Only.class", b"metadata only"),
+                ("bin/a/b/Outside.class", b"non-class section"),
+                ("classes/a/../outside/Unsafe.class", b"unsafe path"),
+            ],
+        );
+        let class_path = JmodClassPath::new(&path).unwrap();
+
+        assert!(!class_path.contains_package(&["a"]).unwrap());
+        assert!(class_path.contains_package_prefix(&[]).unwrap());
+        assert!(class_path.contains_package_prefix(&["a"]).unwrap());
+        assert!(class_path.contains_package_prefix(&["a", "b"]).unwrap());
+        assert!(
+            class_path
+                .contains_package_prefix(&["a", "b", "c"])
+                .unwrap()
+        );
+        assert!(
+            class_path
+                .contains_package_prefix(&["a", "d", "e"])
+                .unwrap()
+        );
+        assert!(!class_path.contains_package_prefix(&["a", "beta"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["META-INF"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["bin"]).unwrap());
+        assert!(!class_path.contains_package_prefix(&["outside"]).unwrap());
+
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

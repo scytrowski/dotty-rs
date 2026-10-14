@@ -199,3 +199,107 @@ fn resolves_a_nested_package_path_under_the_root() {
 
     assert_eq!(resource.bytes(), pool_sample_bytes().as_slice());
 }
+
+#[test]
+fn package_prefix_finds_class_resources_in_nested_packages_without_changing_direct_checks() {
+    let root = TemporaryDirectory::new("directory-package-prefix-descendant");
+    fs::create_dir_all(root.path().join("a/b/c")).unwrap();
+    fs::create_dir_all(root.path().join("a/beta")).unwrap();
+    fs::create_dir_all(root.path().join("a/empty")).unwrap();
+    fs::write(root.path().join("a/b/c/Leaf.class"), b"class bytes").unwrap();
+    fs::write(root.path().join("a/beta/Only.scala"), b"source only").unwrap();
+    fs::write(root.path().join("a/beta/Only.txt"), b"not a class resource").unwrap();
+    fs::write(root.path().join("a/beta/Only.jar"), b"not a class resource").unwrap();
+
+    let class_path = DirectoryClassPath::new(root.path().clone());
+
+    assert!(!class_path.contains_package(&["a"]).unwrap());
+    assert!(!class_path.contains_package(&["a", "b"]).unwrap());
+    assert!(class_path.contains_package_prefix(&["a"]).unwrap());
+    assert!(class_path.contains_package_prefix(&["a", "b"]).unwrap());
+    assert!(
+        class_path
+            .contains_package_prefix(&["a", "b", "c"])
+            .unwrap()
+    );
+    assert!(!class_path.contains_package_prefix(&["a", "d"]).unwrap());
+    assert!(!class_path.contains_package_prefix(&["a", "beta"]).unwrap());
+    assert!(!class_path.contains_package_prefix(&["a", "empty"]).unwrap());
+    assert!(class_path.contains_package_prefix(&[]).unwrap());
+}
+
+#[test]
+fn package_prefix_rejects_unsafe_segments() {
+    let root = TemporaryDirectory::new("directory-package-prefix-unsafe");
+    fs::create_dir_all(root.path().join("safe")).unwrap();
+    fs::write(root.path().join("safe/Leaf.class"), b"class bytes").unwrap();
+
+    let class_path = DirectoryClassPath::new(root.path().clone());
+
+    for package in [
+        &["..", "safe"][..],
+        &["safe/.."],
+        &["safe\\.."],
+        &["safe:else"],
+        &["safe\0else"],
+    ] {
+        assert!(!class_path.contains_package_prefix(package).unwrap());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn package_prefix_ignores_resources_with_unsafe_descendant_names() {
+    let root = TemporaryDirectory::new("directory-package-prefix-unsafe-descendants");
+    for path in [
+        "a/b:bad/ColonDirectory.class",
+        "a/c\\bad/BackslashDirectory.tasty",
+        "a/d/ColonFile:bad.class",
+        "a/e/BackslashFile\\bad.tasty",
+    ] {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"unsafe logical name").unwrap();
+    }
+
+    let class_path = DirectoryClassPath::new(root.path().clone());
+
+    assert!(!class_path.contains_package_prefix(&["a"]).unwrap());
+    for name in [
+        "a/b:bad/ColonDirectory",
+        "a/c\\bad/BackslashDirectory",
+        "a/d/ColonFile:bad",
+        "a/e/BackslashFile\\bad",
+    ] {
+        assert!(
+            class_path
+                .find_class(&BinaryName::from_internal(name))
+                .is_err()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn package_prefix_does_not_follow_symlinked_files_or_directories() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = TemporaryDirectory::new("directory-package-prefix-symlinks");
+    let root = workspace.path().join("root");
+    let package = root.join("pkg");
+    fs::create_dir_all(&package).unwrap();
+    let outside = workspace.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("Escaped.class"), b"outside class").unwrap();
+    symlink(outside.join("Escaped.class"), package.join("Escaped.class")).unwrap();
+    symlink(&package, package.join("loop")).unwrap();
+    symlink(
+        workspace.path().join("missing.class"),
+        package.join("Broken.class"),
+    )
+    .unwrap();
+
+    let class_path = DirectoryClassPath::new(root);
+
+    assert!(!class_path.contains_package_prefix(&["pkg"]).unwrap());
+}

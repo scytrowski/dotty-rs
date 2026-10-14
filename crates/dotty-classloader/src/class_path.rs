@@ -192,6 +192,26 @@ pub trait ClassPathEntry: Send + Sync {
         let _ = package;
         Ok(false)
     }
+
+    /// Whether this entry has positive classpath evidence for `package` or
+    /// any descendant package. `true` only establishes that at least one
+    /// usable `.class` or `.tasty` resource exists at or below this logical
+    /// package path; it does not imply a direct class, module, or
+    /// package-object term exists in `package`. `false` means this entry has
+    /// no such evidence and is not a negative result for other entries or
+    /// source declarations.
+    ///
+    /// The default preserves compatibility for custom entries by treating
+    /// [`Self::contains_package`] as partial positive evidence. Such entries
+    /// may not discover descendant-only packages. Filesystem and archive
+    /// implementations must reject unsafe package segments and propagate
+    /// actual I/O or archive errors.
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !safe_package_segments(package) {
+            return Ok(false);
+        }
+        self.contains_package(package)
+    }
 }
 
 /// A [`ClassPathEntry`] backed by a single filesystem directory, mapping
@@ -219,6 +239,92 @@ impl DirectoryClassPath {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(ClassPathError::from(error)),
         }
+    }
+
+    fn contains_package_resource_at_or_below(
+        &self,
+        package: &[&str],
+    ) -> Result<bool, ClassPathError> {
+        if !safe_package_segments(package) {
+            return Ok(false);
+        }
+
+        let root_type = match std::fs::symlink_metadata(&self.root) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if root_type.is_symlink() || !root_type.is_dir() {
+            return Ok(false);
+        }
+
+        let mut package_directory = self.root.clone();
+        for segment in package {
+            package_directory.push(segment);
+            let file_type = match std::fs::symlink_metadata(&package_directory) {
+                Ok(metadata) => metadata.file_type(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error.into()),
+            };
+            if file_type.is_symlink() || !file_type.is_dir() {
+                return Ok(false);
+            }
+        }
+
+        // Iterative traversal is limited to the requested package subtree.
+        // Symlinks are not followed, preventing both cycles and escapes from
+        // the classpath root.
+        let mut pending = vec![(package_directory, package.join("/"))];
+        while let Some((directory, logical_package)) = pending.pop() {
+            let entries = match std::fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                let Some(entry_name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if file_type.is_dir() {
+                    if !safe_package_segments(&[&entry_name]) {
+                        continue;
+                    }
+                    let child_package = if logical_package.is_empty() {
+                        entry_name
+                    } else {
+                        format!("{logical_package}/{entry_name}")
+                    };
+                    pending.push((entry.path(), child_package));
+                } else if file_type.is_file()
+                    && [".class", ".tasty"].iter().any(|extension| {
+                        entry_name
+                            .strip_suffix(extension)
+                            .is_some_and(|simple_name| {
+                                let resource_name = if logical_package.is_empty() {
+                                    simple_name.to_owned()
+                                } else {
+                                    format!("{logical_package}/{simple_name}")
+                                };
+                                BinaryName::from_internal(resource_name).is_path_safe()
+                            })
+                    })
+                {
+                    return Ok(true);
+                }
+            }
+        }
+
+        Ok(false)
     }
 }
 
@@ -278,6 +384,10 @@ impl ClassPathEntry for DirectoryClassPath {
         }
         Ok(false)
     }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        self.contains_package_resource_at_or_below(package)
+    }
 }
 
 /// An ordered, first-match-wins composite of [`ClassPathEntry`]s: entries
@@ -314,6 +424,18 @@ impl ClassPathEntry for CompositeClassPath {
         }
         Ok(false)
     }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        if !safe_package_segments(package) {
+            return Ok(false);
+        }
+        for entry in &self.entries {
+            if entry.contains_package_prefix(package)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 pub(crate) fn safe_package_segments(package: &[&str]) -> bool {
@@ -331,11 +453,52 @@ pub(crate) fn safe_package_segments(package: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct DirectEvidenceClassPath(AtomicUsize);
+
+    impl ClassPathEntry for DirectEvidenceClassPath {
+        fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(package == ["pkg"])
+        }
+    }
 
     #[test]
     fn class_path_error_displays_the_source_error() {
         let error = ClassPathError::from(io::Error::new(io::ErrorKind::PermissionDenied, "nope"));
         assert_eq!(error.to_string(), "classpath I/O error: nope");
+    }
+
+    #[test]
+    fn package_prefix_default_uses_direct_evidence_as_a_compatible_fallback() {
+        let entry = DirectEvidenceClassPath(AtomicUsize::new(0));
+
+        assert!(entry.contains_package_prefix(&["pkg"]).unwrap());
+        assert!(!entry.contains_package_prefix(&["pkg", "nested"]).unwrap());
+        assert_eq!(entry.0.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn package_prefix_default_rejects_unsafe_segments_before_delegating() {
+        let entry = DirectEvidenceClassPath(AtomicUsize::new(0));
+
+        for package in [
+            &["."][..],
+            &[".."],
+            &["a/b"],
+            &["a\\b"],
+            &["a:b"],
+            &["a\0b"],
+            &[""],
+        ] {
+            assert!(!entry.contains_package_prefix(package).unwrap());
+        }
+        assert_eq!(entry.0.load(Ordering::Relaxed), 0);
     }
 
     #[test]
@@ -387,6 +550,21 @@ mod tests {
         }
     }
 
+    struct PrefixEvidenceEntry(Result<bool, ()>);
+
+    impl ClassPathEntry for PrefixEvidenceEntry {
+        fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package_prefix(&self, _package: &[&str]) -> Result<bool, ClassPathError> {
+            self.0
+                .as_ref()
+                .copied()
+                .map_err(|()| ClassPathError::from(io::Error::other("prefix evidence failed")))
+        }
+    }
+
     fn found(marker: u8) -> Result<Option<ClassResource>, ()> {
         Ok(Some(ClassResource::new(
             vec![marker],
@@ -423,6 +601,40 @@ mod tests {
             .unwrap();
 
         assert_eq!(resource.bytes(), &[2]);
+    }
+
+    #[test]
+    fn composite_package_prefix_stops_after_first_positive_evidence() {
+        let composite = CompositeClassPath::new(vec![
+            Box::new(PrefixEvidenceEntry(Ok(false))),
+            Box::new(PrefixEvidenceEntry(Ok(true))),
+            Box::new(PrefixEvidenceEntry(Err(()))),
+        ]);
+
+        assert!(composite.contains_package_prefix(&["a", "b"]).unwrap());
+    }
+
+    #[test]
+    fn composite_package_prefix_propagates_first_error_before_later_evidence() {
+        let composite = CompositeClassPath::new(vec![
+            Box::new(PrefixEvidenceEntry(Err(()))),
+            Box::new(PrefixEvidenceEntry(Ok(true))),
+        ]);
+
+        assert_eq!(
+            composite
+                .contains_package_prefix(&["a"])
+                .unwrap_err()
+                .to_string(),
+            "classpath I/O error: prefix evidence failed"
+        );
+    }
+
+    #[test]
+    fn composite_package_prefix_rejects_unsafe_segments_before_delegating() {
+        let composite = CompositeClassPath::new(vec![Box::new(PrefixEvidenceEntry(Ok(true)))]);
+
+        assert!(!composite.contains_package_prefix(&["a", ".."]).unwrap());
     }
 
     #[test]

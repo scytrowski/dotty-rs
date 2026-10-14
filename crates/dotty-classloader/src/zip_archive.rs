@@ -1,7 +1,7 @@
 use crate::crc32;
 use crate::inflate::{InflateError, inflate};
 use crate::zip_reader::{ZipReadError, ZipReader};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 const END_OF_CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x0605_4B50;
@@ -333,17 +333,28 @@ pub(crate) fn decode_central_directory(
 pub(crate) struct ZipArchive {
     bytes: Vec<u8>,
     entries: HashMap<String, CentralDirectoryEntry>,
+    class_resource_names: Vec<String>,
 }
 
 impl ZipArchive {
     pub(crate) fn open(bytes: Vec<u8>) -> Result<Self, ZipError> {
         let eocd = EndOfCentralDirectory::locate_and_decode(&bytes)?;
-        let entries = decode_central_directory(&bytes, &eocd)?
+        let entries: HashMap<_, _> = decode_central_directory(&bytes, &eocd)?
             .into_iter()
             .map(|entry| (entry.name.clone(), entry))
             .collect();
+        let mut class_resource_names = entries
+            .keys()
+            .filter(|name| name.ends_with(".class") || name.ends_with(".tasty"))
+            .cloned()
+            .collect::<Vec<_>>();
+        class_resource_names.sort();
 
-        Ok(Self { bytes, entries })
+        Ok(Self {
+            bytes,
+            entries,
+            class_resource_names,
+        })
     }
 
     /// Extracts and decompresses the entry named `name`, verifying its
@@ -379,6 +390,43 @@ impl ZipArchive {
                 && !file.contains('/')
                 && (file.ends_with(".class") || file.ends_with(".tasty"))
         })
+    }
+
+    /// Returns the indexed logical package paths proved by class or TASTy
+    /// resources under `archive_root`. Resource names were selected from the
+    /// validated central directory when this archive was opened; no entry is
+    /// decompressed for this query.
+    pub(crate) fn package_prefixes_under(&self, archive_root: &str) -> HashSet<String> {
+        let mut packages = HashSet::new();
+        for resource in &self.class_resource_names {
+            if let Some(logical_path) = resource.strip_prefix(archive_root) {
+                add_resource_package_prefixes(logical_path, &mut packages);
+            }
+        }
+        packages
+    }
+
+    /// Returns the logical package paths proved by eligible multi-release
+    /// resources at or below `release_version`. The caller decides whether
+    /// the archive's manifest enables multi-release lookup.
+    pub(crate) fn versioned_package_prefixes(&self, release_version: u16) -> HashSet<String> {
+        let mut packages = HashSet::new();
+        for resource in &self.class_resource_names {
+            let Some(versioned_path) = resource.strip_prefix("META-INF/versions/") else {
+                continue;
+            };
+            let Some((version_name, logical_path)) = versioned_path.split_once('/') else {
+                continue;
+            };
+            let Ok(version) = version_name.parse::<u16>() else {
+                continue;
+            };
+            if version.to_string() != version_name || !(9..=release_version).contains(&version) {
+                continue;
+            }
+            add_resource_package_prefixes(logical_path, &mut packages);
+        }
+        packages
     }
 
     /// Reads the local file header at `entry.local_header_offset` to find
@@ -437,6 +485,34 @@ impl ZipArchive {
         }
 
         Ok(decompressed)
+    }
+}
+
+fn add_resource_package_prefixes(resource: &str, packages: &mut HashSet<String>) {
+    if resource.starts_with('/') || resource.ends_with('/') {
+        return;
+    }
+    if !resource.ends_with(".class") && !resource.ends_with(".tasty") {
+        return;
+    }
+    if resource.contains('\\') || resource.contains(':') || resource.contains('\0') {
+        return;
+    }
+
+    let segments = resource.split('/').collect::<Vec<_>>();
+    if segments
+        .iter()
+        .any(|segment| segment.is_empty() || *segment == "." || *segment == "..")
+        || segments
+            .first()
+            .is_some_and(|segment| *segment == "META-INF")
+    {
+        return;
+    }
+
+    packages.insert(String::new());
+    for length in 1..segments.len() {
+        packages.insert(segments[..length].join("/"));
     }
 }
 

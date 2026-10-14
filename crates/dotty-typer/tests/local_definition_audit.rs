@@ -422,6 +422,39 @@ impl ClassPathEntry for SharedClassPath {
     ) -> Result<bool, dotty_classloader::classloader::ClassPathError> {
         self.0.contains_package(package)
     }
+
+    fn contains_package_prefix(
+        &self,
+        package: &[&str],
+    ) -> Result<bool, dotty_classloader::classloader::ClassPathError> {
+        self.0.contains_package_prefix(package)
+    }
+}
+
+struct PrefixOnlyAuditEntry;
+
+impl ClassPathEntry for PrefixOnlyAuditEntry {
+    fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        Ok(None)
+    }
+
+    fn contains_package(&self, _package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(false)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(package == ["outer"])
+    }
+}
+
+#[test]
+fn shared_audit_classpath_delegates_descendant_package_evidence() {
+    let classpath = SharedClassPath(Arc::new(CompositeClassPath::new(vec![Box::new(
+        PrefixOnlyAuditEntry,
+    )])));
+
+    assert!(!classpath.contains_package(&["outer"]).unwrap());
+    assert!(classpath.contains_package_prefix(&["outer"]).unwrap());
 }
 
 impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
