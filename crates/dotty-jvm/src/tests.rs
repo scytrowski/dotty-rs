@@ -1,5 +1,7 @@
 use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
+use dotty_classfile::class_file::ClassFileVersion;
+use dotty_classfile::class_file_builder::ClassFileBuilder;
 use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_classfile::reader::Reader;
 use dotty_core::ast::{
@@ -1883,6 +1885,35 @@ fn typed_call(
     })
 }
 
+fn encode_receiver_code(code: dotty_classfile::bytecode::CodeBuilder) -> Vec<u8> {
+    let mut class = ClassFileBuilder::new(
+        "example/Receiver",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    class
+        .add_instance_method("receiver", "()Ljava/lang/Object;", |output| {
+            *output = code;
+            output.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    let bytes = class.encode().unwrap();
+    let mut reader = Reader::new(&bytes);
+    let class = ClassFile::decode(&mut reader).unwrap();
+    class.methods[0]
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Code(code) => Some(code.code.to_vec()),
+            _ => None,
+        })
+        .unwrap()
+}
+
 #[test]
 fn resolves_ident_this_calls_and_supported_zero_argument_results_by_symbol() {
     let mut fixture = EmissionFixture::new(false);
@@ -2002,6 +2033,257 @@ fn resolves_ident_this_calls_and_supported_zero_argument_results_by_symbol() {
     assert_eq!(noop_target.result(), JvmReturnType::Void);
     assert_eq!(value_target.descriptor().as_str(), "()I");
     assert_eq!(fixture.store.checkpoint(), checkpoint);
+}
+
+#[test]
+fn lowers_explicit_and_implicit_same_class_call_receivers_once() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let target = add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let argument = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(3),
+        }),
+        position: None,
+        ty: int_type,
+    });
+
+    let implicit_function = typed_method_ident(&mut fixture, target);
+    let implicit_call = typed_call(
+        &mut fixture,
+        implicit_function,
+        vec![argument],
+        ApplyKind::Regular,
+        int_type,
+    );
+    let implicit_code = fixture
+        .unit()
+        .lower_same_class_call_receiver(
+            fixture.class,
+            fixture.methods[1],
+            implicit_call,
+            &fixture.definitions,
+        )
+        .unwrap();
+    assert_eq!(encode_receiver_code(implicit_code), vec![0x2a, 0xb0]);
+
+    let this_type = fixture.store.types.alloc(Type::ThisType {
+        class: fixture.class,
+    });
+    let this_tree = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: this_type,
+    });
+    let selected_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: this_type,
+        target: TermRefTarget::Symbol(target),
+    });
+    let explicit_function = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: this_tree,
+            name: fixture.store.symbols.get(target).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: selected_type,
+    });
+    let explicit_call = typed_call(
+        &mut fixture,
+        explicit_function,
+        vec![argument],
+        ApplyKind::Regular,
+        int_type,
+    );
+    let explicit_code = fixture
+        .unit()
+        .lower_same_class_call_receiver(
+            fixture.class,
+            fixture.methods[1],
+            explicit_call,
+            &fixture.definitions,
+        )
+        .unwrap();
+    assert_eq!(encode_receiver_code(explicit_code), vec![0x2a, 0xb0]);
+}
+
+#[test]
+fn rejects_unsupported_call_receivers_and_static_caller_contexts() {
+    let mut fixture = EmissionFixture::new(false);
+    let int_type = fixture.definitions.int;
+    let target = add_call_target_method(&mut fixture, "identity", &[("value", int_type)], int_type);
+    let argument = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(3),
+        }),
+        position: None,
+        ty: int_type,
+    });
+
+    let receiver_symbol = fixture.parameters[1][0];
+    let receiver_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(receiver_symbol),
+    });
+    let receiver = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: fixture.store.symbols.get(receiver_symbol).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: receiver_type,
+    });
+    let selected_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: receiver_type,
+        target: TermRefTarget::Symbol(target),
+    });
+    let selected = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver,
+            name: fixture.store.symbols.get(target).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: selected_type,
+    });
+    let call = typed_call(
+        &mut fixture,
+        selected,
+        vec![argument],
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture
+            .unit()
+            .lower_same_class_call_receiver(
+                fixture.class,
+                fixture.methods[1],
+                call,
+                &fixture.definitions,
+            )
+            .unwrap_err(),
+        JvmCodegenError::UnsupportedJvmCallShape {
+            tree: selected,
+            kind: UnsupportedJvmCallShapeKind::NonThisReceiver,
+        }
+    );
+
+    let this_type = fixture.store.types.alloc(Type::ThisType {
+        class: fixture.class,
+    });
+    let qualified_this = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(This {
+            qual: Some(fixture.store.symbols.get(fixture.class).name),
+        }),
+        position: None,
+        ty: this_type,
+    });
+    let qualified_function_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: this_type,
+        target: TermRefTarget::Symbol(target),
+    });
+    let qualified_function = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: qualified_this,
+            name: fixture.store.symbols.get(target).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: qualified_function_type,
+    });
+    let qualified_call = typed_call(
+        &mut fixture,
+        qualified_function,
+        vec![argument],
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture
+            .unit()
+            .lower_same_class_call_receiver(
+                fixture.class,
+                fixture.methods[1],
+                qualified_call,
+                &fixture.definitions,
+            )
+            .unwrap_err(),
+        JvmCodegenError::UnsupportedJvmCallShape {
+            tree: qualified_this,
+            kind: UnsupportedJvmCallShapeKind::QualifiedThisReceiver,
+        }
+    );
+
+    let other_class = alloc_symbol(&mut fixture.store, SymbolKind::Class, None, int_type);
+    let other_this_type = fixture
+        .store
+        .types
+        .alloc(Type::ThisType { class: other_class });
+    let other_this = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: other_this_type,
+    });
+    let other_selected_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: other_this_type,
+        target: TermRefTarget::Symbol(target),
+    });
+    let other_selected = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: other_this,
+            name: fixture.store.symbols.get(target).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: other_selected_type,
+    });
+    let other_call = typed_call(
+        &mut fixture,
+        other_selected,
+        vec![argument],
+        ApplyKind::Regular,
+        int_type,
+    );
+    assert_eq!(
+        fixture
+            .unit()
+            .lower_same_class_call_receiver(
+                fixture.class,
+                fixture.methods[1],
+                other_call,
+                &fixture.definitions,
+            )
+            .unwrap_err(),
+        JvmCodegenError::UnsupportedJvmCallShape {
+            tree: other_selected,
+            kind: UnsupportedJvmCallShapeKind::NonCurrentThis,
+        }
+    );
+
+    let caller = fixture.methods[1];
+    let static_flags = fixture
+        .store
+        .symbols
+        .get(caller)
+        .flags
+        .union(SymbolFlags::STATIC);
+    fixture.store.symbols.get_mut(caller).flags = static_flags;
+    assert_eq!(
+        fixture
+            .unit()
+            .lower_same_class_call_receiver(
+                fixture.class,
+                caller,
+                qualified_call,
+                &fixture.definitions,
+            )
+            .unwrap_err(),
+        JvmCodegenError::UnsupportedJvmSymbolFlag {
+            symbol: caller,
+            flag: UnsupportedJvmSymbolFlag::Static,
+        }
+    );
 }
 
 #[test]
