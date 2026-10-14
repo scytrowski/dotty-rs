@@ -152,8 +152,12 @@ resolution.
 - A shared-store `ClasspathSymbolResolver` implementing core's
   `SymbolResolver` port. It reuses canonical `Definitions`, package
   identities, and `LoadingSession`; package lookups require existing
-  package state or classpath evidence, and class prefixes support
-  `TypeRef`, `Applied`, and `ThisType` shapes. Resolver calls and caller
+  package state or positive classpath evidence for the full requested
+  package path. Descendant evidence can establish an intermediate package;
+  the resolver then reuses `dotty_core::Packages` to enter each canonical
+  segment. A missing target does not allocate its ancestors, and `_root_` is
+  treated as the source root marker rather than a package name. Class prefixes
+  support `TypeRef`, `Applied`, and `ThisType` shapes. Resolver calls and caller
   transaction rollbacks undo package-scope links and session cache entries
   together with store allocations.
 
@@ -277,6 +281,17 @@ also entered under its type name in the scope of the package from its binary
 name. This package-scope index is separate from `Symbol::owner`: a nested
 class can be semantically owned by its enclosing class while remaining
 discoverable by its binary name through the package scope.
+
+Classpath evidence and package identity are separate contracts:
+`contains_package_prefix` says only that a usable class/TASTy resource exists
+at or below a logical path. When that evidence exists for the full requested
+path, the resolver may enter missing intermediate package segments through the
+shared registry. A direct classpath resource is not required at each ancestor.
+These package symbols remain logical namespace entries; they do not imply a
+class, object, or package-object term. Existing source/TASTy package identities
+and their members are reused. New segments are transactional: missing evidence
+creates no partial chain, and resolver or caller rollback removes newly entered
+segments together with their scope links.
 
 ### 4.3 Nesting
 
