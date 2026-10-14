@@ -516,6 +516,7 @@ fn write_instruction(
         Instruction::AStore(index) => write_local(writer, index, 0x3a, 0x4b),
         Instruction::IAdd => writer.write_u1(0x60),
         Instruction::Dup => writer.write_u1(0x59),
+        Instruction::Pop => writer.write_u1(0x57),
         Instruction::GetField(reference) => {
             write_reference(
                 writer,
@@ -924,6 +925,7 @@ mod tests {
         let instructions = [
             Instruction::IAdd,
             Instruction::Dup,
+            Instruction::Pop,
             Instruction::GetStatic(FieldReference::new(operand(field))),
             Instruction::PutStatic(FieldReference::new(operand(field))),
             Instruction::GetField(FieldReference::new(operand(field))),
@@ -938,7 +940,7 @@ mod tests {
             Instruction::LReturn,
         ];
         let actual = assemble(&instructions, &pool).unwrap();
-        let mut expected = vec![0x60, 0x59];
+        let mut expected = vec![0x60, 0x59, 0x57];
         for (opcode, index) in [
             (0xb2, field),
             (0xb3, field),

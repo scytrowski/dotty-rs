@@ -44,6 +44,7 @@
 //! | `AStore` | [`astore`, `astore_0`..`astore_3`, `wide astore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.astore) `0x3a`, `0x4b`..`0x4e`, `0xc4` | 0, 1, or `wide` + 2 | `[reference] -> []` |
 //! | `IAdd` | [`iadd`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iadd) `0x60` | 0 | `[int, int] -> [int]` |
 //! | `Dup` | [`dup`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.dup) `0x59` | 0 | `[category-1] -> [category-1, category-1]` |
+//! | `Pop` | [`pop`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.pop) `0x57` | 0 | `[category-1] -> []` |
 //! | `GetField(FieldReference)` | [`getfield`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.getfield) `0xb4` | 2 | `[reference] -> [field value]` |
 //! | `PutField(FieldReference)` | [`putfield`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.putfield) `0xb5` | 2 | `[reference, field value] -> []` |
 //! | `GetStatic(FieldReference)` | [`getstatic`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.getstatic) `0xb2` | 2 | `[] -> [field value]` |
@@ -366,6 +367,8 @@ pub enum Instruction {
     IAdd,
     /// Duplicates the top category-one stack value.
     Dup,
+    /// Removes the top category-one stack value.
+    Pop,
     /// Reads an instance field.
     GetField(FieldReference),
     /// Writes an instance field.

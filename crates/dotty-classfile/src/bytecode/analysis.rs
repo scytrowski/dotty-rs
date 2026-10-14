@@ -103,6 +103,13 @@ pub enum AnalysisError {
         /// The category-two value at the top of the stack.
         actual: ValueKind,
     },
+    /// `pop` cannot remove a category-two value.
+    PopCategoryTwo {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// The category-two value at the top of the stack.
+        actual: ValueKind,
+    },
     /// A constant-pool operand is absent or has the wrong entry family.
     InvalidConstantPoolOperand {
         /// Zero-based instruction position.
@@ -300,6 +307,13 @@ impl fmt::Display for AnalysisError {
             } => write!(
                 formatter,
                 "instruction {instruction} cannot dup category-two value {actual}"
+            ),
+            Self::PopCategoryTwo {
+                instruction,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} cannot pop category-two value {actual}"
             ),
             Self::InvalidConstantPoolOperand {
                 instruction,
@@ -626,6 +640,26 @@ impl Frame {
                     });
                 }
                 self.push(instruction_index, top)?;
+            }
+            Instruction::Pop => {
+                let available = self.stack.len();
+                let actual = self
+                    .stack
+                    .last()
+                    .copied()
+                    .ok_or(AnalysisError::StackUnderflow {
+                        instruction: instruction_index,
+                        needed: 1,
+                        available,
+                    })?;
+                if actual.slots() != 1 {
+                    return Err(AnalysisError::PopCategoryTwo {
+                        instruction: instruction_index,
+                        actual,
+                    });
+                }
+                self.stack.pop();
+                self.stack_slots -= 1;
             }
             Instruction::GetField(reference) => {
                 let ty = self.field_type(instruction_index, reference, pool)?;
@@ -1483,6 +1517,7 @@ fn validate_flow_instruction(
             | Instruction::IStore(_)
             | Instruction::IAdd
             | Instruction::Dup
+            | Instruction::Pop
             | Instruction::Return
             | Instruction::IReturn
             | Instruction::Ldc(LdcConstant::Integer(_))
@@ -2017,6 +2052,70 @@ mod tests {
             Err(AnalysisError::DupCategoryTwo {
                 instruction: 1,
                 actual: ValueKind::Long,
+            })
+        );
+        assert_eq!(
+            analyze("()V", true, &[Instruction::Pop, Instruction::Return], &pool),
+            Err(AnalysisError::StackUnderflow {
+                instruction: 0,
+                needed: 1,
+                available: 0,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()J",
+                true,
+                &[
+                    Instruction::LConst(SmallLongConstant::Zero),
+                    Instruction::Pop,
+                    Instruction::LReturn,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::PopCategoryTwo {
+                instruction: 1,
+                actual: ValueKind::Long,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()I",
+                true,
+                &[
+                    Instruction::IConst(SmallIntConstant::One),
+                    Instruction::Pop,
+                    Instruction::IReturn,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::StackUnderflow {
+                instruction: 2,
+                needed: 1,
+                available: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn pop_discards_category_one_ints_and_references_without_changing_max_stack() {
+        let pool = ConstantPool::default();
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::IConst(SmallIntConstant::One),
+                    Instruction::Pop,
+                    Instruction::AConstNull,
+                    Instruction::Pop,
+                    Instruction::Return,
+                ],
+                &pool,
+            ),
+            Ok(CodeAnalysis {
+                max_stack: 1,
+                max_locals: 0,
             })
         );
     }

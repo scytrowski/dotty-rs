@@ -380,6 +380,14 @@ fn build_calculator(version: ClassFileVersion) -> Vec<u8> {
         })
         .expect("branched nested method construction succeeds");
     calculator
+        .add_static_method("discard", "()V", |code| {
+            code.iconst(1)?;
+            code.pop()?;
+            code.return_void()?;
+            Ok(())
+        })
+        .expect("category-one discard method construction succeeds");
+    calculator
         .encode()
         .expect("Calculator is generated through the typed builder")
 }
@@ -470,7 +478,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let calculator = decode_and_validate(&calculator_bytes);
     assert_eq!(calculator.version, version);
     assert_eq!(calculator.access_flags.0, ACC_PUBLIC | ACC_SUPER);
-    assert_eq!(calculator.methods.len(), 4);
+    assert_eq!(calculator.methods.len(), 5);
     let add = &calculator.methods[0];
     assert_eq!(calculator.constant_pool.utf8(add.name_index), Ok("add"));
     assert_eq!(
@@ -518,6 +526,15 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     assert!(nested.exception_table.is_empty());
     let nested_frames = assert_stack_map_targets(&calculator, &calculator.methods[3], 4);
     assert_eq!(nested_frames.len(), 4);
+    let discard = &calculator.methods[4];
+    assert_eq!(
+        calculator.constant_pool.utf8(discard.name_index),
+        Ok("discard")
+    );
+    let discard_code = code(discard);
+    assert_eq!((discard_code.max_stack, discard_code.max_locals), (1, 0));
+    assert_eq!(discard_code.code, [0x04, 0x57, 0xb1]);
+    assert!(discard_code.attributes.is_empty());
 
     let box_file = decode_and_validate(&box_bytes);
     assert_eq!(box_file.version, version);
@@ -635,7 +652,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let harness_path = directory.path().join("GeneratedClassesHarness.java");
     fs::write(
         &harness_path,
-        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        int maxForward = Calculator.max(20, 22);\n        int maxReverse = Calculator.max(22, 20);\n        int maxEqual = Calculator.max(22, 22);\n        if (maxForward != 22 || maxReverse != 22 || maxEqual != 22) throw new AssertionError(\"Calculator.max: \" + maxForward + \", \" + maxReverse + \", \" + maxEqual);\n        int sumTen = Calculator.sumTo(10);\n        int sumZero = Calculator.sumTo(0);\n        int sumOne = Calculator.sumTo(1);\n        if (sumTen != 55 || sumZero != 0 || sumOne != 1) throw new AssertionError(\"Calculator.sumTo: \" + sumTen + \", \" + sumZero + \", \" + sumOne);\n        int nestedZero = Calculator.nested(0, 1);\n        int nestedLess = Calculator.nested(1, 2);\n        int nestedEqual = Calculator.nested(2, 2);\n        int nestedGreater = Calculator.nested(3, 2);\n        if (nestedZero != 100 || nestedLess != 10 || nestedEqual != 1 || nestedGreater != 0) throw new AssertionError(\"Calculator.nested: \" + nestedZero + \", \" + nestedLess + \", \" + nestedEqual + \", \" + nestedGreater);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        int generated = Caller.makeBox(42).get();\n        if (generated != 42) throw new AssertionError(\"Caller.makeBox: \" + generated);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Calculator.max=\" + maxForward + \",\" + maxReverse + \",\" + maxEqual);\n        System.out.println(\"Calculator.sumTo=\" + sumTen + \",\" + sumZero + \",\" + sumOne);\n        System.out.println(\"Calculator.nested=\" + nestedZero + \",\" + nestedLess + \",\" + nestedEqual + \",\" + nestedGreater);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n        System.out.println(\"Caller.makeBox=\" + generated);\n    }\n}\n",
+        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        Calculator.discard();\n        int maxForward = Calculator.max(20, 22);\n        int maxReverse = Calculator.max(22, 20);\n        int maxEqual = Calculator.max(22, 22);\n        if (maxForward != 22 || maxReverse != 22 || maxEqual != 22) throw new AssertionError(\"Calculator.max: \" + maxForward + \", \" + maxReverse + \", \" + maxEqual);\n        int sumTen = Calculator.sumTo(10);\n        int sumZero = Calculator.sumTo(0);\n        int sumOne = Calculator.sumTo(1);\n        if (sumTen != 55 || sumZero != 0 || sumOne != 1) throw new AssertionError(\"Calculator.sumTo: \" + sumTen + \", \" + sumZero + \", \" + sumOne);\n        int nestedZero = Calculator.nested(0, 1);\n        int nestedLess = Calculator.nested(1, 2);\n        int nestedEqual = Calculator.nested(2, 2);\n        int nestedGreater = Calculator.nested(3, 2);\n        if (nestedZero != 100 || nestedLess != 10 || nestedEqual != 1 || nestedGreater != 0) throw new AssertionError(\"Calculator.nested: \" + nestedZero + \", \" + nestedLess + \", \" + nestedEqual + \", \" + nestedGreater);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        int generated = Caller.makeBox(42).get();\n        if (generated != 42) throw new AssertionError(\"Caller.makeBox: \" + generated);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Calculator.max=\" + maxForward + \",\" + maxReverse + \",\" + maxEqual);\n        System.out.println(\"Calculator.sumTo=\" + sumTen + \",\" + sumZero + \",\" + sumOne);\n        System.out.println(\"Calculator.nested=\" + nestedZero + \",\" + nestedLess + \",\" + nestedEqual + \",\" + nestedGreater);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n        System.out.println(\"Caller.makeBox=\" + generated);\n    }\n}\n",
     )
     .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
 
@@ -648,6 +665,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 "public static int max(int, int);",
                 "public static int sumTo(int);",
                 "public static int nested(int, int);",
+                "public static void discard();",
                 "StackMapTable: number_of_entries = 1",
                 "StackMapTable: number_of_entries = 2",
                 "StackMapTable: number_of_entries = 4",
@@ -656,6 +674,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 "iload_0",
                 "iload_1",
                 "iadd",
+                "pop",
             ][..],
         ),
         (
