@@ -8,14 +8,125 @@
 //! `TypeId`, or e.g. overload resolution and type equality would see them as
 //! unrelated types. [`Definitions::bootstrap`] mints each one exactly once.
 
-use crate::ids::{SymbolId, TypeId};
-use crate::names::{Name, Namespace};
+use crate::ids::{ScopeId, SymbolId, TypeId};
+use crate::names::{Name, Namespace, TermName};
 use crate::packages::Packages;
 use crate::store::SemanticStore;
 use crate::symbols::{
-    Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
+    Scope, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
 };
-use crate::types::Type;
+use crate::types::{ClassInfo, MethodKind, MethodParam, MethodType, Type};
+
+/// The canonical semantic identities for the bounded binary `Int` operators.
+///
+/// A backend can use these IDs to recognize typed calls without depending on
+/// `dotty-typer` or inferring an intrinsic from an operator's spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntPrimitiveOperatorSymbols {
+    pub plus: SymbolId,
+    pub minus: SymbolId,
+    pub multiply: SymbolId,
+    pub divide: SymbolId,
+    pub remainder: SymbolId,
+    pub less_than: SymbolId,
+    pub less_or_equal: SymbolId,
+    pub greater_than: SymbolId,
+    pub greater_or_equal: SymbolId,
+}
+
+impl IntPrimitiveOperatorSymbols {
+    /// Returns the nine supported method identities in the audit order.
+    pub const fn all(self) -> [SymbolId; 9] {
+        [
+            self.plus,
+            self.minus,
+            self.multiply,
+            self.divide,
+            self.remainder,
+            self.less_than,
+            self.less_or_equal,
+            self.greater_than,
+            self.greater_or_equal,
+        ]
+    }
+}
+
+/// A conflict or malformed class/member encountered while registering the
+/// bounded canonical `Int` operators.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntPrimitiveOperatorRegistrationError {
+    ClassInfoUnavailable {
+        state: IntPrimitiveOperatorInfoState,
+    },
+    InvalidClassInfoType {
+        info: TypeId,
+    },
+    ClassInfoNotClassInfo {
+        info: TypeId,
+    },
+    MalformedClassInfoIdentity {
+        recorded_class: SymbolId,
+    },
+    MalformedClassInfo {
+        info: TypeId,
+    },
+    InvalidDeclarationScope {
+        scope: ScopeId,
+    },
+    DeclarationScopeOwnerMismatch {
+        actual: Option<SymbolId>,
+    },
+    UnknownMemberSymbol {
+        symbol: SymbolId,
+    },
+    OperatorNameIsNotMethod {
+        operator: &'static str,
+        symbol: SymbolId,
+    },
+    OperatorMethodOwnerMismatch {
+        operator: &'static str,
+        symbol: SymbolId,
+        owner: Option<SymbolId>,
+    },
+    OperatorMethodInfoUnavailable {
+        operator: &'static str,
+        symbol: SymbolId,
+    },
+    OperatorMethodInfoMalformed {
+        operator: &'static str,
+        symbol: SymbolId,
+    },
+    DuplicateOperatorSignature {
+        operator: &'static str,
+    },
+    IncompatibleOperatorSignature {
+        operator: &'static str,
+        symbol: SymbolId,
+    },
+    IntTypeIsNotCanonical,
+    BooleanTypeIsNotCanonical,
+}
+
+/// The completion state reported for the canonical `Int` class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntPrimitiveOperatorInfoState {
+    Deferred,
+    Error,
+}
+
+impl std::fmt::Display for IntPrimitiveOperatorRegistrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for IntPrimitiveOperatorRegistrationError {}
+
+#[derive(Clone, Copy)]
+struct IntOperatorSpec {
+    spelling: &'static str,
+    result: TypeId,
+}
 
 /// The builtin symbols and types every adapter (classfile/TASTy/source)
 /// lowers primitives and `Object`/`Any`/`Nothing` references against.
@@ -104,7 +215,7 @@ impl Definitions {
         let any_type = store.types.alloc(Type::type_ref(no_prefix, any_class));
         let nothing_type = store.types.alloc(Type::type_ref(no_prefix, nothing_class));
 
-        Self {
+        let definitions = Self {
             no_prefix,
             byte,
             char,
@@ -123,7 +234,375 @@ impl Definitions {
             nothing_class,
             and_type,
             or_type,
+        };
+
+        // `Int` is a compiler-owned class shell rather than a classfile
+        // loaded from a classpath. Install its bounded source operator set
+        // while the session's canonical definitions are created.
+        definitions
+            .ensure_int_primitive_operators(store)
+            .expect("fresh canonical Int class should accept builtin operators");
+        definitions
+    }
+
+    /// Ensures the supported primitive operators live in the existing
+    /// canonical `Int` class declaration scope. Existing class information
+    /// and unrelated overloads are preserved; malformed or conflicting
+    /// operator entries are reported without partial registration.
+    pub fn ensure_int_primitive_operators(
+        &self,
+        store: &mut SemanticStore,
+    ) -> Result<IntPrimitiveOperatorSymbols, IntPrimitiveOperatorRegistrationError> {
+        let int_class = store
+            .types
+            .get(self.int)
+            .reference_symbol()
+            .ok_or(IntPrimitiveOperatorRegistrationError::IntTypeIsNotCanonical)?;
+        let boolean_class = store
+            .types
+            .get(self.boolean)
+            .reference_symbol()
+            .ok_or(IntPrimitiveOperatorRegistrationError::BooleanTypeIsNotCanonical)?;
+        let _ = boolean_class;
+        let specs = [
+            IntOperatorSpec {
+                spelling: "+",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "-",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "*",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "/",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "%",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "<",
+                result: self.boolean,
+            },
+            IntOperatorSpec {
+                spelling: "<=",
+                result: self.boolean,
+            },
+            IntOperatorSpec {
+                spelling: ">",
+                result: self.boolean,
+            },
+            IntOperatorSpec {
+                spelling: ">=",
+                result: self.boolean,
+            },
+        ];
+
+        let info = store.symbols.get(int_class).info;
+        let (scope, needs_class_info) = match info {
+            SymbolInfo::Missing => (None, true),
+            SymbolInfo::Deferred(_) => {
+                return Err(
+                    IntPrimitiveOperatorRegistrationError::ClassInfoUnavailable {
+                        state: IntPrimitiveOperatorInfoState::Deferred,
+                    },
+                );
+            }
+            SymbolInfo::Error => {
+                return Err(
+                    IntPrimitiveOperatorRegistrationError::ClassInfoUnavailable {
+                        state: IntPrimitiveOperatorInfoState::Error,
+                    },
+                );
+            }
+            SymbolInfo::Complete(info_id) => {
+                let Some(Type::ClassInfo(class_info)) = store.types.try_get(info_id) else {
+                    return Err(if store.types.contains(info_id) {
+                        IntPrimitiveOperatorRegistrationError::ClassInfoNotClassInfo {
+                            info: info_id,
+                        }
+                    } else {
+                        IntPrimitiveOperatorRegistrationError::InvalidClassInfoType {
+                            info: info_id,
+                        }
+                    });
+                };
+                if class_info.class != int_class {
+                    return Err(
+                        IntPrimitiveOperatorRegistrationError::MalformedClassInfoIdentity {
+                            recorded_class: class_info.class,
+                        },
+                    );
+                }
+                if store.types.try_get(class_info.prefix).is_none()
+                    || class_info
+                        .parents
+                        .iter()
+                        .any(|parent| store.types.try_get(*parent).is_none())
+                    || class_info
+                        .self_type
+                        .is_some_and(|self_type| store.types.try_get(self_type).is_none())
+                {
+                    return Err(IntPrimitiveOperatorRegistrationError::MalformedClassInfo {
+                        info: info_id,
+                    });
+                }
+                if !store.scopes.contains(class_info.declarations) {
+                    return Err(
+                        IntPrimitiveOperatorRegistrationError::InvalidDeclarationScope {
+                            scope: class_info.declarations,
+                        },
+                    );
+                }
+                let declaration_scope = store.scopes.get(class_info.declarations);
+                if declaration_scope.owner != Some(int_class) {
+                    return Err(
+                        IntPrimitiveOperatorRegistrationError::DeclarationScopeOwnerMismatch {
+                            actual: declaration_scope.owner,
+                        },
+                    );
+                }
+                (Some(class_info.declarations), false)
+            }
+        };
+
+        let mut found = [None; 9];
+        if let Some(scope) = scope {
+            for (index, spec) in specs.iter().enumerate() {
+                let name = Name::new(store.names.intern(spec.spelling), Namespace::Term);
+                let mut matching_signature = None;
+                for &symbol in store.scopes.get(scope).lookup_all(&name) {
+                    if !store.symbols.contains(symbol) {
+                        return Err(IntPrimitiveOperatorRegistrationError::UnknownMemberSymbol {
+                            symbol,
+                        });
+                    }
+                    let candidate = store.symbols.get(symbol);
+                    if candidate.kind != SymbolKind::Method {
+                        return Err(
+                            IntPrimitiveOperatorRegistrationError::OperatorNameIsNotMethod {
+                                operator: spec.spelling,
+                                symbol,
+                            },
+                        );
+                    }
+                    if candidate.owner != Some(int_class) {
+                        return Err(
+                            IntPrimitiveOperatorRegistrationError::OperatorMethodOwnerMismatch {
+                                operator: spec.spelling,
+                                symbol,
+                                owner: candidate.owner,
+                            },
+                        );
+                    }
+                    let SymbolInfo::Complete(method_info) = candidate.info else {
+                        return Err(
+                            IntPrimitiveOperatorRegistrationError::OperatorMethodInfoUnavailable {
+                                operator: spec.spelling,
+                                symbol,
+                            },
+                        );
+                    };
+                    let Some(Type::Method(method)) = store.types.try_get(method_info) else {
+                        return Err(
+                            IntPrimitiveOperatorRegistrationError::OperatorMethodInfoMalformed {
+                                operator: spec.spelling,
+                                symbol,
+                            },
+                        );
+                    };
+                    let same_parameter_signature =
+                        method.params.len() == 1 && method.params[0].ty == self.int;
+                    if same_parameter_signature {
+                        if method.kind != MethodKind::Plain
+                            || method.params[0].erased
+                            || method.params[0].varargs
+                            || method.result != spec.result
+                        {
+                            return Err(IntPrimitiveOperatorRegistrationError::IncompatibleOperatorSignature {
+                                operator: spec.spelling,
+                                symbol,
+                            });
+                        }
+                        if matching_signature.replace(symbol).is_some() {
+                            return Err(
+                                IntPrimitiveOperatorRegistrationError::DuplicateOperatorSignature {
+                                    operator: spec.spelling,
+                                },
+                            );
+                        }
+                    }
+                }
+                found[index] = matching_signature;
+            }
         }
+
+        let scope = if let Some(scope) = scope {
+            scope
+        } else {
+            store.scopes.alloc(Scope::new(Some(int_class)))
+        };
+        let mut ids = [None; 9];
+        for (index, spec) in specs.into_iter().enumerate() {
+            if let Some(symbol) = found[index] {
+                ids[index] = Some(symbol);
+                continue;
+            }
+            let name_id = store.names.intern(spec.spelling);
+            let name = Name::new(name_id, Namespace::Term);
+            let param_name = TermName::new(store.names.intern("x"));
+            let method_info = store.types.alloc(Type::Method(MethodType {
+                params: vec![MethodParam {
+                    name: param_name,
+                    ty: self.int,
+                    erased: false,
+                    varargs: false,
+                }],
+                result: spec.result,
+                kind: MethodKind::Plain,
+            }));
+            let symbol = store.symbols.alloc(Symbol {
+                name,
+                owner: Some(int_class),
+                kind: SymbolKind::Method,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(method_info),
+                origin: SymbolOrigin::Builtin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            store.scopes.get_mut(scope).enter(name, symbol);
+            ids[index] = Some(symbol);
+        }
+        let ids = ids.map(Option::unwrap);
+
+        if needs_class_info {
+            let info = store.types.alloc(Type::ClassInfo(ClassInfo {
+                prefix: self.no_prefix,
+                class: int_class,
+                parents: Vec::new(),
+                declarations: scope,
+                self_type: None,
+            }));
+            store.symbols.get_mut(int_class).info = SymbolInfo::Complete(info);
+        }
+        Ok(IntPrimitiveOperatorSymbols {
+            plus: ids[0],
+            minus: ids[1],
+            multiply: ids[2],
+            divide: ids[3],
+            remainder: ids[4],
+            less_than: ids[5],
+            less_or_equal: ids[6],
+            greater_than: ids[7],
+            greater_or_equal: ids[8],
+        })
+    }
+
+    /// Reads the registered builtin operator identities without changing
+    /// semantic state. Returns `None` until registration succeeds.
+    pub fn int_primitive_operator_symbols(
+        &self,
+        store: &SemanticStore,
+    ) -> Option<IntPrimitiveOperatorSymbols> {
+        let int_class = store.types.get(self.int).reference_symbol()?;
+        let SymbolInfo::Complete(info_id) = store.symbols.get(int_class).info else {
+            return None;
+        };
+        let Type::ClassInfo(info) = store.types.try_get(info_id)? else {
+            return None;
+        };
+        if info.class != int_class
+            || !store.scopes.contains(info.declarations)
+            || store.scopes.get(info.declarations).owner != Some(int_class)
+        {
+            return None;
+        }
+        let specs = [
+            IntOperatorSpec {
+                spelling: "+",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "-",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "*",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "/",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "%",
+                result: self.int,
+            },
+            IntOperatorSpec {
+                spelling: "<",
+                result: self.boolean,
+            },
+            IntOperatorSpec {
+                spelling: "<=",
+                result: self.boolean,
+            },
+            IntOperatorSpec {
+                spelling: ">",
+                result: self.boolean,
+            },
+            IntOperatorSpec {
+                spelling: ">=",
+                result: self.boolean,
+            },
+        ];
+        let mut ids = [None; 9];
+        for (index, spec) in specs.iter().enumerate() {
+            let name = Name::new(store.names.get(spec.spelling)?, Namespace::Term);
+            for &symbol in store.scopes.get(info.declarations).lookup_all(&name) {
+                if !store.symbols.contains(symbol) {
+                    return None;
+                }
+                let member = store.symbols.get(symbol);
+                let SymbolInfo::Complete(member_info) = member.info else {
+                    continue;
+                };
+                let Some(Type::Method(method)) = store.types.try_get(member_info) else {
+                    continue;
+                };
+                if member.kind == SymbolKind::Method
+                    && member.owner == Some(int_class)
+                    && method.kind == MethodKind::Plain
+                    && method.params.len() == 1
+                    && method.params[0].ty == self.int
+                    && !method.params[0].erased
+                    && !method.params[0].varargs
+                    && method.result == spec.result
+                    && ids[index].replace(symbol).is_some()
+                {
+                    return None;
+                }
+            }
+            ids[index]?;
+        }
+        Some(IntPrimitiveOperatorSymbols {
+            plus: ids[0]?,
+            minus: ids[1]?,
+            multiply: ids[2]?,
+            divide: ids[3]?,
+            remainder: ids[4]?,
+            less_than: ids[5]?,
+            less_or_equal: ids[6]?,
+            greater_than: ids[7]?,
+            greater_or_equal: ids[8]?,
+        })
     }
 
     /// Returns the session-canonical type for a source-level builtin name.
@@ -300,6 +779,165 @@ mod tests {
 
         assert_eq!(store.symbols.get(symbol).origin, SymbolOrigin::Builtin);
         assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn int_operator_registration_is_complete_canonical_and_idempotent() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
+        let boolean = definitions.boolean;
+        let registered = definitions.int_primitive_operator_symbols(&store).unwrap();
+        assert_eq!(
+            definitions
+                .ensure_int_primitive_operators(&mut store)
+                .unwrap(),
+            registered
+        );
+        assert_eq!(registered.all().len(), 9);
+
+        for (symbol, spelling, result) in [
+            (registered.plus, "+", definitions.int),
+            (registered.minus, "-", definitions.int),
+            (registered.multiply, "*", definitions.int),
+            (registered.divide, "/", definitions.int),
+            (registered.remainder, "%", definitions.int),
+            (registered.less_than, "<", boolean),
+            (registered.less_or_equal, "<=", boolean),
+            (registered.greater_than, ">", boolean),
+            (registered.greater_or_equal, ">=", boolean),
+        ] {
+            let method = store.symbols.get(symbol);
+            assert_eq!(method.kind, SymbolKind::Method);
+            assert_eq!(method.origin, SymbolOrigin::Builtin);
+            assert_eq!(method.owner, Some(int_symbol));
+            assert_eq!(store.names.resolve(method.name.text()), spelling);
+            let SymbolInfo::Complete(info) = method.info else {
+                panic!("registered operator should have completed info");
+            };
+            let Type::Method(method_type) = store.types.get(info) else {
+                panic!("registered operator should be an ordinary method");
+            };
+            assert_eq!(method_type.kind, MethodKind::Plain);
+            assert_eq!(method_type.params.len(), 1);
+            assert_eq!(method_type.params[0].ty, definitions.int);
+            assert_eq!(method_type.result, result);
+        }
+    }
+
+    #[test]
+    fn malformed_int_class_info_is_reported_without_replacing_it() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
+        let original = store.symbols.get(int_symbol).info;
+        store.symbols.get_mut(int_symbol).info = SymbolInfo::Error;
+
+        assert_eq!(
+            definitions.ensure_int_primitive_operators(&mut store),
+            Err(
+                IntPrimitiveOperatorRegistrationError::ClassInfoUnavailable {
+                    state: IntPrimitiveOperatorInfoState::Error,
+                }
+            )
+        );
+        assert_eq!(store.symbols.get(int_symbol).info, SymbolInfo::Error);
+        assert_ne!(original, SymbolInfo::Error);
+    }
+
+    #[test]
+    fn missing_int_operator_is_registered_again_in_the_same_scope() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let before = definitions.int_primitive_operator_symbols(&store).unwrap();
+        let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
+        let SymbolInfo::Complete(info) = store.symbols.get(int_symbol).info else {
+            unreachable!();
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            unreachable!();
+        };
+        let scope = info.declarations;
+        store.scopes.get_mut(scope).remove(before.plus);
+
+        assert!(definitions.int_primitive_operator_symbols(&store).is_none());
+        let after = definitions
+            .ensure_int_primitive_operators(&mut store)
+            .unwrap();
+        assert_ne!(after.plus, before.plus);
+        assert_eq!(after.minus, before.minus);
+        assert_eq!(
+            store.scopes.get(scope).owner,
+            Some(int_symbol),
+            "registration should preserve the existing declaration scope"
+        );
+    }
+
+    #[test]
+    fn duplicate_int_operator_signatures_are_rejected_without_mutation() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
+        let SymbolInfo::Complete(info) = store.symbols.get(int_symbol).info else {
+            unreachable!();
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            unreachable!();
+        };
+        let scope = info.declarations;
+        let name = Name::new(store.names.get("+").unwrap(), Namespace::Term);
+        let plus = definitions
+            .int_primitive_operator_symbols(&store)
+            .unwrap()
+            .plus;
+        store.scopes.get_mut(scope).enter(name, plus);
+
+        assert_eq!(
+            definitions.ensure_int_primitive_operators(&mut store),
+            Err(
+                IntPrimitiveOperatorRegistrationError::DuplicateOperatorSignature { operator: "+" }
+            )
+        );
+        assert_eq!(store.scopes.get(scope).lookup_all(&name), &[plus, plus]);
+    }
+
+    #[test]
+    fn invalid_int_class_info_type_is_rejected() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
+        let invalid = TypeId::new(u32::MAX);
+        store.symbols.get_mut(int_symbol).info = SymbolInfo::Complete(invalid);
+
+        assert_eq!(
+            definitions.ensure_int_primitive_operators(&mut store),
+            Err(IntPrimitiveOperatorRegistrationError::InvalidClassInfoType { info: invalid })
+        );
+        assert_eq!(
+            store.symbols.get(int_symbol).info,
+            SymbolInfo::Complete(invalid)
+        );
+    }
+
+    #[test]
+    fn malformed_int_class_info_references_are_rejected() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
+        let SymbolInfo::Complete(info) = store.symbols.get(int_symbol).info else {
+            unreachable!();
+        };
+        let Type::ClassInfo(mut class_info) = store.types.get(info).clone() else {
+            unreachable!();
+        };
+        class_info.prefix = TypeId::new(u32::MAX);
+        let malformed = store.types.alloc(Type::ClassInfo(class_info));
+        store.symbols.get_mut(int_symbol).info = SymbolInfo::Complete(malformed);
+
+        assert_eq!(
+            definitions.ensure_int_primitive_operators(&mut store),
+            Err(IntPrimitiveOperatorRegistrationError::MalformedClassInfo { info: malformed })
+        );
     }
 
     /// `bootstrap` mints real identities against whatever store it is given,
