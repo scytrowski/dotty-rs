@@ -13814,7 +13814,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_missing_class_info_stays_visible_without_a_local_extension() {
+    fn builtin_int_class_info_reports_an_unknown_member_without_a_local_extension() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class C { def outer(value: Int): Int = value.choose(1) }");
         let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -13830,13 +13830,12 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::MemberLookup(error))
-                if matches!(*error, MemberLookupError::ClassInfoUnavailable { .. })
+            Err(TyperError::MemberNotFound { .. })
         ));
     }
 
     #[test]
-    fn local_extension_cannot_mask_a_primitive_member_lookup_without_class_info() {
+    fn local_extension_cannot_mask_a_builtin_primitive_member() {
         let source_text = "class C { def outer(value: Int): Int = { extension (receiver: Int) { def +(argument: Int): Int = 99 }; value.+(1) } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -13850,15 +13849,25 @@ mod tests {
         );
         let context = typer.expression_context_for(outer).unwrap();
 
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should remain a typed block");
+        };
+        let TreeKind::Apply(application) = &typer.typed_ast().get(block.expr).kind else {
+            panic!("builtin infix operation should type as an application");
+        };
+        let plus = definitions
+            .int_primitive_operator_symbols(typer.store())
+            .unwrap()
+            .plus;
         assert!(matches!(
-            typer.type_expression(rhs, context),
-            Err(TyperError::MemberLookup(error))
-                if matches!(*error, MemberLookupError::ClassInfoUnavailable { .. })
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == plus
         ));
     }
 
     #[test]
-    fn missing_primitive_member_info_precedes_unstable_prefix_errors() {
+    fn unknown_member_on_mutable_int_reports_unstable_prefix() {
         let source_text = "class C { def outer: Int = { var value: Int = 1; extension (receiver: Int) { def choose(argument: Int): Int = receiver }; value.unknown(1) } }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let (outer, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "outer");
@@ -13874,8 +13883,7 @@ mod tests {
 
         assert!(matches!(
             typer.type_expression(rhs, context),
-            Err(TyperError::MemberLookup(error))
-                if matches!(*error, MemberLookupError::ClassInfoUnavailable { .. })
+            Err(TyperError::UnstableSelectionPrefix { .. })
         ));
     }
 

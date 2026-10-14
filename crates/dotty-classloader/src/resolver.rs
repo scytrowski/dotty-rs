@@ -746,6 +746,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         }
 
         match store.names.resolve(member.text()) {
+            "Int" => store.types.get(self.definitions.int).reference_symbol(),
             "Any" => Some(self.definitions.any_class),
             "AnyRef" => Some(self.definitions.object_class),
             "Nothing" => Some(self.definitions.nothing_class),
@@ -762,7 +763,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         package_path_of_symbol(store, package).is_some_and(|path| path.as_slice() == ["scala"])
             && matches!(
                 store.names.resolve(member.text()),
-                "Any" | "AnyRef" | "Nothing"
+                "Int" | "Any" | "AnyRef" | "Nothing"
             )
     }
 
@@ -3284,14 +3285,8 @@ mod tests {
             assert_eq!(resolved, Some(expected));
         }
 
-        assert_eq!(
-            probes.load(Ordering::Relaxed),
-            0,
-            "compiler-only aliases never reach classpath I/O"
-        );
-
         let scala_int = Name::new(store.names.intern("Int"), Namespace::Type);
-        assert!(
+        assert_eq!(
             resolver
                 .resolve_member(
                     &mut store,
@@ -3303,12 +3298,13 @@ mod tests {
                     },
                 )
                 .unwrap()
-                .is_none()
+                .unwrap(),
+            store.types.get(definitions.int).reference_symbol().unwrap()
         );
         assert_eq!(
             probes.load(Ordering::Relaxed),
-            1,
-            "loadable Scala classes are not builtin aliases"
+            0,
+            "compiler-only aliases never reach classpath I/O"
         );
 
         let other = resolver
@@ -3335,7 +3331,7 @@ mod tests {
         );
         assert_eq!(
             probes.load(Ordering::Relaxed),
-            2,
+            1,
             "alias ownership is exactly scala.AnyRef"
         );
 
@@ -3356,7 +3352,7 @@ mod tests {
         );
         assert_eq!(
             probes.load(Ordering::Relaxed),
-            2,
+            1,
             "aliases occupy only the type namespace"
         );
     }

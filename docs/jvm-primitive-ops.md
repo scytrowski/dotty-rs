@@ -1,4 +1,4 @@
-# Scala `Int` operator audit for JVM intrinsics
+# Scala `Int` operator contract for JVM intrinsics
 
 This document records the source-to-typed-tree contract that must be in place
 before JVM lowering recognizes Scala `Int` operators. The Scala reference is
@@ -32,7 +32,7 @@ operator text, the source method name, or an arbitrary owner with a same-named
 method. An ordinary source declaration such as `class Custom { def +(x: Int):
 Int = x }` keeps its own symbol and remains an ordinary method call.
 
-## Source pipeline characterization
+## Source pipeline and canonical registration
 
 `crates/dotty-typer/tests/int_operator_audit.rs` drives source through the
 contextual scanner (lexer), parser, namer, and `SourceTyper`. All nine operator
@@ -40,22 +40,24 @@ forms parse without parser diagnostics and their enclosing class and methods
 are named. Both parameter expressions and expressions using a mutable local
 `var` reach the typer.
 
-The current `Definitions.int` type refers to its one canonical builtin class
-symbol, but that symbol has `SymbolInfo::Missing`; it has no completed
-`ClassInfo` or declaration scope for nominal lookup. `type_infix_expression`
-resolves the left expression and enters ordinary member lookup through
-`resolve_infix_application_function`. Lookup fails first, so the public
-`TyperError` is
-`MemberLookup(ClassInfoUnavailable { symbol: canonical_int_class,
-state: Missing })`. The same error occurs for `Boolean` as the receiver. In
-particular, `Int + true` fails at receiver lookup before the typer checks the
-right operand's type; it is not currently an
-`ApplicationArgumentTypeMismatch`. An unknown operator such as `%%` reaches
-the same missing-`Int`-class-info blocker. A failed expression transaction
-leaves no typed mapping or fabricated `Select`/`Apply` behind.
+`Definitions::bootstrap` completes the existing canonical `Int` class symbol
+with a declaration scope and nine bounded builtin methods. Registration is
+idempotent and `Definitions::int_primitive_operator_symbols` exposes their
+stable `SymbolId`s from `dotty-core`, so a backend can use the identity
+contract without depending on the typer. The classloader maps `scala/Int` to
+this same symbol, even if a classpath entry exists; it does not load a second
+class identity or replace the canonical scope.
 
-Once ordinary members are available, existing overload resolution is the
-right path: it selects a method, creates `Select` with
+`type_infix_expression` continues through the ordinary member resolver. Each
+supported operator becomes a typed `Apply(Select(...))`, with the selected
+`TermRefTarget::Symbol` equal to its registered builtin method. `Int + true`
+reaches overload resolution and fails because no overload accepts the
+argument. `Boolean + 1` remains unsupported because Boolean has no completed
+class info, while an unknown `Int` operator such as `%%` reports a missing
+member. Failed expression transactions leave no typed mapping behind.
+
+The ordinary member resolver uses existing overload resolution: it selects a
+method, creates `Select` with
 `TermRefTarget::Symbol(method_id)`, and applies the typed argument. The passing
 user-defined `+` characterization verifies the current successful shape,
 method owner and symbol identity, `Int` argument/result signature, and receiver
@@ -64,19 +66,18 @@ remain distinguishable by identity.
 
 ## Operator matrix
 
-| Source | Expected Scala target | Argument | Result | JVM operation or branch family | Current frontend stage and blocker | Next issue |
+| Source | Expected Scala target | Argument | Result | JVM operation or branch family | Current frontend stage | Next issue |
 | --- | --- | --- | --- | --- | --- | --- |
-| `x + y` | canonical `scala.Int.+(Int): Int` | `Int` | `Int` | `iadd` | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
-| `x - y` | canonical `scala.Int.-(Int): Int` | `Int` | `Int` | `isub` | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
-| `x * y` | canonical `scala.Int.*(Int): Int` | `Int` | `Int` | `imul` | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
-| `x / y` | canonical `scala.Int./(Int): Int` | `Int` | `Int` | `idiv` | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
-| `x % y` | canonical `scala.Int.%(Int): Int` | `Int` | `Int` | `irem` | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
-| `x < y` | canonical `scala.Int.<(Int): Boolean` | `Int` | `Boolean` | signed `if_icmplt`, then Boolean `0`/`1` normalization | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
-| `x <= y` | canonical `scala.Int.<=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmple`, then Boolean `0`/`1` normalization | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
-| `x > y` | canonical `scala.Int.>(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpgt`, then Boolean `0`/`1` normalization | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
-| `x >= y` | canonical `scala.Int.>=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpge`, then Boolean `0`/`1` normalization | Parser and namer succeed; typer member lookup reports `ClassInfoUnavailable` for canonical `Int` | [#1117](https://github.com/scytrowski/dotty-rs/issues/1117) |
+| `x + y` | canonical `scala.Int.+(Int): Int` | `Int` | `Int` | `iadd` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x - y` | canonical `scala.Int.-(Int): Int` | `Int` | `Int` | `isub` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x * y` | canonical `scala.Int.*(Int): Int` | `Int` | `Int` | `imul` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x / y` | canonical `scala.Int./(Int): Int` | `Int` | `Int` | `idiv` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x % y` | canonical `scala.Int.%(Int): Int` | `Int` | `Int` | `irem` | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x < y` | canonical `scala.Int.<(Int): Boolean` | `Int` | `Boolean` | signed `if_icmplt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x <= y` | canonical `scala.Int.<=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmple`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x > y` | canonical `scala.Int.>(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpgt`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
+| `x >= y` | canonical `scala.Int.>=(Int): Boolean` | `Int` | `Boolean` | signed `if_icmpge`, then Boolean `0`/`1` normalization | Typed `Apply(Select(...))` with canonical operator symbol | [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) |
 
-After #1117 supplies canonical member identities and typed applications,
 [#1118](https://github.com/scytrowski/dotty-rs/issues/1118) owns the read-only
 JVM intrinsic resolver. Opcode emission remains a later step.
 
@@ -93,27 +94,23 @@ lowering must materialize exactly those values on both control-flow paths.
 The equality operators `==` and `!=`, unary operators, numeric widening and
 boxing are not part of this audit.
 
-## Frontend registration recommendation
+## Registration and backend boundary
 
-Prefer verified Scala library metadata when it has already completed the
-canonical `Definitions.int` class symbol and exposes the expected unique
-operator signatures. If that metadata is absent, the frontend member issue
-should install a bounded, session-scoped set of methods into the existing
-canonical `Int` class symbol and its declaration scope. Do not create a second
-`Int` symbol or make the member resolver synthesize arbitrary members while
-looking them up.
+The implementation installs a bounded, session-scoped set of methods into
+the existing canonical `Int` class symbol and its declaration scope. Do not
+create a second `Int` symbol or make the member resolver synthesize arbitrary
+members while looking them up.
 
-The registration must be idempotent. When classpath/TASTy metadata already
-provides an operator, validate and reuse that exact symbol if its owner and
-signature match. Do not overwrite a completed scope wholesale or add a second
-same-signature entry. A wrong-kind, duplicate, or mismatched existing entry is
-a deterministic collision error; it must not be silently replaced or treated
-as a primitive. If loaded metadata represents `scala.Int` under a different
-symbol, reconcile that identity at the loader/definitions boundary before
-typing rather than registering members on a competing class.
+The registration is idempotent. If a completed canonical scope already
+provides an operator, it validates and reuses that exact symbol when its owner
+and signature match. It does not overwrite a completed scope wholesale or add
+a second same-signature entry. A wrong-kind, duplicate, or mismatched existing
+entry is a deterministic collision error. Classloader lookup aliases
+`scala.Int` to the canonical class symbol before classpath metadata can create
+a competing identity.
 
-The registration/accessor should expose the resulting canonical `SymbolId`s
-to a later backend-facing contract. The intrinsic resolver can then validate
+The registration/accessor exposes the resulting canonical `SymbolId`s to a
+later backend-facing contract. The intrinsic resolver can then validate
 the symbol owner, one-parameter `Int` `MethodType`, result type, and typed
 operand types before returning an intrinsic descriptor. Same-named local or
 extension methods do not satisfy this contract.

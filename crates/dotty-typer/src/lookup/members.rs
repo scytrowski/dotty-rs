@@ -1726,9 +1726,14 @@ mod tests {
         let mut w = World::new();
         let class = w.class("C");
         let mut foreign_store = SemanticStore::new();
-        let foreign_scope = foreign_store
+        let mut foreign_scope = foreign_store
             .scopes
             .alloc(dotty_core::Scope::new(Some(class)));
+        while w.store.scopes.contains(foreign_scope) {
+            foreign_scope = foreign_store
+                .scopes
+                .alloc(dotty_core::Scope::new(Some(class)));
+        }
         let info = w.store.types.alloc(Type::ClassInfo(ClassInfo {
             prefix: w.definitions.no_prefix,
             class,

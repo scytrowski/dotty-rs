@@ -1,8 +1,6 @@
-//! Characterize the current real-source pipeline before builtin Int operator
-//! members are introduced. The expected failures in this file are temporary
-//! and should be replaced during that symbol-registration work.
+//! Exercise canonical builtin Int operators through the real source pipeline.
 
-use dotty_core::ast::{AstArena, TreeKind, Untyped, UntypedNode};
+use dotty_core::ast::{AstArena, TreeKind, Untyped};
 use dotty_core::types::{MethodKind, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceSemanticIndex, SourceText, SymbolId,
@@ -119,57 +117,160 @@ fn class_symbol(fixture: &Fixture, ty: dotty_core::TypeId) -> SymbolId {
     *symbol
 }
 
-fn assert_member_lookup_blocked(
+fn assert_operator_typed(
     fixture: &mut Fixture,
     method_name: &str,
-    expected_receiver: SymbolId,
-    expected_operator: &str,
+    expected_symbol: SymbolId,
+    expected_result: dotty_core::TypeId,
 ) {
     let (method, rhs) = fixture.method(method_name);
-    let operator_tree = match &fixture.ast.get(rhs).kind {
-        TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)) => rhs,
-        TreeKind::Block(block) => block.expr,
-        kind => panic!("expected an infix body or local block, got {kind:?}"),
-    };
-    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &fixture.ast.get(operator_tree).kind
-    else {
-        panic!("expected a source infix operator node");
-    };
-    assert_eq!(
-        fixture.store.names.resolve(infix.op.text()),
-        expected_operator
-    );
+    let expected_owner = class_symbol(fixture, fixture.definitions.int);
+    let int_type = fixture.definitions.int;
     let mut typer = fixture.typer();
     let context = typer.expression_context_for(method).unwrap();
-    let error = typer.type_expression(rhs, context).unwrap_err();
-    let TyperError::MemberLookup(error) = error else {
-        panic!("expected a member lookup error, got {error:?}");
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let (selected, prefix, qualifier_type, argument_type, argument_count) = {
+        let application = match &typer.typed_ast().get(typed).kind {
+            TreeKind::Apply(application) => application,
+            TreeKind::Block(block) => {
+                let TreeKind::Apply(application) = &typer.typed_ast().get(block.expr).kind else {
+                    panic!("local block body should be a typed Apply");
+                };
+                application
+            }
+            kind => panic!("expected a typed Apply or local block, got {kind:?}"),
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("infix method application should select a member");
+        };
+        let function_type = typer.typed_ast().get(application.function).ty;
+        let Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(selected),
+        } = typer.store().types.get(function_type)
+        else {
+            panic!("selected method should retain its semantic SymbolId");
+        };
+        (
+            *selected,
+            *prefix,
+            typer.typed_ast().get(selection.qualifier).ty,
+            typer.typed_ast().get(application.args[0]).ty,
+            application.args.len(),
+        )
     };
-    let dotty_typer::MemberLookupError::ClassInfoUnavailable { symbol, state } = *error else {
-        panic!("expected missing builtin ClassInfo, got {error:?}");
-    };
-    assert_eq!(symbol, expected_receiver, "{method_name}");
-    assert_eq!(state, dotty_typer::SymbolInfoState::Missing);
-    assert_eq!(typer.source_typed_index().get(SOURCE, rhs), None);
-    assert!(typer.typed_ast().iter().next().is_none());
+    assert_eq!(selected, expected_symbol, "{method_name}");
+    assert_eq!(prefix, qualifier_type);
+    assert_eq!(
+        typer.widen_expression_type(qualifier_type).unwrap(),
+        int_type
+    );
+    assert_eq!(typer.typed_ast().get(typed).ty, expected_result);
+    assert_eq!(
+        typer.store().symbols.get(expected_symbol).kind,
+        SymbolKind::Method
+    );
+    assert_eq!(
+        typer.store().symbols.get(expected_symbol).owner,
+        Some(expected_owner)
+    );
+    assert_eq!(argument_count, 1);
+    assert_eq!(
+        typer.widen_expression_type(argument_type).unwrap(),
+        int_type
+    );
 }
 
 #[test]
-fn nine_int_operators_reach_typer_and_fail_at_member_lookup_for_parameters_and_vars() {
+fn nine_int_operators_type_for_parameters_and_local_vars_with_canonical_symbols() {
     let source = operator_source();
     let mut fixture = Fixture::new(&source);
     let int = fixture.definitions.int;
     let int_class = class_symbol(&fixture, int);
 
-    for (method_name, operator, _) in OPERATORS {
-        assert_member_lookup_blocked(&mut fixture, method_name, int_class, operator);
-        assert_member_lookup_blocked(
+    let operators = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .all();
+    for (index, (method_name, _, result)) in OPERATORS.into_iter().enumerate() {
+        let result = if result == "Int" {
+            int
+        } else {
+            fixture.definitions.boolean
+        };
+        assert_operator_typed(&mut fixture, method_name, operators[index], result);
+        assert_operator_typed(
             &mut fixture,
             &format!("{method_name}_local"),
-            int_class,
-            operator,
+            operators[index],
+            result,
         );
     }
+    assert!(fixture.store.symbols.contains(int_class));
+}
+
+#[test]
+fn int_operators_type_inside_literals_assignments_loops_and_nested_expressions() {
+    let mut fixture = Fixture::new(
+        "class IntExpressions { def literal: Int = 1 + 2; def nested(x: Int): Int = { var y: Int = 0; y = x + (1 + 2); while (y < x) { y = y + 1 }; y } }",
+    );
+    let symbols = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+    let int_type = fixture.definitions.int;
+    let (literal, literal_rhs) = fixture.method("literal");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(literal).unwrap();
+    let literal_typed = typer.type_expression(literal_rhs, context).unwrap();
+    assert_eq!(typer.typed_ast().get(literal_typed).ty, int_type);
+    let TreeKind::Apply(application) = &typer.typed_ast().get(literal_typed).kind else {
+        panic!("literal arithmetic should type as Apply");
+    };
+    let selected_type = typer.typed_ast().get(application.function).ty;
+    assert!(matches!(
+        typer.store().types.get(selected_type),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == symbols.plus
+    ));
+    drop(typer);
+
+    let (nested, nested_rhs) = fixture.method("nested");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(nested).unwrap();
+    let nested_typed = typer.type_expression(nested_rhs, context).unwrap();
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(nested_typed).ty)
+            .unwrap(),
+        int_type
+    );
+    let mut selected = Vec::new();
+    let mut saw_assignment = false;
+    let mut saw_while = false;
+    for (_, tree) in typer.typed_ast().iter() {
+        match &tree.kind {
+            TreeKind::Select(_) => {
+                if let Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } = typer.store().types.get(tree.ty)
+                {
+                    selected.push(*symbol);
+                }
+            }
+            TreeKind::Assign(_) => saw_assignment = true,
+            TreeKind::While(_) => saw_while = true,
+            _ => {}
+        }
+    }
+    assert!(saw_assignment, "assignment should remain in the typed tree");
+    assert!(
+        saw_while,
+        "while expression should remain in the typed tree"
+    );
+    assert!(selected.contains(&symbols.plus));
+    assert!(selected.contains(&symbols.less_than));
 }
 
 #[test]
@@ -182,13 +283,31 @@ fn invalid_and_unresolved_operator_sources_fail_without_a_typed_application() {
     let int_class = class_symbol(&fixture, int);
     let boolean_class = class_symbol(&fixture, boolean);
 
-    for (name, receiver, operator) in [
-        ("intPlusBoolean", int_class, "+"),
-        ("booleanPlusInt", boolean_class, "+"),
-        ("unresolved", int_class, "%%"),
+    for (name, expected) in [
+        ("intPlusBoolean", "no applicable overload"),
+        ("booleanPlusInt", "missing class info"),
+        ("unresolved", "missing member"),
     ] {
-        assert_member_lookup_blocked(&mut fixture, name, receiver, operator);
+        let (method, rhs) = fixture.method(name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        let error = typer.type_expression(rhs, context).unwrap_err();
+        match (expected, error) {
+            ("no applicable overload", TyperError::OverloadApplicationNoApplicable { .. }) => {}
+            ("missing class info", TyperError::MemberLookup(error))
+                if matches!(
+                    *error,
+                    dotty_typer::MemberLookupError::ClassInfoUnavailable {
+                        symbol,
+                        state: dotty_typer::SymbolInfoState::Missing,
+                    } if symbol == boolean_class
+                ) => {}
+            ("missing member", TyperError::MemberNotFound { .. }) => {}
+            (_, error) => panic!("unexpected diagnostic for {name}: {error:?}"),
+        }
+        assert!(typer.typed_ast().iter().next().is_none());
     }
+    assert!(fixture.store.symbols.contains(int_class));
 }
 
 #[test]
