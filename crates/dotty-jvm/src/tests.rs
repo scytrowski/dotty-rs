@@ -26,10 +26,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::locals::JvmLocalAllocator;
 use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind, JvmLocalBinding,
-    JvmMethodPlan, JvmNameKind, JvmReturnType, JvmType, JvmValueCategory, SymbolRole,
-    UnsupportedJvmCallShapeKind, UnsupportedJvmClassKind, UnsupportedJvmLocalFlag,
-    UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind, UnsupportedMethodShapeKind, emit_class,
+    JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmIntIntrinsic, JvmIntIntrinsicError,
+    JvmInvocationKind, JvmLocalBinding, JvmMethodPlan, JvmNameKind, JvmReturnType, JvmType,
+    JvmValueCategory, SymbolRole, UnsupportedJvmCallShapeKind, UnsupportedJvmClassKind,
+    UnsupportedJvmLocalFlag, UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind,
+    UnsupportedMethodShapeKind, emit_class, resolve_int_intrinsic,
 };
 
 struct Fixture {
@@ -5313,4 +5314,360 @@ fn missing_class_declaration_errors_follow_method_plan_order() {
     });
     assert_eq!(fixture.emit(), expected);
     assert_eq!(fixture.emit(), expected);
+}
+
+struct PrimitiveIntrinsicFixture {
+    store: SemanticStore,
+    ast: TypedAst,
+    definitions: Definitions,
+}
+
+impl PrimitiveIntrinsicFixture {
+    fn new() -> Self {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        Self {
+            store,
+            ast: TypedAst::new(),
+            definitions,
+        }
+    }
+
+    fn call(
+        &mut self,
+        method: SymbolId,
+        result: dotty_core::TypeId,
+    ) -> TreeId<dotty_core::ast::Typed> {
+        let receiver_type = self.store.types.alloc(Type::Constant(Constant::Int(4)));
+        let receiver = self.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(4),
+            }),
+            position: None,
+            ty: receiver_type,
+        });
+        let name = self.store.symbols.get(method).name;
+        let function_type = self.store.types.alloc(Type::TermRef {
+            prefix: receiver_type,
+            target: TermRefTarget::Symbol(method),
+        });
+        let function = self.ast.alloc(Tree {
+            kind: TreeKind::Select(Select {
+                qualifier: receiver,
+                name,
+                backquoted: false,
+            }),
+            position: None,
+            ty: function_type,
+        });
+        let argument_type = self.store.types.alloc(Type::Constant(Constant::Int(6)));
+        let argument = self.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(6),
+            }),
+            position: None,
+            ty: argument_type,
+        });
+        self.ast.alloc(Tree {
+            kind: TreeKind::Apply(Apply {
+                function,
+                args: vec![argument],
+                kind: ApplyKind::Regular,
+            }),
+            position: None,
+            ty: result,
+        })
+    }
+
+    fn set_function_prefix(
+        &mut self,
+        call: TreeId<dotty_core::ast::Typed>,
+        prefix: dotty_core::TypeId,
+    ) -> TreeId<dotty_core::ast::Typed> {
+        let function = match &self.ast.get(call).kind {
+            TreeKind::Apply(apply) => apply.function,
+            _ => unreachable!(),
+        };
+        let method = match self.store.types.get(self.ast.get(function).ty) {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(method),
+                ..
+            } => *method,
+            _ => unreachable!(),
+        };
+        let function_type = self.store.types.alloc(Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(method),
+        });
+        self.ast.get_mut(function).ty = function_type;
+        function
+    }
+}
+
+#[test]
+fn resolves_each_registered_int_primitive_by_symbol_identity() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let symbols = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+    let entries = [
+        (
+            symbols.plus,
+            JvmIntIntrinsic::IntAdd,
+            fixture.definitions.int,
+        ),
+        (
+            symbols.minus,
+            JvmIntIntrinsic::IntSubtract,
+            fixture.definitions.int,
+        ),
+        (
+            symbols.multiply,
+            JvmIntIntrinsic::IntMultiply,
+            fixture.definitions.int,
+        ),
+        (
+            symbols.divide,
+            JvmIntIntrinsic::IntDivide,
+            fixture.definitions.int,
+        ),
+        (
+            symbols.remainder,
+            JvmIntIntrinsic::IntRemainder,
+            fixture.definitions.int,
+        ),
+        (
+            symbols.less_than,
+            JvmIntIntrinsic::IntLessThan,
+            fixture.definitions.boolean,
+        ),
+        (
+            symbols.less_or_equal,
+            JvmIntIntrinsic::IntLessOrEqual,
+            fixture.definitions.boolean,
+        ),
+        (
+            symbols.greater_than,
+            JvmIntIntrinsic::IntGreaterThan,
+            fixture.definitions.boolean,
+        ),
+        (
+            symbols.greater_or_equal,
+            JvmIntIntrinsic::IntGreaterOrEqual,
+            fixture.definitions.boolean,
+        ),
+    ];
+    for (method, expected, result) in entries {
+        let call = fixture.call(method, result);
+        assert_eq!(
+            resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
+            Ok(Some(expected))
+        );
+    }
+    assert_eq!(
+        fixture
+            .definitions
+            .int_primitive_operator_symbols(&fixture.store),
+        Some(symbols)
+    );
+}
+
+#[test]
+fn same_named_noncanonical_int_method_is_not_an_intrinsic() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let name = fixture.store.names.intern("+");
+    let signature = fixture.store.types.alloc(Type::Method(MethodType {
+        params: vec![MethodParam {
+            name: TermName::new(name),
+            ty: fixture.definitions.int,
+            erased: false,
+            varargs: false,
+        }],
+        result: fixture.definitions.int,
+        kind: MethodKind::Plain,
+    }));
+    let method = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(name, Namespace::Term),
+        owner: fixture
+            .store
+            .types
+            .get(fixture.definitions.int)
+            .reference_symbol(),
+        kind: SymbolKind::Method,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(signature),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let call = fixture.call(method, fixture.definitions.int);
+    assert_eq!(
+        resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
+        Ok(None)
+    );
+}
+
+#[test]
+fn builtin_call_with_missing_registry_entry_returns_typed_error() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let symbols = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+    let method = symbols.plus;
+    fixture.store.symbols.set_info(method, SymbolInfo::Missing);
+    let call = fixture.call(method, fixture.definitions.int);
+    assert_eq!(
+        resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
+        Err(JvmIntIntrinsicError::MissingBuiltinRegistry { tree: call, method })
+    );
+}
+
+#[test]
+fn canonical_intrinsic_rejects_wrong_result_type() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let method = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .plus;
+    let call = fixture.call(method, fixture.definitions.boolean);
+    assert!(matches!(
+        resolve_int_intrinsic(&fixture.store, &fixture.ast, call, &fixture.definitions),
+        Err(JvmIntIntrinsicError::WrongResultType { tree, .. }) if tree == call
+    ));
+}
+
+#[test]
+fn canonical_intrinsic_reports_wrong_arity_and_owner() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let method = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .plus;
+    let valid_call = fixture.call(method, fixture.definitions.int);
+    let function = match &fixture.ast.get(valid_call).kind {
+        TreeKind::Apply(apply) => apply.function,
+        _ => unreachable!(),
+    };
+    let wrong_arity = fixture.ast.alloc(Tree {
+        kind: TreeKind::Apply(Apply {
+            function,
+            args: Vec::new(),
+            kind: ApplyKind::Regular,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            wrong_arity,
+            &fixture.definitions
+        ),
+        Err(JvmIntIntrinsicError::WrongArity {
+            tree: wrong_arity,
+            expected: 1,
+            found: 0,
+        })
+    );
+
+    fixture.store.symbols.get_mut(method).owner = Some(method);
+    assert!(matches!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            valid_call,
+            &fixture.definitions
+        ),
+        Err(JvmIntIntrinsicError::WrongOwner { tree, method: found, .. })
+            if tree == valid_call && found == method
+    ));
+}
+
+#[test]
+fn canonical_intrinsic_rejects_unsupported_or_receiver_inconsistent_prefixes() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let method = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .plus;
+    let unsupported_call = fixture.call(method, fixture.definitions.int);
+    let unsupported = fixture.definitions.no_prefix;
+    let unsupported_function = fixture.set_function_prefix(unsupported_call, unsupported);
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            unsupported_call,
+            &fixture.definitions
+        ),
+        Err(JvmIntIntrinsicError::UnsupportedFunctionPrefix {
+            tree: unsupported_function,
+            prefix: unsupported,
+        })
+    );
+
+    let mismatched_call = fixture.call(method, fixture.definitions.int);
+    let mismatched_function =
+        fixture.set_function_prefix(mismatched_call, fixture.definitions.boolean);
+    let receiver_id = match &fixture.ast.get(mismatched_call).kind {
+        TreeKind::Apply(apply) => match &fixture.ast.get(apply.function).kind {
+            TreeKind::Select(select) => select.qualifier,
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let receiver = fixture.ast.get(receiver_id).ty;
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            mismatched_call,
+            &fixture.definitions
+        ),
+        Err(JvmIntIntrinsicError::FunctionPrefixMismatch {
+            tree: mismatched_function,
+            prefix: fixture.definitions.boolean,
+            receiver,
+        })
+    );
+}
+
+#[test]
+fn type_applied_int_call_shape_returns_a_typed_error() {
+    let mut fixture = PrimitiveIntrinsicFixture::new();
+    let method = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .plus;
+    let call = fixture.call(method, fixture.definitions.int);
+    let function = match &fixture.ast.get(call).kind {
+        TreeKind::Apply(apply) => apply.function,
+        _ => unreachable!(),
+    };
+    let type_apply = fixture.ast.alloc(Tree {
+        kind: TreeKind::TypeApply(TypeApply {
+            function,
+            args: Vec::new(),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    assert_eq!(
+        resolve_int_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            type_apply,
+            &fixture.definitions
+        ),
+        Err(JvmIntIntrinsicError::UnsupportedCallShape { tree: type_apply })
+    );
 }

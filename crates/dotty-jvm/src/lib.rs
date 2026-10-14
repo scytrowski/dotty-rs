@@ -25,6 +25,9 @@ mod emission;
 mod expression;
 mod identity;
 mod locals;
+mod primitive_ops;
+
+pub use primitive_ops::{JvmIntIntrinsic, JvmIntIntrinsicError, resolve_int_intrinsic};
 
 /// Maximum number of nested typed expression nodes visited by JVM lowering.
 pub const JVM_EXPRESSION_DEPTH_LIMIT: usize = 64;
