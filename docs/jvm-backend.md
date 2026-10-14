@@ -24,6 +24,23 @@ kind and owner and check that a body root exists, but it relies on the
 frontend to supply the correct formal parameters, order, and method/body
 association.
 
+Each method plan may also carry `JvmLocalBinding` entries for ordinary local
+`val` and `var` declarations. A binding pairs the exact typed `ValDef`
+`TreeId<Typed>` with the existing canonical `SymbolId::Local` whose owner is
+the planned method. The Typer source adapter obtains the tree identity from
+`SourceTypedIndex` and the symbol from `SourceTyper::local_symbol_at` through
+`typed_local_binding_at`; it does not search by a name, span, or tree order.
+The adapter records mutability from the symbol flags and orders bindings by
+typed declaration ID for deterministic plan validation. Bindings live only in
+their containing method plan. Validation rejects stale or non-`ValDef` trees,
+foreign owners, duplicate declaration or symbol IDs, parameter reuse,
+incomplete types, type or mutability disagreement, and unsupported lazy,
+given, implicit, or erased flags. The semantic store and typed arena remain
+borrowed and read-only. This identity contract adds no local slots, initial
+stores, loads, assignments, or loop lowering; source methods containing locals
+remain outside whole-class emission until those operations have their own
+backend contract.
+
 The initial plan subset accepts `SymbolKind::Class`, `SymbolKind::Method`, and
 `SymbolKind::Parameter`; other kinds return a structured unsupported-kind
 error. Validation rejects duplicate class or method plans, missing semantic

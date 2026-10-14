@@ -8,12 +8,12 @@ use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader;
 use dotty_core::ast::{DefDef, Template, TreeKind, Untyped};
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolId, SymbolKind, TreeId,
-    Visibility,
+    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolKind,
+    TreeId, Visibility,
 };
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmMethodPlan, emit_class,
+    JvmCodegenError, JvmCompilationUnit, JvmLocalBinding, JvmMethodPlan, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -194,9 +194,32 @@ fn compile_source(
             }
             None => None,
         };
+        let mut locals = parsed
+            .ast
+            .iter()
+            .filter_map(|(source_tree, node)| {
+                if !matches!(node.kind, TreeKind::ValDef(_)) {
+                    return None;
+                }
+                let binding = typer.typed_local_binding_at(source_id, source_tree)?;
+                (typer.store().symbols.get(binding.symbol()).owner == Some(source_method.symbol))
+                    .then_some(JvmLocalBinding {
+                        declaration: binding.declaration(),
+                        symbol: binding.symbol(),
+                        mutable: typer
+                            .store()
+                            .symbols
+                            .get(binding.symbol())
+                            .flags
+                            .contains(SymbolFlags::MUTABLE),
+                    })
+            })
+            .collect::<Vec<_>>();
+        locals.sort_by_key(|binding| binding.declaration.index());
         methods.push(JvmMethodPlan {
             method: source_method.symbol,
             parameters: source_method.parameters,
+            locals,
             body,
         });
     }
@@ -880,4 +903,109 @@ fn invalid_source_is_rejected_with_parser_diagnostics_without_output() {
     let error = compile_fixture("Invalid.scala", output.path()).unwrap_err();
     assert!(matches!(error, PipelineFailure::Parser(diagnostics) if !diagnostics.is_empty()));
     assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn source_local_declarations_export_method_scoped_canonical_bindings() {
+    let source_text = "class C {\n def first(x: Int): Int = { val value = x; { val value = value; value } }\n def second(x: Int): Int = { val value = x; value }\n}";
+    let source_id = SourceId::from_index(1);
+    let source = SourceText::new(source_text).unwrap();
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = dotty_core::Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "LocalBindings.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        other => panic!("source should be named without diagnostics: {other:?}"),
+    };
+    let (class_symbol, template_tree) =
+        find_single_source_class(&parsed.ast, parsed.root, source_id, &index, &store).unwrap();
+    let TreeKind::Template(template) = &parsed.ast.get(template_tree).kind else {
+        panic!("source class should have a template")
+    };
+    let source_methods =
+        collect_source_methods(&parsed.ast, &template.body, source_id, &index, &store).unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(class_symbol).unwrap();
+    let mut method_plans = Vec::new();
+    for source_method in source_methods {
+        typer.complete_symbol(source_method.symbol).unwrap();
+        let rhs = source_method.rhs.unwrap();
+        let context = typer.expression_context_for(source_method.symbol).unwrap();
+        let body = typer.type_expression(rhs, context).unwrap();
+        let mut locals = parsed
+            .ast
+            .iter()
+            .filter_map(|(source_tree, node)| {
+                if !matches!(node.kind, TreeKind::ValDef(_)) {
+                    return None;
+                }
+                let binding = typer.typed_local_binding_at(source_id, source_tree)?;
+                (typer.store().symbols.get(binding.symbol()).owner == Some(source_method.symbol))
+                    .then_some(JvmLocalBinding {
+                        declaration: binding.declaration(),
+                        symbol: binding.symbol(),
+                        mutable: typer
+                            .store()
+                            .symbols
+                            .get(binding.symbol())
+                            .flags
+                            .contains(SymbolFlags::MUTABLE),
+                    })
+            })
+            .collect::<Vec<_>>();
+        locals.sort_by_key(|binding| binding.declaration.index());
+        assert_eq!(locals.len(), if method_plans.is_empty() { 2 } else { 1 });
+        assert!(
+            locals
+                .windows(2)
+                .all(|pair| pair[0].declaration.index() < pair[1].declaration.index())
+        );
+        method_plans.push(JvmMethodPlan {
+            method: source_method.symbol,
+            parameters: source_method.parameters,
+            locals,
+            body: Some(body),
+        });
+    }
+    assert_eq!(method_plans.len(), 2);
+    assert_eq!(method_plans[0].locals.len(), 2);
+    assert_eq!(method_plans[1].locals.len(), 1);
+    assert_ne!(
+        method_plans[0].locals[0].symbol,
+        method_plans[1].locals[0].symbol
+    );
+    assert_ne!(
+        method_plans[0].locals[0].declaration,
+        method_plans[1].locals[0].declaration
+    );
+    let unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: vec![JvmClassPlan {
+            class: class_symbol,
+            methods: method_plans,
+            initialization: JvmClassInitializationPlan::Unsupported,
+        }],
+    };
+    assert_eq!(unit.validate(), Ok(()));
 }
