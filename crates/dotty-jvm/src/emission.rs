@@ -60,9 +60,9 @@ pub(super) fn emit_class(
         let body = method_plan.body.ok_or(JvmCodegenError::MissingTypedBody {
             method: method_plan.method,
         })?;
-        let code = crate::lower_method_body(
-            unit.store,
-            unit.typed_ast,
+        let code = crate::expression::lower_planned_method_body(
+            unit,
+            &metadata,
             definitions,
             method_metadata,
             body,

@@ -379,6 +379,33 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         symbol: Option<SymbolId>,
     },
+    /// Apply lowering was requested without a validated compilation-unit context.
+    JvmCallContextUnavailable {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+    },
+    /// A same-class call occurs in a control-flow branch whose verifier frames
+    /// cannot represent the temporary reference receiver.
+    JvmCallInUnsupportedControlFlow {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+    },
+    /// A typed call's argument count disagrees with the selected JVM descriptor.
+    JvmCallArityMismatch {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+        expected: usize,
+        found: usize,
+    },
+    /// A lowered argument does not provide the target parameter's primitive value.
+    JvmCallArgumentMismatch {
+        tree: TreeId<Typed>,
+        argument: TreeId<Typed>,
+        method: SymbolId,
+        index: usize,
+        expected: JvmType,
+        found: JvmExpressionFlow,
+    },
     /// A typed parameter reference has a different primitive type from its local metadata.
     ParameterReferenceTypeMismatch {
         tree: TreeId<Typed>,

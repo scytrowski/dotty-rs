@@ -10,8 +10,9 @@ use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
 use crate::{
     InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmCallTarget,
-    JvmClassMetadata, JvmCodegenError, JvmExpressionFlow, JvmLoweredExpression, JvmMethodMetadata,
-    JvmReturnType, JvmType, JvmValueCategory, UnsupportedJvmCallShapeKind,
+    JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmInvocationKind,
+    JvmLoweredExpression, JvmMethodMetadata, JvmReturnType, JvmType, JvmValueCategory,
+    UnsupportedJvmCallShapeKind,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +26,7 @@ enum ExpressionShape {
     Leaf,
     If,
     Return,
+    Apply,
     Unsupported(&'static str),
 }
 
@@ -35,6 +37,19 @@ pub(super) fn lower_current_receiver(
     call_id: TreeId<Typed>,
     target: &JvmCallTarget,
 ) -> Result<CodeBuilder, JvmCodegenError> {
+    let mut code = CodeBuilder::new();
+    append_current_receiver(typed_ast, class, caller, call_id, target, &mut code)?;
+    Ok(code)
+}
+
+fn append_current_receiver(
+    typed_ast: &TypedAst,
+    class: &JvmClassMetadata,
+    caller: &JvmMethodMetadata,
+    call_id: TreeId<Typed>,
+    target: &JvmCallTarget,
+    code: &mut CodeBuilder,
+) -> Result<(), JvmCodegenError> {
     let class_symbol = class.identity().symbol();
     if !class
         .methods()
@@ -106,13 +121,12 @@ pub(super) fn lower_current_receiver(
         });
     }
 
-    let mut code = CodeBuilder::new();
     code.aload(0)
         .map_err(|error| JvmCodegenError::CodeBuilder {
             tree: call_id,
             error,
         })?;
-    Ok(code)
+    Ok(())
 }
 
 /// Read-only semantic inputs shared by every recursive lowering step.
@@ -121,6 +135,8 @@ struct JvmLoweringContext<'a> {
     typed_ast: &'a TypedAst,
     definitions: &'a Definitions,
     method: &'a JvmMethodMetadata,
+    call_context: Option<(&'a JvmCompilationUnit<'a>, &'a JvmClassMetadata)>,
+    control_flow_depth: usize,
     node_visits: usize,
 }
 
@@ -136,6 +152,8 @@ impl<'a> JvmLoweringContext<'a> {
             typed_ast,
             definitions,
             method,
+            call_context: None,
+            control_flow_depth: 0,
             node_visits: 0,
         }
     }
@@ -219,6 +237,31 @@ pub(super) fn lower_method_body(
     let mut code = CodeBuilder::new();
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
+    append_method_return(method, body, flow, &mut code)?;
+    Ok(code)
+}
+
+pub(super) fn lower_planned_method_body(
+    unit: &JvmCompilationUnit<'_>,
+    class: &JvmClassMetadata,
+    definitions: &Definitions,
+    method: &JvmMethodMetadata,
+    body: TreeId<Typed>,
+) -> Result<CodeBuilder, JvmCodegenError> {
+    let mut code = CodeBuilder::new();
+    let mut context = JvmLoweringContext::new(unit.store, unit.typed_ast, definitions, method);
+    context.call_context = Some((unit, class));
+    let flow = emit_expression(&mut context, body, &mut code, 0)?;
+    append_method_return(method, body, flow, &mut code)?;
+    Ok(code)
+}
+
+fn append_method_return(
+    method: &JvmMethodMetadata,
+    body: TreeId<Typed>,
+    flow: Flow,
+    code: &mut CodeBuilder,
+) -> Result<(), JvmCodegenError> {
     match (method.descriptor().result(), flow) {
         (JvmReturnType::Value(expected), Flow::Value(found)) if expected == found => {
             code.ireturn()
@@ -246,7 +289,7 @@ pub(super) fn lower_method_body(
             });
         }
     }
-    Ok(code)
+    Ok(())
 }
 
 fn lower_leaf(
@@ -373,6 +416,7 @@ fn emit_expression(
             TreeKind::Literal(_) | TreeKind::Ident(_) => ExpressionShape::Leaf,
             TreeKind::If(_) => ExpressionShape::If,
             TreeKind::Return(_) => ExpressionShape::Return,
+            TreeKind::Apply(_) => ExpressionShape::Apply,
             kind => ExpressionShape::Unsupported(tree_kind_name(kind)),
         }
     };
@@ -380,6 +424,7 @@ fn emit_expression(
         ExpressionShape::Leaf => lower_leaf(context, tree_id, code),
         ExpressionShape::If => emit_if(context, tree_id, code, depth),
         ExpressionShape::Return => emit_return(context, tree_id, code, depth),
+        ExpressionShape::Apply => emit_apply(context, tree_id, code, depth),
         ExpressionShape::Unsupported(node) => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
             node,
@@ -387,7 +432,106 @@ fn emit_expression(
     }
 }
 
+fn emit_apply(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let (function, arguments) = {
+        let tree = context.tree(tree_id)?;
+        let TreeKind::Apply(application) = &tree.kind else {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: tree_id,
+                node: tree_kind_name(&tree.kind),
+            });
+        };
+        (application.function, application.args.clone())
+    };
+    let Some((unit, class)) = context.call_context else {
+        return Err(JvmCodegenError::JvmCallContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    };
+    if context.control_flow_depth > 0 {
+        return Err(JvmCodegenError::JvmCallInUnsupportedControlFlow {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    }
+    let caller_class = class.identity().symbol();
+    let caller_method = context.method.symbol();
+    let target =
+        unit.resolve_same_class_call(caller_class, caller_method, tree_id, context.definitions)?;
+    let parameters = target.descriptor().parameters().to_vec();
+    if arguments.len() != parameters.len() {
+        return Err(JvmCodegenError::JvmCallArityMismatch {
+            tree: tree_id,
+            method: target.method_symbol(),
+            expected: parameters.len(),
+            found: arguments.len(),
+        });
+    }
+
+    context.visit(function, depth + 1)?;
+    if let TreeKind::Select(select) = &context.tree(function)?.kind {
+        context.visit(select.qualifier, depth + 2)?;
+    }
+    append_current_receiver(
+        context.typed_ast,
+        class,
+        context.method,
+        tree_id,
+        &target,
+        code,
+    )?;
+
+    for (index, (argument, expected)) in arguments.into_iter().zip(parameters).enumerate() {
+        let flow = emit_expression(context, argument, code, depth + 1)?;
+        if flow != Flow::Value(expected) {
+            return Err(JvmCodegenError::JvmCallArgumentMismatch {
+                tree: tree_id,
+                argument,
+                method: target.method_symbol(),
+                index,
+                expected,
+                found: public_flow(flow),
+            });
+        }
+    }
+
+    match target.invocation_kind() {
+        JvmInvocationKind::Virtual => code
+            .invokevirtual(
+                target.owner_internal_name(),
+                target.method_name(),
+                target.descriptor().as_str(),
+            )
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?,
+    };
+    Ok(match target.result() {
+        JvmReturnType::Value(value) => Flow::Value(value),
+        JvmReturnType::Void => Flow::Unit,
+    })
+}
+
 fn emit_if(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    context.control_flow_depth += 1;
+    let result = emit_if_body(context, tree_id, code, depth);
+    context.control_flow_depth -= 1;
+    result
+}
+
+fn emit_if_body(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
     code: &mut CodeBuilder,

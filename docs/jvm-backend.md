@@ -113,6 +113,16 @@ that builder so the receiver precedes the arguments. Qualified `this`,
 errors. This API emits neither arguments nor the invocation and does not
 introduce general JVM reference-value lowering.
 
+Planned method-body lowering in `emit_class` accepts a regular `Apply` whose
+target passes `resolve_same_class_call`. It emits one current receiver, then
+lowers each argument once in source order and checks its primitive stack value
+against the selected descriptor. It finally emits symbolic `invokevirtual`
+with the target's exact owner, name, and descriptor. Int/Boolean results leave
+one int-like value; Unit leaves no value. Arity, argument-flow, target, and
+typed-result mismatches return structured errors, and a failed method does not
+produce a class artifact. Standalone expression/body lowering has no emission
+plan, so it cannot resolve `Apply` targets.
+
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
 semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
@@ -206,7 +216,13 @@ method-local `CodeBuilder`, so an error discards partial instructions. The
 classfile builder then validates reachable blocks, analyzes stack states,
 assembles labels, and writes `StackMapTable` frames.
 
-`Return.from = Some(...)` is rejected. `Select`, `Apply`, `TypeApply`, `Block`,
+Calls inside an `If` expression are rejected with a typed error because the
+current classfile stack-map analyzer cannot represent their temporary
+reference receiver in that control-flow graph. Calls at ordinary expression
+roots, as arguments to other calls, and under supported local returns remain
+within the current subset when their stack flow is primitive or Unit.
+
+`Return.from = Some(...)` is rejected. Arbitrary `Select`, `TypeApply`, `Block`,
 `While`, `Match`, `Try`, `New`, closures, nested `DefDef`s, String/Long and
 other non-Int/Boolean literals, object/reference joins, and all other typed
 nodes remain unsupported. No source name lookup, implicit boxing, boolean
