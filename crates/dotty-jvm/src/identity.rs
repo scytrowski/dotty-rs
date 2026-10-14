@@ -299,11 +299,23 @@ fn method_access_flags(
     ))
 }
 
+pub(super) fn class_info(
+    store: &SemanticStore,
+    class: dotty_core::SymbolId,
+) -> Result<&dotty_core::types::ClassInfo, JvmCodegenError> {
+    let symbol = store
+        .symbols
+        .contains(class)
+        .then(|| store.symbols.get(class))
+        .ok_or(JvmCodegenError::UnknownClass { class })?;
+    validate_class_info(store, class, symbol.info)
+}
+
 fn validate_class_info(
     store: &SemanticStore,
     class: dotty_core::SymbolId,
     info: SymbolInfo,
-) -> Result<(), JvmCodegenError> {
+) -> Result<&dotty_core::types::ClassInfo, JvmCodegenError> {
     let ty = match info {
         SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
             return Err(JvmCodegenError::MissingSemanticInfo { symbol: class });
@@ -374,7 +386,7 @@ fn validate_class_info(
             });
         }
     }
-    Ok(())
+    Ok(class_info)
 }
 
 fn validate_class_flags(

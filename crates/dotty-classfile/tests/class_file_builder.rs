@@ -385,6 +385,50 @@ fn builds_branched_integer_methods_with_one_stack_map_table_each() {
 }
 
 #[test]
+fn class_builder_accepts_prebuilt_symbolic_branch_code() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Prebuilt",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    let mut code = dotty_classfile::bytecode::CodeBuilder::new();
+    let otherwise = code.new_label().unwrap();
+    let join = code.new_label().unwrap();
+    code.iconst(1).unwrap();
+    code.ifeq(otherwise.clone()).unwrap();
+    code.iconst(2).unwrap();
+    code.goto(join.clone()).unwrap();
+    code.mark(otherwise).unwrap();
+    code.iconst(3).unwrap();
+    code.mark(join).unwrap();
+    code.ireturn().unwrap();
+    builder
+        .add_prebuilt_code_method(
+            "choose",
+            "()I",
+            MethodAccessFlags(ACC_PUBLIC | ACC_STATIC),
+            code,
+        )
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let method = method_named(&class_file, "choose");
+    let code = code_attribute(method);
+    assert_eq!(
+        code.code,
+        [0x04, 0x99, 0x00, 0x07, 0x05, 0xa7, 0x00, 0x04, 0x06, 0xac]
+    );
+    assert!(matches!(
+        code.attributes.as_slice(),
+        [Attribute::Other(attribute)] if utf8(&class_file, attribute.name_index) == "StackMapTable"
+    ));
+}
+
+#[test]
 fn rejects_unreachable_blocks_before_automatic_stack_map_emission() {
     let mut builder = ClassFileBuilder::new(
         "example/UnreachableIntegerBlock",

@@ -568,6 +568,25 @@ impl ClassFileBuilder {
         Ok(self)
     }
 
+    /// Adds a method from an already-built symbolic instruction sequence.
+    ///
+    /// The code is validated and analyzed by the same path as
+    /// [`add_code_method`](Self::add_code_method) during class encoding.
+    /// This is useful when a higher-level backend lowers typed trees before it
+    /// creates the class builder.
+    pub fn add_prebuilt_code_method(
+        &mut self,
+        name: impl Into<String>,
+        descriptor: impl Into<String>,
+        access_flags: MethodAccessFlags,
+        code: code_builder::CodeBuilder,
+    ) -> Result<&mut Self, ClassFileBuildError> {
+        self.add_code_method(name, descriptor, access_flags, move |builder| {
+            *builder = code;
+            Ok(())
+        })
+    }
+
     /// Finalizes and encodes the class by interning all symbolic references
     /// before freezing the constant pool, then using the existing class-file
     /// encoder.

@@ -1,12 +1,13 @@
 # JVM backend boundary
 
 `dotty-jvm` is the adapter boundary between a completed typed frontend and
-future JVM lowering. It depends on `dotty-core` for canonical symbols, types,
+bounded JVM lowering. It depends on `dotty-core` for canonical symbols, types,
 and typed trees, and on `dotty-classfile` for class-file descriptor and output
-APIs. The crate validates a borrowed `JvmCompilationUnit` contract and
-projects one bounded method subset to JVM descriptors and lowers selected
-typed expressions to the class-file crate's symbolic code builder. It does not
-assemble a source frontend or emit complete class files.
+APIs. The crate validates a borrowed `JvmCompilationUnit` contract, projects a
+bounded class and method subset to JVM metadata, lowers selected typed
+expressions to the class-file crate's symbolic code builder, and composes a
+complete class file when the frontend supplies sufficient initialization
+evidence. It does not assemble a source frontend.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -89,6 +90,35 @@ This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
 semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
 forms must be handled by a separate contract before they can be emitted.
+
+## Whole-class emission
+
+`emit_class` composes one planned class into a class file at
+`JVM_CLASSFILE_MAJOR_VERSION` (65). The artifact contains a public ordinary
+class extending canonical `java/lang/Object`, one synthesized public
+`<init>()V`, and the public instance methods listed in `JvmClassPlan::methods`
+in plan order. Method bodies are lowered through the same typed expression
+path described above. The file is encoded into an owned `GeneratedClass` only
+after every method and class-file structure has been built successfully.
+
+The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
+proving the source class has no constructor parameters or body, superclass
+arguments, fields, or template initialization expressions. The backend checks
+that the class's completed `ClassInfo` has exactly its canonical `Object`
+parent, has no self type, declares no non-method members, and has at most one
+no-argument primary constructor. A missing plan, a plan marked `Unsupported`,
+or a class shape outside those checks returns a typed error; the backend does
+not infer initialization safety from an empty method list. The synthesized
+constructor calls `java/lang/Object.<init>()V` and returns.
+
+The emitted class has no fields, interfaces, class initializer, Scala/TASTy
+metadata, or unplanned methods. Constructors with parameters, additional
+constructors, field initializers, nested types, explicit superclass behavior,
+and other class initialization semantics remain unsupported. The API returns
+only after encoding succeeds, so a failure does not expose a partial artifact.
+The CI JVM gate writes this generated class to disk, inspects it with `javap`,
+compiles a small Java caller with `javac`, and executes it with
+`java -Xverify:all` on JDK 21 or newer.
 
 ## Typed expression leaves
 
