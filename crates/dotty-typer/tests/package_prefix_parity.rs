@@ -566,6 +566,94 @@ fn stacked_package_imports_use_current_then_enclosing_tasty_packages() {
 }
 
 #[test]
+fn explicit_import_shadows_a_same_named_package_qualifier() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let source = SourceId::from_index(1179);
+    let source_text = "package a.consumer.b { object Local { class PackageRelative } }; package other { object b { object Local { class Relative } } }; package a.consumer { import other.b; import b.Local.Relative; class Use { val value: Relative = new Relative } }";
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Issue1174PackageImportPrecedence.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (value, type_tree) = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| match &node.kind {
+            TreeKind::ValDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "value" =>
+            {
+                Some((index.symbol_at(source, tree).unwrap(), definition.tpt))
+            }
+            _ => None,
+        })
+        .next()
+        .unwrap();
+    let relative = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "Relative" =>
+            {
+                index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    typer.complete_symbol(value).unwrap();
+
+    let projected = typer
+        .source_type_index()
+        .type_at(source, type_tree)
+        .expect("the explicitly imported qualifier should resolve");
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(found),
+        ..
+    } = typer.store().types.get(projected)
+    else {
+        panic!("expected the imported Relative type")
+    };
+    assert_eq!(*found, relative);
+    let local_module = typer.store().symbols.get(relative).owner.unwrap();
+    assert_eq!(
+        typer.store().symbols.get(local_module).kind,
+        SymbolKind::ModuleClass
+    );
+    let imported_b = typer.store().symbols.get(local_module).owner.unwrap();
+    assert_eq!(
+        typer.store().symbols.get(imported_b).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        typer.store().symbols.get(imported_b).owner,
+        Some(packages.symbol(&["other"]).unwrap())
+    );
+}
+
+#[test]
 fn dotted_package_declaration_does_not_expose_synthetic_parent_for_imports() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);

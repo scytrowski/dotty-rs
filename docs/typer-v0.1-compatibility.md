@@ -1655,16 +1655,18 @@ a second resolver.
 
 ### #1174 stacked package precedence and root qualification
 
-Unrooted import qualifiers search the actual current source package, then only
-the enclosing package contexts represented by stacked package clauses, and
-finally the canonical root package. Dotted package declarations do not create
-synthetic lexical parents. Once a qualifier resolves to a package, a missing
-later member does not restart lookup from a lower-priority package. Explicit
-`_root_` qualification begins at the canonical root symbol and never asks the
-classpath resolver to resolve `_root_` as a package segment. Regression
-coverage includes stacked-versus-dotted declarations, current-versus-enclosing
-TASTy packages, root qualification under a relative-name collision, and
-failure after selecting a higher-priority package.
+After local lexical and import bindings miss, unrooted import qualifiers
+search the actual current source package, then only the enclosing package
+contexts represented by stacked package clauses, and finally the canonical
+root package. Dotted package declarations do not create synthetic lexical
+parents. An explicit import binding keeps its existing precedence over package
+candidates. Once a qualifier resolves to a package, a missing later member does
+not restart lookup from a lower-priority package. Explicit `_root_`
+qualification begins at the canonical root symbol and never asks the classpath
+resolver to resolve `_root_` as a package segment. Regression coverage includes
+stacked-versus-dotted declarations, current-versus-enclosing TASTy packages,
+imported-name shadowing, root qualification under a relative-name collision,
+and failure after selecting a higher-priority package.
 
 ### #1072 post-parity Object module reprofile
 
