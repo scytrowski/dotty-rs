@@ -21,7 +21,9 @@ use dotty_core::types::Type;
 
 mod boolean_ops;
 mod call_target;
+mod constructor;
 mod descriptor;
+pub use constructor::{JvmConstructorIssue, JvmConstructorMetadata, JvmPrimaryConstructorPlan};
 mod emission;
 mod expression;
 mod identity;
@@ -199,6 +201,7 @@ pub struct JvmMethodMetadata {
 pub struct JvmClassMetadata {
     identity: JvmClassIdentity,
     fields: Vec<JvmFieldMetadata>,
+    constructor: Option<JvmConstructorMetadata>,
     methods: Vec<JvmMethodMetadata>,
 }
 
@@ -236,8 +239,10 @@ pub struct JvmFieldMetadata {
 }
 
 /// Frontend evidence about class initialization for whole-class emission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmClassInitializationPlan {
+    /// Validated source constructor metadata only; does not authorize emission.
+    PrimaryConstructor(JvmPrimaryConstructorPlan),
     /// The frontend proved that an empty `Object.<init>()V` constructor is
     /// equivalent to the source class: no constructor parameters or body,
     /// superclass arguments, fields, or template initializers are present.
@@ -393,6 +398,11 @@ impl JvmMethodPlan {
 /// A plan failed validation against its caller-owned semantic input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmCodegenError {
+    /// A primary constructor plan or its source evidence is inconsistent.
+    InvalidPrimaryConstructor {
+        constructor: SymbolId,
+        issue: JvmConstructorIssue,
+    },
     /// The class ID is outside the supplied symbol table.
     UnknownClass { class: SymbolId },
     /// The method ID is outside the supplied symbol table.
@@ -1159,6 +1169,10 @@ impl JvmClassPlan {
 }
 
 impl JvmClassMetadata {
+    /// Explicit primary constructor metadata, when the frontend supplied a plan.
+    pub fn constructor(&self) -> Option<&JvmConstructorMetadata> {
+        self.constructor.as_ref()
+    }
     /// Class identity, preserving its canonical semantic symbol.
     pub const fn identity(&self) -> &JvmClassIdentity {
         &self.identity

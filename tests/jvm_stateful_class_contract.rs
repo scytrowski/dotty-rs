@@ -2000,3 +2000,82 @@ fn field_metadata_distinguishes_private_this_from_plain_private() {
         },
     );
 }
+
+#[test]
+fn ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result() {
+    for (text, descriptor) in [
+        ("class C()", "()V"),
+        ("class C(x: Int)", "(I)V"),
+        ("class C(flag: Boolean, x: Int)", "(ZI)V"),
+        ("class C private (x: Int)", "(I)V"),
+    ] {
+        with_source(text, |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "C");
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
+                panic!()
+            };
+            let parameters = def
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                .collect::<Vec<_>>();
+            let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{text}: {e:?}, {def:?}, params: {:?}",
+                    def.value_param_clauses
+                        .iter()
+                        .flatten()
+                        .map(|id| ast.get(*id))
+                        .collect::<Vec<_>>()
+                )
+            });
+            typer.complete_symbol(class).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let plan = JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            };
+            let metadata = plan.metadata(typer.store(), definitions).unwrap();
+            let constructor_metadata = metadata.constructor().unwrap();
+            assert_eq!(constructor_metadata.descriptor().as_str(), descriptor);
+            assert_eq!(constructor_metadata.owner_internal_name(), "C");
+            assert_eq!(constructor_metadata.symbol(), constructor);
+            assert_eq!(
+                constructor_metadata.access_flags().is_private(),
+                text.contains("private")
+            );
+            assert_eq!(
+                constructor_metadata.access_flags().is_public(),
+                !text.contains("private")
+            );
+            for (i, (actual, expected)) in constructor_metadata
+                .parameters()
+                .iter()
+                .zip(parameters)
+                .enumerate()
+            {
+                assert_eq!(actual.symbol(), expected);
+                assert_eq!(actual.slot(), (i + 1) as u16);
+                assert_eq!(typer.store().symbols.get(expected).owner, Some(constructor));
+            }
+        });
+    }
+}

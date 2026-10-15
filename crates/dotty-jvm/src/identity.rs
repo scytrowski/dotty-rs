@@ -199,7 +199,14 @@ pub(super) fn class_metadata(
         methods.push(method);
     }
 
+    let constructor = match &plan.initialization {
+        crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
+            Some(constructor.metadata(store, definitions, plan.class)?)
+        }
+        _ => None,
+    };
     Ok(JvmClassMetadata {
+        constructor,
         identity,
         fields,
         methods,

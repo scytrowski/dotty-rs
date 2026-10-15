@@ -28,6 +28,16 @@ pub(super) fn method_descriptor(
     owner: SymbolId,
     definitions: &Definitions,
 ) -> Result<JvmMethodDescriptor, JvmCodegenError> {
+    descriptor_for(plan, store, owner, definitions, false)
+}
+
+pub(super) fn descriptor_for(
+    plan: &JvmMethodPlan,
+    store: &SemanticStore,
+    owner: SymbolId,
+    definitions: &Definitions,
+    constructor: bool,
+) -> Result<JvmMethodDescriptor, JvmCodegenError> {
     let class = store
         .symbols
         .contains(owner)
@@ -48,7 +58,12 @@ pub(super) fn method_descriptor(
         .ok_or(JvmCodegenError::UnknownMethod {
             method: plan.method,
         })?;
-    if method.kind != SymbolKind::Method {
+    let expected_kind = if constructor {
+        SymbolKind::Constructor
+    } else {
+        SymbolKind::Method
+    };
+    if method.kind != expected_kind {
         return Err(JvmCodegenError::UnsupportedSymbolKind {
             symbol: plan.method,
             expected: crate::SymbolRole::Method,
@@ -196,11 +211,21 @@ pub(super) fn method_descriptor(
         parameters.push(symbol_value_type);
     }
 
-    let result =
+    let result = if constructor {
+        if !matches!(store.types.try_get(method_type.result), Some(Type::TypeRef { target: TypeRefTarget::Symbol(symbol), .. }) if *symbol == owner)
+        {
+            return Err(JvmCodegenError::InvalidPrimaryConstructor {
+                constructor: plan.method,
+                issue: crate::JvmConstructorIssue::ResultType,
+            });
+        }
+        JvmReturnType::Void
+    } else {
         match primitive_result_type(store, method_type.result, plan.method, &primitive_symbols)? {
             Some(ty) => JvmReturnType::Value(ty),
             None => JvmReturnType::Void,
-        };
+        }
+    };
 
     let descriptor_text = format!(
         "({}){}",
