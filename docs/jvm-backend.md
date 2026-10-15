@@ -323,6 +323,14 @@ locals. The test asserts method descriptors, slot-specific loads and stores,
 `max_stack`, `max_locals`, branch targets, sorted decoded `StackMapTable` frame
 PCs, class-file version 65, full class-file decoding, and reference validity.
 Java harnesses check all local-state results under `java -Xverify:all`.
+`BooleanControlFlow` exercises canonical short-circuit intrinsics through the
+source frontend in `if` and `while` conditions, nested eager/short-circuit
+expressions, Boolean local initialization and assignment, and side-effecting
+operands. Its JVM harness checks zero- and multi-iteration loops, verifies
+that short-circuit RHS effects occur only when selected, and confirms that
+strict `&`, `|`, and `^` evaluate both operands. Generated methods are checked
+against the classfile CFG's stack-map frame targets and run with
+`java -Xverify:all` in the JDK gate.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
 Negative source tests verify that field initialization, invalid while
