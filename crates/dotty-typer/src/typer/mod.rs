@@ -8141,6 +8141,53 @@ mod tests {
     }
 
     #[test]
+    fn lexical_package_candidates_reuse_a_preexisting_canonical_package() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let preexisting = packages
+            .enter(&mut store, SymbolOrigin::Synthetic, &["a", "b"])
+            .last()
+            .unwrap()
+            .symbol;
+        let source = SourceId::from_index(13);
+        let (parsed, index) =
+            parse_and_name_unit("package a.b; class C", source, &mut store, &mut packages);
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("fixture class should be named");
+        let context = index.declaration_context_of(class).unwrap();
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidates = typer
+            .lexical_package_candidates(
+                context,
+                resolution::imports::LexicalPackageSearch::Relative,
+                7,
+            )
+            .unwrap();
+
+        assert_eq!(candidates[0].package, preexisting);
+        assert_eq!(candidates[0].package_path, ["a", "b"]);
+    }
+
+    #[test]
     fn lexical_package_candidates_reject_a_cyclic_package_owner_chain() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("package a.b; class C");
