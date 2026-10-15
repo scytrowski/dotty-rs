@@ -119,9 +119,10 @@ local initializers and assignments, and arithmetic in the existing integer
 These intrinsic calls do not emit `invokevirtual` or a method reference for the
 Scala operator. Calls whose symbol is not in the canonical registry continue
 through ordinary same-class call resolution and retain its receiver and
-control-flow restrictions. Generic expression lowering without a validated
-compilation unit still rejects applications because it has no intrinsic or
-call-target context. Canonical relational operators `<`, `<=`, `>`, and `>=`
+control-flow restrictions. Standalone expression lowering can emit canonical
+Int and Boolean intrinsics without a compilation-unit call context; ordinary
+applications still require a validated same-class target. Canonical relational
+operators `<`, `<=`, `>`, and `>=`
 emit their signed `if_icmp*` branch to a true label, materialize `0` on the
 false path and `1` on the true path, then join. The classfile builder computes
 branch offsets and `StackMapTable` frames. The Boolean values work as results,
@@ -132,8 +133,8 @@ multiple loop iterations, comparison conditions, nested Boolean branches, and
 before the loop; a local initialized only in the body is not assumed to exist
 on the zero-iteration exit. Calls with reference receivers remain unsupported
 in control-flow graphs because the current analyzer still models only
-integer-like stack states there. Equality operators `==` and `!=` remain
-unsupported. JVM overflow, signed division/remainder, and division-by-zero
+integer-like stack states there. Universal equality operators `Any.==` and
+`Any.!=` remain unsupported. JVM overflow, signed division/remainder, and division-by-zero
 behavior are preserved by emitting the corresponding JVM instruction without
 constant folding or prechecks.
 
@@ -142,7 +143,7 @@ lexer, parser, namer, typer, JVM backend, and JDK 21+ runtime. Its Java harness
 checks arithmetic overflow, signed comparison boundaries, divide-by-zero
 exceptions, and repeated `sumTo` loop execution with `java -Xverify:all`.
 General Scala library lowering, Long/Float/Double, Java classpath loading,
-TASTy emission, the full Scala ABI, equality operators, and arbitrary
+TASTy emission, the full Scala ABI, universal equality, and arbitrary
 reference-bearing calls inside branched CFGs remain outside this subset.
 
 ## Canonical Boolean intrinsic resolution
@@ -158,8 +159,14 @@ regular `Apply(Select(receiver, member), [argument])` trees.
 The intrinsic value reports whether the operation has no RHS, evaluates it
 strictly, or short-circuits it. Resolution does not emit bytecode, mutate the
 semantic store or typed tree, or route short-circuit operators through
-`invokevirtual`. Boolean JVM code generation remains outside the current
-backend subset.
+`invokevirtual`. Backend lowering emits unary `!` as an int-like XOR with 1;
+eager `&`, `|`, and `^` evaluate the selected receiver and argument once in
+source order before `iand`, `ior`, or `ixor`. Canonical Boolean `==` and `!=`
+compare their int-like values and materialize a normalized 0/1 result.
+Universal `Any.==`/`Any.!=`, user-defined same-spelled methods, and
+short-circuit `&&`/`||` are not substituted. These Boolean values compose with
+the supported locals, assignments, blocks, and integer-like `If`/`While`
+flow; ordinary calls inside branched CFGs keep their existing restriction.
 
 ## Class and method metadata subset
 
@@ -379,8 +386,8 @@ reference receiver in that control-flow graph. Calls at ordinary expression
 roots, as arguments to other calls, and under supported local returns remain
 within the current subset when their stack flow is primitive or Unit.
 
-`Return.from = Some(...)` is rejected. Arbitrary `Select`, `TypeApply`, `Block`,
-`While`, `Match`, `Try`, `New`, closures, nested `DefDef`s, String/Long and
-other non-Int/Boolean literals, object/reference joins, and all other typed
-nodes remain unsupported. No source name lookup, implicit boxing, boolean
-conversion, constant folding, or frontend dependency is introduced.
+`Return.from = Some(...)` is rejected. Non-intrinsic `Select`, `TypeApply`,
+`Match`, `Try`, `New`, closures, nested `DefDef`s, String/Long and other
+non-Int/Boolean literals, object/reference joins, and all other typed nodes
+remain unsupported. No source name lookup, implicit boxing, general-purpose
+coercion, constant folding, or frontend dependency is introduced.

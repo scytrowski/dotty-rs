@@ -11,10 +11,11 @@ use dotty_core::symbols::SymbolInfo;
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
 use crate::{
-    InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmCallTarget,
-    JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmIntIntrinsic,
-    JvmInvocationKind, JvmLocalLayout, JvmLocalSlot, JvmLoweredExpression, JvmMethodMetadata,
-    JvmReturnType, JvmType, JvmValueCategory, UnsupportedJvmCallShapeKind, resolve_int_intrinsic,
+    InvalidTypeReason, JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmBooleanIntrinsic,
+    JvmCallTarget, JvmClassMetadata, JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow,
+    JvmIntIntrinsic, JvmInvocationKind, JvmLocalLayout, JvmLocalSlot, JvmLoweredExpression,
+    JvmMethodMetadata, JvmReturnType, JvmType, JvmValueCategory, UnsupportedJvmCallShapeKind,
+    resolve_int_intrinsic,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,6 +27,7 @@ enum Flow {
 
 enum ExpressionShape {
     Leaf,
+    Select,
     Block,
     If,
     While,
@@ -487,6 +489,7 @@ fn emit_expression(
         let tree = context.tree(tree_id)?;
         match &tree.kind {
             TreeKind::Literal(_) | TreeKind::Ident(_) => ExpressionShape::Leaf,
+            TreeKind::Select(_) => ExpressionShape::Select,
             TreeKind::Block(_) => ExpressionShape::Block,
             TreeKind::If(_) => ExpressionShape::If,
             TreeKind::While(_) => ExpressionShape::While,
@@ -498,6 +501,7 @@ fn emit_expression(
     };
     match shape {
         ExpressionShape::Leaf => lower_leaf(context, tree_id, code),
+        ExpressionShape::Select => emit_boolean_not(context, tree_id, code, depth),
         ExpressionShape::Block => emit_block(context, tree_id, code, depth),
         ExpressionShape::If => emit_if(context, tree_id, code, depth),
         ExpressionShape::While => emit_while(context, tree_id, code, depth),
@@ -820,12 +824,21 @@ fn emit_apply(
         };
         (application.function, application.args.clone())
     };
-    let Some((unit, class)) = context.call_context else {
-        return Err(JvmCodegenError::JvmCallContextUnavailable {
-            tree: tree_id,
-            method: context.method.symbol(),
-        });
-    };
+    let intrinsic = crate::resolve_boolean_intrinsic(
+        context.store,
+        context.typed_ast,
+        tree_id,
+        context.definitions,
+    )
+    .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
+        tree: tree_id,
+        error,
+    })?;
+    if let Some(intrinsic) = intrinsic {
+        return emit_boolean_intrinsic(
+            context, tree_id, function, &arguments, intrinsic, code, depth,
+        );
+    }
 
     let intrinsic = resolve_int_intrinsic(
         context.store,
@@ -842,6 +855,13 @@ fn emit_apply(
             context, tree_id, function, &arguments, intrinsic, code, depth,
         );
     }
+
+    let Some((unit, class)) = context.call_context else {
+        return Err(JvmCodegenError::JvmCallContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    };
 
     if context.control_flow_depth > 0 {
         return Err(JvmCodegenError::JvmCallInUnsupportedControlFlow {
@@ -906,6 +926,158 @@ fn emit_apply(
         JvmReturnType::Value(value) => Flow::Value(value),
         JvmReturnType::Void => Flow::Unit,
     })
+}
+
+fn emit_boolean_not(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let intrinsic = crate::resolve_boolean_intrinsic(
+        context.store,
+        context.typed_ast,
+        tree_id,
+        context.definitions,
+    )
+    .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
+        tree: tree_id,
+        error,
+    })?;
+    if intrinsic != Some(JvmBooleanIntrinsic::Not) {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree: tree_id,
+            node: "non-intrinsic selection",
+        });
+    }
+    let TreeKind::Select(select) = &context.tree(tree_id)?.kind else {
+        return Err(JvmCodegenError::BooleanIntrinsicResolution {
+            tree: tree_id,
+            error: crate::JvmBooleanIntrinsicError::UnsupportedTreeShape { tree: tree_id },
+        });
+    };
+    let operand = select.qualifier;
+    let flow = emit_expression(context, operand, code, depth + 1)?;
+    if flow != Flow::Value(JvmType::Boolean) {
+        return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
+            tree: tree_id,
+            operand,
+            index: 0,
+            found: public_flow(flow),
+        });
+    }
+    code.iconst(1)
+        .and_then(|code| code.ixor())
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    Ok(Flow::Value(JvmType::Boolean))
+}
+
+fn emit_boolean_intrinsic(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    function: TreeId<Typed>,
+    arguments: &[TreeId<Typed>],
+    intrinsic: JvmBooleanIntrinsic,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let receiver = match &context.tree(function)?.kind {
+        TreeKind::Select(select) => select.qualifier,
+        _ => {
+            return Err(JvmCodegenError::BooleanIntrinsicResolution {
+                tree: tree_id,
+                error: crate::JvmBooleanIntrinsicError::UnsupportedFunctionShape { tree: function },
+            });
+        }
+    };
+    let [argument] = arguments else {
+        return Err(JvmCodegenError::BooleanIntrinsicResolution {
+            tree: tree_id,
+            error: crate::JvmBooleanIntrinsicError::WrongArity {
+                tree: tree_id,
+                expected: 1,
+                found: arguments.len(),
+            },
+        });
+    };
+    if matches!(
+        intrinsic,
+        JvmBooleanIntrinsic::Not
+            | JvmBooleanIntrinsic::ShortCircuitAnd
+            | JvmBooleanIntrinsic::ShortCircuitOr
+    ) {
+        return Err(JvmCodegenError::BooleanIntrinsicResolution {
+            tree: tree_id,
+            error: crate::JvmBooleanIntrinsicError::UnsupportedTreeShape { tree: tree_id },
+        });
+    }
+    for (index, operand) in [receiver, *argument].into_iter().enumerate() {
+        let flow = emit_expression(context, operand, code, depth + 1)?;
+        if flow != Flow::Value(JvmType::Boolean) {
+            return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
+                tree: tree_id,
+                operand,
+                index,
+                found: public_flow(flow),
+            });
+        }
+    }
+
+    match intrinsic {
+        JvmBooleanIntrinsic::And => code.iand(),
+        JvmBooleanIntrinsic::Or => code.ior(),
+        JvmBooleanIntrinsic::Xor => code.ixor(),
+        JvmBooleanIntrinsic::Equal | JvmBooleanIntrinsic::NotEqual => {
+            let truthy = code
+                .new_label()
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            let end = code
+                .new_label()
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            if intrinsic == JvmBooleanIntrinsic::Equal {
+                code.if_icmpeq(truthy.clone())
+            } else {
+                code.if_icmpne(truthy.clone())
+            }
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
+            code.iconst(0)
+                .and_then(|code| code.goto(end.clone()))
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            code.mark(truthy)
+                .and_then(|code| code.iconst(1))
+                .and_then(|code| code.mark(end))
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            return Ok(Flow::Value(JvmType::Boolean));
+        }
+        JvmBooleanIntrinsic::Not
+        | JvmBooleanIntrinsic::ShortCircuitAnd
+        | JvmBooleanIntrinsic::ShortCircuitOr => unreachable!(
+            "unary and short-circuit Boolean operators were rejected before operand lowering"
+        ),
+    }
+    .map_err(|error| JvmCodegenError::CodeBuilder {
+        tree: tree_id,
+        error,
+    })?;
+    Ok(Flow::Value(JvmType::Boolean))
 }
 
 fn emit_int_intrinsic(
