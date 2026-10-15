@@ -90,11 +90,15 @@ resolution.
   and central-directory index while opening; entry reads fetch the local
   header and compressed range on demand. A mutex protects seek/read pairs
   on the shared file handle. ZIP-relative offsets are translated from the
-  supplied archive start, including a 4-byte JMOD prefix. If the file is
-  truncated after opening, the read returns a typed ZIP read error. The
-  existing `JarClassPath` and `JmodClassPath` still use memory backing; this
-  private capability does not change their behavior yet. Central directories
-  and compressed entries are each bounded to 256 MiB before allocation.
+  supplied archive start, including a 4-byte JMOD prefix. `JmodClassPath`
+  validates the JMOD magic and uses this backing, so `JdkClassPath::new`
+  indexes each JMOD's metadata without retaining its complete payload; JARs
+  remain memory-backed. If an opened JMOD is truncated or modified in place,
+  later reads use the current file contents and report typed ZIP errors if
+  those bytes no longer match the indexed archive. On systems that permit
+  unlinking an open file, removing its path does not invalidate the already
+  open handle. Central directories and compressed entries are each bounded
+  to 256 MiB before allocation.
 - Two package-evidence queries with distinct contracts:
 
   | Check | Meaning |

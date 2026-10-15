@@ -2,7 +2,7 @@ use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::zip_archive::ZipArchive;
 use std::collections::HashSet;
-use std::io;
+use std::io::{self, Read};
 use std::path::PathBuf;
 
 /// A JMOD file is a 4-byte magic (`"JM"` followed by a version byte
@@ -14,9 +14,8 @@ const JMOD_MAGIC: [u8; 4] = [0x4A, 0x4D, 0x01, 0x00];
 /// `BinaryName` to the entry named `classes/<internal name>.class`.
 ///
 /// A JMOD is otherwise an ordinary ZIP archive (see `ZipArchive`) once
-/// its 4-byte magic is stripped, so this type only adds the magic check
-/// and the `classes/` prefix on top of [`JarClassPath`](crate::jar_class_path::JarClassPath)'s
-/// approach.
+/// its 4-byte magic is skipped by the file-backed ZIP reader, so this
+/// type only adds the magic check and the `classes/` prefix.
 pub struct JmodClassPath {
     path: PathBuf,
     archive: ZipArchive,
@@ -26,17 +25,25 @@ pub struct JmodClassPath {
 impl JmodClassPath {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self, ClassPathError> {
         let path = path.into();
-        let mut bytes = std::fs::read(&path)?;
-
-        if bytes.len() < JMOD_MAGIC.len() || bytes[..JMOD_MAGIC.len()] != JMOD_MAGIC {
+        let mut file = std::fs::File::open(&path)?;
+        let mut magic = [0; JMOD_MAGIC.len()];
+        if let Err(error) = file.read_exact(&mut magic) {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                return Err(ClassPathError::from(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("not a JMOD file (bad magic): {}", path.display()),
+                )));
+            }
+            return Err(error.into());
+        }
+        if magic != JMOD_MAGIC {
             return Err(ClassPathError::from(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("not a JMOD file (bad magic): {}", path.display()),
             )));
         }
-        bytes.drain(..JMOD_MAGIC.len());
 
-        let archive = ZipArchive::open(bytes)?;
+        let archive = ZipArchive::open_file_handle(file, JMOD_MAGIC.len() as u64)?;
         let package_prefixes = archive.package_prefixes_under("classes/");
 
         Ok(Self {
@@ -250,5 +257,90 @@ mod tests {
             crate::error::ClassLoadCategory::Conditional
         );
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn file_backed_archive_does_not_retain_the_jmod_payload() {
+        let path = write_temp_jmod(
+            "file_backed_payload",
+            &[("classes/pkg/A.class", b"class bytes")],
+        );
+        let class_path = JmodClassPath::new(&path).unwrap();
+
+        assert_eq!(class_path.archive.retained_archive_payload_bytes(), 0);
+        assert_eq!(
+            class_path
+                .find_class(&BinaryName::from_internal("pkg/A"))
+                .unwrap()
+                .unwrap()
+                .bytes(),
+            b"class bytes"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn repeated_and_concurrent_reads_from_a_jmod_are_stable() {
+        let path = write_temp_jmod(
+            "concurrent_reads",
+            &[("classes/pkg/A.class", b"class bytes")],
+        );
+        let class_path = JmodClassPath::new(&path).unwrap();
+        let name = BinaryName::from_internal("pkg/A");
+
+        std::thread::scope(|scope| {
+            let readers = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        for _ in 0..10 {
+                            let resource = class_path.find_class(&name).unwrap().unwrap();
+                            assert_eq!(resource.bytes(), b"class bytes");
+                            assert_eq!(resource.format(), ClassFormat::Class);
+                            assert_eq!(resource.origin(), &ClassOrigin::Jmod(path.clone()));
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            for reader in readers {
+                reader.join().unwrap();
+            }
+        });
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn truncating_a_jmod_after_open_returns_a_typed_read_error() {
+        let path = write_temp_jmod(
+            "truncated_after_open",
+            &[("classes/pkg/A.class", b"class bytes")],
+        );
+        let class_path = JmodClassPath::new(&path).unwrap();
+        std::fs::write(&path, JMOD_MAGIC).unwrap();
+
+        let error = class_path
+            .find_class(&BinaryName::from_internal("pkg/A"))
+            .expect_err("truncating the backing JMOD must not panic or look like a miss");
+        assert_eq!(error.code(), "classpath.zip.read_error");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_jmod_after_open_keeps_the_open_archive_readable() {
+        let path = write_temp_jmod(
+            "removed_after_open",
+            &[("classes/pkg/A.class", b"class bytes")],
+        );
+        let class_path = JmodClassPath::new(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let resource = class_path
+            .find_class(&BinaryName::from_internal("pkg/A"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.bytes(), b"class bytes");
     }
 }

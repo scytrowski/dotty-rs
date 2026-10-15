@@ -525,12 +525,16 @@ impl ZipArchive {
         Self::open_storage(ZipStorage::Memory(bytes))
     }
 
-    #[allow(dead_code)] // Deliberately not wired into JarClassPath or JmodClassPath in this issue.
+    #[allow(dead_code)] // Kept as the path-based constructor for other ZIP adapters.
     pub(crate) fn open_file(path: impl AsRef<Path>, archive_start: u64) -> Result<Self, ZipError> {
         let file = File::open(path).map_err(|error| ZipError::FileRead {
             kind: error.kind(),
             message: error.to_string(),
         })?;
+        Self::open_file_handle(file, archive_start)
+    }
+
+    pub(crate) fn open_file_handle(file: File, archive_start: u64) -> Result<Self, ZipError> {
         let file_len = file
             .metadata()
             .map_err(|error| ZipError::FileRead {
@@ -624,6 +628,11 @@ impl ZipArchive {
                 .iter()
                 .map(String::len)
                 .sum::<usize>()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_archive_payload_bytes(&self) -> usize {
+        self.storage.retained_archive_payload_bytes()
     }
 
     /// Extracts and decompresses the entry named `name`, verifying its

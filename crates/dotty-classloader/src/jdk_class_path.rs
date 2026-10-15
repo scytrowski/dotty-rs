@@ -10,10 +10,9 @@ use std::path::Path;
 /// semantics — this type only adds directory discovery on top).
 ///
 /// Every `.jmod` file is opened (its ZIP central directory parsed) once,
-/// eagerly, in [`JdkClassPath::new`]. Deferring that per file until it
-/// might actually be needed is a possible future optimization against a
-/// real `jmods/` directory (tens of megabytes across dozens of files),
-/// not attempted here.
+/// eagerly, in [`JdkClassPath::new`]. JMOD payloads remain file-backed and
+/// class entries are read on demand; only archive metadata is indexed at
+/// construction time.
 pub struct JdkClassPath {
     composite: CompositeClassPath,
 }
