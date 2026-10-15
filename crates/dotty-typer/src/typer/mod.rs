@@ -8479,6 +8479,123 @@ mod tests {
     }
 
     #[test]
+    fn current_package_binding_does_not_fall_back_to_root_after_missing_member() {
+        let source_text = "package b { object Local { class Root } }; package a.consumer.b { object Local { class Other } }; package a.consumer { import b.Local.Root; class Use { val value: Root = new Root } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, type_tree) = val_symbol(&parsed, &store, &index, source, "value");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(value),
+            Err(TyperError::TypeNameNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "Root"
+        ));
+        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
+        assert!(typer.source_typed_index().is_empty());
+    }
+
+    #[test]
+    fn current_package_import_uses_root_when_no_relative_binding_exists() {
+        let source_text = "package b { object Local { class Root } }; package a.consumer { import b.Local.Root; class Use { val value: Root = new Root } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let root_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Root" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), root_type);
+    }
+
+    #[test]
+    fn source_class_is_selected_after_a_current_package_relative_prefix() {
+        let source_text = "package a.consumer.b { class Local }; package a.consumer { import b.Local; val value: Local = new Local }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let local_class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Local" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), local_class);
+    }
+
+    #[test]
+    fn object_member_import_uses_a_current_package_relative_prefix() {
+        let source_text = "package a.consumer.b { object Local { val member: Int = 1 } }; package a.consumer { import b.Local.member; def use: Int = member }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (use_method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let member = val_symbol(&parsed, &store, &index, source, "member").0;
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let context = typer.expression_context_for(use_method).unwrap();
+        let typed_rhs = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Ident(_) = &typer.typed_ast().get(typed_rhs).kind else {
+            panic!("expected the imported member identifier")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_rhs).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == member
+        ));
+    }
+
+    #[test]
     fn unresolved_import_segment_probes_current_package_before_root() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("package a.consumer { import b.Local.Relative; val x: Int = 1 }");

@@ -2235,6 +2235,7 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         current_method: "Audit.use".to_owned(),
         ..ResolverMetrics::default()
     }));
+    let typer_packages = namer_packages.snapshot();
     let resolver = AuditResolver {
         inner: ClasspathSymbolResolver::new(
             ScalaSourceAuditPath,
@@ -2246,7 +2247,6 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         metrics: Rc::clone(&metrics),
         class_path_probe: None,
     };
-    let typer_packages = Packages::new();
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
