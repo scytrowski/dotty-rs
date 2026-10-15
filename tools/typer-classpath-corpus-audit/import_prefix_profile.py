@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import io
+import json
 import os
 import re
 import sys
@@ -115,6 +116,14 @@ def package_resource_evidence(
     }
 
 
+def read_classpath_evidence(text: str) -> dict[tuple[str, str], dict[str, str]]:
+    reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+    return {
+        (row["target_key"], row["prefix"]): row
+        for row in reader
+    }
+
+
 def failed_prefix(row: dict[str, str]) -> list[str]:
     resolved = row["resolved_prefix"]
     prefix = [] if resolved in ("", "-") else resolved.split(".")
@@ -135,6 +144,190 @@ def source_package_candidates(row: dict[str, str]) -> set[str]:
         if "@" in candidate:
             candidates.add(candidate.rsplit("@", 1)[1])
     return candidates
+
+
+def ordered_source_package_candidates(row: dict[str, str]) -> list[dict[str, str]]:
+    """Decode source registry probes without losing lexical precedence."""
+    lookup = row["source_package_registry_lookup"]
+    candidates: list[dict[str, str]] = []
+
+    def add(origin: str, probe: str) -> None:
+        status, separator, path = probe.rpartition("@")
+        if not separator or not path:
+            return
+        if "=" in status:
+            status = status.rsplit("=", 1)[1]
+        candidates.append(
+            {
+                "origin": origin,
+                "path": path,
+                "registry": status,
+                "next_segment_lookup": status,
+            }
+        )
+
+    relative = lookup.partition("relative=")[2].split(";", 1)[0]
+    add("current", relative)
+    enclosing = lookup.partition("enclosing=")[2].split(";root=", 1)[0]
+    for probe in enclosing.split(","):
+        add("enclosing", probe)
+    root = lookup.partition(";root=")[2]
+    candidates.append(
+        {
+            "origin": "root",
+            "path": "<root>",
+            "registry": "found:Package",
+            "next_segment_lookup": root or "unknown",
+        }
+    )
+    seen = set()
+    ordered = []
+    for candidate in candidates:
+        key = candidate["path"]
+        if key not in seen:
+            seen.add(key)
+            ordered.append(candidate)
+    return ordered
+
+
+def render_lexical_candidate_evidence(
+    observations: list[dict[str, str]],
+    roots: list[tuple[str, set[str], dict[str, int], set[str]]],
+    snapshot: str,
+    families: tuple[str, ...] = ("core", "ast", "transform", "util", "io"),
+    classpath_evidence: dict[tuple[str, str], dict[str, str]] | None = None,
+    include_header: bool = True,
+) -> str:
+    """Render stable representative rows without merging snapshot denominators."""
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+    if include_header:
+        writer.writerow(
+            [
+            "snapshot",
+            "target_family",
+            "source_file",
+            "import_tree",
+            "line",
+            "context_owner",
+            "source_context_owners_in_priority_order",
+            "context_package",
+            "requested_segment",
+            "qualifier_source",
+            "source_lookup",
+            "candidates_priority_order",
+            "collision_marker",
+            "ambiguous_marker",
+            "unsupported_marker",
+            "resolver_outcome",
+            ]
+        )
+    for family in families:
+        rows = [
+            row
+            for row in observations
+            if row["target_key"].split("::", 1)[0] == family
+        ]
+        rows.sort(key=lambda row: (row["source_file"], row["import_tree"], row["method"]))
+        representatives = []
+        seen_files = set()
+        for row in rows:
+            if row["source_file"] in seen_files:
+                continue
+            seen_files.add(row["source_file"])
+            representatives.append(row)
+            if len(representatives) == 2:
+                break
+        if not representatives:
+            raise ValueError(f"{snapshot} snapshot has no observations for {family}")
+        for row in representatives:
+            candidates = ordered_source_package_candidates(row)
+            for candidate in candidates:
+                package_path = candidate["path"]
+                probe_path = (
+                    row["first_failing_segment"]
+                    if package_path == "<root>"
+                    else package_path
+                )
+                path_segments = [] if not probe_path else probe_path.split(".")
+                candidate["classpath_probe"] = probe_path or "<root>"
+                evidence = package_resource_evidence(path_segments, roots)
+                direct = evidence["direct"]
+                descendants = evidence["descendants"]
+                frozen = (classpath_evidence or {}).get((row["target_key"], probe_path))
+                if frozen:
+                    is_direct = frozen["contains_package_direct"] == "True"
+                    is_descendant = frozen["descendant_only"] == "True"
+                    candidate["classpath"] = (
+                        "direct" if is_direct else "descendant" if is_descendant else "absent"
+                    )
+                    candidate["classpath_resources"] = sorted(
+                        set(frozen["direct_origins"].split(";"))
+                        | set(frozen["descendant_resources"].split(";"))
+                    )
+                    candidate["classpath_resources"] = [
+                        item for item in candidate["classpath_resources"] if item != "-"
+                    ][:5]
+                else:
+                    candidate["classpath"] = (
+                        "direct"
+                        if direct
+                        else "descendant"
+                        if descendants
+                        else "absent"
+                    )
+                    candidate["classpath_resources"] = sorted(
+                        {
+                            f"{origin}:{resource}"
+                            for origin, resource, _ in direct
+                        }
+                        | {
+                            f"{origin}:{resource}"
+                            for origin, resource, _, _ in descendants
+                        }
+                    )[:5]
+                candidate["source_registry_known"] = "found:Package" in candidate["registry"]
+            overlap = any(
+                "found:Package" in candidate["next_segment_lookup"]
+                and candidate["classpath"] != "absent"
+                for candidate in candidates
+            )
+            lookup_text = row["source_lookup"] + " " + row["source_package_registry_lookup"]
+            outcome = row["resolver_outcome"].lower()
+            writer.writerow(
+                [
+                    snapshot,
+                    family,
+                    row["source_file"],
+                    row["import_tree"],
+                    row["line"],
+                    row["context_owner"],
+                    json.dumps(
+                        [
+                            row["context_owner"],
+                            *[
+                                probe.partition("=")[0]
+                                for probe in row["source_package_registry_lookup"]
+                                .partition("enclosing=")[2]
+                                .split(";root=", 1)[0]
+                                .split(",")
+                                if probe and probe != "none"
+                            ],
+                        ],
+                        separators=(",", ":"),
+                    ),
+                    row["context_package"],
+                    row["first_failing_segment"],
+                    row["qualifier_source"],
+                    row["source_lookup"],
+                    json.dumps(candidates, sort_keys=True, separators=(",", ":")),
+                    "source_classpath_overlap" if overlap else "not_observed",
+                    "ambiguous" if "ambiguous" in lookup_text.lower() else "not_observed",
+                    "unsupported" if "unsupported" in outcome else "not_observed",
+                    row["resolver_outcome"],
+                ]
+            )
+    return output.getvalue()
 
 
 def classify_target(
@@ -260,6 +453,9 @@ def main() -> int:
     parser.add_argument("--classpath", required=True, help="path-separated pinned Scala JAR list")
     parser.add_argument("--jdk-jmods", required=True, type=Path)
     parser.add_argument("--jdk-release", required=True, type=int)
+    parser.add_argument("--candidate-baseline", type=Path)
+    parser.add_argument("--candidate-baseline-evidence", type=Path)
+    parser.add_argument("--candidates", type=Path)
     args = parser.parse_args()
     observations = extract_observations(args.report.read_text(encoding="utf-8"))
     roots = []
@@ -274,6 +470,35 @@ def main() -> int:
     summary, evidence, categories = render_profile(observations, roots)
     args.rows.write_text(summary, encoding="utf-8")
     args.evidence.write_text(evidence, encoding="utf-8")
+    if args.candidates:
+        if not args.candidate_baseline:
+            parser.error("--candidates requires --candidate-baseline")
+        baseline = extract_observations(
+            args.candidate_baseline.read_text(encoding="utf-8")
+        )
+        baseline_evidence = (
+            read_classpath_evidence(
+                args.candidate_baseline_evidence.read_text(encoding="utf-8")
+            )
+            if args.candidate_baseline_evidence
+            else None
+        )
+        args.candidates.write_text(
+            render_lexical_candidate_evidence(
+                baseline,
+                roots,
+                "frozen-1128",
+                classpath_evidence=baseline_evidence,
+            )
+            + render_lexical_candidate_evidence(
+                observations,
+                roots,
+                "current-1132",
+                classpath_evidence=read_classpath_evidence(evidence),
+                include_header=False,
+            ),
+            encoding="utf-8",
+        )
     targets = len({row["target_key"] for row in observations})
     files = len({row["source_file"] for row in observations})
     direct = sum(row["blocker_origin"].startswith("direct:") for row in observations)

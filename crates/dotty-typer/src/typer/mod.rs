@@ -8072,6 +8072,51 @@ mod tests {
     }
 
     #[test]
+    fn lexical_package_candidates_do_not_enumerate_unreferenced_registry_packages() {
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name("package a.b; class C");
+        packages.enter(&mut store, SymbolOrigin::Synthetic, &["classpath_only"]);
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("fixture class should be named");
+        let context = index.declaration_context_of(class).unwrap();
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidates = typer.lexical_package_candidates(context, false, 5).unwrap();
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| {
+                    candidate
+                        .package_path
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![vec!["a", "b"], vec![]]
+        );
+        assert!(packages.symbol(&["classpath_only"]).is_some());
+    }
+
+    #[test]
     fn lexical_package_candidates_reject_a_cyclic_package_owner_chain() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("package a.b; class C");
@@ -8106,6 +8151,43 @@ mod tests {
                 reason: "package owner chain contains a cycle",
                 ..
             }) if found == package
+        ));
+    }
+
+    #[test]
+    fn lexical_package_candidates_report_a_context_from_another_index() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package a.b; class C");
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("fixture class should be named");
+        let foreign_context = index.declaration_context_of(class).unwrap();
+        let empty_index = SourceSemanticIndex::new();
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &empty_index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.lexical_package_candidates(foreign_context, false, 6),
+            Err(TyperError::SourceContextMissing {
+                source: found_source,
+                tree_index: 6,
+                context_index,
+            }) if found_source == source && context_index == foreign_context.index()
         ));
     }
 

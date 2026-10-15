@@ -150,6 +150,9 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         "$tmp_dir/first.profile" \
         --rows "$tmp_dir/import-prefix-targets.tsv" \
         --evidence "$tmp_dir/import-prefix-evidence.tsv" \
+        --candidate-baseline "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md" \
+        --candidate-baseline-evidence "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0-import-prefix-classpath-evidence.tsv" \
+        --candidates "$tmp_dir/import-prefix-candidates.tsv" \
         --classpath "$SCALA39_CLASSPATH" \
         --jdk-jmods "$java_home/jmods" \
         --jdk-release "$jdk_release" >"$tmp_dir/import-prefix-summary.txt"
@@ -157,6 +160,7 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         >"$tmp_dir/import-oracle.txt"
     prefix_targets_path="${output_path%.md}-import-prefix-targets.tsv"
     prefix_evidence_path="${output_path%.md}-import-prefix-classpath-evidence.tsv"
+    prefix_candidates_path="${output_path%.md}-lexical-package-candidates.tsv"
     prefix_reconciliation_path="${output_path%.md}-reconciliation.tsv"
     profile_field() {
         awk -F= -v wanted="$1" '$1 == wanted { print $2; exit }' "$tmp_dir/first.profile"
@@ -203,19 +207,21 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         cat "$tmp_dir/import-prefix-summary.txt" "$tmp_dir/import-oracle.txt"
         printf '```\n\n'
         printf 'Scala 3.9 oracle fixtures confirm that a package-relative path in the current package wins over a root path, root lookup succeeds when that relative path is absent, stacked package clauses expose their enclosing package scope to an import qualifier, and a single dotted package clause does not synthesize that parent scope. Intermediate packages can exist only through descendants, and a missing selected member remains an error after package resolution. An object/package same-name collision is rejected. The measured cohort has no root-qualified imports, no direct-resource resolver rejection, and no non-package first-segment or ambiguous resolver outcome; `_root_` behavior is covered by the separate oracle fixture. These findings do not promise that all imports or typer failures will be fixed.\n\n'
-        printf 'See [`%s`](%s) for the row-level reconciliation of every frozen observation, including its original method and attempted method, direct/inherited attribution, failed qualifier and segment, #1128 evidence category, current source selector, package-prefix result, final selected symbol or explicit absence, current blocker, and full-method typed boolean. The target and classpath TSVs below are separate unresolved-only views. See [`%s`](%s) for unresolved target keys, weighted observations, files, blocker origins, source lookups, and classifications. See [`%s`](%s) for direct and descendant resources, archive origin, directory-only evidence, and effective Multi-Release JAR versions. Raw stable unresolved observation rows are included below.\n\n' \
+        printf 'See [`%s`](%s) for the row-level reconciliation of every frozen observation, including its original method and attempted method, direct/inherited attribution, failed qualifier and segment, #1128 evidence category, current source selector, package-prefix result, final selected symbol or explicit absence, current blocker, and full-method typed boolean. The target and classpath TSVs below are separate unresolved-only views. See [`%s`](%s) for unresolved target keys, weighted observations, files, blocker origins, source lookups, and classifications. See [`%s`](%s) for direct and descendant resources, archive origin, directory-only evidence, and effective Multi-Release JAR versions. See [`%s`](%s) for representative lexical package candidates, source registry status, and pinned classpath evidence; frozen #1128 and current #1132 rows are labeled separately. Raw stable unresolved observation rows are included below.\n\n' \
             "$(basename -- "$prefix_reconciliation_path")" "$(basename -- "$prefix_reconciliation_path")" \
             "$(basename -- "$prefix_targets_path")" "$(basename -- "$prefix_targets_path")" \
-            "$(basename -- "$prefix_evidence_path")" "$(basename -- "$prefix_evidence_path")"
+            "$(basename -- "$prefix_evidence_path")" "$(basename -- "$prefix_evidence_path")" \
+            "$(basename -- "$prefix_candidates_path")" "$(basename -- "$prefix_candidates_path")"
         printf '```text\n'
         cat "$tmp_dir/first.profile"
         printf '```\n'
     } >"$output_path"
     cp "$tmp_dir/import-prefix-targets.tsv" "$prefix_targets_path"
     cp "$tmp_dir/import-prefix-evidence.tsv" "$prefix_evidence_path"
+    cp "$tmp_dir/import-prefix-candidates.tsv" "$prefix_candidates_path"
     cp "$tmp_dir/first.reconciliation" "$prefix_reconciliation_path"
-    printf 'Wrote deterministic import-prefix profile to %s and TSVs to %s / %s / %s\n' \
-        "$output_path" "$prefix_targets_path" "$prefix_evidence_path" "$prefix_reconciliation_path"
+    printf 'Wrote deterministic import-prefix profile to %s and TSVs to %s / %s / %s / %s\n' \
+        "$output_path" "$prefix_targets_path" "$prefix_evidence_path" "$prefix_candidates_path" "$prefix_reconciliation_path"
     exit 0
 fi
 for run in "${run_names[@]}"; do

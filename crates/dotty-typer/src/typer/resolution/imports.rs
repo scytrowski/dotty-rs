@@ -220,6 +220,7 @@ impl SourceTyper<'_> {
                 ));
             };
             if registered.symbol != *symbol
+                || self.packages.scope_of(*symbol) != Some(registered.scope)
                 || !self.store.scopes.contains(registered.scope)
                 || self.store.scopes.get(registered.scope).owner != Some(*symbol)
             {
@@ -249,6 +250,7 @@ impl SourceTyper<'_> {
         };
         if registered.symbol != package
             || registered.scope != registered_scope
+            || self.packages.scope_of(package) != Some(registered.scope)
             || !self.store.scopes.contains(registered_scope)
             || self.store.scopes.get(registered_scope).owner != Some(package)
             || registered_scope != context_scope

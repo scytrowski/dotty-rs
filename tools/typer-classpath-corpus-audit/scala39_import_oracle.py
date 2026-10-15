@@ -46,6 +46,7 @@ def main() -> int:
             "RootLocal.scala": "package b\nobject Local { class Root }\n",
             "NestedLocal.scala": "package a.b\nobject Local { class Nested }\n",
             "RelativeLocal.scala": "package a.consumer.b\nobject Local { class Relative }\n",
+            "RootCandidate.scala": "package candidate\nobject Local { class Target }\n",
             "NameCollisionPackage.scala": "package collision.Target\nclass FromPackage\n",
             "ImportClass.scala": "package fixture\nimport a.b.C\nobject ImportClass { val value: C = new C }\n",
             "ImportObject.scala": "package fixture\nimport a.b.Obj\nobject ImportObject { val value = Obj.value }\n",
@@ -69,6 +70,67 @@ def main() -> int:
                 "pinned Scala 3.9 positive import fixtures failed:\n"
                 + compiled.stdout
                 + compiled.stderr
+            )
+
+        dotted_package = source / "ImportDottedPackage.scala"
+        dotted_package.write_text(
+            "package a.ast\nimport core.Obj\n"
+            "object ImportDottedPackage { val value = Obj.value }\n",
+            encoding="utf-8",
+        )
+        dotted_lookup = compile_sources(
+            java_home,
+            classpath + os.pathsep + str(output),
+            root / "dotted-package-scope",
+            [dotted_package],
+        )
+        dotted_diagnostic = dotted_lookup.stdout + dotted_lookup.stderr
+        if dotted_lookup.returncode == 0 or "core" not in dotted_diagnostic:
+            raise SystemExit(
+                "Scala 3.9 treated a dotted package parent as a lexical import scope"
+            )
+
+        lexical_term = source / "ImportLexicalTermAndRoot.scala"
+        lexical_term.write_text(
+            "package a.consumer\n"
+            "object candidate { object Local { class Other } }\n"
+            "import candidate.Local.Other\n"
+            "import _root_.candidate.Local.Target\n"
+            "object ImportLexicalTermAndRoot { val local: Other = new Other; "
+            "val rooted: Target = new Target }\n",
+            encoding="utf-8",
+        )
+        lexical_term_result = compile_sources(
+            java_home,
+            classpath + os.pathsep + str(output),
+            root / "lexical-term-and-root",
+            [lexical_term],
+        )
+        if lexical_term_result.returncode:
+            raise SystemExit(
+                "Scala 3.9 lexical term and explicit root fixtures failed:\n"
+                + lexical_term_result.stdout
+                + lexical_term_result.stderr
+            )
+
+        local_term = source / "ImportLexicalTermNoRootFallback.scala"
+        local_term.write_text(
+            "package a.consumer\n"
+            "object candidate { object Local { class Other } }\n"
+            "import candidate.Local.Target\n"
+            "object ImportLexicalTermNoRootFallback { val value: Target = new Target }\n",
+            encoding="utf-8",
+        )
+        local_term_lookup = compile_sources(
+            java_home,
+            classpath + os.pathsep + str(output),
+            root / "lexical-term-no-root-fallback",
+            [local_term],
+        )
+        local_term_diagnostic = local_term_lookup.stdout + local_term_lookup.stderr
+        if local_term_lookup.returncode == 0 or "Target is not a member" not in local_term_diagnostic:
+            raise SystemExit(
+                "Scala 3.9 fell back to a root package after selecting a lexical term qualifier"
             )
         if (output / "middle" / "deep" / "third" / "Leaf.class").is_file() is False:
             raise SystemExit("intermediate-only package fixture did not emit its leaf class")
@@ -164,7 +226,8 @@ def main() -> int:
 
     print(
         "scala=3.9.0 positive_imports=class,object,object_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate "
-        "negative_imports=absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision;root_fallback=success"
+        "negative_imports=absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision,lexical_term_missing_member_no_root_fallback;root_fallback=success "
+        "root_qualification=bypasses_relative_search;lexical_term_binding=normal_priority"
     )
     return 0
 
