@@ -688,6 +688,14 @@ exact error variants asserted rather than `is_err()`.
   `JAVA_HOME=/path/to/jdk cargo test -p dotty-classloader real_jdk_object_and_get_class_materialize_through_the_resolver -- --ignored`.
   This pins real JDK symbol/member loading while avoiding unrelated eager
   closure over all of `java.base`.
+- The ignored JDK classpath integration test
+  `finds_and_decodes_classes_from_real_jdk_modules` checks the `java.base` and
+  `java.net.http` modules, classfile decoding, origins, and a missing class
+  against a real JDK 21 or newer. Set `DOTTY_JDK_JMODS` to the JDK's `jmods`
+  directory, or leave it unset to use `$JAVA_HOME/jmods`, then run:
+  `DOTTY_JDK_JMODS=/path/to/jdk/jmods cargo test -p dotty-classloader --test real_jdk_class_path -- --ignored`.
+  The test is ignored in the normal suite so CI does not depend on a local JDK;
+  when explicitly run, a missing or invalid JDK path is a test failure.
 - Differential testing against `javap -p -v` on real fixtures is used
   throughout to confirm exact attribute/descriptor/signature shapes
   before writing an assertion against them (e.g. confirming
