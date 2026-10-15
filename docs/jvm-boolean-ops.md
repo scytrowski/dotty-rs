@@ -1,10 +1,10 @@
 # JVM Boolean operator audit
 
-This audit records the source and typed-tree contract for Boolean operators
-against Scala 3.9.0 at revision
+This document records the source and typed-tree contract for Boolean
+operators against Scala 3.9.0 at revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
-It does not register Boolean methods or emit Boolean bytecode. Source-level
-observations are reproduced by
+The source typer registers the canonical Boolean methods; JVM bytecode
+emission remains out of scope. Source-level observations are reproduced by
 [`boolean_operator_audit.rs`](../crates/dotty-typer/tests/boolean_operator_audit.rs).
 
 ## Contract matrix
@@ -17,14 +17,14 @@ use the existing `Definitions.boolean` `TypeId`.
 
 | Source operator | Scala 3.9 canonical target and signature | Expected typed expression | RHS evaluation | JVM strategy in Scala 3.9 | dotty-rs audit status |
 | --- | --- | --- | --- | --- | --- |
-| `!a` | Parameterless `BooleanId.unary_! : Boolean` (no argument clause) | `Select(a, unary_!)`; no `Apply` | One operand | `ZNOT`; condition generation reverses success/failure branches | Parser and namer accept it. Typer reports missing `Boolean` `ClassInfo`. |
-| `a && b` | `BooleanId.&&(Boolean): Boolean` | `Apply(Select(a, &&), [b])` | Short-circuit: evaluate `b` only when `a` is true | `ZAND`; branch to skip RHS when the left condition is false | Same missing `Boolean` `ClassInfo`. |
-| `a || b` | `BooleanId.||(Boolean): Boolean` | `Apply(Select(a, ||), [b])` | Short-circuit: evaluate `b` only when `a` is false | `ZOR`; branch to skip RHS when the left condition is true | Same missing `Boolean` `ClassInfo`. |
-| `a & b` | `BooleanId.&(Boolean): Boolean` | `Apply(Select(a, &), [b])` | Eager; evaluate both operands left to right | `AND`; load both values, then primitive logical operation | Same missing `Boolean` `ClassInfo`. |
-| `a | b` | `BooleanId.|(Boolean): Boolean` | `Apply(Select(a, |), [b])` | Eager; evaluate both operands left to right | `OR`; load both values, then primitive logical operation | Same missing `Boolean` `ClassInfo`. |
-| `a ^ b` | `BooleanId.^(Boolean): Boolean` | `Apply(Select(a, ^), [b])` | Eager; evaluate both operands left to right | `XOR`; load both values, then primitive logical operation | Same missing `Boolean` `ClassInfo`. |
-| `a == b` for Boolean operands | `BooleanId.==(Boolean): Boolean`; Scala `Definitions.Boolean_==` selects the Boolean-parameter overload | `Apply(Select(a, ==), [b])` | Eager; evaluate both operands | Boolean `EQ` primitive | Same missing `Boolean` `ClassInfo`. For operands statically typed `Any`, Scala instead uses `Any_==` and universal equality semantics. |
-| `a != b` for Boolean operands | `BooleanId.!=(Boolean): Boolean`; Scala `Definitions.Boolean_!=` selects the Boolean-parameter overload | `Apply(Select(a, !=), [b])` | Eager; evaluate both operands | Boolean `NE` primitive | Same missing `Boolean` `ClassInfo`. For operands statically typed `Any`, Scala instead uses `Any_!=` and universal inequality semantics. |
+| `!a` | Parameterless `BooleanId.unary_! : Boolean` (no argument clause) | `Select(a, unary_!)`; no `Apply` | One operand | `ZNOT`; condition generation reverses success/failure branches | Registered by `Definitions`; Typer selects its canonical `SymbolId`. |
+| `a && b` | `BooleanId.&&(Boolean): Boolean` | `Apply(Select(a, &&), [b])` | Short-circuit: evaluate `b` only when `a` is true | `ZAND`; branch to skip RHS when the left condition is false | Registered by `Definitions`; Typer selects its canonical `SymbolId`. |
+| `a || b` | `BooleanId.||(Boolean): Boolean` | `Apply(Select(a, ||), [b])` | Short-circuit: evaluate `b` only when `a` is false | `ZOR`; branch to skip RHS when the left condition is true | Registered by `Definitions`; Typer selects its canonical `SymbolId`. |
+| `a & b` | `BooleanId.&(Boolean): Boolean` | `Apply(Select(a, &), [b])` | Eager; evaluate both operands left to right | `AND`; load both values, then primitive logical operation | Registered by `Definitions`; Typer selects its canonical `SymbolId`. |
+| `a | b` | `BooleanId.|(Boolean): Boolean` | `Apply(Select(a, |), [b])` | Eager; evaluate both operands left to right | `OR`; load both values, then primitive logical operation | Registered by `Definitions`; Typer selects its canonical `SymbolId`. |
+| `a ^ b` | `BooleanId.^(Boolean): Boolean` | `Apply(Select(a, ^), [b])` | Eager; evaluate both operands left to right | `XOR`; load both values, then primitive logical operation | Registered by `Definitions`; Typer selects its canonical `SymbolId`. |
+| `a == b` for Boolean operands | `BooleanId.==(Boolean): Boolean`; Scala `Definitions.Boolean_==` selects the Boolean-parameter overload | `Apply(Select(a, ==), [b])` | Eager; evaluate both operands | Boolean `EQ` primitive | Registered by `Definitions`; Typer selects its Boolean overload. For operands statically typed `Any`, Scala instead uses `Any_==` and universal equality semantics. |
+| `a != b` for Boolean operands | `BooleanId.!=(Boolean): Boolean`; Scala `Definitions.Boolean_!=` selects the Boolean-parameter overload | `Apply(Select(a, !=), [b])` | Eager; evaluate both operands | Boolean `NE` primitive | Registered by `Definitions`; Typer selects its Boolean overload. For operands statically typed `Any`, Scala instead uses `Any_!=` and universal inequality semantics. |
 
 The binary Boolean methods have a plain one-parameter method signature in the
 Scala library. `&&` and `||` still have by-name-like behavior: the library
@@ -56,32 +56,32 @@ untyped AST assertions verify that the loop's `cond` child is the operator
 expression itself, rather than an identifier initialized from a separate
 operator expression. It also covers literal operands and RHS expressions with
 division-by-zero effects. The parser produces no diagnostics and the namer
-enters the declarations. Typing stops before a built-in Boolean operator
-application can be completed:
+enters the declarations. Source Typer completes all eight canonical Boolean
+operators through normal member lookup and overload resolution:
 
-- `!true`, `true && false`, `a && b`, `a || b`, `a & b`, `a | b`, `a ^ b`,
-  Boolean `a == b`, and Boolean `a != b` report
-  `TyperError::MemberLookup(ClassInfoUnavailable { symbol: BooleanId,
-  state: Missing })`.
+- Prefix `!` types as a `Select`; each binary operator types as an
+  `Apply(Select(...), [rhs])`. The selected references retain the canonical
+  operator `SymbolId` from `Definitions::boolean_primitive_operator_symbols`.
+- Boolean parameters, literals, local values, `if` conditions, and direct
+  `while` conditions all type successfully.
 - A source class with the valid parameterless declaration
   `def unary_! : Boolean` types the prefix use as `Select` without `Apply` and
   resolves its own method `SymbolId`. The distinct invalid declaration
   `def unary_!(): Boolean` is covered by the Typer's
   `PrefixMethodNeedsArgumentList` regression test and by the Scala E100 oracle.
 - `a == b` and `a != b` with `a` and `b` statically typed `Any` stop at the
-  analogous missing canonical `Any` class information. This is a separate
-  observed path from Boolean equality.
+  still-missing canonical `Any` class information. This is a separate path
+  from Boolean equality.
 - `!1` reports `TyperError::MemberNotFound` on the canonical `Int` receiver.
-  `true && 42` stops earlier at missing Boolean class information; it does not
-  currently reach argument applicability checking.
+  `a && 42` reports `TyperError::OverloadApplicationNoApplicable` after
+  resolving the canonical Boolean member.
 - A source class that defines `def &&(rhs: Boolean): Boolean` types its own
   call as `Apply(Select(...), [rhs])`. The typed selection carries that
   user-defined method's `SymbolId`, owner, and ordinary signature. It is not a
   Boolean intrinsic.
 
-There are no parser or namer failures in these cases. The audit deliberately
-does not continue to Codegen because no built-in Boolean typed call is produced
-by the current Typer. The RHS effect examples are source-level scenarios, not
+There are no parser or namer failures in these cases. This issue does not
+implement Codegen. The RHS effect examples are source-level scenarios, not
 runtime claims about dotty-rs. Under Scala 3.9 semantics, `false && (1 / 0 > 0)`
 and `true || (1 / 0 > 0)` do not evaluate the division; `false & (1 / 0 > 0)`
 and `true | (1 / 0 > 0)` evaluate it and throw `ArithmeticException`.
@@ -96,31 +96,30 @@ references do not change that operator contract.
 
 1. Reuse the existing canonical Boolean class symbol and type from
    `Definitions`; never mint another `scala.Boolean` or a parallel Boolean
-   method registry detached from the class declaration scope.
-2. Let Scala standard-library metadata populate or complete the existing
-   canonical class information. Before using it, validate that its `ClassInfo`
-   identifies that same class symbol and that its declaration scope is owned
-   by that symbol. Preserve unrelated metadata and overloads. If metadata is
-   absent, deferred, malformed, or conflicts with a canonical signature,
-   report that state instead of fabricating a second Boolean definition.
+   method registry detached from the class declaration scope. Bootstrap
+   installs a minimal owned `ClassInfo` only when the canonical symbol has no
+   info; an existing valid `ClassInfo` and unrelated overloads are preserved.
+2. Before using existing class information, validate that its `ClassInfo`
+   identifies the same class symbol and that its declaration scope is owned by
+   that symbol. If information is deferred, malformed, or conflicts with a
+   canonical signature, report that state without partially registering
+   operators or replacing the class definition.
 3. Resolve each candidate from the canonical declaration scope and retain its
    `SymbolId`. Validate owner, method kind and signature, parameter
    and result `TypeId`s, and arity. Register `unary_!`, `&&`, `||`, `&`, `|`,
    `^`, and the Boolean overloads of `==`/`!=` by this identity. Keep
    `Any_==`/`Any_!=` separate.
-4. Only lower a selected canonical method that passed those checks. A method
-   named `&&` on a user class remains an ordinary call. A spelling match,
-   Boolean result type, or Boolean operands alone do not establish intrinsic
-   identity.
+4. A method named `&&` on a user class remains an ordinary call. The Typer
+   retains the selected symbol identity; future intrinsic lowering must require
+   that exact canonical identity. A spelling match, Boolean result type, or
+   Boolean operands alone do not establish intrinsic identity.
 5. Preserve the distinction in later lowering: `&&`/`||` need conditional
    RHS control flow; `&`/`|`/`^` need left-to-right evaluation of both sides;
    `Any` equality needs universal equality handling.
 
-The current dotty-rs member lookup reaches `ClassInfoUnavailable` for the
-synthetic canonical Boolean symbol; `Definitions::bootstrap` only installs a
-bounded operator `ClassInfo` for `Int`. This issue does not change that
-bootstrap behavior. Adding metadata-backed Boolean registration and bytecode
-lowering belongs to the follow-up implementation increments.
+`Definitions::bootstrap` installs canonical Boolean member signatures alongside
+the existing bounded `Int` operator registry. This enables source typing only;
+Boolean JVM intrinsic lowering remains a follow-up increment.
 
 ## Scala 3.9.0 source references
 

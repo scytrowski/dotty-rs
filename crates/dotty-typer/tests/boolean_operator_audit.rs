@@ -190,46 +190,63 @@ fn contextual_operator_sources() -> (String, Vec<String>, Vec<(String, String)>)
     )
 }
 
-fn assert_boolean_receiver_class_info_blocker(fixture: &mut Fixture, method_name: &str) {
-    let (method, rhs) = fixture.method(method_name);
-    let expected_boolean = class_symbol(fixture, fixture.definitions.boolean);
-    let mut typer = fixture.typer();
-    let context = typer.expression_context_for(method).unwrap();
-    let error = typer.type_expression(rhs, context).unwrap_err();
-    assert!(
-        matches!(
-            error,
-            TyperError::MemberLookup(ref error)
-                if matches!(
-                    **error,
-                    dotty_typer::MemberLookupError::ClassInfoUnavailable {
-                        symbol,
-                        state: dotty_typer::SymbolInfoState::Missing,
-                    } if symbol == expected_boolean
-                )
-        ),
-        "{method_name} should currently stop at missing canonical Boolean ClassInfo; got {error:?}"
-    );
-    assert!(
-        typer.typed_ast().iter().next().is_none(),
-        "failed Boolean typing must not leave a partial typed tree for {method_name}"
-    );
+fn assert_selected_boolean_operator(
+    typer: &SourceTyper<'_>,
+    tree: TreeId<dotty_core::Typed>,
+    expected: SymbolId,
+    is_application: bool,
+) {
+    let function = if is_application {
+        let TreeKind::Apply(application) = &typer.typed_ast().get(tree).kind else {
+            panic!("binary Boolean operator should type as Apply");
+        };
+        application.function
+    } else {
+        tree
+    };
+    let TreeKind::Select(_) = &typer.typed_ast().get(function).kind else {
+        panic!("Boolean operator should select its canonical member");
+    };
+    assert!(matches!(
+        typer.store().types.get(typer.typed_ast().get(function).ty),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected
+    ));
 }
 
 #[test]
-fn all_boolean_operator_sources_reach_the_typer_and_report_the_bootstrap_blocker() {
+fn boolean_operators_type_through_the_canonical_method_symbols() {
     let mut fixture = Fixture::new(SOURCE_OPERATORS);
-    for method in [
-        "notParameter",
-        "notLiteral",
-        "andLiteral",
-        "andParameter",
-        "orParameter",
-        "eagerAndParameter",
-        "eagerOrParameter",
-        "xorParameter",
-        "equalBoolean",
-        "notEqualBoolean",
+    let canonical = fixture
+        .definitions
+        .boolean_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+    let boolean = fixture.definitions.boolean;
+    for (method_name, symbol, application) in [
+        ("notParameter", canonical.unary_not, false),
+        ("notLiteral", canonical.unary_not, false),
+        ("andLiteral", canonical.and_then, true),
+        ("andParameter", canonical.and_then, true),
+        ("orParameter", canonical.or_else, true),
+        ("eagerAndParameter", canonical.eager_and, true),
+        ("eagerOrParameter", canonical.eager_or, true),
+        ("xorParameter", canonical.xor, true),
+        ("equalBoolean", canonical.equal, true),
+        ("notEqualBoolean", canonical.not_equal, true),
+    ] {
+        let (method, rhs) = fixture.method(method_name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            boolean
+        );
+        assert_selected_boolean_operator(&typer, typed, symbol, application);
+    }
+
+    for method_name in [
         "andLocal",
         "andInIf",
         "orInWhile",
@@ -238,13 +255,19 @@ fn all_boolean_operator_sources_reach_the_typer_and_report_the_bootstrap_blocker
         "eagerAndEffect",
         "eagerOrEffect",
     ] {
-        assert_boolean_receiver_class_info_blocker(&mut fixture, method);
+        let (method, rhs) = fixture.method(method_name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        assert!(typer.type_expression(rhs, context).is_ok(), "{method_name}");
     }
 
     let (source, contextual_methods, while_conditions) = contextual_operator_sources();
     let mut contexts = Fixture::new(&source);
     for method in contextual_methods {
-        assert_boolean_receiver_class_info_blocker(&mut contexts, &method);
+        let (symbol, rhs) = contexts.method(&method);
+        let mut typer = contexts.typer();
+        let context = typer.expression_context_for(symbol).unwrap();
+        assert!(typer.type_expression(rhs, context).is_ok(), "{method}");
     }
     for (method, expected_operator) in while_conditions {
         let (_, rhs) = contexts.method(&method);
@@ -298,40 +321,26 @@ fn malformed_boolean_operands_fail_at_the_typer_boundary() {
     let mut fixture = Fixture::new(
         "class InvalidBooleanOperators { def wrongAnd(a: Boolean): Boolean = a && 42; def wrongAndLiteral(): Boolean = true && 42; def wrongNot: Boolean = !1 }",
     );
-    let boolean_class = class_symbol(&fixture, fixture.definitions.boolean);
-
     let (and_method, and_rhs) = fixture.method("wrongAnd");
     let mut typer = fixture.typer();
     let context = typer.expression_context_for(and_method).unwrap();
     let error = typer.type_expression(and_rhs, context).unwrap_err();
-    assert!(matches!(
-        error,
-        TyperError::MemberLookup(ref error)
-            if matches!(
-                **error,
-                dotty_typer::MemberLookupError::ClassInfoUnavailable {
-                    symbol,
-                    state: dotty_typer::SymbolInfoState::Missing,
-                } if symbol == boolean_class
-            )
-    ));
+    assert!(
+        matches!(error, TyperError::OverloadApplicationNoApplicable { .. }),
+        "{error:?}"
+    );
+    assert!(typer.typed_ast().iter().next().is_none());
     drop(typer);
 
     let (literal_method, literal_rhs) = fixture.method("wrongAndLiteral");
     let mut typer = fixture.typer();
     let context = typer.expression_context_for(literal_method).unwrap();
     let error = typer.type_expression(literal_rhs, context).unwrap_err();
-    assert!(matches!(
-        error,
-        TyperError::MemberLookup(ref error)
-            if matches!(
-                **error,
-                dotty_typer::MemberLookupError::ClassInfoUnavailable {
-                    symbol,
-                    state: dotty_typer::SymbolInfoState::Missing,
-                } if symbol == boolean_class
-            )
-    ));
+    assert!(
+        matches!(error, TyperError::OverloadApplicationNoApplicable { .. }),
+        "{error:?}"
+    );
+    assert!(typer.typed_ast().iter().next().is_none());
     drop(typer);
 
     let (not_method, not_rhs) = fixture.method("wrongNot");
@@ -373,7 +382,7 @@ fn parameterless_prefix_member_types_as_a_select_without_an_argument_clause() {
 #[test]
 fn user_defined_and_operator_keeps_its_own_method_identity() {
     let mut fixture = Fixture::new(
-        "class CustomBoolean { def &&(rhs: Boolean): Boolean = rhs; def use(lhs: CustomBoolean, rhs: Boolean): Boolean = lhs && rhs }",
+        "class CustomBoolean { def &&(rhs: Boolean): Boolean = rhs; def use(lhs: CustomBoolean, rhs: Boolean): Boolean = lhs && rhs; def booleanUse(lhs: Boolean, rhs: Boolean): Boolean = lhs && rhs }",
     );
     let custom_operator = fixture.method_named_symbol("&&");
     let (method, rhs) = fixture.method("use");
@@ -429,4 +438,17 @@ fn user_defined_and_operator_keeps_its_own_method_identity() {
     assert_eq!(signature.params.len(), 1);
     assert_eq!(signature.params[0].ty, boolean);
     assert_eq!(signature.result, boolean);
+    drop(typer);
+
+    let canonical_and = fixture
+        .definitions
+        .boolean_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .and_then;
+    let (boolean_use_method, boolean_use_rhs) = fixture.method("booleanUse");
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(boolean_use_method).unwrap();
+    let typed = typer.type_expression(boolean_use_rhs, context).unwrap();
+    assert_selected_boolean_operator(&typer, typed, canonical_and, true);
+    assert_ne!(canonical_and, custom_operator);
 }
