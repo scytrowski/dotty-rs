@@ -771,23 +771,9 @@ fn block_value_type(
         return Ok(Some(local.ty()));
     }
     if let Some(expression) = intrinsic_expression
-        && context
-            .tree(expression)
-            .is_ok_and(|expression_tree| expression_tree.ty == ty)
+        && is_boolean_not_block_result(context, expression, ty)?
     {
-        let intrinsic = crate::resolve_boolean_intrinsic(
-            context.store,
-            context.typed_ast,
-            expression,
-            context.definitions,
-        )
-        .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
-            tree: expression,
-            error,
-        })?;
-        if intrinsic == Some(JvmBooleanIntrinsic::Not) {
-            return Ok(Some(JvmType::Boolean));
-        }
+        return Ok(Some(JvmType::Boolean));
     }
     let Some(parameter) = context
         .method
@@ -830,6 +816,37 @@ fn block_value_type(
         });
     }
     Ok(found)
+}
+
+fn is_boolean_not_block_result(
+    context: &JvmLoweringContext<'_>,
+    expression: TreeId<Typed>,
+    expected_type: TypeId,
+) -> Result<bool, JvmCodegenError> {
+    let mut candidate = expression;
+    for _ in 0..=JVM_EXPRESSION_DEPTH_LIMIT {
+        let expression_tree = context.tree(candidate)?;
+        if expression_tree.ty != expected_type {
+            return Ok(false);
+        }
+        if let TreeKind::Block(block) = &expression_tree.kind {
+            candidate = block.expr;
+            continue;
+        }
+
+        let intrinsic = crate::resolve_boolean_intrinsic(
+            context.store,
+            context.typed_ast,
+            candidate,
+            context.definitions,
+        )
+        .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
+            tree: candidate,
+            error,
+        })?;
+        return Ok(intrinsic == Some(JvmBooleanIntrinsic::Not));
+    }
+    Ok(false)
 }
 
 fn emit_apply(
