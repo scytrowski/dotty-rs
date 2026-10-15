@@ -6491,6 +6491,194 @@ fn compilation_unit_metadata_rejects_a_stale_term_reference_in_field_initializer
 }
 
 #[test]
+fn planned_field_reads_reject_stale_targets_and_forged_this_prefixes() {
+    let mut fixture = EmissionFixture::new(false);
+    let field_name = fixture.store.names.intern("current");
+    let field = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(field_name, Namespace::Term),
+        owner: Some(fixture.class),
+        kind: SymbolKind::Field,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Private,
+        info: SymbolInfo::Complete(fixture.definitions.int),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let class_info_type = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => *ty,
+        _ => unreachable!(),
+    };
+    let Type::ClassInfo(info) = fixture.store.types.get(class_info_type).clone() else {
+        unreachable!()
+    };
+    fixture
+        .store
+        .scopes
+        .get_mut(info.declarations)
+        .enter(Name::new(field_name, Namespace::Term), field);
+    let initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(5),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let this_type = fixture.store.types.alloc(Type::ThisType {
+        class: fixture.class,
+    });
+    let receiver = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(dotty_core::ast::This { qual: None }),
+        position: None,
+        ty: this_type,
+    });
+
+    let mut other_store = SemanticStore::new();
+    let other_type = other_store.types.alloc(Type::Constant(Constant::Int(0)));
+    let stale = loop {
+        let symbol = alloc_symbol(&mut other_store, SymbolKind::Value, None, other_type);
+        if !fixture.store.symbols.contains(symbol) {
+            break symbol;
+        }
+    };
+    let stale_reference = fixture.store.types.alloc(Type::TermRef {
+        prefix: this_type,
+        target: TermRefTarget::Symbol(stale),
+    });
+    let stale_select = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver,
+            name: Name::new(field_name, Namespace::Term),
+            backquoted: false,
+        }),
+        position: None,
+        ty: stale_reference,
+    });
+
+    let mut unit = fixture.unit();
+    unit.classes[0].fields.push(JvmFieldPlan {
+        field,
+        source_visibility: crate::JvmFieldSourceVisibility::PlainPrivate,
+        initializer: Some(initializer),
+    });
+    unit.classes[0].methods[0].body = Some(stale_select);
+    assert!(matches!(
+        unit.lower_method_body(fixture.class, fixture.methods[0], &fixture.definitions),
+        Err(JvmCodegenError::UnknownJvmFieldReference {
+            tree,
+            field,
+        }) if tree == stale_select && field == stale
+    ));
+    drop(unit);
+
+    let forged_prefix = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(field),
+    });
+    let forged_select = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver,
+            name: Name::new(field_name, Namespace::Term),
+            backquoted: false,
+        }),
+        position: None,
+        ty: forged_prefix,
+    });
+    let mut unit = fixture.unit();
+    unit.classes[0].fields.push(JvmFieldPlan {
+        field,
+        source_visibility: crate::JvmFieldSourceVisibility::PlainPrivate,
+        initializer: Some(initializer),
+    });
+    unit.classes[0].methods[0].body = Some(forged_select);
+    assert!(matches!(
+        unit.lower_method_body(fixture.class, fixture.methods[0], &fixture.definitions),
+        Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+            tree,
+            field: actual_field,
+            class,
+        }) if tree == forged_select && actual_field == field && class == fixture.class
+    ));
+}
+
+#[test]
+fn same_named_planned_local_keeps_its_local_load() {
+    let mut fixture = EmissionFixture::new(false);
+    let name_id = fixture.store.names.intern("current");
+    let field = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(name_id, Namespace::Term),
+        owner: Some(fixture.class),
+        kind: SymbolKind::Field,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Private,
+        info: SymbolInfo::Complete(fixture.definitions.int),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let class_info_type = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => *ty,
+        _ => unreachable!(),
+    };
+    let Type::ClassInfo(info) = fixture.store.types.get(class_info_type).clone() else {
+        unreachable!()
+    };
+    fixture
+        .store
+        .scopes
+        .get_mut(info.declarations)
+        .enter(Name::new(name_id, Namespace::Term), field);
+    let field_initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(5),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let int_ty = fixture.definitions.int;
+    let local = add_emission_local_symbol(
+        &mut fixture,
+        0,
+        "current",
+        int_ty,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let local_initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(7),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let declaration =
+        add_emission_local_valdef(&mut fixture, 0, local, int_ty, Some(local_initializer));
+    let reference = typed_emission_symbol_ident(&mut fixture, local);
+    let body = typed_block(&mut fixture, vec![declaration], reference, int_ty);
+    fixture.bodies[0] = body;
+
+    let mut unit = fixture.unit();
+    unit.classes[0].fields.push(JvmFieldPlan {
+        field,
+        source_visibility: crate::JvmFieldSourceVisibility::PlainPrivate,
+        initializer: Some(field_initializer),
+    });
+    unit.classes[0].methods[0].locals.push(JvmLocalBinding {
+        declaration,
+        symbol: local,
+        mutable: false,
+    });
+    let code = unit
+        .lower_method_body(fixture.class, fixture.methods[0], &fixture.definitions)
+        .unwrap();
+    let code = format!("{code:?}");
+    assert!(code.contains("ILoad"));
+    assert!(!code.contains("GetField"));
+}
+
+#[test]
 fn missing_class_declaration_errors_follow_method_plan_order() {
     let mut fixture = EmissionFixture::new(false);
     let class_info_type = match fixture.store.symbols.info(fixture.class) {

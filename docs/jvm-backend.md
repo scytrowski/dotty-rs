@@ -292,6 +292,20 @@ Same-class calls in loop control flow, reference-bearing states, `PatDef`, and
 general comparison/arithmetic remain unsupported. Standalone expression
 lowering and other unsupported stats return structured errors.
 
+`JvmCompilationUnit::lower_method_body(class, method, definitions)` also lowers
+reads of fields in that class's validated field plan. A canonical unqualified
+field `Ident` or a `Select` whose qualifier is that class's unqualified
+`ThisType` emits `aload(0)` followed by symbolic `getfield` using the validated
+owner, field name, and `I`/`Z` descriptor. Both forms produce the matching
+int-like `Int` or Boolean flow. Resolution uses the `TermRefTarget::Symbol`
+identity, the field owner, and its planned metadata; same-spelling parameters
+and locals keep their existing loads. Other receivers, fields absent from the
+plan, stale targets, and prefixes that do not identify the current instance
+return contextual errors. Field reads within `If`, `While`, or other branching
+CFG regions are rejected explicitly until the stack-map analyzer can track the
+temporary reference operand. This method-level API does not publish a class
+file; `emit_class` continues to fail closed for plans containing fields.
+
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
 semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
@@ -401,10 +415,14 @@ only the explicitly supported frontend and JVM subset; the class has no
 `lower_value_expression` accepts typed `Literal` nodes containing `Constant::Int`
 or `Constant::Boolean`, and `Ident` nodes whose typed `TermRefTarget::Symbol`
 matches one of the method metadata's canonical parameter symbols. Literals
-lower through `CodeBuilder::iconst`; parameter references use `CodeBuilder::iload`
-at the metadata-assigned instance local slot. Both produce the `IntLike`
-category while Boolean descriptors remain `Z`. Literal types may be the
-matching singleton constant type or canonical `Definitions.int` / `.boolean`.
+lower through `CodeBuilder::iconst`; parameter references use
+`CodeBuilder::iload` at the metadata-assigned instance local slot. These
+primitive values use the `IntLike` category while Boolean field descriptors
+remain `Z`. Literal types may be the matching singleton constant type or
+canonical `Definitions.int` / `.boolean`. Same-class field `Ident` and
+current-`this` `Select` reads are available only through the validated
+`JvmCompilationUnit::lower_method_body` path described above; standalone
+expression APIs do not carry class field metadata.
 
 `lower_expression` also supports a typed `Constant::Unit` literal. It emits no
 instruction and reports `JvmExpressionFlow::Unit`, distinct from an int-like

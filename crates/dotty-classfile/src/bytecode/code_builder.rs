@@ -282,7 +282,8 @@ impl CodeBuilder {
         self.branch(SymbolicBranch::IfICmpLe, target)
     }
 
-    pub(crate) fn has_branches(&self) -> bool {
+    /// Returns whether this method contains any branch instructions.
+    pub fn has_branches(&self) -> bool {
         self.elements
             .iter()
             .any(|element| matches!(element, SymbolicCodeElement::Branch { .. }))
