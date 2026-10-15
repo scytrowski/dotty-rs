@@ -2,7 +2,8 @@ use dotty_core::ast::TreeKind;
 use dotty_core::names::{Name, Namespace};
 use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolId, SymbolKind,
+    Definitions, MemberRequest, Packages, ResolutionError, SemanticStore, SourceId, SourceText,
+    SymbolId, SymbolKind, SymbolResolver,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -15,6 +16,55 @@ const WIDGET: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Widget.tasty");
 const HOLDER: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Holder.tasty");
+const ISSUE_1173_LOCAL: &[u8] = include_bytes!("fixtures/issue-1173/a/consumer/b/Local.tasty");
+
+struct ExistingPackageResolver {
+    expected_path: Vec<String>,
+    package: SymbolId,
+    module_class: SymbolId,
+    object: SymbolId,
+    relative: SymbolId,
+    requests: std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>,
+}
+
+impl SymbolResolver for ExistingPackageResolver {
+    fn module_class_of_object(
+        &self,
+        _store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        Ok((object == self.object).then_some(self.module_class))
+    }
+
+    fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+        dotty_core::ResolverCheckpoint::new(0)
+    }
+
+    fn rollback_to(
+        &mut self,
+        _store: &mut SemanticStore,
+        _checkpoint: dotty_core::ResolverCheckpoint,
+    ) {
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        Ok((store.names.resolve(request.name.text()) == "Relative").then_some(self.relative))
+    }
+
+    fn resolve_package(
+        &mut self,
+        _store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let path: Vec<_> = path.iter().map(|segment| (*segment).to_owned()).collect();
+        self.requests.borrow_mut().push(path.clone());
+        Ok((path == self.expected_path).then_some(self.package))
+    }
+}
 
 fn package_prefix_symbol(store: &SemanticStore, prefix: dotty_core::TypeId) -> SymbolId {
     let package = match store.types.get(prefix) {
@@ -152,4 +202,128 @@ fn source_and_tasty_references_use_the_same_package_prefix_identity() {
         package_prefix_symbol(&store, tasty_prefix)
     );
     assert_eq!(package_prefix_symbol(&store, source_prefix), root);
+}
+
+#[test]
+fn current_package_import_reuses_package_identity_from_scala39_tasty() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let tasty_file = TastyFile::parse_scala_3_9(ISSUE_1173_LOCAL).unwrap();
+    let (entered_symbols, next_packages) = {
+        let mut unpickler =
+            TastyUnpickler::with_packages(&tasty_file, &mut store, definitions, packages);
+        let entered = unpickler
+            .enter_symbols()
+            .unwrap()
+            .entered_symbols()
+            .to_vec();
+        let (_, packages) = unpickler.into_parts();
+        (entered, packages)
+    };
+    packages = next_packages;
+    let relative_package = packages.symbol(&["a", "consumer", "b"]).unwrap();
+
+    let source = SourceId::from_index(1173);
+    let source_text = "package a.consumer { import b.Local.Relative; class Use { val value: Relative = new Relative } }";
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Issue1173.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+
+    // Model a package known to the binary package registry but absent from
+    // the source lexical scope; the resolver must return that same identity.
+    let current_package = packages.symbol(&["a", "consumer"]).unwrap();
+    let current_scope = packages.scope_of(current_package).unwrap();
+    store.scopes.get_mut(current_scope).remove(relative_package);
+
+    let module_class = entered_symbols
+        .iter()
+        .copied()
+        .find(|symbol| {
+            let entry = store.symbols.get(*symbol);
+            entry.kind == SymbolKind::ModuleClass
+                && entry.owner == Some(relative_package)
+                && store.names.resolve(entry.name.text()) == "Local$"
+        })
+        .unwrap();
+    let local = entered_symbols
+        .iter()
+        .copied()
+        .find(|symbol| {
+            let entry = store.symbols.get(*symbol);
+            entry.kind == SymbolKind::Object
+                && entry.owner == Some(relative_package)
+                && store.names.resolve(entry.name.text()) == "Local"
+        })
+        .unwrap();
+    let relative = entered_symbols
+        .iter()
+        .copied()
+        .find(|symbol| {
+            let entry = store.symbols.get(*symbol);
+            entry.kind == SymbolKind::Class
+                && entry.owner == Some(module_class)
+                && store.names.resolve(entry.name.text()) == "Relative"
+        })
+        .unwrap();
+    let requests = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let resolver = ExistingPackageResolver {
+        expected_path: vec!["a".to_owned(), "consumer".to_owned(), "b".to_owned()],
+        package: relative_package,
+        module_class,
+        object: local,
+        relative,
+        requests: std::rc::Rc::clone(&requests),
+    };
+    let (_value, type_tree) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::ValDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "value" =>
+            {
+                Some((index.symbol_at(source, tree).unwrap(), definition.tpt))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    typer.complete_symbol(_value).unwrap();
+
+    assert_eq!(requests.borrow().as_slice(), [&["a", "consumer", "b"]]);
+    let projected = typer
+        .source_type_index()
+        .type_at(source, type_tree)
+        .unwrap();
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(found),
+        ..
+    } = typer.store().types.get(projected)
+    else {
+        panic!("expected the imported TASTy class type")
+    };
+    assert_eq!(*found, relative);
 }
