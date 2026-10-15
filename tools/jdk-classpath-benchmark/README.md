@@ -1,24 +1,31 @@
 # JDK classpath baseline runner
 
-`run` builds one release example binary, launches it in at least ten
-independent processes, measures maximum resident set size from Linux
-`/proc/self/status` `VmHWM`, and writes the unaggregated JSON samples plus
-median/p95 summaries. It never flushes the OS page cache: these are fresh
-processes, not cold-cache runs.
+`run` builds one release example binary (or accepts a prebuilt binary with
+`--binary`), launches it in at least ten independent processes, measures
+maximum resident set size from Linux `/proc/self/status` `VmHWM`, counts open
+file descriptors after initialization and after the workload, and writes the
+unaggregated JSON samples plus median/p95 summaries. It never flushes the OS
+page cache: these are fresh processes, not cold-cache runs.
 
 Run against an installed JDK 21:
 
 ```bash
 ./tools/jdk-classpath-benchmark/run --jmods "$JAVA_HOME/jmods" \
-  --samples 10 --output docs/jdk-classpath-performance-raw.json
+  --samples 10 --source-revision "$(git rev-parse HEAD)" \
+  --purpose after-1160 --output docs/jdk-classpath-performance-raw.json
 ```
 
 If `--jmods` is omitted, `JAVA_HOME/jmods` is used. The runner requires a
 Linux host with `/proc/self/status`, Python 3, Cargo, Rust, and an
 executable JDK 21 `java` (used to record and verify the JDK version). The
-output captures machine/kernel/CPU and memory details, Rust/Cargo versions,
-JMOD count and total bytes, per-process timings and RSS. It does not preserve
-the machine-specific JDK path.
+output captures machine/kernel/CPU and memory details, Rust/Cargo/JDK
+versions, source revision, JMOD count and total bytes, per-process timings,
+RSS, and descriptor counts. It does not preserve the machine-specific JDK path.
+
+The workload includes initialization, first/sequential repeated lookups for
+classes in `java.base` and `java.net.http`, a missing-class lookup, direct and
+descendant package evidence, and synchronized four-thread lookups for an early
+class, a later-module class, and a miss.
 
 Run the JDK-free harness smoke path using checked-in tiny JMOD fixtures:
 

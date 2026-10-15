@@ -1,10 +1,14 @@
 use dotty_classloader::classloader::{BinaryName, ClassOrigin, ClassPathEntry, JdkClassPath};
 use std::env;
 use std::path::PathBuf;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::Instant;
 
 const WARM_ITERATIONS: u64 = 1_000;
 const PACKAGE_ITERATIONS: u64 = 1_000;
+const CONCURRENT_THREADS: usize = 4;
+const CONCURRENT_ITERATIONS_PER_THREAD: u64 = 250;
 
 fn main() {
     if let Err(error) = run() {
@@ -36,6 +40,7 @@ fn run() -> Result<(), String> {
     let class_path = JdkClassPath::new(&jmods)
         .map_err(|error| format!("could not open JDK jmods at {}: {error}", jmods.display()))?;
     let init_ns = init_start.elapsed().as_nanos();
+    let fd_count_after_init = open_fd_count()?;
 
     let mut samples = Vec::new();
     for (module, name) in [
@@ -142,13 +147,124 @@ fn run() -> Result<(), String> {
         start.elapsed().as_nanos()
     ));
 
+    let concurrent_scenarios = [
+        ("java.base", "java/lang/Object"),
+        ("java.net.http", "java/net/http/HttpClient"),
+        ("missing", "dotty_issue_1157/DefinitelyMissing"),
+    ];
+    let mut concurrent_samples = Vec::new();
+    for (expected_module, name) in concurrent_scenarios {
+        let class_path = Arc::new(&class_path);
+        let ready = Arc::new(Barrier::new(CONCURRENT_THREADS + 1));
+        let start_gate = Arc::new(Barrier::new(CONCURRENT_THREADS + 1));
+        let elapsed = thread::scope(|scope| -> Result<u128, String> {
+            let readers = (0..CONCURRENT_THREADS)
+                .map(|_| {
+                    let class_path = Arc::clone(&class_path);
+                    let ready = Arc::clone(&ready);
+                    let start_gate = Arc::clone(&start_gate);
+                    scope.spawn(move || -> Result<(), String> {
+                        ready.wait();
+                        start_gate.wait();
+                        for _ in 0..CONCURRENT_ITERATIONS_PER_THREAD {
+                            let resource = class_path
+                                .find_class(&BinaryName::from_internal(name))
+                                .map_err(|error| format!("concurrent lookup for {name} failed: {error}"))?;
+                            if expected_module == "missing" {
+                                if resource.is_some() {
+                                    return Err(format!("missing-class assertion failed: {name} was found"));
+                                }
+                            } else {
+                                let resource = resource
+                                    .ok_or_else(|| format!("concurrent lookup could not find {name}"))?;
+                                let origin_module = match resource.origin() {
+                                    ClassOrigin::Jmod(path) => path
+                                        .file_stem()
+                                        .and_then(|stem| stem.to_str())
+                                        .unwrap_or("unknown"),
+                                    _ => "unexpected-origin",
+                                };
+                                if origin_module != expected_module {
+                                    return Err(format!(
+                                        "{name} resolved from {origin_module}, expected {expected_module}"
+                                    ));
+                                }
+                            }
+                        }
+                        Ok(())
+                    })
+                })
+                .collect::<Vec<_>>();
+            let start = start_timed_workers(&ready, &start_gate, || {});
+            for reader in readers {
+                reader
+                    .join()
+                    .map_err(|_| format!("concurrent lookup worker panicked for {name}"))??;
+            }
+            Ok(start.elapsed().as_nanos())
+        })?;
+        concurrent_samples.push(format!(
+            "{{\"module\":\"{expected_module}\",\"class\":\"{name}\",\"threads\":{CONCURRENT_THREADS},\"iterations_per_thread\":{CONCURRENT_ITERATIONS_PER_THREAD},\"total_ns\":{elapsed}}}"
+        ));
+    }
+
+    let fd_count_after_workload = open_fd_count()?;
     let peak_rss_kib = peak_rss_kib()?;
     println!(
-        "{{\"jmods\":\"provided\",\"peak_rss_kib\":{peak_rss_kib},\"init_ns\":{init_ns},\"class_lookups\":[{}],\"negative_lookup\":{{\"class\":\"{negative_name}\",\"first_lookup_ns\":{negative_first_ns},\"warm_iterations\":{WARM_ITERATIONS},\"warm_total_ns\":{negative_warm_total_ns}}},\"package_lookups\":[{}]}}",
+        "{{\"jmods\":\"provided\",\"peak_rss_kib\":{peak_rss_kib},\"fd_count_after_init\":{fd_count_after_init},\"fd_count_after_workload\":{fd_count_after_workload},\"init_ns\":{init_ns},\"class_lookups\":[{}],\"negative_lookup\":{{\"class\":\"{negative_name}\",\"first_lookup_ns\":{negative_first_ns},\"warm_iterations\":{WARM_ITERATIONS},\"warm_total_ns\":{negative_warm_total_ns}}},\"package_lookups\":[{}],\"concurrent_lookups\":[{}]}}",
         samples.join(","),
-        package_samples.join(",")
+        package_samples.join(","),
+        concurrent_samples.join(",")
     );
     Ok(())
+}
+
+fn start_timed_workers(
+    ready: &Barrier,
+    start_gate: &Barrier,
+    before_release: impl FnOnce(),
+) -> Instant {
+    ready.wait();
+    let start = Instant::now();
+    before_release();
+    start_gate.wait();
+    start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start_timed_workers;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn coordinator_delay_before_releasing_workers_is_included_in_timing() {
+        let ready = Arc::new(Barrier::new(2));
+        let start_gate = Arc::new(Barrier::new(2));
+        let did_work = Arc::new(AtomicBool::new(false));
+
+        thread::scope(|scope| {
+            let worker_ready = Arc::clone(&ready);
+            let worker_start_gate = Arc::clone(&start_gate);
+            let worker_did_work = Arc::clone(&did_work);
+            let worker = scope.spawn(move || {
+                worker_ready.wait();
+                worker_start_gate.wait();
+                worker_did_work.store(true, Ordering::SeqCst);
+            });
+
+            let start = start_timed_workers(&ready, &start_gate, || {
+                thread::sleep(Duration::from_millis(20));
+                assert!(!did_work.load(Ordering::SeqCst));
+            });
+            worker.join().expect("worker should complete");
+
+            assert!(did_work.load(Ordering::SeqCst));
+            assert!(start.elapsed() >= Duration::from_millis(20));
+        });
+    }
 }
 
 fn peak_rss_kib() -> Result<u64, String> {
@@ -163,6 +279,18 @@ fn peak_rss_kib() -> Result<u64, String> {
         .nth(1)
         .and_then(|value| value.parse().ok())
         .ok_or_else(|| format!("could not parse peak RSS from {line:?}"))
+}
+
+fn open_fd_count() -> Result<usize, String> {
+    std::fs::read_dir("/proc/self/fd")
+        .map_err(|error| {
+            format!("Linux /proc/self/fd is unavailable for descriptor measurement: {error}")
+        })?
+        .try_fold(0, |count, entry| {
+            entry
+                .map(|_| count + 1)
+                .map_err(|error| format!("could not count open file descriptors: {error}"))
+        })
 }
 
 fn smoke() -> Result<(), String> {
@@ -193,7 +321,8 @@ fn smoke() -> Result<(), String> {
     }
     let peak_rss_kib = peak_rss_kib()?;
     println!(
-        "{{\"smoke\":true,\"peak_rss_kib\":{peak_rss_kib},\"positive_classes\":2,\"negative_lookup\":true,\"package_queries\":true}}"
+        "{{\"smoke\":true,\"peak_rss_kib\":{peak_rss_kib},\"fd_count_after_init\":{},\"positive_classes\":2,\"negative_lookup\":true,\"package_queries\":true}}",
+        open_fd_count()?
     );
     Ok(())
 }
