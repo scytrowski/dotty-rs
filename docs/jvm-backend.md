@@ -319,7 +319,7 @@ file; `emit_class` continues to fail closed for plans containing fields.
 
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
-semantics, constructors, classfile hierarchy, or bytecode. Unsupported ABI
+semantics, constructor bodies, classfile hierarchy, or bytecode. Unsupported ABI
 forms must be handled by a separate contract before they can be emitted.
 
 ## Whole-class emission

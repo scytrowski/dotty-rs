@@ -18,7 +18,7 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | Source shape | Canonical field identity | Initializer / constructor evidence | Status |
 | --- | --- | --- | --- |
 | `class Plain { private val seed: Int = 42; private val enabled: Boolean = true }` | Each declaration maps to a distinct `SymbolKind::Field`, owned by `Plain`, with `Visibility::Private`; neither has `MUTABLE`. `SymbolInfo` completes to the canonical Int or Boolean type. | Template body order is `seed`, then `enabled`. Each source RHS is typed with `type_expression_expected(rhs, context, completed_field_type)` using `field_initializer_context_for`; its literal `TreeId<Typed>` is read back unchanged through `source_typed_index().get(source, rhs)`. The literal keeps its singleton `Type::Constant` type. The frontend-issued `JvmFieldPlan`s preserve this order and project `I`/`Z`, private access, and immutable `ACC_FINAL`. | Frontend and JVM field metadata characterized; class-file field emission is unsupported. |
-| `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | Source signature and binding characterized. No JVM constructor plan or field emission exists. |
+| `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | Source binding and explicit constructor metadata characterized; constructor and field emission remain unsupported. |
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The parameter order comes from the source constructor clause. | Identity audit only; public accessor ABI is out of scope. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same clause ordering as `val`. | Identity audit only; public getter/setter ABI is out of scope. |
 
@@ -50,8 +50,8 @@ typed expression's widened value type must conform before code is emitted.
 There is no JVM slot for a field initializer itself. Constructor parameters
 retain source clause and parameter order; in the one-clause `Counter(start)`
 case, instance receiver occupies local slot 0 and `start` occupies slot 1.
-That layout is a proposed lowering rule, not an API currently represented in
-`dotty-core` or `dotty-jvm`.
+That parameter layout is now exposed by `JvmConstructorMetadata`; field
+initializer lowering remains a proposed rule and is not implemented.
 
 Earlier initialized fields can be read after their initializer has executed.
 The integration characterization also confirms that explicitly typed
