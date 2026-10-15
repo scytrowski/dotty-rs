@@ -91,7 +91,7 @@ export SCALA39_CLASSPATH="$(IFS=:; printf '%s' "${scala_jars[*]}")"
 
 if [[ -z "$output_path" ]]; then
     if [[ "$import_prefix_profile" == 1 ]]; then
-        output_path="$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md"
+        output_path="$repo_root/docs/typer-classpath-import-prefix-profile-current-3.9.0.md"
     else
         output_path="$repo_root/docs/typer-classpath-corpus-audit-3.9.0.md"
     fi
@@ -111,7 +111,7 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         printf 'the import-prefix profile requires --verify-determinism\n' >&2
         exit 2
     fi
-    export SCALA39_IMPORT_PREFIX_BASELINE_REPORT="$repo_root/docs/typer-classpath-corpus-audit-3.9.0.md"
+    export SCALA39_IMPORT_PREFIX_BASELINE_PROFILE="$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md"
     for run in "${run_names[@]}"; do
         if ! (
             cd "$repo_root"
@@ -123,15 +123,27 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         fi
         sed -n '/^AUDIT_IMPORT_PREFIX_BEGIN$/,/^AUDIT_IMPORT_PREFIX_END$/p' "$tmp_dir/$run.log" \
             | sed '1d;$d' >"$tmp_dir/$run.profile"
+        sed -n '/^AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN$/,/^AUDIT_IMPORT_PREFIX_RECONCILIATION_END$/p' "$tmp_dir/$run.log" \
+            | sed '1d;$d' >"$tmp_dir/$run.reconciliation"
         if [[ ! -s "$tmp_dir/$run.profile" ]]; then
             cat "$tmp_dir/$run.log" >&2
             printf 'import-prefix audit markers were missing\n' >&2
+            exit 1
+        fi
+        if [[ ! -s "$tmp_dir/$run.reconciliation" ]]; then
+            cat "$tmp_dir/$run.log" >&2
+            printf 'import-prefix reconciliation markers were missing\n' >&2
             exit 1
         fi
     done
     if ! cmp -s "$tmp_dir/first.profile" "$tmp_dir/second.profile"; then
         diff -u "$tmp_dir/first.profile" "$tmp_dir/second.profile" >&2 || true
         printf 'normalized import-prefix audit output was not deterministic\n' >&2
+        exit 1
+    fi
+    if ! cmp -s "$tmp_dir/first.reconciliation" "$tmp_dir/second.reconciliation"; then
+        diff -u "$tmp_dir/first.reconciliation" "$tmp_dir/second.reconciliation" >&2 || true
+        printf 'normalized import-prefix reconciliation was not deterministic\n' >&2
         exit 1
     fi
     PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/import_prefix_profile.py" \
@@ -145,21 +157,54 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         >"$tmp_dir/import-oracle.txt"
     prefix_targets_path="${output_path%.md}-import-prefix-targets.tsv"
     prefix_evidence_path="${output_path%.md}-import-prefix-classpath-evidence.tsv"
+    prefix_reconciliation_path="${output_path%.md}-reconciliation.tsv"
+    profile_field() {
+        awk -F= -v wanted="$1" '$1 == wanted { print $2; exit }' "$tmp_dir/first.profile"
+    }
+    baseline_observations="$(profile_field baseline_observations)"
+    baseline_files="$(profile_field baseline_files)"
+    baseline_targets="$(profile_field baseline_targets)"
+    baseline_origins="$(profile_field baseline_blocker_origins)"
+    current_import_failures="$(profile_field current_import_qualifier_not_found)"
+    current_unresolved="$(profile_field current_unresolved_next_segment)"
+    current_term_gaps="$(profile_field current_term_object_gaps)"
+    current_unmatched="$(profile_field current_unmatched_request_traces)"
+    reconciliation_rows="$(profile_field reconciliation_rows)"
+    reconciliation_unresolved="$(profile_field reconciliation_unresolved_rows)"
+    reconciliation_advanced="$(profile_field reconciliation_advanced_rows)"
+    new_current_observations="$(profile_field new_current_observations_outside_baseline)"
+    reconciliation_with_evidence="$(profile_field reconciliation_rows_with_resolver_evidence)"
+    reconciliation_final_resolved="$(awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "final_import_identity") col = i; next } { n = split($col, outcomes, ";"); for (j = 1; j <= n; j++) if (outcomes[j] ~ /=resolved::/) count++ } END { print count + 0 }' "$tmp_dir/first.reconciliation")"
+    reconciliation_final_absent="$(awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "final_import_identity") col = i; next } { n = split($col, outcomes, ";"); for (j = 1; j <= n; j++) if (outcomes[j] ~ /=absent::/) count++ } END { print count + 0 }' "$tmp_dir/first.reconciliation")"
+    reconciliation_method_typed="$(awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "current_method_typed") col = i; next } $col == "true" { count++ } END { print count + 0 }' "$tmp_dir/first.reconciliation")"
+    unresolved_movement="$((baseline_observations - current_unresolved))"
+    reconciliation_line_count="$(wc -l <"$tmp_dir/first.reconciliation" | tr -d '[:space:]')"
+    if [[ "$reconciliation_line_count" -ne $((baseline_observations + 1)) ]]; then
+        printf 'expected one reconciliation header and %s frozen rows, got %s lines\n' \
+            "$baseline_observations" "$reconciliation_line_count" >&2
+        exit 1
+    fi
     mkdir -p "$(dirname -- "$output_path")"
     {
-        printf '# #1128 import-prefix profile\n\n'
-        printf 'The focused profile selects the corrected full-corpus method trees, then uses the original source typer path to collect each first blocker and its resolver trace. It does not infer import ownership from method-level aggregates.\n\n'
-        printf 'Both normalized profiles matched byte-for-byte. The observations are pinned to Scala revision `%s`, Scala artifacts 3.9.0, and JDK %s. The corrected full-corpus baseline denominator remains 3,297 methods; this focused profile adds no production behavior.\n\n' "$revision" "$jdk_version"
-        printf '## Selection and observation summary\n\n```text\n'
+        printf '# #1132 current import-prefix reprofile\n\n'
+        printf 'The frozen [#1128 import-prefix profile](typer-classpath-import-prefix-profile-3.9.0.md) remains unchanged. This reprofile starts from its exact weighted source rows and blocker origins, then collects current resolver outcomes; it does not treat a moved first blocker as full-method success.\n\n'
+        printf 'Both normalized profiles matched byte-for-byte. Inputs are pinned to Scala revision `%s`, Scala artifacts 3.9.0, and JDK %s. The full-audit typed-local-method denominator remains 3,297.\n\n' "$revision" "$jdk_version"
+        printf '## Frozen cohort reconciliation\n\n'
+        printf '| Measure | Frozen #1128 | Current |\n| --- | ---: | ---: |\n'
+        printf '| Weighted first-segment observations | %s | %s unresolved next-segment observations |\n' "$baseline_observations" "$current_unresolved"
+        printf '| Files | %s | %s |\n' "$baseline_files" "$(sed -n 's/^observations=[0-9]* files=\([0-9]*\).*/\1/p' "$tmp_dir/import-prefix-summary.txt" | head -1)"
+        printf '| Target keys | %s | %s |\n' "$baseline_targets" "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=\([0-9]*\).*/\1/p' "$tmp_dir/import-prefix-summary.txt" | head -1)"
+        printf '| Distinct blocker origins | %s | %s |\n\n' "$baseline_origins" "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=[0-9]* unique_blocker_origins=\([0-9]*\).*/\1/p' "$tmp_dir/import-prefix-summary.txt" | head -1)"
+        printf 'The exact frozen-row reconciliation contains `%s` rows: `%s` still fail with `ImportQualifierNotFound` at the same import tree, and `%s` have advanced to a later current method blocker. All `%s` advanced rows include a matching resolver request and selected package identity for the frozen qualifier. The row-level selector outcomes are separate from that package result: `%s` selectors have an observed final selected symbol and `%s` explicitly record absence. The full-method typed boolean is true for `%s` frozen rows. The separate unresolved-only view contains `%s` rows, including `%s` newly observed imports outside the frozen cohort. Across the selected roots there are `%s` unresolved-prefix observations, `%s` term/object materialization gaps, and `%s` without a matching failed resolver trace. The full local-method audit still types 0 / 3,297 methods; blocker movement is not full-method success.\n\n' "$reconciliation_rows" "$reconciliation_unresolved" "$reconciliation_advanced" "$reconciliation_with_evidence" "$reconciliation_final_resolved" "$reconciliation_final_absent" "$reconciliation_method_typed" "$current_unresolved" "$new_current_observations" "$current_import_failures" "$current_term_gaps" "$current_unmatched"
+        printf '## Current evidence and next slice\n\n'
+        printf 'The source-package inventory still has `%s` registry hits among the unresolved observations, concentrated in five qualified targets with direct class/TASTy resources. The previously descendant-only `dotty` (19 observations) and `java` (39) targets no longer appear in the unresolved-prefix set; their blockers moved past package resolution. No direct resource exists at the bare first failing segment.\n\n' "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=[0-9]* unique_blocker_origins=[0-9]* direct=[0-9]* inherited=[0-9]* unknown_origins=[0-9]* root_qualified=[0-9]* source_relative_candidates=[0-9]* source_package_registry_hits=\([0-9]*\).*/\1/p' "$tmp_dir/import-prefix-summary.txt" | head -1)"
+        printf 'The grounded next slice is source-owned lexical package resolution for those qualified candidates. Preserve current-package precedence, `_root_` behavior, ambiguity errors, and rollback. Keep targets without source or classpath evidence unresolved.\n\n'
+        printf '## Current selection and evidence summary\n\n```text\n'
         cat "$tmp_dir/import-prefix-summary.txt" "$tmp_dir/import-oracle.txt"
         printf '```\n\n'
-        printf '## Cause ranking and bounded implementation slices\n\n'
-        printf 'The cohort contains 2,394 weighted observations across 209 files and 30 target keys, with 904 distinct blocker origins. All first blockers are inherited; none is direct to the outer method. No target has direct class/TASTy evidence at the bare first failing segment. Cause counts below are observation counts, with overlap called out.\n\n'
-        printf '1. **Qualified lexical package candidates** — 1,615 observations across five keys, 130 files, and 584 blocker origins have direct class/TASTy resources at a package-qualified candidate from the actual source context chain. `core` contributes 1,329 observations (1,323 through enclosing package contexts and 6 in the current package), `ast` 212 (208 enclosing, 4 current), `transform` 66, `util` 6, and `io` 2. The Namer inventory independently confirms these package paths. The importing unit’s isolated source lookup remains `missing`; a follow-up should expose the canonical source package registry and try actual lexical package candidates against source and classpath packages, preserving current-package precedence. Estimated cost: medium; semantic/boundary risk: medium-to-high.\n\n'
-        printf '2. **Descendant-only classpath prefixes** — 58 observations across two keys: `dotty` 19 / 2 files and `java` 39 / 14 files. Neither bare prefix has a direct member, but Scala compiler JAR/JDK JMOD descendants prove both are valid logical packages; deeper levels have direct resources. The 19 `dotty` observations also have a matching root package in the Namer inventory. A bounded classloader slice could recognize package prefixes from effective class/TASTy descendants, preserving MR-JAR/JMOD selection and ignoring directory-only entries. Estimated cost: low-to-medium; semantic risk: moderate.\n\n'
-        printf '3. **No configured source or classpath package evidence** — 721 observations have neither a matching package in the actual lexical source context chain nor a descendant resource at the bare failed prefix. This is the residual after the 1,615 qualified-candidate rows and 58 descendant-only rows. It spans 23 target keys. Do not change resolver acceptance for these rows without supplying or identifying the missing artifact/source declaration.\n\n'
         printf 'Scala 3.9 oracle fixtures confirm that a package-relative path in the current package wins over a root path, root lookup succeeds when that relative path is absent, stacked package clauses expose their enclosing package scope to an import qualifier, and a single dotted package clause does not synthesize that parent scope. Intermediate packages can exist only through descendants, and a missing selected member remains an error after package resolution. An object/package same-name collision is rejected. The measured cohort has no root-qualified imports, no direct-resource resolver rejection, and no non-package first-segment or ambiguous resolver outcome; `_root_` behavior is covered by the separate oracle fixture. These findings do not promise that all imports or typer failures will be fixed.\n\n'
-        printf 'See [`%s`](%s) for target keys, weighted observations, files, blocker origins, source lookups, and classifications. See [`%s`](%s) for direct and descendant resources, archive origin, directory-only evidence, and effective Multi-Release JAR versions. Raw stable observation rows are included below.\n\n' \
+        printf 'See [`%s`](%s) for the row-level reconciliation of every frozen observation, including its original method and attempted method, direct/inherited attribution, failed qualifier and segment, #1128 evidence category, current source selector, package-prefix result, final selected symbol or explicit absence, current blocker, and full-method typed boolean. The target and classpath TSVs below are separate unresolved-only views. See [`%s`](%s) for unresolved target keys, weighted observations, files, blocker origins, source lookups, and classifications. See [`%s`](%s) for direct and descendant resources, archive origin, directory-only evidence, and effective Multi-Release JAR versions. Raw stable unresolved observation rows are included below.\n\n' \
+            "$(basename -- "$prefix_reconciliation_path")" "$(basename -- "$prefix_reconciliation_path")" \
             "$(basename -- "$prefix_targets_path")" "$(basename -- "$prefix_targets_path")" \
             "$(basename -- "$prefix_evidence_path")" "$(basename -- "$prefix_evidence_path")"
         printf '```text\n'
@@ -168,8 +213,9 @@ if [[ "$import_prefix_profile" == 1 ]]; then
     } >"$output_path"
     cp "$tmp_dir/import-prefix-targets.tsv" "$prefix_targets_path"
     cp "$tmp_dir/import-prefix-evidence.tsv" "$prefix_evidence_path"
-    printf 'Wrote deterministic import-prefix profile to %s and TSVs to %s / %s\n' \
-        "$output_path" "$prefix_targets_path" "$prefix_evidence_path"
+    cp "$tmp_dir/first.reconciliation" "$prefix_reconciliation_path"
+    printf 'Wrote deterministic import-prefix profile to %s and TSVs to %s / %s / %s\n' \
+        "$output_path" "$prefix_targets_path" "$prefix_evidence_path" "$prefix_reconciliation_path"
     exit 0
 fi
 for run in "${run_names[@]}"; do

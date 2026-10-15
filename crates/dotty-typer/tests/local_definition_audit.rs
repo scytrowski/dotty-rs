@@ -163,12 +163,13 @@ fn audit_tsv_rows_render_missing_cells_without_trailing_tabs() {
     );
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ResolverRequestObservation {
     target: String,
     outcome: String,
     cause: Option<String>,
     materialized_prefix: Option<String>,
+    selected_identity: Option<String>,
     enclosing_attempt: String,
 }
 
@@ -1071,6 +1072,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         }
         let method = current_method;
         let materialized_prefix = materialized_request_prefix(store, &prefix);
+        let selected_identity = match &result {
+            Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
+                Some(audit_symbol_identity(store, *symbol))
+            }
+            _ => None,
+        };
         if !method.is_empty() {
             metrics
                 .resolver_requests_by_method
@@ -1081,6 +1088,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     outcome: outcome.clone(),
                     cause: member_request_cause(&outcome, &actual_target, &result),
                     materialized_prefix,
+                    selected_identity,
                     enclosing_attempt: method.clone(),
                 });
         }
@@ -1315,6 +1323,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 None,
             ),
         };
+        let selected_identity = match &result {
+            Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
+                Some(audit_symbol_identity(store, *symbol))
+            }
+            _ => None,
+        };
         if !metrics.current_method.is_empty() {
             let method = metrics.current_method.clone();
             metrics
@@ -1326,6 +1340,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     outcome,
                     cause,
                     materialized_prefix,
+                    selected_identity,
                     enclosing_attempt: method.clone(),
                 });
         }
@@ -1377,6 +1392,22 @@ fn audit_symbol_path(store: &SemanticStore, symbol: SymbolId) -> String {
     }
     parts.reverse();
     parts.join(".")
+}
+
+fn audit_symbol_identity(store: &SemanticStore, symbol: SymbolId) -> String {
+    let entry = store.symbols.get(symbol);
+    let kind = format!("{:?}", entry.kind);
+    let origin = match entry.origin {
+        dotty_core::SymbolOrigin::Source(_) => "source",
+        dotty_core::SymbolOrigin::Classfile(_) => "classfile",
+        dotty_core::SymbolOrigin::Tasty(_) => "tasty",
+        dotty_core::SymbolOrigin::Builtin => "builtin",
+        dotty_core::SymbolOrigin::Synthetic => "synthetic",
+    };
+    format!(
+        "kind={kind}::origin={origin}::path={}",
+        audit_symbol_path(store, symbol)
+    )
 }
 
 fn symbol_info_label(info: dotty_core::SymbolInfo) -> &'static str {
@@ -4013,6 +4044,7 @@ struct Audit {
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
     local_method_attempts: BTreeSet<String>,
+    import_prefix_selectors: BTreeMap<String, Vec<String>>,
     local_value_blocker_profile: LocalValueBlockerProfile,
     local_value_baseline_outcomes: BTreeSet<LocalValueBaselineOutcome>,
     by_name_method_outcomes: BTreeMap<String, String>,
@@ -4061,6 +4093,39 @@ struct BaselineImportAttempt {
     file: String,
     method_tree: u32,
     blocker_origin_tree: u32,
+    import_tree: u32,
+    baseline_method: String,
+    baseline_attempted_method: String,
+    baseline_attribution: String,
+    baseline_import_tree: String,
+    qualifier_segments: String,
+    first_failing_segment: String,
+    evidence_category: String,
+    target_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ImportPrefixReconciliation {
+    source_file: String,
+    method_tree: u32,
+    blocker_origin_tree: u32,
+    import_tree: u32,
+    baseline_method: String,
+    baseline_attempted_method: String,
+    baseline_attribution: String,
+    baseline_import_tree: String,
+    baseline_target_key: String,
+    qualifier_segments: String,
+    baseline_first_failing_segment: String,
+    baseline_evidence_category: String,
+    current_import_selectors: String,
+    current_outcome: String,
+    current_method_blocker: String,
+    current_method_typed: bool,
+    current_blocker_origin: String,
+    current_selected_identity: String,
+    final_import_identity: String,
+    current_resolver_requests: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -4332,6 +4397,7 @@ impl Default for Audit {
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
             local_method_attempts: BTreeSet::new(),
+            import_prefix_selectors: BTreeMap::new(),
             local_value_blocker_profile: LocalValueBlockerProfile::default(),
             local_value_baseline_outcomes: BTreeSet::new(),
             by_name_method_outcomes: BTreeMap::new(),
@@ -5181,6 +5247,8 @@ impl Audit {
             .extend(other.local_method_first_blockers);
         self.local_method_attempts
             .extend(other.local_method_attempts);
+        self.import_prefix_selectors
+            .extend(other.import_prefix_selectors);
         self.resolution_blocker_profile
             .observations
             .extend(other.resolution_blocker_profile.observations);
@@ -6344,20 +6412,73 @@ fn pinned_scala39_import_prefix_typing_probe() {
         "777528f19a58e794c9954a42f433373472ec57f8",
         "import audit requires the repository's pinned Scala 3.9.0 source revision"
     );
-    let report = PathBuf::from(
-        std::env::var_os("SCALA39_IMPORT_PREFIX_BASELINE_REPORT")
-            .expect("SCALA39_IMPORT_PREFIX_BASELINE_REPORT is required"),
+    let profile = PathBuf::from(
+        std::env::var_os("SCALA39_IMPORT_PREFIX_BASELINE_PROFILE")
+            .expect("SCALA39_IMPORT_PREFIX_BASELINE_PROFILE is required"),
     );
-    let report = fs::read_to_string(report).expect("corrected baseline report should be readable");
-    let baseline_rows = baseline_import_blocker_attempts(&report);
-    assert_eq!(baseline_rows.len(), 2_573);
+    let profile = fs::read_to_string(profile).expect("frozen #1128 profile should be readable");
+    let baseline_target_categories = frozen_import_target_categories();
+    let baseline_rows = baseline_import_blocker_attempts(&profile, &baseline_target_categories);
+    assert_eq!(baseline_rows.len(), 2_394);
+    assert!(baseline_rows.iter().all(|row| {
+        !row.baseline_method.is_empty()
+            && !row.baseline_attempted_method.is_empty()
+            && matches!(row.baseline_attribution.as_str(), "direct" | "inherited")
+            && !row.baseline_import_tree.is_empty()
+            && !row.qualifier_segments.is_empty()
+            && !row.first_failing_segment.is_empty()
+            && !row.evidence_category.is_empty()
+    }));
+    assert_eq!(
+        baseline_rows
+            .iter()
+            .map(|row| (
+                row.file.as_str(),
+                row.method_tree,
+                row.blocker_origin_tree,
+                row.import_tree
+            ))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        baseline_rows.len(),
+        "frozen row identity must uniquely identify every weighted observation"
+    );
+    assert_eq!(
+        baseline_rows
+            .iter()
+            .map(|row| (row.file.as_str(), row.method_tree, row.import_tree))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        baseline_rows.len(),
+        "the stable source/method/import key must uniquely join current observations"
+    );
+    assert_eq!(
+        baseline_rows
+            .iter()
+            .map(|row| row.file.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        209
+    );
+    assert_eq!(
+        baseline_rows
+            .iter()
+            .map(|row| row.target_key.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        30
+    );
     let mut methods_by_file = BTreeMap::<String, BTreeSet<u32>>::new();
-    for attempt in baseline_rows {
+    for attempt in &baseline_rows {
         methods_by_file
-            .entry(attempt.file)
+            .entry(attempt.file.clone())
             .or_default()
             .insert(attempt.blocker_origin_tree);
     }
+    assert_eq!(
+        methods_by_file.values().map(BTreeSet::len).sum::<usize>(),
+        904
+    );
     let classpath = audit_classpath_from_environment();
     let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
     let mut audit = Audit::default();
@@ -6382,14 +6503,75 @@ fn pinned_scala39_import_prefix_typing_probe() {
         ));
     }
     let all_observations = audit.import_prefix_profile.observations;
+    let reconciliation = reconcile_import_prefix_observations(
+        &baseline_rows,
+        &all_observations,
+        &audit.local_method_first_blockers,
+        &audit.local_method_attempts,
+        &audit.import_prefix_selectors,
+        &metrics.borrow().resolver_requests_by_method,
+    );
+    assert_eq!(reconciliation.len(), baseline_rows.len());
+    let unresolved_baseline_rows = reconciliation
+        .iter()
+        .filter(|row| row.current_outcome.starts_with("ImportQualifierNotFound::"))
+        .count();
+    let advanced_baseline_rows = reconciliation.len() - unresolved_baseline_rows;
+    assert_eq!(unresolved_baseline_rows, 2_336);
+    assert_eq!(advanced_baseline_rows, 58);
+    assert!(reconciliation.iter().all(|row| {
+        row.current_method_typed == (row.current_method_blocker == "typed")
+            && row.final_import_identity.starts_with("outcomes::")
+            && (row.final_import_identity.contains("resolved::")
+                || row.final_import_identity.contains("absent::"))
+    }));
+    assert!(
+        reconciliation
+            .iter()
+            .filter(|row| row.current_outcome.starts_with("advanced past"))
+            .all(|row| {
+                row.current_resolver_requests != "no matching resolver request"
+                    && row.current_selected_identity != "-"
+            })
+    );
+    let baseline_identities = baseline_rows
+        .iter()
+        .map(|row| (&row.file, row.method_tree, row.import_tree))
+        .collect::<BTreeSet<_>>();
+    let new_current_observations = all_observations
+        .iter()
+        .filter(|row| {
+            !baseline_identities.contains(&(
+                &row.source_file,
+                source_tree_index(&row.method),
+                source_tree_index(&row.import_tree),
+            ))
+        })
+        .count();
+    assert_eq!(new_current_observations, 6);
+    assert!(reconciliation.iter().all(|row| {
+        row.current_method_blocker != "not observed"
+            && row.current_outcome != "unmatched current outcome"
+    }));
     let first_segment_observations = all_observations
         .iter()
         .filter(|row| {
             row.resolver_outcome
-                .ends_with("::first segment/package unresolved")
+                .ends_with("::truly unresolved next segment")
         })
         .cloned()
         .collect::<Vec<_>>();
+    let term_object_gaps = all_observations
+        .iter()
+        .filter(|row| {
+            row.resolver_outcome
+                .ends_with("::term/object materialization gap")
+        })
+        .count();
+    let unmatched_traces = all_observations
+        .iter()
+        .filter(|row| row.resolver_outcome == "unknown:no matching failed request")
+        .count();
     let files = first_segment_observations
         .iter()
         .map(|row| row.source_file.as_str())
@@ -6399,21 +6581,55 @@ fn pinned_scala39_import_prefix_typing_probe() {
         .map(|row| row.target_key.as_str())
         .collect::<BTreeSet<_>>();
     eprintln!(
-        "import-prefix totals: all={}, first-segment={}, files={}, targets={}",
+        "import-prefix totals: all={}, unresolved-next-segment={}, files={}, targets={}, term-object-gaps={}, unmatched-traces={}",
         all_observations.len(),
         first_segment_observations.len(),
         files.len(),
-        targets.len()
+        targets.len(),
+        term_object_gaps,
+        unmatched_traces
     );
-    assert_eq!(all_observations.len(), 2_573);
-    assert_eq!(first_segment_observations.len(), 2_394);
-    assert_eq!(files.len(), 209);
-    assert_eq!(targets.len(), 30);
+    assert_eq!(all_observations.len(), 2_342);
+    assert_eq!(first_segment_observations.len(), 2_342);
+    assert_eq!(files.len(), 196);
+    assert_eq!(targets.len(), 29);
+    assert_eq!(term_object_gaps, 0);
+    assert_eq!(unmatched_traces, 0);
+    assert!(
+        !targets.contains("dotty::<first-segment-unresolved>")
+            && !targets.contains("java::<first-segment-unresolved>"),
+        "the previously descendant-only dotty/java prefixes must move past this blocker"
+    );
     println!("AUDIT_IMPORT_PREFIX_BEGIN");
     print_import_prefix_profile(&ImportPrefixProfile {
         observations: first_segment_observations,
     });
+    println!("baseline_observations=2394");
+    println!("baseline_files=209");
+    println!("baseline_targets=30");
+    println!("baseline_blocker_origins=904");
+    println!(
+        "current_import_qualifier_not_found={}",
+        all_observations.len()
+    );
+    println!("current_unresolved_next_segment={}", all_observations.len());
+    println!("current_term_object_gaps={term_object_gaps}");
+    println!("current_unmatched_request_traces={unmatched_traces}");
+    println!("reconciliation_rows={}", reconciliation.len());
+    println!("reconciliation_unresolved_rows={unresolved_baseline_rows}");
+    println!("reconciliation_advanced_rows={advanced_baseline_rows}");
+    println!("new_current_observations_outside_baseline={new_current_observations}");
+    println!(
+        "reconciliation_rows_with_resolver_evidence={}",
+        reconciliation
+            .iter()
+            .filter(|row| row.current_resolver_requests != "no matching resolver request")
+            .count()
+    );
     println!("AUDIT_IMPORT_PREFIX_END");
+    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
+    print_import_prefix_reconciliation(&reconciliation);
+    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
 }
 
 fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
@@ -9182,6 +9398,28 @@ fn audit_source_inner_filtered(
         &mut store.names,
     );
     let mut audit = collect_local_nodes(&parsed.ast);
+    if import_prefix_only {
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::Import(import) = &node.kind else {
+                continue;
+            };
+            audit.import_prefix_selectors.insert(
+                format!("{path}#tree={}", tree.index()),
+                import
+                    .selectors
+                    .iter()
+                    .map(|selector| {
+                        let name = store.names.resolve(selector.imported.text());
+                        if selector.bound.is_some() {
+                            format!("given:{name}")
+                        } else {
+                            name.to_owned()
+                        }
+                    })
+                    .collect(),
+            );
+        }
+    }
     audit.files_attempted = 1;
     audit.patdef_profile = collect_local_patdefs(&parsed.ast, &store.names, path);
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
@@ -9532,6 +9770,13 @@ fn audit_source_inner_filtered(
         let site = format!("{path}:{line}:{name}");
         if typer.source_typed_index().get(source, tree).is_some() {
             if import_prefix_only {
+                let method_key = format!("{path}#tree={}", tree.index());
+                audit
+                    .local_method_first_blockers
+                    .insert(method_key.clone(), "typed".to_owned());
+                audit.local_method_attempts.insert(format!(
+                    "method={method_key}::site={site}::attempt={method_key}::blocker=typed::typed=true"
+                ));
                 continue;
             }
             audit.typed_local_defdefs += 1;
@@ -9670,6 +9915,16 @@ fn audit_source_inner_filtered(
                         audit.import_prefix_profile.observations.push(observation);
                     }
                 }
+                let method_key = format!("{path}#tree={}", tree.index());
+                let attempt = blocker_method_tree
+                    .map_or_else(|| "<none>".to_owned(), |id| format!("{path}#tree={id}"));
+                audit
+                    .local_method_first_blockers
+                    .insert(method_key.clone(), kind.bucket.clone());
+                audit.local_method_attempts.insert(format!(
+                    "method={method_key}::site={site}::attempt={attempt}::blocker={}::typed=false",
+                    kind.bucket
+                ));
                 continue;
             }
             let attempt = blocker_method_tree
@@ -11350,45 +11605,503 @@ fn print_import_prefix_profile(profile: &ImportPrefixProfile) {
     }
 }
 
-fn baseline_import_blocker_attempts(report: &str) -> BTreeSet<BaselineImportAttempt> {
+fn frozen_import_target_categories() -> BTreeMap<String, String> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = repo_root
+        .join("docs/typer-classpath-import-prefix-profile-3.9.0-import-prefix-targets.tsv");
+    let report = fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "cannot read frozen #1128 target evidence {}: {error}",
+            path.display()
+        )
+    });
+    let mut categories = BTreeMap::new();
+    for line in report.lines().skip(1) {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(
+            fields.len(),
+            10,
+            "frozen target evidence row has ten columns"
+        );
+        assert!(
+            categories
+                .insert(fields[0].to_owned(), fields[9].to_owned())
+                .is_none(),
+            "frozen target evidence keys are unique"
+        );
+    }
+    categories
+}
+
+fn baseline_import_blocker_attempts(
+    report: &str,
+    target_categories: &BTreeMap<String, String>,
+) -> Vec<BaselineImportAttempt> {
     let start = report
-        .rfind("local_method_attempts:")
-        .expect("corrected audit contains the local_method_attempts section");
-    let mut rows = BTreeSet::new();
-    for line in report[start..].lines().skip(1) {
-        let Some(line) = line.strip_prefix("  method=") else {
-            if line.starts_with("  ") {
-                continue;
-            }
+        .find("import_prefix_observations:\n")
+        .expect("frozen #1128 profile contains import-prefix observations");
+    let mut lines = report[start..].lines().skip(1);
+    let counts = lines
+        .next()
+        .expect("profile contains an observation count")
+        .trim()
+        .strip_prefix("observations=")
+        .expect("profile observation count is labeled")
+        .parse::<usize>()
+        .expect("profile observation count is numeric");
+    let header = lines.next().expect("profile contains the row header");
+    assert!(header.contains("\tmethod\tblocker_origin\t"));
+    let mut rows = Vec::with_capacity(counts);
+    for line in lines {
+        let Some(line) = line.strip_prefix("  ") else {
             break;
         };
-        let fields = line.split("::").collect::<Vec<_>>();
-        if fields.get(3).copied() != Some("blocker=ImportQualifierNotFound") {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 17 {
             continue;
         }
-        let (file, tree) = fields[0]
+        let (file, tree) = fields[1]
             .rsplit_once("#tree=")
-            .expect("method attempt has a stable source tree key");
+            .expect("baseline method has a stable source tree key");
+        assert_eq!(
+            file, fields[0],
+            "baseline source path matches its method key"
+        );
         let method_tree = tree
             .parse::<u32>()
-            .expect("method tree key contains a numeric source tree index");
-        let attempt = fields
-            .get(2)
-            .and_then(|field| field.strip_prefix("attempt="))
-            .expect("method attempt records its first-blocker origin");
-        let (_, origin_tree) = attempt
+            .expect("baseline method tree key contains a numeric source tree index");
+        let (attribution, origin) = fields[2]
+            .split_once(':')
+            .expect("baseline blocker origin has an attribution prefix");
+        let (_, origin_tree) = origin
             .rsplit_once("#tree=")
-            .expect("blocker origin contains a source tree index");
+            .expect("baseline blocker origin contains a source tree index");
         let blocker_origin_tree = origin_tree
             .parse::<u32>()
-            .expect("blocker origin tree is numeric");
-        rows.insert(BaselineImportAttempt {
-            file: file.to_owned(),
+            .expect("baseline blocker origin tree is numeric");
+        let (_, import_tree) = fields[3]
+            .rsplit_once("#tree=")
+            .expect("baseline import has a stable source tree key");
+        let import_tree = import_tree
+            .parse::<u32>()
+            .expect("baseline import tree key contains a numeric source tree index");
+        let evidence_category = target_categories
+            .get(fields[16])
+            .unwrap_or_else(|| panic!("missing frozen evidence category for {}", fields[16]))
+            .clone();
+        rows.push(BaselineImportAttempt {
+            file: fields[0].to_owned(),
             method_tree,
             blocker_origin_tree,
+            import_tree,
+            baseline_method: fields[1].to_owned(),
+            baseline_attempted_method: origin.to_owned(),
+            baseline_attribution: attribution.to_owned(),
+            baseline_import_tree: fields[3].to_owned(),
+            qualifier_segments: fields[6].to_owned(),
+            first_failing_segment: fields[13].to_owned(),
+            evidence_category,
+            target_key: fields[16].to_owned(),
         });
     }
+    assert_eq!(
+        rows.len(),
+        counts,
+        "frozen profile row count matches its header"
+    );
     rows
+}
+
+fn reconcile_import_prefix_observations(
+    baseline_rows: &[BaselineImportAttempt],
+    current_rows: &[ImportPrefixObservation],
+    current_blockers: &BTreeMap<String, String>,
+    current_attempts: &BTreeSet<String>,
+    import_selectors: &BTreeMap<String, Vec<String>>,
+    resolver_requests: &BTreeMap<String, Vec<ResolverRequestObservation>>,
+) -> Vec<ImportPrefixReconciliation> {
+    let mut current_by_identity = BTreeMap::new();
+    for row in current_rows {
+        let identity = (
+            row.source_file.as_str(),
+            source_tree_index(&row.method),
+            source_tree_index(&row.import_tree),
+        );
+        assert!(
+            current_by_identity.insert(identity, row).is_none(),
+            "current import observation identity must be unique"
+        );
+    }
+
+    let mut attempt_by_method = BTreeMap::new();
+    for attempt in current_attempts {
+        let Some(method) = attempt.strip_prefix("method=") else {
+            continue;
+        };
+        let Some((method, remainder)) = method.split_once("::site=") else {
+            continue;
+        };
+        let Some((_, current_origin)) = remainder.split_once("::attempt=") else {
+            continue;
+        };
+        let Some((current_origin, _)) = current_origin.split_once("::blocker=") else {
+            continue;
+        };
+        attempt_by_method.insert(method.to_owned(), current_origin.to_owned());
+    }
+
+    let mut reconciliation = Vec::with_capacity(baseline_rows.len());
+    for baseline in baseline_rows {
+        let identity = (
+            baseline.file.as_str(),
+            baseline.method_tree,
+            baseline.import_tree,
+        );
+        let current = current_by_identity.get(&identity).copied();
+        let method_key = format!("{}#tree={}", baseline.file, baseline.method_tree);
+        let current_method_blocker = current_blockers
+            .get(&method_key)
+            .cloned()
+            .unwrap_or_else(|| "not observed".to_owned());
+        let current_method_typed = current_method_blocker == "typed";
+        let import_key = format!("{}#tree={}", baseline.file, baseline.import_tree);
+        let current_import_selectors = import_selectors
+            .get(&import_key)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing current selector inventory for {import_key}"));
+        let current_blocker_origin = attempt_by_method
+            .get(&method_key)
+            .cloned()
+            .unwrap_or_else(|| "<unknown>".to_owned());
+
+        let request_prefix = format!("{}#tree={}::", baseline.file, baseline.blocker_origin_tree);
+        let matching_requests = resolver_requests
+            .iter()
+            .filter(|(method, _)| method.starts_with(&request_prefix))
+            .flat_map(|(_, requests)| requests.iter())
+            .filter(|request| {
+                resolver_request_matches_qualifier(request, &baseline.qualifier_segments)
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let wildcard_selector = current_import_selectors
+            .iter()
+            .any(|selector| selector == "*");
+        let selected_targets = if current_import_selectors.is_empty() {
+            vec![("<self>".to_owned(), baseline.qualifier_segments.clone())]
+        } else {
+            current_import_selectors
+                .iter()
+                .filter(|selector| selector.as_str() != "*" && !selector.starts_with("given:"))
+                .map(|selector| {
+                    (
+                        selector.clone(),
+                        format!("{}.{}", baseline.qualifier_segments, selector),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut final_selector_outcomes = selected_targets
+            .iter()
+            .map(|(selector, target)| {
+                let exact_requests = matching_requests
+                    .iter()
+                    .filter(|request| resolver_request_targets_exact_qualifier(request, target))
+                    .collect::<Vec<_>>();
+                let resolved = exact_requests
+                    .iter()
+                    .filter_map(|request| request.selected_identity.as_deref())
+                    .collect::<BTreeSet<_>>();
+                if !resolved.is_empty() {
+                    format!(
+                        "{selector}=resolved::{}",
+                        resolved.into_iter().collect::<Vec<_>>().join("|")
+                    )
+                } else if let Some(request) = exact_requests.first() {
+                    format!(
+                        "{selector}=absent::outcome={}::cause={}",
+                        request.outcome,
+                        request.cause.as_deref().unwrap_or("no resolver cause")
+                    )
+                } else if let Some(current) = current {
+                    format!(
+                        "{selector}=absent::qualifier unresolved::{}",
+                        current.resolver_outcome
+                    )
+                } else {
+                    format!("{selector}=absent::no exact successful final-symbol resolution")
+                }
+            })
+            .collect::<Vec<_>>();
+        if wildcard_selector {
+            final_selector_outcomes
+                .push("*=absent::wildcard import has no singular final selected symbol".to_owned());
+        }
+        final_selector_outcomes.extend(
+            current_import_selectors
+                .iter()
+                .filter(|selector| selector.starts_with("given:"))
+                .map(|selector| {
+                    format!(
+                        "{selector}=absent::given selector has no singular symbol in this audit"
+                    )
+                }),
+        );
+        let final_import_identity = format!("outcomes::{}", final_selector_outcomes.join(";"));
+        let current_resolver_requests = if matching_requests.is_empty() {
+            "no matching resolver request".to_owned()
+        } else {
+            matching_requests
+                .iter()
+                .map(|request| {
+                    format!(
+                        "target={}::outcome={}::cause={}::materialized={}::identity={}",
+                        request.target,
+                        request.outcome,
+                        request.cause.as_deref().unwrap_or("-"),
+                        request.materialized_prefix.as_deref().unwrap_or("-"),
+                        request.selected_identity.as_deref().unwrap_or("-")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(";")
+        };
+        let (current_outcome, current_origin, current_selected_identity) =
+            if let Some(current) = current {
+                (
+                    format!("ImportQualifierNotFound::{}", current.resolver_outcome),
+                    current.blocker_origin.clone(),
+                    current.resolved_prefix.clone(),
+                )
+            } else {
+                let current_outcome = if current_method_blocker == "not observed" {
+                    "unmatched current outcome".to_owned()
+                } else {
+                    format!("advanced past ImportQualifierNotFound::{current_method_blocker}")
+                };
+                (
+                    current_outcome,
+                    current_blocker_origin.clone(),
+                    matching_requests
+                        .iter()
+                        .filter_map(|request| {
+                            request
+                                .materialized_prefix
+                                .as_deref()
+                                .map(|selected| (request.target.len(), selected))
+                        })
+                        .max_by_key(|(specificity, _)| *specificity)
+                        .map(|(_, selected)| selected)
+                        .unwrap_or("-")
+                        .to_owned(),
+                )
+            };
+
+        reconciliation.push(ImportPrefixReconciliation {
+            source_file: baseline.file.clone(),
+            method_tree: baseline.method_tree,
+            blocker_origin_tree: baseline.blocker_origin_tree,
+            import_tree: baseline.import_tree,
+            baseline_method: baseline.baseline_method.clone(),
+            baseline_attempted_method: baseline.baseline_attempted_method.clone(),
+            baseline_attribution: baseline.baseline_attribution.clone(),
+            baseline_import_tree: baseline.baseline_import_tree.clone(),
+            baseline_target_key: baseline.target_key.clone(),
+            qualifier_segments: baseline.qualifier_segments.clone(),
+            baseline_first_failing_segment: baseline.first_failing_segment.clone(),
+            baseline_evidence_category: baseline.evidence_category.clone(),
+            current_import_selectors: if current_import_selectors.is_empty() {
+                "<self>".to_owned()
+            } else {
+                current_import_selectors.join(",")
+            },
+            current_outcome,
+            current_method_blocker,
+            current_method_typed,
+            current_blocker_origin: current_origin,
+            current_selected_identity,
+            final_import_identity,
+            current_resolver_requests,
+        });
+    }
+    reconciliation.sort();
+    reconciliation
+}
+
+fn source_tree_index(key: &str) -> u32 {
+    key.rsplit_once("#tree=")
+        .and_then(|(_, index)| index.parse().ok())
+        .expect("source tree key contains a numeric tree index")
+}
+
+fn resolver_request_matches_qualifier(
+    request: &ResolverRequestObservation,
+    qualifier: &str,
+) -> bool {
+    let qualifier = qualifier.strip_prefix("_root_.").unwrap_or(qualifier);
+    let normalized_target = request.target.replace('/', ".");
+    if request.outcome == "package success" {
+        return qualifier == normalized_target
+            || qualifier.starts_with(&format!("{normalized_target}."));
+    }
+    let Some(prefix) = request
+        .target
+        .strip_prefix("prefix=")
+        .and_then(|target| target.split("::").next())
+    else {
+        return false;
+    };
+    let Some(name) = request
+        .target
+        .split("::")
+        .find_map(|field| field.strip_prefix("name="))
+    else {
+        return false;
+    };
+    let selected = format!("{}.{}", prefix.replace('/', "."), name);
+    qualifier == selected || qualifier.starts_with(&format!("{selected}."))
+}
+
+fn resolver_request_targets_exact_qualifier(
+    request: &ResolverRequestObservation,
+    qualifier: &str,
+) -> bool {
+    let qualifier = qualifier.strip_prefix("_root_.").unwrap_or(qualifier);
+    if request.outcome.starts_with("package ") {
+        return request.target.replace('/', ".") == qualifier;
+    }
+    let Some(prefix) = request
+        .target
+        .strip_prefix("prefix=")
+        .and_then(|target| target.split("::").next())
+    else {
+        return false;
+    };
+    let Some(name) = request
+        .target
+        .split("::")
+        .find_map(|field| field.strip_prefix("name="))
+    else {
+        return false;
+    };
+    format!("{}.{}", prefix.replace('/', "."), name) == qualifier
+}
+
+#[test]
+fn frozen_import_reconciliation_preserves_original_provenance() {
+    let row = [
+        "compiler/Foo.scala",
+        "compiler/Foo.scala#tree=10",
+        "inherited:compiler/Foo.scala#tree=20",
+        "compiler/Foo.scala#tree=30",
+        "5",
+        "old.pkg",
+        "old.pkg",
+        "owner",
+        "pkg",
+        "Term",
+        "missing",
+        "relative=found:Package@pkg.old;enclosing=none;root=missing",
+        "-",
+        "old",
+        "resolve_package",
+        "Ok(None)::package unresolved::first segment/package unresolved",
+        "old::<first-segment-unresolved>",
+    ]
+    .join("\t");
+    let report = format!(
+        "import_prefix_observations:\n  observations=1\n  source_file\tmethod\tblocker_origin\timport_tree\tline\tqualifier_source\tqualifier_segments\tcontext_owner\tcontext_package\tnamespace\tsource_lookup\tsource_package_registry_lookup\tresolved_prefix\tfirst_failing_segment\trequest_kind\tresolver_outcome\ttarget_key\n  {row}\n"
+    );
+    let categories = BTreeMap::from([(
+        "old::<first-segment-unresolved>".to_owned(),
+        "descendant_only_intermediate,source_relative_candidate".to_owned(),
+    )]);
+
+    let baseline = baseline_import_blocker_attempts(&report, &categories);
+    assert_eq!(baseline.len(), 1);
+    assert_eq!(baseline[0].file, "compiler/Foo.scala");
+    assert_eq!(baseline[0].baseline_method, "compiler/Foo.scala#tree=10");
+    assert_eq!(
+        baseline[0].baseline_attempted_method,
+        "compiler/Foo.scala#tree=20"
+    );
+    assert_eq!(baseline[0].baseline_attribution, "inherited");
+    assert_eq!(
+        baseline[0].baseline_import_tree,
+        "compiler/Foo.scala#tree=30"
+    );
+    assert_eq!(baseline[0].qualifier_segments, "old.pkg");
+    assert_eq!(baseline[0].first_failing_segment, "old");
+    assert_eq!(
+        baseline[0].evidence_category,
+        "descendant_only_intermediate,source_relative_candidate"
+    );
+}
+
+#[test]
+fn final_import_identity_requires_an_exact_resolver_target() {
+    let package = ResolverRequestObservation {
+        target: "scala.collection".to_owned(),
+        outcome: "package success".to_owned(),
+        cause: None,
+        materialized_prefix: Some("package=scala.collection::owner=scala".to_owned()),
+        selected_identity: Some("kind=Package::origin=classfile::path=scala.collection".to_owned()),
+        enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
+    };
+    let class = ResolverRequestObservation {
+        target: "prefix=scala.collection::namespace=type::name=List::space=Prefix".to_owned(),
+        outcome: "class member success".to_owned(),
+        cause: None,
+        materialized_prefix: Some("package=scala.collection::owner=scala".to_owned()),
+        selected_identity: Some(
+            "kind=Class::origin=classfile::path=scala.collection.List".to_owned(),
+        ),
+        enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
+    };
+
+    assert!(!resolver_request_targets_exact_qualifier(
+        &package,
+        "scala.collection.List"
+    ));
+    assert!(resolver_request_targets_exact_qualifier(
+        &class,
+        "scala.collection.List"
+    ));
+    assert_eq!(
+        class.selected_identity.as_deref(),
+        Some("kind=Class::origin=classfile::path=scala.collection.List")
+    );
+}
+
+fn print_import_prefix_reconciliation(rows: &[ImportPrefixReconciliation]) {
+    println!(
+        "source_file\tmethod_tree\tblocker_origin_tree\timport_tree\tbaseline_method\tbaseline_attempted_method\tbaseline_attribution\tbaseline_import_tree\tbaseline_target_key\tbaseline_failed_qualifier\tbaseline_first_failing_segment\tbaseline_evidence_category\tcurrent_import_selectors\tcurrent_outcome\tcurrent_method_blocker\tcurrent_method_typed\tcurrent_blocker_origin\tcurrent_selected_identity\tfinal_import_identity\tcurrent_resolver_requests"
+    );
+    for row in rows {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.source_file,
+            row.method_tree,
+            row.blocker_origin_tree,
+            row.import_tree,
+            row.baseline_method,
+            row.baseline_attempted_method,
+            row.baseline_attribution,
+            row.baseline_import_tree,
+            row.baseline_target_key,
+            tsv_or_dash(&row.qualifier_segments),
+            tsv_or_dash(&row.baseline_first_failing_segment),
+            tsv_or_dash(&row.baseline_evidence_category),
+            tsv_or_dash(&row.current_import_selectors),
+            row.current_outcome,
+            row.current_method_blocker,
+            row.current_method_typed,
+            row.current_blocker_origin,
+            tsv_or_dash(&row.current_selected_identity),
+            row.final_import_identity,
+            row.current_resolver_requests
+        );
+    }
 }
 
 fn print_dependency_profiles(metrics: &ResolverMetrics) {
@@ -16407,6 +17120,7 @@ mod resolver_profile_tests {
                 outcome: "package term member unsupported".to_owned(),
                 cause: Some("term/object materialization gap".to_owned()),
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16414,6 +17128,7 @@ mod resolver_profile_tests {
                 outcome: "package type member unresolved".to_owned(),
                 cause: Some("package resolved but member unresolved".to_owned()),
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
         ];
@@ -16443,6 +17158,7 @@ mod resolver_profile_tests {
                 outcome: "package success".to_owned(),
                 cause: None,
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16450,6 +17166,7 @@ mod resolver_profile_tests {
                 outcome: "package success".to_owned(),
                 cause: None,
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16457,6 +17174,7 @@ mod resolver_profile_tests {
                 outcome: "package unresolved".to_owned(),
                 cause: Some("first segment/package unresolved".to_owned()),
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16465,6 +17183,7 @@ mod resolver_profile_tests {
                 outcome: "package type member unresolved".to_owned(),
                 cause: Some("package resolved but member unresolved".to_owned()),
                 materialized_prefix: Some("scala/Function1".to_owned()),
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16472,6 +17191,7 @@ mod resolver_profile_tests {
                 outcome: "class member scope unavailable: incomplete class info".to_owned(),
                 cause: Some("incomplete class identity".to_owned()),
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
         ];
@@ -16617,6 +17337,7 @@ mod resolver_profile_tests {
             outcome: "package term member unsupported".to_owned(),
             cause: Some("term/object materialization gap".to_owned()),
             materialized_prefix: None,
+            selected_identity: None,
             enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
         }];
 
