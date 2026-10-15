@@ -13,7 +13,7 @@ Both normalized profiles matched byte-for-byte. Inputs are pinned to Scala revis
 | Target keys | 30 | 29 |
 | Distinct blocker origins | 904 | 879 |
 
-Current import failures across the selected roots: `2342`; of these, `2342` remain unresolved at the next package segment, `0` stop at a term/object materialization gap, and `0` have no matching failed resolver trace. The unresolved-prefix count is down by `52` from the frozen cohort, but the complete local-method audit still types 0 / 3,297 methods. This is blocker movement, not a claim that those methods type.
+The exact frozen-row reconciliation contains `2394` rows: `2336` still fail with `ImportQualifierNotFound` at the same import tree, and `58` have advanced to a later current method blocker. All `58` advanced rows include a matching resolver request and selected package identity for the frozen qualifier. The separate unresolved-only view contains `2342` rows, including `6` newly observed imports outside the frozen cohort. Across the selected roots there are `2342` unresolved-prefix observations, `0` term/object materialization gaps, and `0` without a matching failed resolver trace. The full local-method audit still types 0 / 3,297 methods; blocker movement is not full-method success.
 
 ## Current evidence and next slice
 
@@ -60,7 +60,7 @@ scala=3.9.0 positive_imports=class,object,object_member,rename,_root_,root_packa
 
 Scala 3.9 oracle fixtures confirm that a package-relative path in the current package wins over a root path, root lookup succeeds when that relative path is absent, stacked package clauses expose their enclosing package scope to an import qualifier, and a single dotted package clause does not synthesize that parent scope. Intermediate packages can exist only through descendants, and a missing selected member remains an error after package resolution. An object/package same-name collision is rejected. The measured cohort has no root-qualified imports, no direct-resource resolver rejection, and no non-package first-segment or ambiguous resolver outcome; `_root_` behavior is covered by the separate oracle fixture. These findings do not promise that all imports or typer failures will be fixed.
 
-See [`typer-classpath-import-prefix-profile-1132-3.9.0-import-prefix-targets.tsv`](typer-classpath-import-prefix-profile-1132-3.9.0-import-prefix-targets.tsv) for target keys, weighted observations, files, blocker origins, source lookups, and classifications. See [`typer-classpath-import-prefix-profile-1132-3.9.0-import-prefix-classpath-evidence.tsv`](typer-classpath-import-prefix-profile-1132-3.9.0-import-prefix-classpath-evidence.tsv) for direct and descendant resources, archive origin, directory-only evidence, and effective Multi-Release JAR versions. Raw stable observation rows are included below.
+See [`typer-classpath-import-prefix-profile-1132-3.9.0-reconciliation.tsv`](typer-classpath-import-prefix-profile-1132-3.9.0-reconciliation.tsv) for the row-level reconciliation of every frozen observation to its current blocker and matching resolver/selected-package evidence. The target and classpath TSVs below are separate unresolved-only views. See [`typer-classpath-import-prefix-profile-1132-3.9.0-import-prefix-targets.tsv`](typer-classpath-import-prefix-profile-1132-3.9.0-import-prefix-targets.tsv) for unresolved target keys, weighted observations, files, blocker origins, source lookups, and classifications. See [`typer-classpath-import-prefix-profile-1132-3.9.0-import-prefix-classpath-evidence.tsv`](typer-classpath-import-prefix-profile-1132-3.9.0-import-prefix-classpath-evidence.tsv) for direct and descendant resources, archive origin, directory-only evidence, and effective Multi-Release JAR versions. Raw stable unresolved observation rows are included below.
 
 ```text
 import_prefix_observations:
@@ -2416,4 +2416,9 @@ current_import_qualifier_not_found=2342
 current_unresolved_next_segment=2342
 current_term_object_gaps=0
 current_unmatched_request_traces=0
+reconciliation_rows=2394
+reconciliation_unresolved_rows=2336
+reconciliation_advanced_rows=58
+new_current_observations_outside_baseline=6
+reconciliation_rows_with_resolver_evidence=58
 ```

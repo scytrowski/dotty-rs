@@ -400,11 +400,23 @@ stands at 2,501. This is a broader set than the selected frozen #1128 cohort.
 | Max fully completed classes per request | 9 (hard gate <= 16) | — |
 
 Within the selected cohort, the 58 descendant-only `dotty` and `java` target
-observations no longer stop at the package blocker. The unresolved count fell
-by 52 overall; the difference is not attributed solely to those 58 rows. The
-remaining unresolved observations include 1,618 source-package registry hits
-across five qualified targets with direct class/TASTy resources. The audit
-reports blocker movement only: none of the 3,297 local methods typed.
+observations no longer stop at the package blocker. The frozen cohort has 58
+advanced rows, while the unresolved-only view also contains six new import
+observations outside that cohort, for a net reduction of 52. The remaining
+unresolved observations include 1,618 source-package registry hits across five
+qualified targets with direct class/TASTy resources. The audit reports blocker
+movement only: none of the 3,297 local methods typed.
+
+The row-level [#1128 reconciliation](typer-classpath-import-prefix-profile-1132-3.9.0-reconciliation.tsv)
+joins all 2,394 frozen import identities: 2,336 still fail at the same import
+tree and 58 have a matching successful package request with its selected
+package identity. Those 58 enclosing methods now stop at `SymbolResolution`
+(20), `StringLiteralTypingDeferred` (14), `TermNameNotFound` (9),
+`TypeNameNotFound` (8), a different `ImportQualifierNotFound` import (6), or
+`ExternalGenericInstantiationDeferred` (1). The separate current
+[unresolved-only profile](typer-classpath-import-prefix-profile-1132-3.9.0.md)
+contains 2,342 rows, including six newly observed imports outside the frozen
+cohort.
 
 The end-to-end regressions also preserve atomic rollback for a missing
 intermediate package and a missing final imported member. Both leave semantic
