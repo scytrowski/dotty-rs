@@ -11,6 +11,7 @@ pub struct ZipReader<'a> {
     bytes: &'a [u8],
     offset: usize,
     limit: usize,
+    offset_bias: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,11 +65,23 @@ impl<'a> ZipReader<'a> {
             bytes,
             offset: start,
             limit: end,
+            offset_bias: 0,
         })
     }
 
+    pub(crate) fn with_offset_bias(
+        bytes: &'a [u8],
+        start: usize,
+        end: usize,
+        offset_bias: usize,
+    ) -> Result<Self, ZipReadError> {
+        let mut reader = Self::with_range(bytes, start, end)?;
+        reader.offset_bias = offset_bias;
+        Ok(reader)
+    }
+
     pub fn position(&self) -> usize {
-        self.offset
+        self.offset.saturating_add(self.offset_bias)
     }
 
     pub fn remaining(&self) -> usize {
@@ -80,14 +93,14 @@ impl<'a> ZipReader<'a> {
             .offset
             .checked_add(length)
             .ok_or(ZipReadError::UnexpectedEof {
-                offset: self.offset,
+                offset: self.position(),
                 needed: length,
                 remaining: self.remaining(),
             })?;
 
         if end > self.limit {
             return Err(ZipReadError::UnexpectedEof {
-                offset: self.offset,
+                offset: self.position(),
                 needed: length,
                 remaining: self.remaining(),
             });

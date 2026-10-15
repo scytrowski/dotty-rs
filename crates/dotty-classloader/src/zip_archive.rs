@@ -3,6 +3,10 @@ use crate::inflate::{InflateError, inflate};
 use crate::zip_reader::{ZipReadError, ZipReader};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+use std::sync::Mutex;
 
 const END_OF_CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x0605_4B50;
 /// The fixed-size portion of the end-of-central-directory record (JAR/ZIP
@@ -25,6 +29,10 @@ const COMPRESSION_METHOD_DEFLATE: u16 = 8;
 /// claiming or producing far more than that (a "ZIP bomb" — APPNOTE.TXT
 /// places no bound on either at all).
 const MAX_ENTRY_UNCOMPRESSED_SIZE: usize = 256 * 1024 * 1024;
+/// Maximum central-directory buffer read while indexing any backing.
+/// Real classpath archives are far smaller; this caps hostile index
+/// declarations before allocating their contents.
+const MAX_CENTRAL_DIRECTORY_SIZE: usize = 256 * 1024 * 1024;
 
 /// Errors reading a ZIP (JAR) archive. Crate-private: callers only see
 /// `JarClassPath`, which maps these into [`crate::class_path::ClassPathError`].
@@ -69,6 +77,16 @@ pub(crate) enum ZipError {
         declared: u32,
         limit: usize,
     },
+    /// The compressed input for an entry exceeds the bounded read limit.
+    CompressedEntryTooLarge {
+        declared: u32,
+        limit: usize,
+    },
+    /// The central directory exceeds the bounded indexing limit.
+    CentralDirectoryTooLarge {
+        declared: u32,
+        limit: usize,
+    },
     /// An entry's actual extracted/decompressed length did not match the
     /// `uncompressed_size` declared for it in the central directory —
     /// either corrupt data, or a stream deliberately crafted to produce
@@ -76,6 +94,11 @@ pub(crate) enum ZipError {
     UncompressedSizeMismatch {
         declared: u32,
         actual: usize,
+    },
+    /// An operating-system error while reading the file-backed archive.
+    FileRead {
+        kind: std::io::ErrorKind,
+        message: String,
     },
     Read(ZipReadError),
 }
@@ -112,10 +135,21 @@ impl fmt::Display for ZipError {
                 formatter,
                 "entry's declared uncompressed size ({declared} bytes) exceeds the {limit}-byte limit"
             ),
+            Self::CompressedEntryTooLarge { declared, limit } => write!(
+                formatter,
+                "entry's compressed size ({declared} bytes) exceeds the {limit}-byte read limit"
+            ),
+            Self::CentralDirectoryTooLarge { declared, limit } => write!(
+                formatter,
+                "central directory size ({declared} bytes) exceeds the {limit}-byte indexing limit"
+            ),
             Self::UncompressedSizeMismatch { declared, actual } => write!(
                 formatter,
                 "entry's actual size ({actual} bytes) does not match its declared uncompressed size ({declared} bytes)"
             ),
+            Self::FileRead { kind, message } => {
+                write!(formatter, "ZIP file read failed ({kind:?}): {message}")
+            }
             Self::Read(error) => error.fmt(formatter),
         }
     }
@@ -133,8 +167,12 @@ impl ZipError {
             Self::UnsupportedCompressionMethod(_) => "classpath.zip.unsupported_compression",
             Self::Inflate(_) => "classpath.zip.invalid_deflate_data",
             Self::CrcMismatch { .. } => "classpath.zip.crc_mismatch",
-            Self::EntryTooLarge { .. } => "classpath.zip.entry_too_large",
+            Self::EntryTooLarge { .. } | Self::CompressedEntryTooLarge { .. } => {
+                "classpath.zip.entry_too_large"
+            }
+            Self::CentralDirectoryTooLarge { .. } => "classpath.zip.directory_too_large",
             Self::UncompressedSizeMismatch { .. } => "classpath.zip.size_mismatch",
+            Self::FileRead { .. } => "classpath.io",
             Self::Read(_) => "classpath.zip.read_error",
         }
     }
@@ -142,10 +180,12 @@ impl ZipError {
     pub(crate) fn category(&self) -> crate::error::ClassLoadCategory {
         use crate::error::ClassLoadCategory as C;
         match self {
-            Self::UnsupportedCompressionMethod(_) | Self::EntryTooLarge { .. } => {
-                C::UnsupportedFeatureOrVersion
-            }
+            Self::UnsupportedCompressionMethod(_)
+            | Self::EntryTooLarge { .. }
+            | Self::CompressedEntryTooLarge { .. }
+            | Self::CentralDirectoryTooLarge { .. } => C::UnsupportedFeatureOrVersion,
             Self::EndOfCentralDirectoryNotFound => C::Conditional,
+            Self::FileRead { .. } => C::IoOrEnvironment,
             Self::Read(_) => C::Conditional,
             Self::InvalidCentralDirectoryHeader { .. }
             | Self::InvalidEntryName { .. }
@@ -167,6 +207,9 @@ impl std::error::Error for ZipError {
             | Self::UnsupportedCompressionMethod(_)
             | Self::CrcMismatch { .. }
             | Self::EntryTooLarge { .. }
+            | Self::CompressedEntryTooLarge { .. }
+            | Self::CentralDirectoryTooLarge { .. }
+            | Self::FileRead { .. }
             | Self::UncompressedSizeMismatch { .. } => None,
             Self::Inflate(error) => Some(error),
             Self::Read(error) => Some(error),
@@ -269,13 +312,28 @@ pub(crate) struct CentralDirectoryEntry {
 /// Decodes `eocd.entry_count` central directory file headers starting at
 /// `eocd.central_directory_offset`, bounded to `eocd.central_directory_size`
 /// bytes.
+#[cfg(test)]
 pub(crate) fn decode_central_directory(
     bytes: &[u8],
     eocd: &EndOfCentralDirectory,
 ) -> Result<Vec<CentralDirectoryEntry>, ZipError> {
+    decode_central_directory_at(bytes, eocd, 0)
+}
+
+fn decode_central_directory_at(
+    bytes: &[u8],
+    eocd: &EndOfCentralDirectory,
+    offset_bias: usize,
+) -> Result<Vec<CentralDirectoryEntry>, ZipError> {
     let start = eocd.central_directory_offset as usize;
-    let end = start + eocd.central_directory_size as usize;
-    let mut reader = ZipReader::with_range(bytes, start, end)?;
+    let end = start
+        .checked_add(eocd.central_directory_size as usize)
+        .ok_or(ZipError::Read(ZipReadError::InvalidRange {
+            start,
+            end: usize::MAX,
+            len: bytes.len(),
+        }))?;
+    let mut reader = ZipReader::with_offset_bias(bytes, start, end, offset_bias)?;
 
     let mut entries = Vec::with_capacity(usize::from(eocd.entry_count));
     for _ in 0..eocd.entry_count {
@@ -328,18 +386,216 @@ pub(crate) fn decode_central_directory(
     Ok(entries)
 }
 
-/// A ZIP (JAR) archive opened once from its full byte contents, with its
-/// central directory parsed and indexed by entry name.
+fn invalid_archive_range(start: u64, end: u64, archive_len: u64) -> ZipError {
+    let start = usize::try_from(start).unwrap_or(usize::MAX);
+    ZipError::Read(ZipReadError::InvalidRange {
+        start,
+        end: usize::try_from(end).unwrap_or(usize::MAX),
+        len: usize::try_from(archive_len).unwrap_or(usize::MAX),
+    })
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // Kept private for the follow-up that switches JMODs to this backing.
+enum ZipStorage {
+    Memory(Vec<u8>),
+    File {
+        file: Mutex<File>,
+        archive_start: u64,
+        archive_len: u64,
+    },
+}
+
+impl ZipStorage {
+    fn len(&self) -> u64 {
+        match self {
+            Self::Memory(bytes) => bytes.len() as u64,
+            Self::File { archive_len, .. } => *archive_len,
+        }
+    }
+
+    fn read_range(&self, start: u64, length: usize) -> Result<Vec<u8>, ZipError> {
+        self.with_range(start, length, |bytes| Ok(bytes.to_vec()))
+    }
+
+    fn with_range<T>(
+        &self,
+        start: u64,
+        length: usize,
+        read: impl FnOnce(&[u8]) -> Result<T, ZipError>,
+    ) -> Result<T, ZipError> {
+        let archive_len = self.len();
+        let length_u64 = u64::try_from(length).map_err(|_| {
+            ZipError::Read(ZipReadError::InvalidRange {
+                start: usize::try_from(start).unwrap_or(usize::MAX),
+                end: usize::MAX,
+                len: usize::try_from(archive_len).unwrap_or(usize::MAX),
+            })
+        })?;
+        let end = start.checked_add(length_u64).ok_or_else(|| {
+            ZipError::Read(ZipReadError::InvalidRange {
+                start: usize::try_from(start).unwrap_or(usize::MAX),
+                end: usize::MAX,
+                len: usize::try_from(archive_len).unwrap_or(usize::MAX),
+            })
+        })?;
+        let start_usize = usize::try_from(start).unwrap_or(usize::MAX);
+        let end_usize = usize::try_from(end).unwrap_or(usize::MAX);
+        let len_usize = usize::try_from(archive_len).unwrap_or(usize::MAX);
+        if start > archive_len {
+            return Err(ZipError::Read(ZipReadError::InvalidRange {
+                start: start_usize,
+                end: end_usize,
+                len: len_usize,
+            }));
+        }
+        if end > archive_len {
+            return Err(ZipError::Read(ZipReadError::UnexpectedEof {
+                offset: start_usize,
+                needed: length,
+                remaining: usize::try_from(archive_len - start).unwrap_or(usize::MAX),
+            }));
+        }
+
+        match self {
+            Self::Memory(bytes) => read(&bytes[start_usize..end_usize]),
+            Self::File {
+                file,
+                archive_start,
+                ..
+            } => {
+                let physical_offset = archive_start.checked_add(start).ok_or({
+                    ZipError::Read(ZipReadError::InvalidRange {
+                        start: start_usize,
+                        end: end_usize,
+                        len: len_usize,
+                    })
+                })?;
+                let mut file = file.lock().map_err(|_| ZipError::FileRead {
+                    kind: std::io::ErrorKind::Other,
+                    message: "ZIP file read lock was poisoned".to_owned(),
+                })?;
+                let bytes = file
+                    .seek(SeekFrom::Start(physical_offset))
+                    .and_then(|_| {
+                        let mut bytes = vec![0; length];
+                        file.read_exact(&mut bytes)?;
+                        Ok(bytes)
+                    })
+                    .map_err(|error| {
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                            ZipError::Read(ZipReadError::UnexpectedEof {
+                                offset: start_usize,
+                                needed: length,
+                                remaining: 0,
+                            })
+                        } else {
+                            ZipError::FileRead {
+                                kind: error.kind(),
+                                message: error.to_string(),
+                            }
+                        }
+                    })?;
+                drop(file);
+                read(&bytes)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_archive_payload_bytes(&self) -> usize {
+        match self {
+            Self::Memory(bytes) => bytes.len(),
+            Self::File { .. } => 0,
+        }
+    }
+}
+
+/// A ZIP archive indexed by its central directory. Its bytes are either
+/// retained in memory (JARs and test fixtures) or fetched from a
+/// synchronized file handle in bounded ranges.
 pub(crate) struct ZipArchive {
-    bytes: Vec<u8>,
+    storage: ZipStorage,
     entries: HashMap<String, CentralDirectoryEntry>,
     class_resource_names: Vec<String>,
 }
 
 impl ZipArchive {
     pub(crate) fn open(bytes: Vec<u8>) -> Result<Self, ZipError> {
-        let eocd = EndOfCentralDirectory::locate_and_decode(&bytes)?;
-        let entries: HashMap<_, _> = decode_central_directory(&bytes, &eocd)?
+        Self::open_storage(ZipStorage::Memory(bytes))
+    }
+
+    #[allow(dead_code)] // Deliberately not wired into JarClassPath or JmodClassPath in this issue.
+    pub(crate) fn open_file(path: impl AsRef<Path>, archive_start: u64) -> Result<Self, ZipError> {
+        let file = File::open(path).map_err(|error| ZipError::FileRead {
+            kind: error.kind(),
+            message: error.to_string(),
+        })?;
+        let file_len = file
+            .metadata()
+            .map_err(|error| ZipError::FileRead {
+                kind: error.kind(),
+                message: error.to_string(),
+            })?
+            .len();
+        if archive_start > file_len {
+            return Err(ZipError::Read(ZipReadError::InvalidRange {
+                start: usize::try_from(archive_start).unwrap_or(usize::MAX),
+                end: usize::try_from(archive_start).unwrap_or(usize::MAX),
+                len: usize::try_from(file_len).unwrap_or(usize::MAX),
+            }));
+        }
+
+        Self::open_storage(ZipStorage::File {
+            file: Mutex::new(file),
+            archive_start,
+            archive_len: file_len - archive_start,
+        })
+    }
+
+    fn open_storage(storage: ZipStorage) -> Result<Self, ZipError> {
+        let archive_len = storage.len();
+        let search_window_len = usize::try_from(
+            archive_len.min((END_OF_CENTRAL_DIRECTORY_RECORD_SIZE + MAX_COMMENT_LENGTH) as u64),
+        )
+        .expect("bounded ZIP search window fits usize");
+        let search_window =
+            storage.read_range(archive_len - search_window_len as u64, search_window_len)?;
+        let eocd = EndOfCentralDirectory::locate_and_decode(&search_window)?;
+        let central_directory_size = eocd.central_directory_size as usize;
+        if central_directory_size > MAX_CENTRAL_DIRECTORY_SIZE {
+            return Err(ZipError::CentralDirectoryTooLarge {
+                declared: eocd.central_directory_size,
+                limit: MAX_CENTRAL_DIRECTORY_SIZE,
+            });
+        }
+        let central_directory_start = u64::from(eocd.central_directory_offset);
+        let central_directory_end = central_directory_start
+            .checked_add(u64::from(eocd.central_directory_size))
+            .ok_or_else(|| invalid_archive_range(central_directory_start, u64::MAX, archive_len))?;
+        if central_directory_end > archive_len {
+            return Err(invalid_archive_range(
+                central_directory_start,
+                central_directory_end,
+                archive_len,
+            ));
+        }
+        let normalized_eocd = EndOfCentralDirectory {
+            central_directory_offset: 0,
+            ..eocd
+        };
+        let decoded_entries = storage.with_range(
+            central_directory_start,
+            central_directory_size,
+            |central_directory| {
+                decode_central_directory_at(
+                    central_directory,
+                    &normalized_eocd,
+                    central_directory_start as usize,
+                )
+            },
+        )?;
+        let entries: HashMap<_, _> = decoded_entries
             .into_iter()
             .map(|entry| (entry.name.clone(), entry))
             .collect();
@@ -351,10 +607,23 @@ impl ZipArchive {
         class_resource_names.sort();
 
         Ok(Self {
-            bytes,
+            storage,
             entries,
             class_resource_names,
         })
+    }
+
+    #[cfg(test)]
+    fn retained_index_bytes(&self) -> usize {
+        self.entries
+            .values()
+            .map(|entry| entry.name.len() + std::mem::size_of::<CentralDirectoryEntry>())
+            .sum::<usize>()
+            + self
+                .class_resource_names
+                .iter()
+                .map(String::len)
+                .sum::<usize>()
     }
 
     /// Extracts and decompresses the entry named `name`, verifying its
@@ -446,13 +715,21 @@ impl ZipArchive {
             });
         }
 
-        let header_offset = entry.local_header_offset as usize;
-        let mut reader = ZipReader::with_range(&self.bytes, header_offset, self.bytes.len())?;
+        if entry.compressed_size as usize > MAX_ENTRY_UNCOMPRESSED_SIZE {
+            return Err(ZipError::CompressedEntryTooLarge {
+                declared: entry.compressed_size,
+                limit: MAX_ENTRY_UNCOMPRESSED_SIZE,
+            });
+        }
+
+        let header_offset = u64::from(entry.local_header_offset);
+        let fixed_header = self.storage.read_range(header_offset, 30)?;
+        let mut reader = ZipReader::with_range(&fixed_header, 0, fixed_header.len())?;
 
         let signature = reader.read_u32()?;
         if signature != LOCAL_FILE_HEADER_SIGNATURE {
             return Err(ZipError::InvalidLocalFileHeader {
-                offset: header_offset,
+                offset: usize::try_from(header_offset).unwrap_or(usize::MAX),
             });
         }
 
@@ -466,15 +743,30 @@ impl ZipArchive {
         reader.read_u32()?; // uncompressed size (already known)
         let file_name_length = reader.read_u16()?;
         let extra_field_length = reader.read_u16()?;
-        reader.read_bytes(usize::from(file_name_length))?;
-        reader.read_bytes(usize::from(extra_field_length))?;
-
-        let compressed = reader.read_bytes(entry.compressed_size as usize)?;
-
+        let variable_length = usize::from(file_name_length) + usize::from(extra_field_length);
+        let variable_start = header_offset
+            .checked_add(30)
+            .ok_or_else(|| invalid_archive_range(header_offset, u64::MAX, self.storage.len()))?;
+        self.storage.read_range(variable_start, variable_length)?;
+        let compressed_start = variable_start
+            .checked_add(variable_length as u64)
+            .ok_or_else(|| invalid_archive_range(variable_start, u64::MAX, self.storage.len()))?;
         let decompressed = match entry.compression_method {
-            COMPRESSION_METHOD_STORED => compressed.to_vec(),
-            COMPRESSION_METHOD_DEFLATE => inflate(compressed, declared_uncompressed_size)?,
-            other => return Err(ZipError::UnsupportedCompressionMethod(other)),
+            COMPRESSION_METHOD_STORED => self
+                .storage
+                .read_range(compressed_start, entry.compressed_size as usize)?,
+            COMPRESSION_METHOD_DEFLATE => self.storage.with_range(
+                compressed_start,
+                entry.compressed_size as usize,
+                |compressed| Ok(inflate(compressed, declared_uncompressed_size)?),
+            )?,
+            other => {
+                return self.storage.with_range(
+                    compressed_start,
+                    entry.compressed_size as usize,
+                    |_| Err(ZipError::UnsupportedCompressionMethod(other)),
+                );
+            }
         };
 
         if decompressed.len() != declared_uncompressed_size {
@@ -519,6 +811,43 @@ fn add_resource_package_prefixes(resource: &str, packages: &mut HashSet<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_TEMP_ARCHIVE: AtomicUsize = AtomicUsize::new(0);
+
+    struct TemporaryArchiveFile(PathBuf);
+
+    impl TemporaryArchiveFile {
+        fn new(bytes: &[u8]) -> Self {
+            let id = NEXT_TEMP_ARCHIVE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "dotty-classloader-zip-{}-{id}.zip",
+                std::process::id()
+            ));
+            std::fs::write(&path, bytes).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TemporaryArchiveFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn open_memory_and_file(bytes: &[u8]) -> (ZipArchive, ZipArchive, TemporaryArchiveFile) {
+        let file = TemporaryArchiveFile::new(bytes);
+        (
+            ZipArchive::open(bytes.to_vec()).unwrap(),
+            ZipArchive::open_file(file.path(), 0).unwrap(),
+            file,
+        )
+    }
 
     fn minimal_eocd(entry_count: u16, cd_size: u32, cd_offset: u32, comment: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -667,6 +996,418 @@ mod tests {
             &[],
         ));
         bytes
+    }
+
+    #[test]
+    fn file_backing_reads_a_zip_after_a_nonzero_archive_start_offset() {
+        let archive = minimal_zip_with_entry(
+            "pkg/Value.class",
+            COMPRESSION_METHOD_STORED,
+            crate::crc32::checksum(b"class bytes"),
+            b"class bytes",
+            11,
+        );
+        let mut payload = b"JM\x01\x00".to_vec();
+        payload.extend_from_slice(&archive);
+        let file = TemporaryArchiveFile::new(&payload);
+        let memory = ZipArchive::open(archive).unwrap();
+        let backed = ZipArchive::open_file(file.path(), 4).unwrap();
+
+        assert_eq!(
+            memory.read_entry("pkg/Value.class"),
+            backed.read_entry("pkg/Value.class")
+        );
+        assert_eq!(
+            backed.read_entry("pkg/Value.class").unwrap().unwrap(),
+            b"class bytes"
+        );
+    }
+
+    #[test]
+    fn file_backing_reads_a_class_from_the_checked_in_jar_fixture() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pool_sample_jar/pool_sample_stored.jar");
+        let memory = ZipArchive::open(std::fs::read(&path).unwrap()).unwrap();
+        let file_backed = ZipArchive::open_file(&path, 0).unwrap();
+
+        assert_eq!(
+            memory.read_entry("PoolSample.class"),
+            file_backed.read_entry("PoolSample.class")
+        );
+        assert!(
+            file_backed
+                .read_entry("PoolSample.class")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn memory_and_file_backings_share_real_deflate_decoding() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pool_sample_jar/pool_sample_deflate.jar");
+        let memory = ZipArchive::open(std::fs::read(&path).unwrap()).unwrap();
+        let file_backed = ZipArchive::open_file(&path, 0).unwrap();
+
+        let expected = memory.read_entry("PoolSample.class").unwrap().unwrap();
+        assert_eq!(
+            file_backed.read_entry("PoolSample.class").unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn memory_and_file_backings_match_for_valid_missing_and_package_queries() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // local header
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&COMPRESSION_METHOD_STORED.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&crate::crc32::checksum(b"x").to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&("pkg/nested/A.class".len() as u16).to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(b"pkg/nested/A.class");
+        bytes.push(b'x');
+        let central_directory_offset = bytes.len() as u32;
+        bytes.extend(minimal_central_directory_header(
+            "pkg/nested/A.class",
+            COMPRESSION_METHOD_STORED,
+            crate::crc32::checksum(b"x"),
+            1,
+            1,
+            0,
+        ));
+        let central_directory_size = bytes.len() as u32 - central_directory_offset;
+        bytes.extend(minimal_eocd(
+            1,
+            central_directory_size,
+            central_directory_offset,
+            &[],
+        ));
+        let (memory, file_backed, _file) = open_memory_and_file(&bytes);
+
+        assert_eq!(
+            memory.read_entry("pkg/nested/A.class"),
+            file_backed.read_entry("pkg/nested/A.class")
+        );
+        assert_eq!(memory.read_entry("absent.class"), Ok(None));
+        assert_eq!(
+            memory.read_entry("absent.class"),
+            file_backed.read_entry("absent.class")
+        );
+        for prefix in ["", "pkg/", "pkg/nested/"] {
+            assert_eq!(
+                memory.contains_package(prefix),
+                file_backed.contains_package(prefix)
+            );
+        }
+        assert_eq!(
+            memory.package_prefixes_under(""),
+            file_backed.package_prefixes_under("")
+        );
+    }
+
+    #[test]
+    fn memory_and_file_backings_match_for_versioned_package_evidence() {
+        let bytes = crate::jar_class_path::tests::minimal_stored_zip(&[
+            ("pkg/Base.class", b"base"),
+            ("META-INF/versions/11/pkg/Versioned.class", b"versioned"),
+        ]);
+        let (memory, file_backed, _file) = open_memory_and_file(&bytes);
+
+        for release in [8, 11, 17, u16::MAX] {
+            assert_eq!(
+                memory.versioned_package_prefixes(release),
+                file_backed.versioned_package_prefixes(release)
+            );
+        }
+        assert_eq!(memory.versioned_package_prefixes(10), HashSet::new());
+        assert_eq!(
+            memory.versioned_package_prefixes(11),
+            HashSet::from([String::new(), "pkg".to_owned()])
+        );
+    }
+
+    #[test]
+    fn memory_and_file_backings_match_for_crc_errors() {
+        let mut bytes = minimal_zip_with_entry(
+            "Crc.class",
+            COMPRESSION_METHOD_STORED,
+            crate::crc32::checksum(b"x"),
+            b"x",
+            1,
+        );
+        bytes[30 + "Crc.class".len()] = b'y';
+        let (memory, file_backed, _file) = open_memory_and_file(&bytes);
+
+        assert_eq!(
+            memory.read_entry("Crc.class").unwrap_err(),
+            file_backed.read_entry("Crc.class").unwrap_err()
+        );
+    }
+
+    #[test]
+    fn memory_and_file_backings_match_for_invalid_central_offsets_and_names() {
+        let mut invalid_offset =
+            minimal_zip_with_entry("Offset.class", COMPRESSION_METHOD_STORED, 0, b"x", 1);
+        let eocd = invalid_offset.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        invalid_offset[eocd + 16..eocd + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+        let file = TemporaryArchiveFile::new(&invalid_offset);
+        let memory_error = match ZipArchive::open(invalid_offset) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid central offset unexpectedly opened in memory"),
+        };
+        let file_error = match ZipArchive::open_file(file.path(), 0) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid central offset unexpectedly opened from a file"),
+        };
+        assert_eq!(memory_error, file_error);
+
+        let mut oversized_directory =
+            minimal_zip_with_entry("Bounded.class", COMPRESSION_METHOD_STORED, 0, b"x", 1);
+        let eocd = oversized_directory.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        oversized_directory[eocd + 12..eocd + 16]
+            .copy_from_slice(&((MAX_CENTRAL_DIRECTORY_SIZE as u32) + 1).to_le_bytes());
+        let file = TemporaryArchiveFile::new(&oversized_directory);
+        let memory_error = match ZipArchive::open(oversized_directory) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized central directory unexpectedly opened in memory"),
+        };
+        let file_error = match ZipArchive::open_file(file.path(), 0) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized central directory unexpectedly opened from a file"),
+        };
+        assert_eq!(memory_error, file_error);
+        assert_eq!(memory_error.code(), "classpath.zip.directory_too_large");
+
+        let mut truncated_central =
+            minimal_zip_with_entry("One.class", COMPRESSION_METHOD_STORED, 0, b"x", 1);
+        let eocd = truncated_central.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        truncated_central[eocd + 10..eocd + 12].copy_from_slice(&2u16.to_le_bytes());
+        let file = TemporaryArchiveFile::new(&truncated_central);
+        let memory_error = match ZipArchive::open(truncated_central) {
+            Err(error) => error,
+            Ok(_) => panic!("truncated central directory unexpectedly opened in memory"),
+        };
+        let file_error = match ZipArchive::open_file(file.path(), 0) {
+            Err(error) => error,
+            Ok(_) => panic!("truncated central directory unexpectedly opened from a file"),
+        };
+        assert_eq!(memory_error, file_error);
+
+        let mut invalid_name =
+            minimal_zip_with_entry("Name.class", COMPRESSION_METHOD_STORED, 0, b"x", 1);
+        let eocd = invalid_name.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        let central =
+            u32::from_le_bytes(invalid_name[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        invalid_name[central + 46] = 0xFF;
+        let file = TemporaryArchiveFile::new(&invalid_name);
+        let memory_error = match ZipArchive::open(invalid_name) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid name unexpectedly opened in memory"),
+        };
+        let file_error = match ZipArchive::open_file(file.path(), 0) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid name unexpectedly opened from a file"),
+        };
+        assert_eq!(memory_error, file_error);
+
+        let mut invalid_local_offset =
+            minimal_zip_with_entry("Offset.class", COMPRESSION_METHOD_STORED, 0, b"x", 1);
+        let eocd = invalid_local_offset.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        let central = u32::from_le_bytes(
+            invalid_local_offset[eocd + 16..eocd + 20]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        invalid_local_offset[central + 42..central + 46].copy_from_slice(&u32::MAX.to_le_bytes());
+        let (memory, file_backed, _file) = open_memory_and_file(&invalid_local_offset);
+        assert_eq!(
+            memory.read_entry("Offset.class").unwrap_err(),
+            file_backed.read_entry("Offset.class").unwrap_err()
+        );
+    }
+
+    #[test]
+    fn memory_and_file_backings_match_for_local_header_data_and_size_errors() {
+        let mut invalid_header = minimal_zip_with_entry(
+            "Header.class",
+            COMPRESSION_METHOD_STORED,
+            crate::crc32::checksum(b"x"),
+            b"x",
+            1,
+        );
+        invalid_header[..4].copy_from_slice(&0u32.to_le_bytes());
+        let (memory, file_backed, _file) = open_memory_and_file(&invalid_header);
+        assert_eq!(
+            memory.read_entry("Header.class").unwrap_err(),
+            file_backed.read_entry("Header.class").unwrap_err()
+        );
+
+        let mut truncated_header = minimal_zip_with_entry(
+            "Header.class",
+            COMPRESSION_METHOD_STORED,
+            crate::crc32::checksum(b"x"),
+            b"x",
+            1,
+        );
+        truncated_header[26..28].copy_from_slice(&u16::MAX.to_le_bytes());
+        let (memory, file_backed, _file) = open_memory_and_file(&truncated_header);
+        assert_eq!(
+            memory.read_entry("Header.class").unwrap_err(),
+            file_backed.read_entry("Header.class").unwrap_err()
+        );
+
+        let mut truncated_data =
+            minimal_zip_with_entry("Data.class", COMPRESSION_METHOD_STORED, 0, b"x", 1);
+        let eocd = truncated_data.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        let central =
+            u32::from_le_bytes(truncated_data[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let too_long_data_range = u32::try_from(truncated_data.len()).unwrap() + 1;
+        truncated_data[central + 20..central + 24]
+            .copy_from_slice(&too_long_data_range.to_le_bytes());
+        let (memory, file_backed, _file) = open_memory_and_file(&truncated_data);
+        assert!(matches!(
+            memory.read_entry("Data.class"),
+            Err(ZipError::Read(ZipReadError::UnexpectedEof { .. }))
+        ));
+        assert_eq!(
+            memory.read_entry("Data.class").unwrap_err(),
+            file_backed.read_entry("Data.class").unwrap_err()
+        );
+
+        let oversized = minimal_zip_with_entry(
+            "Large.class",
+            COMPRESSION_METHOD_STORED,
+            0,
+            b"x",
+            MAX_ENTRY_UNCOMPRESSED_SIZE as u32 + 1,
+        );
+        let (memory, file_backed, _file) = open_memory_and_file(&oversized);
+        assert_eq!(
+            memory.read_entry("Large.class").unwrap_err(),
+            file_backed.read_entry("Large.class").unwrap_err()
+        );
+
+        let unsupported = minimal_zip_with_entry("Method.class", 99, 0, b"x", 1);
+        let (memory, file_backed, _file) = open_memory_and_file(&unsupported);
+        assert_eq!(
+            memory.read_entry("Method.class").unwrap_err(),
+            file_backed.read_entry("Method.class").unwrap_err()
+        );
+
+        let mut oversized_compressed =
+            minimal_zip_with_entry("Compressed.class", COMPRESSION_METHOD_STORED, 0, b"x", 1);
+        let eocd = oversized_compressed.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        let central = u32::from_le_bytes(
+            oversized_compressed[eocd + 16..eocd + 20]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        oversized_compressed[central + 20..central + 24].copy_from_slice(&u32::MAX.to_le_bytes());
+        let (memory, file_backed, _file) = open_memory_and_file(&oversized_compressed);
+        assert_eq!(
+            memory.read_entry("Compressed.class").unwrap_err(),
+            file_backed.read_entry("Compressed.class").unwrap_err()
+        );
+    }
+
+    #[test]
+    fn file_backing_reports_a_typed_error_if_the_archive_is_truncated_after_open() {
+        let bytes = minimal_zip_with_entry(
+            "Truncated.class",
+            COMPRESSION_METHOD_STORED,
+            crate::crc32::checksum(b"payload"),
+            b"payload",
+            7,
+        );
+        let file = TemporaryArchiveFile::new(&bytes);
+        let archive = ZipArchive::open_file(file.path(), 0).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(file.path())
+            .unwrap()
+            .set_len(32)
+            .unwrap();
+
+        let error = archive.read_entry("Truncated.class").unwrap_err();
+        assert!(matches!(
+            error,
+            ZipError::Read(ZipReadError::UnexpectedEof { .. })
+        ));
+        assert_eq!(error.code(), "classpath.zip.read_error");
+        assert_eq!(
+            error.category(),
+            crate::error::ClassLoadCategory::Conditional
+        );
+    }
+
+    #[test]
+    fn file_backing_preserves_classpath_io_classification_for_a_missing_file() {
+        let id = NEXT_TEMP_ARCHIVE.fetch_add(1, Ordering::Relaxed);
+        let missing = std::env::temp_dir().join(format!(
+            "dotty-classloader-zip-missing-{}-{id}.zip",
+            std::process::id()
+        ));
+
+        let error = match ZipArchive::open_file(&missing, 0) {
+            Err(error) => error,
+            Ok(_) => panic!("missing ZIP file unexpectedly opened"),
+        };
+
+        assert_eq!(error.code(), "classpath.io");
+        assert_eq!(
+            error.category(),
+            crate::error::ClassLoadCategory::IoOrEnvironment
+        );
+    }
+
+    #[test]
+    fn file_backing_retains_no_archive_payload_and_serializes_concurrent_reads() {
+        let bytes = minimal_zip_with_entry(
+            "Parallel.class",
+            COMPRESSION_METHOD_STORED,
+            crate::crc32::checksum(b"class bytes"),
+            b"class bytes",
+            11,
+        );
+        let mut padded = bytes.clone();
+        let eocd = padded.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        let central_directory_offset =
+            u32::from_le_bytes(padded[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let padding = vec![0; 4 * 1024 * 1024];
+        padded.splice(central_directory_offset..central_directory_offset, padding);
+        let padded_eocd = padded.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        padded[padded_eocd + 16..padded_eocd + 20]
+            .copy_from_slice(&((central_directory_offset + 4 * 1024 * 1024) as u32).to_le_bytes());
+        let file = TemporaryArchiveFile::new(&padded);
+        let archive = ZipArchive::open_file(file.path(), 0).unwrap();
+        assert_eq!(archive.storage.retained_archive_payload_bytes(), 0);
+        assert!(
+            std::fs::metadata(file.path()).unwrap().len()
+                > u64::from(archive.entries.len() as u32) * 1024 * 1024
+        );
+        assert!(
+            archive.retained_index_bytes() < std::fs::metadata(file.path()).unwrap().len() as usize
+        );
+        assert!(archive.entries.contains_key("Parallel.class"));
+
+        let archive = std::sync::Arc::new(archive);
+        std::thread::scope(|scope| {
+            let readers = (0..8)
+                .map(|_| {
+                    let archive = std::sync::Arc::clone(&archive);
+                    scope.spawn(move || archive.read_entry("Parallel.class").unwrap().unwrap())
+                })
+                .collect::<Vec<_>>();
+            for reader in readers {
+                assert_eq!(reader.join().unwrap(), b"class bytes");
+            }
+        });
     }
 
     #[test]

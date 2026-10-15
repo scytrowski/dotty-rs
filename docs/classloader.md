@@ -85,6 +85,16 @@ resolution.
   (ordered, first-match-wins). JAR/JMOD reading includes this crate's
   own ZIP central-directory reader and DEFLATE inflater — no external
   archive dependency.
+- The crate-private `ZipArchive` supports memory-backed and file-backed
+  storage. The file-backed constructor reads only the bounded EOCD window
+  and central-directory index while opening; entry reads fetch the local
+  header and compressed range on demand. A mutex protects seek/read pairs
+  on the shared file handle. ZIP-relative offsets are translated from the
+  supplied archive start, including a 4-byte JMOD prefix. If the file is
+  truncated after opening, the read returns a typed ZIP read error. The
+  existing `JarClassPath` and `JmodClassPath` still use memory backing; this
+  private capability does not change their behavior yet. Central directories
+  and compressed entries are each bounded to 256 MiB before allocation.
 - Two package-evidence queries with distinct contracts:
 
   | Check | Meaning |
