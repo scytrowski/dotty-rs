@@ -46,6 +46,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check frontend platform boundaries
+        run: python3 tools/check-frontend-boundaries.py
+
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
