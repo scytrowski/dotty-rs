@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Measure JdkClassPath startup and lookup cost in fresh Linux processes."""
+
+import argparse
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PROC_STATUS = Path("/proc/self/status")
+
+
+def percentile95(values):
+    ordered = sorted(values)
+    return ordered[max(0, (95 * len(ordered) + 99) // 100 - 1)]
+
+
+def quantiles(values):
+    return {"median": statistics.median(values), "p95": percentile95(values)}
+
+
+def run_checked(command, *, env=None):
+    result = subprocess.run(command, cwd=ROOT, env=env, text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(
+            f"command failed ({result.returncode}): {' '.join(map(str, command))}\n"
+            f"{result.stderr.strip()}"
+        )
+    return result
+
+
+def build_driver():
+    run_checked(["cargo", "build", "--release", "--locked", "-p", "dotty-classloader",
+                 "--example", "jdk_classpath_benchmark"])
+    return ROOT / "target/release/examples/jdk_classpath_benchmark"
+
+
+def smoke(binary):
+    result = run_checked([binary, "--smoke"])
+    report = json.loads(result.stdout)
+    expected = {
+        "smoke": True,
+        "positive_classes": 2,
+        "negative_lookup": True,
+        "package_queries": True,
+    }
+    if any(report.get(key) != value for key, value in expected.items()):
+        raise RuntimeError(f"unexpected smoke output: {result.stdout.strip()}")
+    if not isinstance(report["peak_rss_kib"], int) or report["peak_rss_kib"] <= 0:
+        raise RuntimeError(f"smoke output has no positive VmHWM RSS: {result.stdout.strip()}")
+    print(json.dumps(report, sort_keys=True))
+
+
+def jdk_path(args):
+    if args.jmods:
+        path = Path(args.jmods).expanduser()
+    else:
+        java_home = os.environ.get("JAVA_HOME")
+        if not java_home:
+            raise RuntimeError("provide --jmods PATH or set JAVA_HOME to a JDK 21 installation")
+        path = Path(java_home).expanduser() / "jmods"
+    if not path.is_dir():
+        raise RuntimeError(
+            f"JMOD directory is unavailable: {path}; install/provide a JDK 21 and pass --jmods PATH or set JAVA_HOME"
+        )
+    modules = sorted(path.glob("*.jmod"))
+    if not modules:
+        raise RuntimeError(f"no .jmod files found in {path}; expected a JDK jmods directory")
+    return path, modules
+
+
+def environment(path, modules, explicit_jmods):
+    if explicit_jmods:
+        java = path.resolve().parent / "bin/java"
+    elif os.environ.get("JAVA_HOME"):
+        java = Path(os.environ["JAVA_HOME"]) / "bin/java"
+    else:
+        java = shutil.which("java")
+        if java is None:
+            raise RuntimeError("could not find java; set JAVA_HOME to a JDK 21 installation")
+    if not Path(java).is_file():
+        raise RuntimeError(f"JDK java executable is unavailable at {java}; provide a complete JDK 21 installation")
+    java_version = subprocess.run(
+        [str(java), "-XshowSettings:properties", "-version"], text=True, capture_output=True
+    )
+    version_output = java_version.stderr or java_version.stdout
+    if java_version.returncode != 0:
+        raise RuntimeError("could not run java -version; provide a JDK 21 installation and set JAVA_HOME")
+    release = re.search(r"^\s*java\.version\s*=\s*(\S+)", version_output, re.MULTILINE)
+    vendor = re.search(r"^\s*java\.vendor\s*=\s*(.+)$", version_output, re.MULTILINE)
+    runtime = re.search(r"^\s*java\.runtime\.version\s*=\s*(\S+)", version_output, re.MULTILINE)
+    release_value = release.group(1) if release else ""
+    if not release_value.startswith("21.") and release_value != "21":
+        raise RuntimeError(
+            f"expected JDK 21, got java.version {release_value or 'unknown'}"
+        )
+    return {
+        "captured_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "os": platform.platform(),
+        "kernel": run_checked(["uname", "-a"]).stdout.strip(),
+        "cpu": cpu_model(),
+        "logical_cpu_count": os.cpu_count(),
+        "memory_total_kib": memory_total_kib(),
+        "memory_cgroup_limit_bytes": memory_cgroup_limit_bytes(),
+        "jdk_distribution": vendor.group(1).strip() if vendor else "unknown",
+        "jdk_version": runtime.group(1) if runtime else release_value,
+        "jmods_count": len(modules),
+        "jmods_total_bytes": sum(module.stat().st_size for module in modules),
+        "jmods_dir_label": "provided-jmods",
+        "rustc": run_checked(["rustc", "-Vv"]).stdout.strip(),
+        "cargo": run_checked(["cargo", "-V"]).stdout.strip(),
+        "profile": "release",
+        "rss_method": "Linux /proc/self/status VmHWM high-water mark in KiB; read at end of the complete benchmark workload",
+    }
+
+
+def memory_total_kib():
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1])
+    except OSError:
+        pass
+    return None
+
+
+def memory_cgroup_limit_bytes():
+    for candidate in (Path("/sys/fs/cgroup/memory.max"), Path("/sys/fs/cgroup/memory/memory.limit_in_bytes")):
+        try:
+            value = candidate.read_text().strip()
+            if value != "max":
+                limit = int(value)
+                if limit < 2**60:
+                    return limit
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def cpu_model():
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith(("model name", "Hardware", "Processor")):
+                return line.split(":", 1)[-1].strip()
+    except OSError:
+        pass
+    return platform.processor() or platform.machine()
+
+
+def run_samples(binary, path, count):
+    samples = []
+    for index in range(count):
+        result = subprocess.run(
+            [binary, "--jmods", str(path)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode:
+            raise RuntimeError(
+                f"sample {index + 1}/{count} failed ({result.returncode}):\n{result.stderr.strip()}"
+            )
+        measurements = json.loads(result.stdout)
+        samples.append({
+            "sample": index + 1,
+            "rss_kib": measurements["peak_rss_kib"],
+            "measurements": measurements,
+        })
+    return samples
+
+
+def summarize(samples):
+    init_ms = [sample["measurements"]["init_ns"] / 1_000_000 for sample in samples]
+    rss = [sample["rss_kib"] for sample in samples]
+    first_class = samples[0]["measurements"]["class_lookups"]
+    classes = {}
+    for index, first_row in enumerate(first_class):
+        classes[first_row["class"]] = {
+            "first_lookup_ms": quantiles([
+                sample["measurements"]["class_lookups"][index]["first_lookup_ns"] / 1_000_000
+                for sample in samples
+            ]),
+            "warm_lookup_ms_per_op": quantiles([
+                sample["measurements"]["class_lookups"][index]["warm_total_ns"] /
+                sample["measurements"]["class_lookups"][index]["warm_iterations"] / 1_000_000
+                for sample in samples
+            ]),
+        }
+    negative = {
+        "first_lookup_ms": quantiles([
+            sample["measurements"]["negative_lookup"]["first_lookup_ns"] / 1_000_000
+            for sample in samples
+        ]),
+        "warm_lookup_ms_per_op": quantiles([
+            sample["measurements"]["negative_lookup"]["warm_total_ns"] /
+            sample["measurements"]["negative_lookup"]["warm_iterations"] / 1_000_000
+            for sample in samples
+        ]),
+    }
+    package_queries = {}
+    for index, first_row in enumerate(samples[0]["measurements"]["package_lookups"]):
+        package_queries[f"{first_row['query']}:{first_row['package']}"] = quantiles([
+            sample["measurements"]["package_lookups"][index]["total_ns"] /
+            sample["measurements"]["package_lookups"][index]["iterations"] / 1_000_000
+            for sample in samples
+        ])
+    return {
+        "init_ms": quantiles(init_ms),
+        "peak_rss_kib": quantiles(rss),
+        "class_lookups": classes,
+        "negative_lookup": negative,
+        "package_lookup_ms_per_op": package_queries,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--jmods", help="path to a JDK 21 jmods directory (defaults to JAVA_HOME/jmods)")
+    parser.add_argument("--samples", type=int, default=10, help="independent fresh-process runs (minimum 10)")
+    parser.add_argument("--output", default="docs/jdk-classpath-performance-raw.json")
+    parser.add_argument("--smoke", action="store_true", help="run the tiny checked-in JMOD fixture without a JDK")
+    args = parser.parse_args()
+
+    try:
+        if args.smoke:
+            smoke(build_driver())
+            return 0
+        if args.samples < 10:
+            raise RuntimeError("--samples must be at least 10 for a baseline run")
+        path, modules = jdk_path(args)
+        environment_info = environment(path, modules, bool(args.jmods))
+        if not PROC_STATUS.is_file():
+            raise RuntimeError("Linux /proc/self/status with VmHWM is required to measure peak RSS")
+        binary = build_driver()
+        results = run_samples(binary, path, args.samples)
+        report = {
+            "schema_version": 1,
+            "purpose": "unmodified pre-optimization JdkClassPath baseline",
+            "sample_count": args.samples,
+            "process_model": "each raw row is one independently launched release binary process; OS page cache is not flushed",
+            "environment": environment_info,
+            "summary": summarize(results),
+            "samples": results,
+        }
+        output = (ROOT / args.output).resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        print(f"wrote {args.samples} raw samples to {args.output}")
+        print(json.dumps(report["summary"], sort_keys=True))
+        return 0
+    except (OSError, RuntimeError, json.JSONDecodeError) as error:
+        print(f"jdk-classpath-benchmark: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
