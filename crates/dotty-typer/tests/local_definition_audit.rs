@@ -2235,6 +2235,7 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         current_method: "Audit.use".to_owned(),
         ..ResolverMetrics::default()
     }));
+    let typer_packages = namer_packages.snapshot();
     let resolver = AuditResolver {
         inner: ClasspathSymbolResolver::new(
             ScalaSourceAuditPath,
@@ -2246,7 +2247,6 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         metrics: Rc::clone(&metrics),
         class_path_probe: None,
     };
-    let typer_packages = Packages::new();
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -6517,23 +6517,24 @@ fn pinned_scala39_import_prefix_typing_probe() {
         .filter(|row| row.current_outcome.starts_with("ImportQualifierNotFound::"))
         .count();
     let advanced_baseline_rows = reconciliation.len() - unresolved_baseline_rows;
-    assert_eq!(unresolved_baseline_rows, 2_336);
-    assert_eq!(advanced_baseline_rows, 58);
+    assert_eq!(unresolved_baseline_rows, 2_326);
+    assert_eq!(advanced_baseline_rows, 68);
     assert!(reconciliation.iter().all(|row| {
         row.current_method_typed == (row.current_method_blocker == "typed")
             && row.final_import_identity.starts_with("outcomes::")
             && (row.final_import_identity.contains("resolved::")
                 || row.final_import_identity.contains("absent::"))
     }));
-    assert!(
-        reconciliation
-            .iter()
-            .filter(|row| row.current_outcome.starts_with("advanced past"))
-            .all(|row| {
-                row.current_resolver_requests != "no matching resolver request"
-                    && row.current_selected_identity != "-"
-            })
-    );
+    if let Some(row) = reconciliation
+        .iter()
+        .filter(|row| row.current_outcome.starts_with("advanced past"))
+        .find(|row| {
+            row.current_resolver_requests != "no matching resolver request"
+                && row.current_selected_identity == "-"
+        })
+    {
+        panic!("resolver-backed advanced import row has no selected identity: {row:?}");
+    }
     let baseline_identities = baseline_rows
         .iter()
         .map(|row| (&row.file, row.method_tree, row.import_tree))
@@ -6589,9 +6590,9 @@ fn pinned_scala39_import_prefix_typing_probe() {
         term_object_gaps,
         unmatched_traces
     );
-    assert_eq!(all_observations.len(), 2_342);
-    assert_eq!(first_segment_observations.len(), 2_342);
-    assert_eq!(files.len(), 196);
+    assert_eq!(all_observations.len(), 2_332);
+    assert_eq!(first_segment_observations.len(), 2_332);
+    assert_eq!(files.len(), 193);
     assert_eq!(targets.len(), 29);
     assert_eq!(term_object_gaps, 0);
     assert_eq!(unmatched_traces, 0);
@@ -6610,7 +6611,7 @@ fn pinned_scala39_import_prefix_typing_probe() {
     println!("baseline_blocker_origins=904");
     println!(
         "current_import_qualifier_not_found={}",
-        all_observations.len()
+        unresolved_baseline_rows
     );
     println!("current_unresolved_next_segment={}", all_observations.len());
     println!("current_term_object_gaps={term_object_gaps}");
@@ -9509,7 +9510,7 @@ fn audit_source_inner_filtered(
     let empty_source_package_inventory = BTreeSet::new();
     let source_package_paths = source_package_inventory.unwrap_or(&empty_source_package_inventory);
     let (typer_packages, resolver_packages) = if classpath.is_some() {
-        (Packages::new(), Some(packages))
+        (packages.snapshot(), Some(packages))
     } else {
         (packages, None)
     };
