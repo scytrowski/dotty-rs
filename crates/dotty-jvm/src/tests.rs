@@ -3371,6 +3371,550 @@ fn typed_call_to(
     typed_call(fixture, function, args, ApplyKind::Regular, result)
 }
 
+fn typed_boolean_intrinsic_call(
+    fixture: &mut EmissionFixture,
+    method: SymbolId,
+    receiver: TreeId<dotty_core::ast::Typed>,
+    argument: TreeId<dotty_core::ast::Typed>,
+) -> TreeId<dotty_core::ast::Typed> {
+    let prefix = fixture.ast.get(receiver).ty;
+    let name = fixture.store.symbols.get(method).name;
+    let function_type = fixture.store.types.alloc(Type::TermRef {
+        prefix,
+        target: TermRefTarget::Symbol(method),
+    });
+    let function = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver,
+            name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: function_type,
+    });
+    typed_call(
+        fixture,
+        function,
+        vec![argument],
+        ApplyKind::Regular,
+        fixture.definitions.boolean,
+    )
+}
+
+fn typed_boolean_not(
+    fixture: &mut EmissionFixture,
+    receiver: TreeId<dotty_core::ast::Typed>,
+) -> TreeId<dotty_core::ast::Typed> {
+    let symbols = fixture
+        .definitions
+        .boolean_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+    let prefix = fixture.ast.get(receiver).ty;
+    let name = fixture.store.symbols.get(symbols.unary_not).name;
+    let ty = fixture.store.types.alloc(Type::TermRef {
+        prefix,
+        target: TermRefTarget::Symbol(symbols.unary_not),
+    });
+    fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver,
+            name,
+            backquoted: false,
+        }),
+        position: None,
+        ty,
+    })
+}
+
+fn typed_int_intrinsic_call(
+    fixture: &mut EmissionFixture,
+    method: SymbolId,
+    receiver: TreeId<dotty_core::ast::Typed>,
+    argument: TreeId<dotty_core::ast::Typed>,
+    result: dotty_core::TypeId,
+) -> TreeId<dotty_core::ast::Typed> {
+    let prefix = fixture.ast.get(receiver).ty;
+    let name = fixture.store.symbols.get(method).name;
+    let function_type = fixture.store.types.alloc(Type::TermRef {
+        prefix,
+        target: TermRefTarget::Symbol(method),
+    });
+    let function = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver,
+            name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: function_type,
+    });
+    typed_call(
+        fixture,
+        function,
+        vec![argument],
+        ApplyKind::Regular,
+        result,
+    )
+}
+
+#[test]
+fn emits_canonical_boolean_intrinsics_and_evaluates_boolean_truth_tables() {
+    let mut fixture = EmissionFixture::new(false);
+    let boolean = fixture.definitions.boolean;
+    let int = fixture.definitions.int;
+    let symbols = fixture
+        .definitions
+        .boolean_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+
+    let not_method =
+        add_call_target_method(&mut fixture, "negateFlag", &[("value", boolean)], boolean);
+    let not_parameter = fixture.parameters.last().unwrap()[0];
+    let no_prefix = fixture.definitions.no_prefix;
+    let not_receiver = typed_method_ident_with_prefix(&mut fixture, not_parameter, no_prefix);
+    let not_body = typed_boolean_not(&mut fixture, not_receiver);
+    let ignored_stat = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(0),
+        }),
+        position: None,
+        ty: int,
+    });
+    let not_result_type = fixture.ast.get(not_body).ty;
+    let inner_ignored_stat = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(0),
+        }),
+        position: None,
+        ty: int,
+    });
+    let inner_not_block = typed_block(
+        &mut fixture,
+        vec![inner_ignored_stat],
+        not_body,
+        not_result_type,
+    );
+    let not_block = typed_block(
+        &mut fixture,
+        vec![ignored_stat],
+        inner_not_block,
+        not_result_type,
+    );
+    *fixture.bodies.last_mut().unwrap() = not_block;
+
+    let mut operation_methods = Vec::new();
+    for (name, method, operation) in [
+        ("andFlag", symbols.eager_and, 0x7e),
+        ("orFlag", symbols.eager_or, 0x80),
+        ("xorFlag", symbols.xor, 0x82),
+        ("equalFlag", symbols.equal, 0x9f),
+        ("notEqualFlag", symbols.not_equal, 0xa0),
+    ] {
+        let method_symbol = add_call_target_method(
+            &mut fixture,
+            name,
+            &[("left", boolean), ("right", boolean)],
+            boolean,
+        );
+        let method_index = fixture.methods.len() - 1;
+        let left_parameter = fixture.parameters[method_index][0];
+        let right_parameter = fixture.parameters[method_index][1];
+        let left = typed_method_ident_with_prefix(&mut fixture, left_parameter, no_prefix);
+        let right = typed_method_ident_with_prefix(&mut fixture, right_parameter, no_prefix);
+        let expression = typed_boolean_intrinsic_call(&mut fixture, method, left, right);
+        fixture.bodies[method_index] = expression;
+        operation_methods.push((name, method_symbol, operation));
+    }
+
+    let and_method = add_call_target_method(
+        &mut fixture,
+        "branchOnAnd",
+        &[("left", boolean), ("right", boolean)],
+        int,
+    );
+    let branch_index = fixture.methods.len() - 1;
+    let left_parameter = fixture.parameters[branch_index][0];
+    let right_parameter = fixture.parameters[branch_index][1];
+    let left = typed_method_ident_with_prefix(&mut fixture, left_parameter, no_prefix);
+    let right = typed_method_ident_with_prefix(&mut fixture, right_parameter, no_prefix);
+    let condition = typed_boolean_intrinsic_call(&mut fixture, symbols.eager_and, left, right);
+    let yes = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: int,
+    });
+    let no = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(0),
+        }),
+        position: None,
+        ty: int,
+    });
+    fixture.bodies[branch_index] = fixture.ast.alloc(Tree {
+        kind: TreeKind::If(If {
+            cond: condition,
+            then_branch: yes,
+            else_branch: no,
+        }),
+        position: None,
+        ty: int,
+    });
+
+    let left_probe = add_call_target_method(&mut fixture, "leftProbe", &[], boolean);
+    let right_probe = add_call_target_method(&mut fixture, "rightProbe", &[], boolean);
+    let ordered_method = add_call_target_method(&mut fixture, "orderedAnd", &[], boolean);
+    let left_call = typed_call_to(&mut fixture, left_probe, Vec::new(), boolean, false);
+    let right_call = typed_call_to(&mut fixture, right_probe, Vec::new(), boolean, false);
+    let ordered =
+        typed_boolean_intrinsic_call(&mut fixture, symbols.eager_and, left_call, right_call);
+    *fixture.bodies.last_mut().unwrap() = ordered;
+
+    let int_symbols = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+    for (name, boolean_method, initial) in [
+        ("falseAndDivide", symbols.eager_and, false),
+        ("trueOrDivide", symbols.eager_or, true),
+    ] {
+        add_call_target_method(&mut fixture, name, &[], boolean);
+        let left = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Boolean(initial),
+            }),
+            position: None,
+            ty: boolean,
+        });
+        let one = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(1),
+            }),
+            position: None,
+            ty: int,
+        });
+        let zero = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(0),
+            }),
+            position: None,
+            ty: int,
+        });
+        let quotient = typed_int_intrinsic_call(&mut fixture, int_symbols.divide, one, zero, int);
+        let zero_again = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(0),
+            }),
+            position: None,
+            ty: int,
+        });
+        let comparison = typed_int_intrinsic_call(
+            &mut fixture,
+            int_symbols.greater_than,
+            quotient,
+            zero_again,
+            boolean,
+        );
+        let body = typed_boolean_intrinsic_call(&mut fixture, boolean_method, left, comparison);
+        *fixture.bodies.last_mut().unwrap() = body;
+    }
+
+    add_call_target_method(
+        &mut fixture,
+        "localBoolean",
+        &[("left", boolean), ("right", boolean)],
+        boolean,
+    );
+    let local_method_index = fixture.methods.len() - 1;
+    let local_left_parameter = fixture.parameters[local_method_index][0];
+    let local_right_parameter = fixture.parameters[local_method_index][1];
+    let local_left = typed_method_ident_with_prefix(&mut fixture, local_left_parameter, no_prefix);
+    let local_right =
+        typed_method_ident_with_prefix(&mut fixture, local_right_parameter, no_prefix);
+    let first_local = add_emission_local_symbol(
+        &mut fixture,
+        local_method_index,
+        "andResult",
+        boolean,
+        false,
+        SymbolFlags::EMPTY,
+    );
+    let initialized_with_and =
+        typed_boolean_intrinsic_call(&mut fixture, symbols.eager_and, local_left, local_right);
+    let first_declaration = add_emission_local_valdef(
+        &mut fixture,
+        local_method_index,
+        first_local,
+        boolean,
+        Some(initialized_with_and),
+    );
+    let first_reference = typed_emission_symbol_ident(&mut fixture, first_local);
+    let second_local = add_emission_local_symbol(
+        &mut fixture,
+        local_method_index,
+        "result",
+        boolean,
+        true,
+        SymbolFlags::EMPTY,
+    );
+    let second_declaration = add_emission_local_valdef(
+        &mut fixture,
+        local_method_index,
+        second_local,
+        boolean,
+        Some(first_reference),
+    );
+    let assignment_target = typed_emission_symbol_ident(&mut fixture, second_local);
+    let assignment_left =
+        typed_method_ident_with_prefix(&mut fixture, local_left_parameter, no_prefix);
+    let assignment_right =
+        typed_method_ident_with_prefix(&mut fixture, local_right_parameter, no_prefix);
+    let assigned_xor =
+        typed_boolean_intrinsic_call(&mut fixture, symbols.xor, assignment_left, assignment_right);
+    let assignment = fixture.ast.alloc(Tree {
+        kind: TreeKind::Assign(dotty_core::ast::Assign {
+            lhs: assignment_target,
+            rhs: assigned_xor,
+        }),
+        position: None,
+        ty: fixture.definitions.unit,
+    });
+    let result = typed_emission_symbol_ident(&mut fixture, second_local);
+    let local_body = typed_block(
+        &mut fixture,
+        vec![first_declaration, second_declaration, assignment],
+        result,
+        boolean,
+    );
+    fixture.bodies[local_method_index] = local_body;
+
+    add_call_target_method(
+        &mut fixture,
+        "loopUntilTrue",
+        &[("initial", boolean)],
+        boolean,
+    );
+    let loop_method_index = fixture.methods.len() - 1;
+    let loop_parameter = fixture.parameters[loop_method_index][0];
+    let loop_local = add_emission_local_symbol(
+        &mut fixture,
+        loop_method_index,
+        "flag",
+        boolean,
+        true,
+        SymbolFlags::EMPTY,
+    );
+    let initializer = typed_method_ident_with_prefix(&mut fixture, loop_parameter, no_prefix);
+    let loop_declaration = add_emission_local_valdef(
+        &mut fixture,
+        loop_method_index,
+        loop_local,
+        boolean,
+        Some(initializer),
+    );
+    let condition_operand = typed_emission_symbol_ident(&mut fixture, loop_local);
+    let condition = typed_boolean_not(&mut fixture, condition_operand);
+    let assignment_target = typed_emission_symbol_ident(&mut fixture, loop_local);
+    let true_value = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        }),
+        position: None,
+        ty: boolean,
+    });
+    let loop_assignment = fixture.ast.alloc(Tree {
+        kind: TreeKind::Assign(dotty_core::ast::Assign {
+            lhs: assignment_target,
+            rhs: true_value,
+        }),
+        position: None,
+        ty: fixture.definitions.unit,
+    });
+    let loop_body = fixture.ast.alloc(Tree {
+        kind: TreeKind::While(dotty_core::ast::While {
+            cond: condition,
+            body: loop_assignment,
+        }),
+        position: None,
+        ty: fixture.definitions.unit,
+    });
+    let loop_result = typed_emission_symbol_ident(&mut fixture, loop_local);
+    fixture.bodies[loop_method_index] = typed_block(
+        &mut fixture,
+        vec![loop_declaration, loop_body],
+        loop_result,
+        boolean,
+    );
+
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[local_method_index].locals = vec![
+        JvmLocalBinding {
+            declaration: first_declaration,
+            symbol: first_local,
+            mutable: false,
+        },
+        JvmLocalBinding {
+            declaration: second_declaration,
+            symbol: second_local,
+            mutable: true,
+        },
+    ];
+    unit.classes[0].methods[loop_method_index].locals = vec![JvmLocalBinding {
+        declaration: loop_declaration,
+        symbol: loop_local,
+        mutable: true,
+    }];
+    let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    assert_eq!(
+        emitted_method_code(&class, "negateFlag"),
+        [0x03, 0x57, 0x03, 0x57, 0x1b, 0x04, 0x82, 0xac]
+    );
+    for (name, _, opcode) in operation_methods {
+        let method_code = emitted_method_code(&class, name);
+        match opcode {
+            0x7e | 0x80 | 0x82 => assert_eq!(method_code, [0x1b, 0x1c, opcode, 0xac]),
+            0x9f | 0xa0 => assert_eq!(
+                method_code,
+                [
+                    0x1b, 0x1c, opcode, 0x00, 0x07, 0x03, 0xa7, 0x00, 0x04, 0x04, 0xac
+                ]
+            ),
+            _ => unreachable!(),
+        }
+    }
+    let ordered_code = emitted_method_code(&class, "orderedAnd");
+    assert_eq!(&ordered_code[0..1], &[0x2a]);
+    assert_eq!(&ordered_code[4..5], &[0x2a]);
+    assert_eq!(ordered_code.len(), 10);
+    assert_eq!(&ordered_code[8..], &[0x7e, 0xac]);
+    assert_virtual_method_ref(
+        &class,
+        ordered_code,
+        1,
+        "example/Answer",
+        "leftProbe",
+        "()Z",
+    );
+    assert_virtual_method_ref(
+        &class,
+        ordered_code,
+        5,
+        "example/Answer",
+        "rightProbe",
+        "()Z",
+    );
+    let branch_code = emitted_method_code(&class, "branchOnAnd");
+    assert!(branch_code.contains(&0x7e));
+    assert!(class.methods.iter().any(|method| {
+        class.constant_pool.utf8(method.name_index) == Ok("branchOnAnd")
+            && method.attributes.iter().any(|attribute| matches!(attribute,
+                Attribute::Code(code) if code.attributes.iter().any(|nested| matches!(nested,
+                    Attribute::Other(raw) if class.constant_pool.utf8(raw.name_index) == Ok("StackMapTable")
+                ))
+            ))
+    }));
+    for name in ["falseAndDivide", "trueOrDivide"] {
+        let code = emitted_method_code(&class, name);
+        let divide = code.iter().position(|opcode| *opcode == 0x6c).unwrap();
+        let boolean_bitwise = code
+            .iter()
+            .position(|opcode| matches!(*opcode, 0x7e | 0x80))
+            .unwrap();
+        assert!(
+            divide < boolean_bitwise,
+            "RHS division must run before {name}'s intrinsic"
+        );
+    }
+
+    if require_jdk_or_skip() {
+        verify_emitted_call_class_with_jdk(
+            generated.bytes(),
+            "public final class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); for (boolean left : new boolean[] { false, true }) { if (answer.negateFlag(left) != !left) throw new AssertionError(\"not\"); for (boolean right : new boolean[] { false, true }) { if (answer.andFlag(left, right) != (left & right)) throw new AssertionError(\"and\"); if (answer.orFlag(left, right) != (left | right)) throw new AssertionError(\"or\"); if (answer.xorFlag(left, right) != (left ^ right)) throw new AssertionError(\"xor\"); if (answer.equalFlag(left, right) != (left == right)) throw new AssertionError(\"eq\"); if (answer.notEqualFlag(left, right) != (left != right)) throw new AssertionError(\"ne\"); if (answer.localBoolean(left, right) != (left ^ right)) throw new AssertionError(\"local init and assign\"); } } if (answer.loopUntilTrue(false) != true || answer.loopUntilTrue(true) != true) throw new AssertionError(\"while condition\"); if (answer.branchOnAnd(true, true) != 1 || answer.branchOnAnd(true, false) != 0 || !answer.orderedAnd()) throw new AssertionError(\"control flow and eager order\"); try { answer.falseAndDivide(); throw new AssertionError(\"false & rhs was short-circuited\"); } catch (ArithmeticException expected) { } try { answer.trueOrDivide(); throw new AssertionError(\"true | rhs was short-circuited\"); } catch (ArithmeticException expected) { } System.out.println(\"boolean intrinsics ok\"); } }\n",
+            "boolean intrinsics ok",
+        );
+    }
+    assert_ne!(and_method, not_method);
+    assert_ne!(ordered_method, right_probe);
+}
+
+#[test]
+fn rejects_mistyped_canonical_boolean_intrinsics_without_a_class_result() {
+    let mut operand = EmissionFixture::new(false);
+    let boolean = operand.definitions.boolean;
+    let int = operand.definitions.int;
+    let symbols = operand
+        .definitions
+        .boolean_primitive_operator_symbols(&operand.store)
+        .unwrap();
+    add_call_target_method(&mut operand, "badOperand", &[], boolean);
+    let receiver = operand.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: int,
+    });
+    let argument = operand.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        }),
+        position: None,
+        ty: boolean,
+    });
+    let call = typed_boolean_intrinsic_call(&mut operand, symbols.eager_and, receiver, argument);
+    *operand.bodies.last_mut().unwrap() = call;
+    assert_eq!(
+        operand.emit().unwrap_err(),
+        JvmCodegenError::BooleanIntrinsicResolution {
+            tree: call,
+            error: crate::JvmBooleanIntrinsicError::WrongOperandType {
+                tree: call,
+                operand: receiver,
+            },
+        }
+    );
+
+    let mut result = EmissionFixture::new(false);
+    let boolean = result.definitions.boolean;
+    let int = result.definitions.int;
+    let symbols = result
+        .definitions
+        .boolean_primitive_operator_symbols(&result.store)
+        .unwrap();
+    add_call_target_method(&mut result, "badResult", &[], int);
+    let receiver = result.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        }),
+        position: None,
+        ty: boolean,
+    });
+    let argument = result.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(false),
+        }),
+        position: None,
+        ty: boolean,
+    });
+    let call = typed_boolean_intrinsic_call(&mut result, symbols.xor, receiver, argument);
+    result.ast.get_mut(call).ty = int;
+    *result.bodies.last_mut().unwrap() = call;
+    assert_eq!(
+        result.emit().unwrap_err(),
+        JvmCodegenError::BooleanIntrinsicResolution {
+            tree: call,
+            error: crate::JvmBooleanIntrinsicError::WrongResultType {
+                tree: call,
+                expected: boolean,
+                found: int,
+            },
+        }
+    );
+}
+
 #[test]
 fn resolves_ident_this_calls_and_supported_zero_argument_results_by_symbol() {
     let mut fixture = EmissionFixture::new(false);

@@ -570,6 +570,18 @@ pub enum JvmCodegenError {
         index: usize,
         found: JvmExpressionFlow,
     },
+    /// A typed tree that claims a canonical Boolean intrinsic has inconsistent semantics.
+    BooleanIntrinsicResolution {
+        tree: TreeId<Typed>,
+        error: JvmBooleanIntrinsicError,
+    },
+    /// A resolved Boolean operand did not lower to one JVM Boolean value.
+    BooleanIntrinsicOperandFlowMismatch {
+        tree: TreeId<Typed>,
+        operand: TreeId<Typed>,
+        index: usize,
+        found: JvmExpressionFlow,
+    },
     /// A same-class call occurs in a control-flow branch whose verifier frames
     /// cannot represent the temporary reference receiver.
     JvmCallInUnsupportedControlFlow {
@@ -1061,10 +1073,11 @@ pub fn lower_value_expression(
 
 /// Lowers one supported typed expression without appending a method epilogue.
 ///
-/// Integer/Boolean leaves, the `Unit` literal, ordered blocks, and nested
-/// `If`/local `Return` nodes are supported. `Value` leaves one correctly typed
-/// value on the JVM stack; `Unit` completes normally with no stack value;
-/// `Diverges` has no reachable fallthrough. Blocks discard unused primitive
+/// Integer/Boolean leaves and canonical Int/Boolean intrinsics, the `Unit`
+/// literal, ordered blocks, and nested `If`/local `Return` nodes are supported.
+/// Intrinsics resolve only by their canonical semantic symbols. `Value` leaves
+/// one correctly typed value on the JVM stack; `Unit` completes normally with
+/// no stack value; `Diverges` has no reachable fallthrough. Blocks discard unused primitive
 /// values with `pop` and stop lowering after a definitely diverging statement.
 /// The expression is built into a fresh method-local instruction builder, so
 /// an error never exposes partial code. This standalone API has no local
