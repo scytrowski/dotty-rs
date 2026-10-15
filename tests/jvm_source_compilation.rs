@@ -1085,6 +1085,200 @@ fn canonical_int_intrinsics_compose_across_loop_and_branch_control_flow() {
     }
 }
 
+#[test]
+fn canonical_boolean_intrinsics_compose_with_source_control_flow_and_locals() {
+    let output = TestOutputDirectory::new("compositional-boolean-intrinsics");
+    let source = r#"class BooleanControlFlow {
+              def whileAnd(n: Int): Int = {
+                var i = 0
+                var running = true
+                while i < n && running do {
+                  i = i + 1
+                  if i >= 2 then running = false else ()
+                }
+                i
+              }
+              def select(flag: Boolean, i: Int): Int =
+                if !flag || i >= 10 then 1 else 0
+              def composed(a: Boolean, b: Boolean, c: Boolean): Boolean = {
+                val result = (a && b) || c
+                result
+              }
+              def mixedAnd(a: Boolean, b: Boolean, c: Boolean): Boolean = (a & b) || c
+              def mixedOr(a: Boolean, b: Boolean, c: Boolean): Boolean = a && (b | c)
+              def toggle(flag: Boolean): Boolean = {
+                var current = flag
+                current = !current
+                current
+              }
+              def andHits(flag: Boolean): Int = {
+                var hits = 0
+                val result = flag && { hits = hits + 1; true }
+                hits
+              }
+              def orHits(flag: Boolean): Int = {
+                var hits = 0
+                val result = flag || { hits = hits + 1; false }
+                hits
+              }
+              def shortCircuitOrder(a: Boolean, b: Boolean): Int = {
+                var order = 0
+                val result = { order = order * 10 + 1; a } && { order = order * 10 + 2; b }
+                order
+              }
+              def strictAndHits(a: Boolean, b: Boolean): Int = {
+                var hits = 0
+                val result = ({ hits = hits + 1; a } & { hits = hits + 1; b })
+                hits
+              }
+              def strictOrHits(a: Boolean, b: Boolean): Int = {
+                var hits = 0
+                val result = ({ hits = hits + 1; a } | { hits = hits + 1; b })
+                hits
+              }
+              def strictXorHits(a: Boolean, b: Boolean): Int = {
+                var hits = 0
+                val result = ({ hits = hits + 1; a } ^ { hits = hits + 1; b })
+                hits
+              }
+            }
+"#;
+    let artifact = compile_source(source, "BooleanControlFlow.scala", output.path()).unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("BooleanControlFlow should decode");
+    for name in [
+        "whileAnd",
+        "select",
+        "composed",
+        "mixedAnd",
+        "mixedOr",
+        "toggle",
+        "andHits",
+        "orHits",
+        "shortCircuitOrder",
+        "strictAndHits",
+        "strictOrHits",
+        "strictXorHits",
+    ] {
+        let code = emitted_method_code(&class, name);
+        assert!(
+            !decode_subset_instructions(code)
+                .iter()
+                .any(|(_, opcode)| *opcode == 0xb6),
+            "{name} should lower canonical Boolean operators without invokevirtual"
+        );
+        let mut expected_frame_pcs = decode_branch_targets(code)
+            .into_iter()
+            .map(|(_, _, target)| target)
+            .collect::<Vec<_>>();
+        expected_frame_pcs.sort_unstable();
+        expected_frame_pcs.dedup();
+        if [
+            "whileAnd",
+            "select",
+            "composed",
+            "mixedAnd",
+            "mixedOr",
+            "andHits",
+            "orHits",
+            "shortCircuitOrder",
+        ]
+        .contains(&name)
+        {
+            assert_eq!(
+                stack_map_frame_pcs(&class, name),
+                expected_frame_pcs,
+                "{name} should use the classfile CFG's frame targets"
+            );
+        }
+    }
+    assert!(
+        decode_subset_instructions(emitted_method_code(&class, "whileAnd"))
+            .iter()
+            .any(|(_, opcode)| *opcode == 0xa7),
+        "whileAnd should retain a symbolic loop back-edge"
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness_path = output.path().join("BooleanControlFlowHarness.java");
+        fs::write(
+            &harness_path,
+            r#"public final class BooleanControlFlowHarness {
+  public static void main(String[] args) {
+    BooleanControlFlow v = new BooleanControlFlow();
+    if (v.whileAnd(0) != 0 || v.whileAnd(1) != 1 || v.whileAnd(10) != 2)
+      throw new AssertionError("while && zero/multiple iterations");
+    for (boolean f : new boolean[] {false, true}) {
+      for (int i : new int[] {9, 10}) {
+        if (v.select(f, i) != ((!f || i >= 10) ? 1 : 0))
+          throw new AssertionError("if !flag || comparison");
+      }
+    }
+    for (boolean a : new boolean[] {false, true}) {
+      for (boolean b : new boolean[] {false, true}) {
+        for (boolean c : new boolean[] {false, true}) {
+          if (v.composed(a, b, c) != ((a && b) || c))
+            throw new AssertionError("composed");
+          if (v.mixedAnd(a, b, c) != ((a & b) || c))
+            throw new AssertionError("mixed eager and short circuit");
+          if (v.mixedOr(a, b, c) != (a && (b | c)))
+            throw new AssertionError("mixed short circuit and eager");
+        }
+      }
+    }
+    if (v.toggle(false) || !v.toggle(true))
+      throw new AssertionError("Boolean local assignment");
+    if (v.andHits(false) != 0 || v.andHits(true) != 1
+        || v.orHits(true) != 0 || v.orHits(false) != 1)
+      throw new AssertionError("short-circuit RHS effects");
+    if (v.shortCircuitOrder(false, true) != 1
+        || v.shortCircuitOrder(true, false) != 12
+        || v.shortCircuitOrder(true, true) != 12)
+      throw new AssertionError("short-circuit evaluation order and single evaluation");
+    if (v.strictAndHits(false, false) != 2
+        || v.strictOrHits(true, true) != 2
+        || v.strictXorHits(false, true) != 2)
+      throw new AssertionError("strict Boolean RHS effects");
+    System.out.println("Boolean control flow ok");
+  }
+}
+"#,
+        )
+        .expect("write Boolean control-flow harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected BooleanControlFlowHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "BooleanControlFlowHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected BooleanControlFlow\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "Boolean control flow ok"
+        );
+    }
+}
+
 fn assert_invoked_method_names(class: &ClassFile<'_>, code: &[u8], expected: &[&str]) {
     let instructions = decode_subset_instructions(code);
     let calls = instructions
@@ -1223,10 +1417,13 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0x68
             | 0x6c
             | 0x70
+            | 0x7e
+            | 0x80
+            | 0x82
             | 0xac
             | 0xb1 => 1,
             0x10 | 0x15 | 0x36 => 2,
-            0x99 | 0x9f..=0xa4 | 0xa7 | 0xb6..=0xb8 => 3,
+            0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb6..=0xb8 => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };
         assert!(
@@ -1242,7 +1439,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
 fn decode_branch_targets(code: &[u8]) -> Vec<(usize, u8, usize)> {
     decode_subset_instructions(code)
         .into_iter()
-        .filter(|(_, opcode)| matches!(*opcode, 0x99 | 0x9f..=0xa4 | 0xa7))
+        .filter(|(_, opcode)| matches!(*opcode, 0x99..=0x9a | 0x9f..=0xa4 | 0xa7))
         .map(|(offset, opcode)| {
             let displacement = i16::from_be_bytes([code[offset + 1], code[offset + 2]]);
             let target = offset as isize + isize::from(displacement);
