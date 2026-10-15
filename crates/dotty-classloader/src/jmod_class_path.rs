@@ -89,6 +89,7 @@ impl ClassPathEntry for JmodClassPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::class_path::ClassFormat;
 
     fn fixture_path(relative_path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path)
@@ -115,7 +116,13 @@ mod tests {
             .expect("entry should be found");
 
         assert!(!resource.bytes().is_empty());
-        assert!(matches!(resource.origin(), ClassOrigin::Jmod(_)));
+        assert_eq!(resource.format(), ClassFormat::Class);
+        assert_eq!(
+            resource.origin(),
+            &ClassOrigin::Jmod(fixture_path(
+                "tests/fixtures/pool_sample_jmod/pool_sample.jmod"
+            ))
+        );
     }
 
     #[test]
@@ -129,6 +136,7 @@ mod tests {
             .find_class(&BinaryName::from_internal("../../etc/passwd"))
             .expect_err("a path-traversal name must be rejected, not resolved");
 
+        assert_eq!(error.code(), "classpath.invalid_binary_name");
         assert!(error.to_string().contains("not safe to use as a path"));
     }
 
@@ -162,6 +170,7 @@ mod tests {
         let class_path = JmodClassPath::new(&path).unwrap();
 
         assert!(!class_path.contains_package(&["a"]).unwrap());
+        assert!(class_path.contains_package(&["a", "b", "c"]).unwrap());
         assert!(class_path.contains_package_prefix(&[]).unwrap());
         assert!(class_path.contains_package_prefix(&["a"]).unwrap());
         assert!(class_path.contains_package_prefix(&["a", "b"]).unwrap());
@@ -200,7 +209,11 @@ mod tests {
         ));
         let error = result.err().expect("wrong-magic file should be an error");
 
-        assert!(error.to_string().starts_with("classpath I/O error:"));
+        assert_eq!(error.code(), "classpath.invalid_data");
+        assert_eq!(
+            error.category(),
+            crate::error::ClassLoadCategory::Conditional
+        );
     }
 
     #[test]
@@ -211,8 +224,31 @@ mod tests {
         let error = JmodClassPath::new(&path)
             .err()
             .expect("too-short file should be an error");
-        assert!(error.to_string().starts_with("classpath I/O error:"));
+        assert_eq!(error.code(), "classpath.invalid_data");
+        assert_eq!(
+            error.category(),
+            crate::error::ClassLoadCategory::Conditional
+        );
 
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn new_reports_a_typed_error_for_a_truncated_zip_after_valid_jmod_magic() {
+        let path = std::env::temp_dir().join("dotty_classloader_jmod_truncated_zip.jmod");
+        let mut bytes = JMOD_MAGIC.to_vec();
+        bytes.extend_from_slice(b"PK\x03\x04truncated");
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = JmodClassPath::new(&path)
+            .err()
+            .expect("a truncated archive must not open as an empty JMOD");
+
+        assert_eq!(error.code(), "classpath.zip.unsupported_or_invalid_archive");
+        assert_eq!(
+            error.category(),
+            crate::error::ClassLoadCategory::Conditional
+        );
         std::fs::remove_file(&path).unwrap();
     }
 }

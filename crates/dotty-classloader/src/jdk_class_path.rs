@@ -60,8 +60,40 @@ impl ClassPathEntry for JdkClassPath {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::class_path::ClassFormat;
     use crate::class_path::ClassOrigin;
+    use std::fs;
     use std::path::PathBuf;
+
+    struct TemporaryDirectory(PathBuf);
+
+    impl TemporaryDirectory {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "dotty-classloader-jdk-{label}-{}",
+                std::process::id()
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TemporaryDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_jmod(directory: &std::path::Path, name: &str, entries: &[(&str, &[u8])]) {
+        let mut bytes = [0x4A, 0x4D, 0x01, 0x00].to_vec();
+        bytes.extend(crate::jar_class_path::tests::minimal_stored_zip(entries));
+        fs::write(directory.join(name), bytes).unwrap();
+    }
 
     fn fixture_path(relative_path: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative_path)
@@ -76,12 +108,14 @@ mod tests {
             .unwrap()
             .expect("pool/PoolSample should be found");
         assert!(matches!(pool_sample.origin(), ClassOrigin::Jmod(_)));
+        assert_eq!(pool_sample.format(), ClassFormat::Class);
 
         let other_sample = class_path
             .find_class(&BinaryName::from_internal("other/OtherSample"))
             .unwrap()
             .expect("other/OtherSample should be found");
         assert!(matches!(other_sample.origin(), ClassOrigin::Jmod(_)));
+        assert_eq!(other_sample.format(), ClassFormat::Class);
     }
 
     #[test]
@@ -120,5 +154,124 @@ mod tests {
         let error = result.err().expect("missing directory should be an error");
 
         assert!(error.to_string().starts_with("classpath I/O error:"));
+    }
+
+    #[test]
+    fn sorts_jmods_lexically_and_matches_composite_first_match_wins() {
+        let temp = TemporaryDirectory::new("lexical-order");
+        let jmods = temp.path().join("jmods");
+        fs::create_dir(&jmods).unwrap();
+        let alpha = jmods.join("alpha.jmod");
+        let zeta = jmods.join("zeta.jmod");
+        write_jmod(
+            &jmods,
+            "zeta.jmod",
+            &[
+                ("classes/shared/Duplicate.class", b"zeta duplicate"),
+                ("classes/zeta/Only.class", b"zeta only"),
+            ],
+        );
+        write_jmod(
+            &jmods,
+            "alpha.jmod",
+            &[
+                ("classes/shared/Duplicate.class", b"alpha duplicate"),
+                ("classes/alpha/Only.class", b"alpha only"),
+            ],
+        );
+
+        let class_path = JdkClassPath::new(&jmods).unwrap();
+        let duplicate_name = BinaryName::from_internal("shared/Duplicate");
+        let duplicate = class_path
+            .find_class(&duplicate_name)
+            .unwrap()
+            .expect("duplicate class must be found");
+        let alpha_only = class_path
+            .find_class(&BinaryName::from_internal("alpha/Only"))
+            .unwrap()
+            .expect("class from alpha.jmod must be found");
+        let zeta_only = class_path
+            .find_class(&BinaryName::from_internal("zeta/Only"))
+            .unwrap()
+            .expect("class from zeta.jmod must be found");
+        let composite = CompositeClassPath::new(vec![
+            Box::new(JmodClassPath::new(&alpha).unwrap()),
+            Box::new(JmodClassPath::new(&zeta).unwrap()),
+        ]);
+
+        assert_eq!(duplicate.bytes(), b"alpha duplicate");
+        assert_eq!(duplicate.origin(), &ClassOrigin::Jmod(alpha.clone()));
+        assert_eq!(
+            duplicate,
+            composite.find_class(&duplicate_name).unwrap().unwrap()
+        );
+        assert_eq!(alpha_only.bytes(), b"alpha only");
+        assert_eq!(zeta_only.bytes(), b"zeta only");
+        assert_eq!(alpha_only.origin(), &ClassOrigin::Jmod(alpha));
+        assert_eq!(zeta_only.origin(), &ClassOrigin::Jmod(zeta));
+
+        for _ in 0..3 {
+            let repeated = JdkClassPath::new(&jmods)
+                .unwrap()
+                .find_class(&duplicate_name)
+                .unwrap()
+                .unwrap();
+            assert_eq!(repeated, duplicate);
+        }
+    }
+
+    #[test]
+    fn a_corrupt_jmod_propagates_an_archive_error_instead_of_a_class_miss() {
+        let temp = TemporaryDirectory::new("corrupt-jmod");
+        let jmods = temp.path().join("jmods");
+        fs::create_dir(&jmods).unwrap();
+        fs::write(jmods.join("broken.jmod"), b"JM\x01\x00PK\x03\x04truncated").unwrap();
+
+        let error = JdkClassPath::new(&jmods)
+            .err()
+            .expect("a corrupt archive must fail eagerly");
+
+        assert_eq!(error.code(), "classpath.zip.unsupported_or_invalid_archive");
+        assert_eq!(
+            error.category(),
+            crate::error::ClassLoadCategory::Conditional
+        );
+    }
+
+    #[test]
+    fn classpath_entries_are_send_sync_and_support_concurrent_reads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<JmodClassPath>();
+        assert_send_sync::<JdkClassPath>();
+        assert_send_sync::<CompositeClassPath>();
+
+        let class_path = std::sync::Arc::new(
+            JdkClassPath::new(fixture_path("tests/fixtures/jdk_classpath")).unwrap(),
+        );
+        std::thread::scope(|scope| {
+            let readers = (0..4)
+                .map(|index| {
+                    let class_path = std::sync::Arc::clone(&class_path);
+                    scope.spawn(move || {
+                        let name = if index % 2 == 0 {
+                            "pool/PoolSample"
+                        } else {
+                            "other/OtherSample"
+                        };
+                        let resource = class_path
+                            .find_class(&BinaryName::from_internal(name))
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(resource.format(), ClassFormat::Class);
+                        resource
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for reader in readers {
+                assert!(!reader.join().unwrap().bytes().is_empty());
+            }
+        });
     }
 }

@@ -781,6 +781,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rejects_a_central_directory_offset_outside_the_archive() {
+        let mut bytes =
+            minimal_zip_with_entry("Offset.class", COMPRESSION_METHOD_STORED, 0, b"x", 1);
+        let eocd = bytes.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        bytes[eocd + 16..eocd + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let error = ZipArchive::open(bytes)
+            .err()
+            .expect("an out-of-range central directory must fail");
+
+        assert!(matches!(
+            error,
+            ZipError::Read(ZipReadError::InvalidRange { .. })
+        ));
+        assert_eq!(error.code(), "classpath.zip.read_error");
+    }
+
+    #[test]
+    fn rejects_an_entry_offset_outside_the_archive_when_reading_it() {
+        let mut bytes = minimal_zip_with_entry(
+            "Offset.class",
+            COMPRESSION_METHOD_STORED,
+            crate::crc32::checksum(b"x"),
+            b"x",
+            1,
+        );
+        let eocd = bytes.len() - END_OF_CENTRAL_DIRECTORY_RECORD_SIZE;
+        let central_directory =
+            u32::from_le_bytes(bytes[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        bytes[central_directory + 42..central_directory + 46]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let archive = ZipArchive::open(bytes).unwrap();
+        let error = archive.read_entry("Offset.class").unwrap_err();
+
+        assert!(matches!(
+            error,
+            ZipError::Read(ZipReadError::InvalidRange { .. })
+        ));
+        assert_eq!(error.code(), "classpath.zip.read_error");
+    }
+
+    #[test]
+    fn rejects_an_unsupported_compression_method_when_reading_an_entry() {
+        let bytes = minimal_zip_with_entry("Compressed.class", 99, 0, b"x", 1);
+        let archive = ZipArchive::open(bytes).unwrap();
+
+        assert_eq!(
+            archive.read_entry("Compressed.class"),
+            Err(ZipError::UnsupportedCompressionMethod(99))
+        );
+    }
+
     fn pool_sample_class_bytes() -> Vec<u8> {
         std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -827,9 +881,10 @@ mod tests {
 
         let archive = ZipArchive::open(jar_bytes).unwrap();
 
-        assert!(matches!(
-            archive.read_entry("PoolSample.class"),
-            Err(ZipError::CrcMismatch { .. })
-        ));
+        let error = archive
+            .read_entry("PoolSample.class")
+            .expect_err("changed bytes must fail CRC validation");
+        assert!(matches!(error, ZipError::CrcMismatch { expected, actual } if expected != actual));
+        assert_eq!(error.code(), "classpath.zip.crc_mismatch");
     }
 }
