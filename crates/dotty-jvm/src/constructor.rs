@@ -451,6 +451,7 @@ mod tests {
             })
         ));
         plan.parameters.clear();
+        let valid = plan.clone();
         let mut other = SemanticStore::new();
         let stale = loop {
             let name =
@@ -486,7 +487,6 @@ mod tests {
             })
         ));
         // A valid source proof also fails closed if the class signature is corrupted.
-        let (_, _, valid) = fixture();
         store
             .symbols
             .set_info(valid.class, SymbolInfo::Complete(definitions.int));
