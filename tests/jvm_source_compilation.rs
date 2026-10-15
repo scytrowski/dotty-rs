@@ -1227,7 +1227,7 @@ fn canonical_boolean_intrinsics_compose_with_source_control_flow_and_locals() {
         }
       }
     }
-    if (v.toggle(false) || !v.toggle(true))
+    if (!v.toggle(false) || v.toggle(true))
       throw new AssertionError("Boolean local assignment");
     if (v.andHits(false) != 0 || v.andHits(true) != 1
         || v.orHits(true) != 0 || v.orHits(false) != 1)
