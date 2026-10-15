@@ -542,6 +542,12 @@ pub enum JvmCodegenError {
         field: SymbolId,
         initializer: TreeId<Typed>,
     },
+    /// A field initializer's `TermRef` points outside the semantic symbol table.
+    UnknownFieldInitializerSymbol {
+        field: SymbolId,
+        initializer: TreeId<Typed>,
+        symbol: SymbolId,
+    },
     /// The declared field has no typed initializer.
     MissingFieldInitializer { field: SymbolId },
     /// The canonical class declaration scope does not contain this field.

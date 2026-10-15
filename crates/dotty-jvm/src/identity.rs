@@ -303,8 +303,13 @@ fn field_metadata(
                 field: plan.field,
                 initializer: initializer_id,
             })?;
-    let initializer_type =
-        typed_expression_primitive_type(store, definitions, plan.field, initializer.ty)?;
+    let initializer_type = typed_expression_primitive_type(
+        store,
+        definitions,
+        plan.field,
+        initializer_id,
+        initializer.ty,
+    )?;
     if initializer_type != field_type {
         return Err(JvmCodegenError::FieldInitializerTypeMismatch {
             field: plan.field,
@@ -347,6 +352,7 @@ fn typed_expression_primitive_type(
     store: &SemanticStore,
     definitions: &Definitions,
     symbol: dotty_core::SymbolId,
+    initializer: dotty_core::TreeId<dotty_core::ast::Typed>,
     ty: dotty_core::TypeId,
 ) -> Result<crate::JvmType, JvmCodegenError> {
     match store.types.try_get(ty) {
@@ -354,6 +360,13 @@ fn typed_expression_primitive_type(
             target: dotty_core::types::TermRefTarget::Symbol(target),
             ..
         }) => {
+            if !store.symbols.contains(*target) {
+                return Err(JvmCodegenError::UnknownFieldInitializerSymbol {
+                    field: symbol,
+                    initializer,
+                    symbol: *target,
+                });
+            }
             let target_ty = match store.symbols.info(*target) {
                 SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
                     return Err(JvmCodegenError::MissingSemanticInfo { symbol: *target });

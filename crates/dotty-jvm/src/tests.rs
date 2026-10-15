@@ -26,11 +26,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::locals::JvmLocalAllocator;
 use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmIntIntrinsic, JvmIntIntrinsicError,
-    JvmInvocationKind, JvmLocalBinding, JvmMethodPlan, JvmNameKind, JvmReturnType, JvmType,
-    JvmValueCategory, SymbolRole, UnsupportedJvmCallShapeKind, UnsupportedJvmClassKind,
-    UnsupportedJvmLocalFlag, UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind,
-    UnsupportedMethodShapeKind, emit_class, resolve_int_intrinsic,
+    JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmFieldPlan, JvmIntIntrinsic,
+    JvmIntIntrinsicError, JvmInvocationKind, JvmLocalBinding, JvmMethodPlan, JvmNameKind,
+    JvmReturnType, JvmType, JvmValueCategory, SymbolRole, UnsupportedJvmCallShapeKind,
+    UnsupportedJvmClassKind, UnsupportedJvmLocalFlag, UnsupportedJvmSymbolFlag,
+    UnsupportedJvmTypeKind, UnsupportedMethodShapeKind, emit_class, resolve_int_intrinsic,
 };
 
 struct Fixture {
@@ -6421,6 +6421,71 @@ fn class_emission_fails_closed_for_unknown_constructor_fields_and_superclasses()
         Err(JvmCodegenError::UnsupportedJvmSuperclass {
             class: superclass.class,
             parent: Some(superclass.definitions.int)
+        })
+    );
+}
+
+#[test]
+fn compilation_unit_metadata_rejects_a_stale_term_reference_in_field_initializer() {
+    let mut fixture = EmissionFixture::new(false);
+    let mut other_store = SemanticStore::new();
+    let other_type = other_store.types.alloc(Type::Constant(Constant::Int(0)));
+
+    let field_name = fixture.store.names.intern("field");
+    let field = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(field_name, Namespace::Term),
+        owner: Some(fixture.class),
+        kind: SymbolKind::Field,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Private,
+        info: SymbolInfo::Complete(fixture.definitions.int),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let stale_symbol = loop {
+        let symbol = alloc_symbol(&mut other_store, SymbolKind::Value, None, other_type);
+        if !fixture.store.symbols.contains(symbol) {
+            break symbol;
+        }
+    };
+    let initializer_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(stale_symbol),
+    });
+    let initializer = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(42),
+        }),
+        position: None,
+        ty: initializer_type,
+    });
+    let class_info_type = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => *ty,
+        _ => unreachable!(),
+    };
+    let Type::ClassInfo(info) = fixture.store.types.get(class_info_type).clone() else {
+        unreachable!()
+    };
+    fixture
+        .store
+        .scopes
+        .get_mut(info.declarations)
+        .enter(Name::new(field_name, Namespace::Term), field);
+
+    let mut unit = fixture.unit();
+    unit.classes[0].fields.push(JvmFieldPlan {
+        field,
+        source_visibility: crate::JvmFieldSourceVisibility::PlainPrivate,
+        initializer: Some(initializer),
+    });
+    assert_eq!(
+        unit.metadata(&fixture.definitions),
+        Err(JvmCodegenError::UnknownFieldInitializerSymbol {
+            field,
+            initializer,
+            symbol: stale_symbol,
         })
     );
 }
