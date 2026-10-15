@@ -155,14 +155,17 @@ fn run() -> Result<(), String> {
     let mut concurrent_samples = Vec::new();
     for (expected_module, name) in concurrent_scenarios {
         let class_path = Arc::new(&class_path);
-        let barrier = Arc::new(Barrier::new(CONCURRENT_THREADS + 1));
+        let ready = Arc::new(Barrier::new(CONCURRENT_THREADS + 1));
+        let start_gate = Arc::new(Barrier::new(CONCURRENT_THREADS + 1));
         let elapsed = thread::scope(|scope| -> Result<u128, String> {
             let readers = (0..CONCURRENT_THREADS)
                 .map(|_| {
                     let class_path = Arc::clone(&class_path);
-                    let barrier = Arc::clone(&barrier);
+                    let ready = Arc::clone(&ready);
+                    let start_gate = Arc::clone(&start_gate);
                     scope.spawn(move || -> Result<(), String> {
-                        barrier.wait();
+                        ready.wait();
+                        start_gate.wait();
                         for _ in 0..CONCURRENT_ITERATIONS_PER_THREAD {
                             let resource = class_path
                                 .find_class(&BinaryName::from_internal(name))
@@ -192,8 +195,7 @@ fn run() -> Result<(), String> {
                     })
                 })
                 .collect::<Vec<_>>();
-            barrier.wait();
-            let start = Instant::now();
+            let start = start_timed_workers(&ready, &start_gate, || {});
             for reader in readers {
                 reader
                     .join()
@@ -215,6 +217,54 @@ fn run() -> Result<(), String> {
         concurrent_samples.join(",")
     );
     Ok(())
+}
+
+fn start_timed_workers(
+    ready: &Barrier,
+    start_gate: &Barrier,
+    before_release: impl FnOnce(),
+) -> Instant {
+    ready.wait();
+    let start = Instant::now();
+    before_release();
+    start_gate.wait();
+    start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start_timed_workers;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn coordinator_delay_before_releasing_workers_is_included_in_timing() {
+        let ready = Arc::new(Barrier::new(2));
+        let start_gate = Arc::new(Barrier::new(2));
+        let did_work = Arc::new(AtomicBool::new(false));
+
+        thread::scope(|scope| {
+            let worker_ready = Arc::clone(&ready);
+            let worker_start_gate = Arc::clone(&start_gate);
+            let worker_did_work = Arc::clone(&did_work);
+            let worker = scope.spawn(move || {
+                worker_ready.wait();
+                worker_start_gate.wait();
+                worker_did_work.store(true, Ordering::SeqCst);
+            });
+
+            let start = start_timed_workers(&ready, &start_gate, || {
+                thread::sleep(Duration::from_millis(20));
+                assert!(!did_work.load(Ordering::SeqCst));
+            });
+            worker.join().expect("worker should complete");
+
+            assert!(did_work.load(Ordering::SeqCst));
+            assert!(start.elapsed() >= Duration::from_millis(20));
+        });
+    }
 }
 
 fn peak_rss_kib() -> Result<u64, String> {

@@ -23,8 +23,8 @@ runtime path.
 
 | Metric | Before #1160 | After #1160 | Change |
 | --- | ---: | ---: | ---: |
-| `JdkClassPath::new` (ms) | 43.534 / 151.845 | 17.535 / 19.233 | median −59.7%; p95 −87.3% |
-| Peak process RSS (KiB) | 97,670 / 97,752 | 13,184 / 13,300 | median −86.5% |
+| `JdkClassPath::new` (ms) | 42.239 / 154.757 | 18.037 / 18.721 | median −57.3%; p95 −87.9% |
+| Peak process RSS (KiB) | 97,684 / 97,824 | 13,198 / 13,300 | median −86.5% |
 | Open FDs after init | 4 / 4 | 73 / 73 | +69 |
 | Open FDs after workload | 4 / 4 | 73 / 73 | +69 |
 
@@ -43,12 +43,12 @@ imply a decompressed-class cache.
 
 | Class | First before (median / p95 ms) | First after (median / p95 ms) | Repeated before (median / p95 ms per op) | Repeated after (median / p95 ms per op) |
 | --- | ---: | ---: | ---: | ---: |
-| `java/lang/Object` (`java.base`) | 0.168 / 0.175 | 0.164 / 0.170 | 0.152 / 0.159 | 0.152 / 0.154 |
-| `java/lang/String` (`java.base`) | 2.150 / 2.241 | 2.117 / 2.199 | 2.130 / 2.291 | 2.101 / 2.112 |
-| `java/util/ArrayList` (`java.base`) | 0.787 / 0.868 | 0.770 / 0.802 | 0.783 / 1.021 | 0.773 / 0.777 |
-| `java/util/concurrent/CompletableFuture` (`java.base`) | 1.591 / 2.408 | 1.580 / 1.596 | 1.585 / 2.007 | 1.565 / 1.579 |
-| `java/net/http/HttpClient` (`java.net.http`) | 0.191 / 0.199 | 0.189 / 0.198 | 0.179 / 0.196 | 0.178 / 0.178 |
-| Missing class | 0.036 / 0.042 | 0.032 / 0.036 | 0.00513 / 0.00554 | 0.00502 / 0.00511 |
+| `java/lang/Object` (`java.base`) | 0.163 / 0.172 | 0.165 / 0.178 | 0.150 / 0.155 | 0.155 / 0.157 |
+| `java/lang/String` (`java.base`) | 2.155 / 2.178 | 2.141 / 2.196 | 2.104 / 2.117 | 2.123 / 2.129 |
+| `java/util/ArrayList` (`java.base`) | 0.781 / 0.798 | 0.790 / 0.811 | 0.771 / 0.775 | 0.779 / 0.786 |
+| `java/util/concurrent/CompletableFuture` (`java.base`) | 1.570 / 2.024 | 1.604 / 1.658 | 1.559 / 1.571 | 1.574 / 1.588 |
+| `java/net/http/HttpClient` (`java.net.http`) | 0.185 / 0.192 | 0.189 / 0.203 | 0.176 / 0.177 | 0.179 / 0.182 |
+| Missing class | 0.036 / 0.039 | 0.033 / 0.038 | 0.00503 / 0.00509 | 0.00503 / 0.00528 |
 
 The synchronized concurrent workload starts four workers together; each does
 250 lookups of an early-module class, a later-module class, or a missing class.
@@ -57,21 +57,24 @@ median / p95 across the 10 process samples:
 
 | Concurrent lookup | Before (µs/op) | After (µs/op) |
 | --- | ---: | ---: |
-| `java/lang/Object` | 40.291 / 60.313 | 40.278 / 45.989 |
-| `java/net/http/HttpClient` | 47.654 / 65.490 | 47.111 / 48.439 |
-| Missing class | 2.407 / 2.885 | 2.298 / 3.200 |
+| `java/lang/Object` | 40.007 / 40.097 | 40.723 / 42.208 |
+| `java/net/http/HttpClient` | 46.344 / 46.889 | 47.592 / 48.598 |
+| Missing class | 2.319 / 2.721 | 2.731 / 3.069 |
 
-Concurrent negative lookup p95 increased by 0.315 µs/op, while remaining below
-0.004 ms/op. No concurrent scenario shows a material latency regression.
+Concurrent negative lookup p95 increased by 0.348 µs/op, while remaining below
+0.004 ms/op. No concurrent scenario shows a material latency regression. The
+coordinator waits until all workers are ready, records the start time, then
+opens a separate start gate; time spent by the coordinator before opening that
+gate is therefore included, and workers cannot run early.
 
 Package-evidence queries avoid reading or inflating class payloads. Values are
 microseconds per operation, median / p95 across process samples:
 
 | Query | Before (µs/op) | After (µs/op) |
 | --- | ---: | ---: |
-| Direct `java/lang` | 0.156 / 0.359 | 0.071 / 0.255 |
-| Descendant `java/net/http` | 0.393 / 0.412 | 0.384 / 0.399 |
-| Descendant `java/util/concurrent` | 0.064 / 0.069 | 0.062 / 0.066 |
+| Direct `java/lang` | 0.094 / 0.208 | 0.116 / 0.189 |
+| Descendant `java/net/http` | 0.384 / 0.402 | 0.385 / 0.412 |
+| Descendant `java/util/concurrent` | 0.062 / 0.062 | 0.062 / 0.064 |
 
 ## Method and environment
 
@@ -85,7 +88,7 @@ microseconds per operation, median / p95 across process samples:
   locally under ignored `target/`; no global SDKMAN setting was changed.
 - Each sample is a new process. Linux's page cache was not flushed, so these
   are not cold-cache measurements. The before cohort's first initialization
-  sample was 151.845 ms; its other nine ranged from 42.547 to 52.880 ms. This
+  sample was 154.757 ms; its other nine ranged from 41.132 to 43.467 ms. This
   sample is retained in the raw results and accounts for the before p95. It is
   consistent with host/cache variance; the earlier #1157 baseline independently
   reported 39.453 / 41.067 ms init median / p95. No sample was discarded.
@@ -101,7 +104,7 @@ The original #1157 baseline remains at
 This issue reran the same workload with concurrent lookups and descriptor
 counts added. Both builds used the same
 [`jdk_classpath_benchmark.rs`](../crates/dotty-classloader/examples/jdk_classpath_benchmark.rs)
-source (SHA-256 `93d95d3b8c251b93736944037f8072d97c3ccf81755a00dda9bd9cfe46f70de4`).
+source (SHA-256 `1c0acdb6b90395180a6ff119f45b26cc5fddce6aa9504004a69f649dcb905162`).
 
 The before JMOD implementation is commit
 `b5cb2d5b832ba40c6d2e5d9694c8f772f78401cc`; after is merge commit
