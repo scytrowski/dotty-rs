@@ -18,15 +18,9 @@ pub(in crate::typer) enum LexicalPackageCandidateOrigin {
 
 /// Whether candidate enumeration searches source package contexts or explicit
 /// `_root_` qualification.
-// Root-qualified enumeration remains unused until import resolution consumes
-// this contract in the following increment.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::typer) enum LexicalPackageSearch {
     Relative,
-    /// Search only the actual current package and then canonical root. This
-    /// excludes enclosing contexts represented by dotted package clauses.
-    CurrentPackageThenRoot,
     RootQualified,
 }
 
@@ -59,9 +53,6 @@ impl SourceTyper<'_> {
     ///
     /// This is intentionally separate from qualifier resolution: calling it
     /// does not perform lookup, load symbols, or mutate semantic state.
-    // Kept separate from resolution until the follow-up increment consumes
-    // this contract; #1168 deliberately leaves import behavior unchanged.
-    #[allow(dead_code)]
     pub(in crate::typer) fn lexical_package_candidates(
         &self,
         context: SourceContextId,
@@ -78,10 +69,7 @@ impl SourceTyper<'_> {
         let mut candidates = Vec::new();
         let mut seen_packages = HashSet::new();
 
-        if matches!(
-            search,
-            LexicalPackageSearch::Relative | LexicalPackageSearch::CurrentPackageThenRoot
-        ) {
+        if search == LexicalPackageSearch::Relative {
             let context_limit = self.index.source_context_count();
             let mut seen_contexts = HashSet::new();
             let mut current = Some(context);
@@ -121,9 +109,6 @@ impl SourceTyper<'_> {
                     if seen_packages.insert(candidate.package) {
                         candidates.push(candidate);
                     }
-                    if search == LexicalPackageSearch::CurrentPackageThenRoot {
-                        break;
-                    }
                     origin = LexicalPackageCandidateOrigin::EnclosingPackage;
                 }
                 current = source_context.parent;
@@ -131,7 +116,7 @@ impl SourceTyper<'_> {
         }
 
         let Some(root) = self.packages.get::<&str>(&[]) else {
-            if search == LexicalPackageSearch::CurrentPackageThenRoot {
+            if search == LexicalPackageSearch::Relative {
                 return Ok(candidates);
             }
             return Err(self.invalid_package_candidate(
@@ -166,7 +151,7 @@ impl SourceTyper<'_> {
         let mut seen = HashSet::new();
         let mut current = Some(package);
         let canonical_root = self.packages.get::<&str>(&[]);
-        if canonical_root.is_none() && origin != LexicalPackageCandidateOrigin::CurrentPackage {
+        if canonical_root.is_none() && origin == LexicalPackageCandidateOrigin::Root {
             return Err(self.invalid_package_candidate(
                 tree_index,
                 Some(source_context.index()),
@@ -232,7 +217,7 @@ impl SourceTyper<'_> {
             current = entry.owner;
         }
         reversed_chain.reverse();
-        if origin == LexicalPackageCandidateOrigin::CurrentPackage
+        if origin != LexicalPackageCandidateOrigin::Root
             && (!self.store.scopes.contains(context_scope)
                 || self.store.scopes.get(context_scope).owner != Some(package))
         {
@@ -247,7 +232,7 @@ impl SourceTyper<'_> {
         for (symbol, segment) in &reversed_chain {
             path.push(segment.clone());
             let Some(registered) = self.packages.get(&path) else {
-                if origin == LexicalPackageCandidateOrigin::CurrentPackage {
+                if origin != LexicalPackageCandidateOrigin::Root {
                     continue;
                 }
                 return Err(self.invalid_package_candidate(
@@ -287,9 +272,7 @@ impl SourceTyper<'_> {
                 }
                 registered_scope
             }
-            (None, None) if origin == LexicalPackageCandidateOrigin::CurrentPackage => {
-                context_scope
-            }
+            (None, None) if origin != LexicalPackageCandidateOrigin::Root => context_scope,
             (None, None) => {
                 return Err(self.invalid_package_candidate(
                     tree_index,
@@ -360,6 +343,9 @@ impl SourceTyper<'_> {
         };
         match &node.kind {
             TreeKind::Ident(ident) => {
+                if self.store.names.resolve(ident.name.text()) == "_root_" {
+                    return self.resolve_root_package(context, tree_index).map(Some);
+                }
                 if let Some(expression_context) = expression_context {
                     match self.expression_term_candidates(
                         ident.name,
@@ -384,12 +370,7 @@ impl SourceTyper<'_> {
                 {
                     return Ok(Some(symbol));
                 }
-                let segment = self.store.names.resolve(ident.name.text()).to_owned();
-                if segment == "_root_" {
-                    self.resolve_external_package(&[segment], tree_index)
-                } else {
-                    self.resolve_relative_import_segment(ident.name, context, tree_index, position)
-                }
+                self.resolve_relative_import_segment(ident.name, context, tree_index, position)
             }
             TreeKind::Select(select) => {
                 let Some(qualifier) = self.resolve_qualifier_symbol_with_expression_context(
@@ -447,10 +428,10 @@ impl SourceTyper<'_> {
         }
     }
 
-    /// Resolves the first segment of an unrooted import qualifier. The source
-    /// package is probed before the root package; enclosing package contexts
-    /// are deliberately excluded because a dotted package clause does not
-    /// make its ancestors lexical import scopes.
+    /// Resolves the first segment of an unrooted import qualifier. The actual
+    /// current package is probed first, followed by genuinely enclosing source
+    /// package contexts, then the canonical root. A dotted package path does
+    /// not create source contexts for its textual parent segments.
     fn resolve_relative_import_segment(
         &mut self,
         name: dotty_core::Name,
@@ -458,16 +439,15 @@ impl SourceTyper<'_> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
-        let candidates = self.lexical_package_candidates(
-            context,
-            LexicalPackageSearch::CurrentPackageThenRoot,
-            tree_index,
-        )?;
+        let candidates =
+            self.lexical_package_candidates(context, LexicalPackageSearch::Relative, tree_index)?;
         let mut has_canonical_root = false;
         for candidate in candidates.into_iter().filter(|candidate| {
             matches!(
                 candidate.origin,
-                LexicalPackageCandidateOrigin::CurrentPackage | LexicalPackageCandidateOrigin::Root
+                LexicalPackageCandidateOrigin::CurrentPackage
+                    | LexicalPackageCandidateOrigin::EnclosingPackage
+                    | LexicalPackageCandidateOrigin::Root
             )
         }) {
             has_canonical_root |= candidate.origin == LexicalPackageCandidateOrigin::Root;
@@ -490,6 +470,25 @@ impl SourceTyper<'_> {
             return self.resolve_external_package(&root_qualified, tree_index);
         }
         Ok(None)
+    }
+
+    fn resolve_root_package(
+        &self,
+        context: SourceContextId,
+        tree_index: u32,
+    ) -> Result<SymbolId, TyperError> {
+        self.lexical_package_candidates(context, LexicalPackageSearch::RootQualified, tree_index)?
+            .into_iter()
+            .find(|candidate| candidate.origin == LexicalPackageCandidateOrigin::Root)
+            .map(|candidate| candidate.package)
+            .ok_or_else(|| {
+                self.invalid_package_candidate(
+                    tree_index,
+                    Some(context.index()),
+                    None,
+                    "canonical root package is absent from the package registry",
+                )
+            })
     }
 
     pub(in crate::typer) fn resolve_external_package(
@@ -1017,6 +1016,9 @@ impl SourceTyper<'_> {
         let contexts = self.source_context_chain(context, import_tree_index)?;
         for context_id in &contexts {
             let source_context = self.index.source_context(*context_id);
+            if self.store.symbols.get(source_context.owner).kind == SymbolKind::Package {
+                continue;
+            }
             if let Some(symbol) = self.unique_scoped_symbol(
                 source_context.lexical_scope,
                 name,
