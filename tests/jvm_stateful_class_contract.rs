@@ -15,6 +15,48 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
 use dotty_typer::SourceTyper;
+use std::fs;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn require_jdk21_or_skip() -> bool {
+    let unavailable = ["java", "javac"]
+        .into_iter()
+        .filter_map(|tool| match jdk_tool_major_version(tool) {
+            Some(major) if major >= 21 => None,
+            Some(major) => Some(format!("{tool} {major} (requires JDK 21+)")),
+            None => Some(format!("{tool} (missing or version unavailable)")),
+        })
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() {
+        return true;
+    }
+
+    let message = format!(
+        "mutable field assignment JVM harness requires java and javac from JDK 21+ on PATH; unavailable: {}",
+        unavailable.join(", ")
+    );
+    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        panic!("{message}");
+    }
+    eprintln!("skipping optional mutable field assignment JVM harness: {message}");
+    false
+}
+
+fn jdk_tool_major_version(tool: &str) -> Option<u32> {
+    let output = Command::new(tool).arg("-version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    version_text
+        .split(|character: char| !character.is_ascii_digit())
+        .find_map(|component| component.parse::<u32>().ok())
+}
 
 fn with_source<R>(
     source_text: &str,
@@ -913,6 +955,446 @@ fn real_typed_current_instance_field_reads_lower_to_aload_getfield() {
                 assert_eq!(field, expected_field);
                 assert_eq!(descriptor, expected_descriptor);
             }
+        },
+    );
+}
+
+#[test]
+fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() {
+    with_source(
+        "class State { private var current: Int = 0; private var active: Boolean = false; private val fixed: Int = 1; def set(current: Int): Unit = { this.current = current }; def setUnqualified(value: Int): Unit = { current = value }; def setActive(value: Boolean): Unit = { this.active = value }; def increment(): Unit = { current = current + 1 }; def stop(): Unit = { current = { return } }; def localShadow(): Unit = { var current = 1; current = 2 }; def branch(flag: Boolean): Unit = if (flag) { current = 3 } else (); def loop(flag: Boolean): Unit = while (flag) { current = 4 }; def external(other: State): Unit = { other.current = 5 } }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "State");
+            typer.complete_symbol(class).unwrap();
+
+            let mut fields = Vec::new();
+            for name in ["current", "active", "fixed"] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(initializer),
+                });
+            }
+
+            let method_names = [
+                "set",
+                "setUnqualified",
+                "setActive",
+                "increment",
+                "stop",
+                "localShadow",
+                "branch",
+                "loop",
+            ];
+            let mut methods = Vec::new();
+            let mut typed_bodies = Vec::new();
+            for name in method_names {
+                let (method, rhs, parameters) = ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::DefDef(definition) = &node.kind else {
+                            return None;
+                        };
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            != name
+                        {
+                            return None;
+                        }
+                        let method = index.symbol_at(source, tree)?;
+                        if typer.store().symbols.get(method).owner != Some(class) {
+                            return None;
+                        }
+                        let rhs = definition.rhs?;
+                        let parameters = definition
+                            .value_param_clauses
+                            .iter()
+                            .flatten()
+                            .map(|parameter| index.symbol_at(source, *parameter))
+                            .collect::<Option<Vec<_>>>()?;
+                        Some((method, rhs, parameters))
+                    })
+                    .unwrap_or_else(|| panic!("missing source method {name}"));
+                typer.complete_symbol(method).unwrap();
+                let context = typer.expression_context_for(method).unwrap();
+                let body = typer.type_expression(rhs, context).unwrap();
+                let locals = if name == "localShadow" {
+                    let TreeKind::Block(block) = &ast.get(rhs).kind else {
+                        panic!("localShadow should have a block body");
+                    };
+                    let declaration = block
+                        .stats
+                        .iter()
+                        .copied()
+                        .find(|tree| matches!(ast.get(*tree).kind, TreeKind::ValDef(_)))
+                        .unwrap();
+                    let binding = typer
+                        .typed_local_binding_at(source, declaration)
+                        .expect("local shadow should have a canonical typed binding");
+                    vec![dotty_jvm::JvmLocalBinding {
+                        declaration: binding.declaration(),
+                        symbol: binding.symbol(),
+                        mutable: typer
+                            .store()
+                            .symbols
+                            .get(binding.symbol())
+                            .flags
+                            .contains(SymbolFlags::MUTABLE),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                methods.push(JvmMethodPlan {
+                    method,
+                    parameters,
+                    locals,
+                    body: Some(body),
+                });
+                typed_bodies.push((name, method, body));
+            }
+
+            let (external_method, external_rhs) = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    (typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == "external")
+                        .then_some((index.symbol_at(source, tree)?, definition.rhs?))
+                })
+                .expect("missing external receiver method");
+            typer.complete_symbol(external_method).unwrap();
+            let external_context = typer.expression_context_for(external_method).unwrap();
+            let external_body = typer
+                .type_expression(external_rhs, external_context)
+                .unwrap();
+
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods,
+                    fields: fields.clone(),
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            let typed_body = |name: &str| {
+                typed_bodies
+                    .iter()
+                    .find(|(candidate, _, _)| *candidate == name)
+                    .copied()
+                    .unwrap()
+            };
+            let encode_body = |name: &str, descriptor: &str| {
+                let (_, method, _) = typed_body(name);
+                let code = unit.lower_method_body(class, method, definitions).unwrap();
+                let mut builder = ClassFileBuilder::new(
+                    "State",
+                    ClassFileVersion {
+                        major: 65,
+                        minor: 0,
+                    },
+                )
+                .unwrap();
+                builder
+                    .add_field(
+                        "current",
+                        "I",
+                        dotty_classfile::access_flags::FieldAccessFlags(
+                            dotty_classfile::access_flags::ACC_PRIVATE,
+                        ),
+                    )
+                    .unwrap();
+                builder
+                    .add_field(
+                        "active",
+                        "Z",
+                        dotty_classfile::access_flags::FieldAccessFlags(
+                            dotty_classfile::access_flags::ACC_PRIVATE,
+                        ),
+                    )
+                    .unwrap();
+                builder
+                    .add_field(
+                        "fixed",
+                        "I",
+                        dotty_classfile::access_flags::FieldAccessFlags(
+                            dotty_classfile::access_flags::ACC_PRIVATE
+                                | dotty_classfile::access_flags::ACC_FINAL,
+                        ),
+                    )
+                    .unwrap();
+                builder
+                    .add_prebuilt_code_method(name, descriptor, MethodAccessFlags(ACC_PUBLIC), code)
+                    .unwrap();
+                let mut constructor = dotty_classfile::bytecode::CodeBuilder::new();
+                constructor
+                    .aload(0)
+                    .and_then(|code| code.invokespecial("java/lang/Object", "<init>", "()V"))
+                    .and_then(|code| code.return_void())
+                    .unwrap();
+                builder
+                    .add_prebuilt_code_method(
+                        "<init>",
+                        "()V",
+                        MethodAccessFlags(ACC_PUBLIC),
+                        constructor,
+                    )
+                    .unwrap();
+                let bytes = builder.encode().unwrap();
+                let mut reader = Reader::new(&bytes);
+                let class_file =
+                    dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+                let code = class_file.methods[0]
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        dotty_classfile::attribute::Attribute::Code(code) => {
+                            Some(code.code.to_vec())
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                let field_ref = code
+                    .iter()
+                    .position(|opcode| *opcode == 0xb5)
+                    .map(|putfield| {
+                        let index = u16::from_be_bytes([code[putfield + 1], code[putfield + 2]]);
+                        let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                            class_index,
+                            name_and_type_index,
+                        } = class_file
+                            .constant_pool
+                            .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
+                            .unwrap()
+                        else {
+                            panic!("putfield must reference Fieldref");
+                        };
+                        let (field, descriptor) = class_file
+                            .constant_pool
+                            .name_and_type(*name_and_type_index)
+                            .unwrap();
+                        (
+                            class_file
+                                .constant_pool
+                                .class_name(*class_index)
+                                .unwrap()
+                                .to_owned(),
+                            field.to_owned(),
+                            descriptor.to_owned(),
+                        )
+                    });
+                (code, field_ref, bytes)
+            };
+
+            for (name, descriptor, field, field_descriptor) in [
+                ("set", "(I)V", "current", "I"),
+                ("setUnqualified", "(I)V", "current", "I"),
+                ("setActive", "(Z)V", "active", "Z"),
+            ] {
+                let (code, field_ref, _) = encode_body(name, descriptor);
+                assert_eq!(
+                    code[0], 0x2a,
+                    "aload_0 evaluates the receiver first for {name}"
+                );
+                let rhs_load = code
+                    .iter()
+                    .position(|opcode| *opcode == 0x1b)
+                    .expect("parameter is loaded for the RHS");
+                let receiver_reload = code
+                    .iter()
+                    .rposition(|opcode| *opcode == 0x2c)
+                    .expect("saved receiver is reloaded after the RHS");
+                assert!(
+                    rhs_load < receiver_reload,
+                    "RHS follows receiver for {name}"
+                );
+                let putfield = code.iter().position(|opcode| *opcode == 0xb5).unwrap();
+                assert_eq!(code.iter().filter(|opcode| **opcode == 0xb5).count(), 1);
+                assert!(!code.contains(&0xb4), "LHS is not evaluated as a read");
+                assert_eq!(code[putfield + 3], 0xb1, "Unit return for {name}");
+                assert_eq!(
+                    field_ref,
+                    Some((
+                        "State".to_owned(),
+                        field.to_owned(),
+                        field_descriptor.to_owned()
+                    ))
+                );
+            }
+
+            let (increment_code, increment_field, _) = encode_body("increment", "()V");
+            assert_eq!(increment_code[0], 0x2a, "field receiver is loaded first");
+            assert!(
+                increment_code.contains(&0xb4),
+                "RHS reads the current field"
+            );
+            assert!(
+                increment_code.contains(&0x60),
+                "RHS adds one before storing"
+            );
+            assert!(
+                increment_code.contains(&0xb5),
+                "composite assignment stores once"
+            );
+            assert_eq!(
+                increment_code
+                    .iter()
+                    .filter(|opcode| **opcode == 0xb5)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                increment_field,
+                Some(("State".to_owned(), "current".to_owned(), "I".to_owned()))
+            );
+
+            let (local_code, local_field, _) = encode_body("localShadow", "()V");
+            assert!(!local_code.contains(&0xb5), "shadowing local uses istore");
+            assert!(
+                !local_code.contains(&0xb4),
+                "shadowing local does not read field"
+            );
+            assert!(local_code.contains(&0x3c), "local var stores to its slot");
+            assert!(local_field.is_none());
+
+            let (stop_code, stop_field, _) = encode_body("stop", "()V");
+            assert!(stop_code.contains(&0xb1), "local return is encoded");
+            assert!(!stop_code.contains(&0xb5), "diverging RHS does not store");
+            assert!(stop_field.is_none());
+
+            if require_jdk21_or_skip() {
+                for (name, descriptor, harness_body) in [
+                    (
+                        "set",
+                        "(I)V",
+                        "state.set(41); java.lang.reflect.Field field = State.class.getDeclaredField(\"current\"); field.setAccessible(true); if (field.getInt(state) != 41) throw new AssertionError(\"Int putfield\");",
+                    ),
+                    (
+                        "setActive",
+                        "(Z)V",
+                        "state.setActive(true); java.lang.reflect.Field field = State.class.getDeclaredField(\"active\"); field.setAccessible(true); if (!field.getBoolean(state)) throw new AssertionError(\"Boolean putfield\");",
+                    ),
+                    (
+                        "increment",
+                        "()V",
+                        "state.increment(); java.lang.reflect.Field field = State.class.getDeclaredField(\"current\"); field.setAccessible(true); if (field.getInt(state) != 1) throw new AssertionError(\"compound putfield\");",
+                    ),
+                ] {
+                    let (_, _, class_bytes) = encode_body(name, descriptor);
+                    let nonce = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos();
+                    let output = std::env::temp_dir().join(format!(
+                        "dotty-jvm-field-write-{}-{nonce}",
+                        std::process::id()
+                    ));
+                    fs::create_dir_all(&output).unwrap();
+                    fs::write(output.join("State.class"), class_bytes).unwrap();
+                    let harness = output.join("WriteHarness.java");
+                    fs::write(
+                        &harness,
+                        format!(
+                            "public final class WriteHarness {{ public static void main(String[] args) throws Exception {{ State state = new State(); {harness_body} }} }}\n"
+                        ),
+                    )
+                    .unwrap();
+                    let javac = Command::new("javac")
+                        .args(["-classpath", output.to_str().unwrap(), "-d"])
+                        .arg(output.to_str().unwrap())
+                        .arg(&harness)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        javac.status.success(),
+                        "javac rejected {name} harness\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&javac.stdout),
+                        String::from_utf8_lossy(&javac.stderr)
+                    );
+                    let java = Command::new("java")
+                        .args([
+                            "-Xverify:all",
+                            "-classpath",
+                            output.to_str().unwrap(),
+                            "WriteHarness",
+                        ])
+                        .output()
+                        .unwrap();
+                    assert!(
+                        java.status.success(),
+                        "java -Xverify:all rejected {name}\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&java.stdout),
+                        String::from_utf8_lossy(&java.stderr)
+                    );
+                    fs::remove_dir_all(output).unwrap();
+                }
+            }
+
+            let (_, branch_method, _) = typed_body("branch");
+            assert!(matches!(
+                unit.lower_method_body(class, branch_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::JvmFieldWriteInUnsupportedControlFlow {
+                    method,
+                    field,
+                    ..
+                }) if method == branch_method && field == fields[0].field
+            ));
+
+            let (_, loop_method, _) = typed_body("loop");
+            assert!(matches!(
+                unit.lower_method_body(class, loop_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::JvmFieldWriteInUnsupportedControlFlow {
+                    method,
+                    field,
+                    ..
+                }) if method == loop_method && field == fields[0].field
+            ));
+
+            let (_, setter_method, _) = typed_body("setUnqualified");
+            let mut no_fields = unit.classes[0].clone();
+            no_fields.fields.clear();
+            let unplanned = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![no_fields],
+            };
+            assert!(matches!(
+                unplanned.lower_method_body(class, setter_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::FieldNotInJvmPlan { field, .. })
+                    if field == fields[0].field
+            ));
+
+            let mut external_method_plan = unit.classes[0].methods[1].clone();
+            external_method_plan.body = Some(external_body);
+            let mut external_class_plan = unit.classes[0].clone();
+            external_class_plan.methods = vec![external_method_plan];
+            let external = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![external_class_plan],
+            };
+            assert!(matches!(
+                external.lower_method_body(class, setter_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmFieldReceiver { field, .. })
+                    if field == fields[0].field
+            ));
         },
     );
 }

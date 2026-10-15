@@ -147,6 +147,7 @@ struct JvmLoweringContext<'a> {
     call_context: Option<(&'a JvmCompilationUnit<'a>, &'a JvmClassMetadata)>,
     control_flow_depth: usize,
     first_field_read: Option<(TreeId<Typed>, SymbolId)>,
+    first_field_write: Option<(TreeId<Typed>, SymbolId)>,
     node_visits: usize,
 }
 
@@ -167,6 +168,7 @@ impl<'a> JvmLoweringContext<'a> {
             call_context: None,
             control_flow_depth: 0,
             first_field_read: None,
+            first_field_write: None,
             node_visits: 0,
         }
     }
@@ -251,7 +253,7 @@ pub(super) fn lower_method_body(
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
-    validate_field_read_control_flow(&context, &code)?;
+    validate_field_access_control_flow(&context, &code)?;
     Ok(code)
 }
 
@@ -270,22 +272,29 @@ pub(super) fn lower_planned_method_body(
     context.call_context = Some((unit, class));
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
-    validate_field_read_control_flow(&context, &code)?;
+    validate_field_access_control_flow(&context, &code)?;
     Ok(code)
 }
 
-fn validate_field_read_control_flow(
+fn validate_field_access_control_flow(
     context: &JvmLoweringContext<'_>,
     code: &CodeBuilder,
 ) -> Result<(), JvmCodegenError> {
-    if code.has_branches()
-        && let Some((tree, field)) = context.first_field_read
-    {
-        return Err(JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
-            tree,
-            method: context.method.symbol(),
-            field,
-        });
+    if code.has_branches() {
+        if let Some((tree, field)) = context.first_field_write {
+            return Err(JvmCodegenError::JvmFieldWriteInUnsupportedControlFlow {
+                tree,
+                method: context.method.symbol(),
+                field,
+            });
+        }
+        if let Some((tree, field)) = context.first_field_read {
+            return Err(JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
+                tree,
+                method: context.method.symbol(),
+                field,
+            });
+        }
     }
     Ok(())
 }
@@ -741,24 +750,39 @@ fn emit_assignment(
     }
 
     context.visit(lhs, depth + 1)?;
-    let symbol = match context.tree(lhs)? {
+    let (symbol, receiver) = match context.tree(lhs)? {
         Tree {
             kind: TreeKind::Ident(_),
             ty,
             ..
-        } => match context.store.types.try_get(*ty) {
-            Some(Type::TermRef {
-                target: TermRefTarget::Symbol(symbol),
-                ..
-            }) => *symbol,
-            _ => {
-                return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs });
-            }
-        },
-        _ => {
-            return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs });
-        }
+        } => (term_ref_symbol(context, tree_id, lhs, *ty)?, None),
+        Tree {
+            kind: TreeKind::Select(select),
+            ty,
+            ..
+        } => (
+            term_ref_symbol(context, tree_id, lhs, *ty)?,
+            Some(select.qualifier),
+        ),
+        _ => return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs }),
     };
+    if !context.store.symbols.contains(symbol) {
+        return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs });
+    }
+    if context.store.symbols.get(symbol).kind == dotty_core::symbols::SymbolKind::Field {
+        return emit_field_assignment(
+            context,
+            tree_id,
+            lhs,
+            FieldAssignmentTarget { symbol, receiver },
+            rhs,
+            code,
+            depth,
+        );
+    }
+    if receiver.is_some() {
+        return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs });
+    }
     let Some(local) = local_reference_slot(context, lhs, symbol)? else {
         return Err(JvmCodegenError::InvalidAssignmentTarget { tree: tree_id, lhs });
     };
@@ -803,6 +827,215 @@ fn emit_assignment(
             tree: tree_id,
             symbol,
             expected: local.ty(),
+            found: public_flow(found),
+        }),
+    }
+}
+
+fn term_ref_symbol(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    lhs: TreeId<Typed>,
+    ty: TypeId,
+) -> Result<SymbolId, JvmCodegenError> {
+    match context.store.types.try_get(ty) {
+        Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) => Ok(*symbol),
+        _ => Err(JvmCodegenError::InvalidAssignmentTarget { tree, lhs }),
+    }
+}
+
+struct FieldAssignmentTarget {
+    symbol: SymbolId,
+    receiver: Option<TreeId<Typed>>,
+}
+
+fn emit_field_assignment(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    lhs: TreeId<Typed>,
+    target: FieldAssignmentTarget,
+    rhs: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let FieldAssignmentTarget {
+        symbol: field,
+        receiver,
+    } = target;
+    let Some((_, class)) = context.call_context else {
+        return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    };
+    let class_symbol = class.identity().symbol();
+    if !class
+        .methods()
+        .iter()
+        .any(|method| method.symbol() == context.method.symbol())
+    {
+        return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    }
+    if context.control_flow_depth > 0 {
+        return Err(JvmCodegenError::JvmFieldWriteInUnsupportedControlFlow {
+            tree: tree_id,
+            method: context.method.symbol(),
+            field,
+        });
+    }
+
+    let field_symbol = context
+        .store
+        .symbols
+        .contains(field)
+        .then(|| context.store.symbols.get(field))
+        .ok_or(JvmCodegenError::UnknownJvmFieldReference { tree: lhs, field })?;
+    if field_symbol.kind != dotty_core::symbols::SymbolKind::Field {
+        return Err(JvmCodegenError::FieldNotInJvmPlan {
+            tree: lhs,
+            class: class_symbol,
+            field,
+        });
+    }
+    if field_symbol.owner != Some(class_symbol) {
+        return Err(JvmCodegenError::WrongOwner {
+            symbol: field,
+            expected: class_symbol,
+            actual: field_symbol.owner,
+        });
+    }
+    let field_metadata = class
+        .fields()
+        .iter()
+        .find(|candidate| candidate.symbol() == field)
+        .ok_or(JvmCodegenError::FieldNotInJvmPlan {
+            tree: lhs,
+            class: class_symbol,
+            field,
+        })?;
+
+    let reference_prefix = match context.store.types.try_get(context.tree(lhs)?.ty) {
+        Some(Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(target),
+        }) if *target == field => *prefix,
+        _ => {
+            return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                tree: lhs,
+                field,
+                class: class_symbol,
+            });
+        }
+    };
+    if let Some(receiver) = receiver {
+        context.visit(receiver, depth + 1)?;
+        let receiver_tree = context.tree(receiver)?;
+        let valid_receiver =
+            matches!(
+                receiver_tree.kind,
+                TreeKind::This(dotty_core::ast::This { qual: None })
+            ) && is_current_this_type(context.store, receiver_tree.ty, class_symbol);
+        if !valid_receiver {
+            return Err(JvmCodegenError::UnsupportedJvmFieldReceiver { tree: lhs, field });
+        }
+        if reference_prefix != receiver_tree.ty {
+            return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                tree: lhs,
+                field,
+                class: class_symbol,
+            });
+        }
+    } else if !is_current_this_type(context.store, reference_prefix, class_symbol) {
+        return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+            tree: lhs,
+            field,
+            class: class_symbol,
+        });
+    }
+
+    let symbol_mutable = field_symbol
+        .flags
+        .contains(dotty_core::symbols::SymbolFlags::MUTABLE);
+    let metadata_mutable = !field_metadata.access_flags().is_final();
+    if symbol_mutable != metadata_mutable {
+        return Err(JvmCodegenError::JvmFieldMutabilityMismatch {
+            tree: lhs,
+            field,
+            symbol_mutable,
+            metadata_mutable,
+        });
+    }
+    if !symbol_mutable {
+        return Err(JvmCodegenError::ImmutableFieldAssignment {
+            tree: tree_id,
+            field,
+        });
+    }
+
+    let field_type = match context.store.symbols.info(field) {
+        SymbolInfo::Complete(ty) => crate::descriptor::primitive_semantic_value_type(
+            context.store,
+            context.definitions,
+            field,
+            *ty,
+        )?,
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
+        }
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
+    };
+
+    context.first_field_write.get_or_insert((tree_id, field));
+    let Some(local_layout) = context.local_layout else {
+        return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    };
+    let receiver_slot = usize::from(local_layout.max_locals());
+    let value_slot = receiver_slot
+        .checked_add(1)
+        .filter(|slot| *slot < usize::from(u16::MAX))
+        .ok_or(JvmCodegenError::TooManyLocalSlots {
+            method: context.method.symbol(),
+        })?;
+    code.aload(0)
+        .and_then(|code| code.astore(receiver_slot))
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    match emit_expression(context, rhs, code, depth + 1)? {
+        Flow::Diverges => Ok(Flow::Diverges),
+        Flow::Value(found) if found == field_type => {
+            code.istore(value_slot)
+                .and_then(|code| code.aload(receiver_slot))
+                .and_then(|code| code.iload(value_slot))
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
+            code.putfield(
+                class.identity().internal_name(),
+                field_metadata.name(),
+                field_metadata.descriptor(),
+            )
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
+            Ok(Flow::Unit)
+        }
+        found => Err(JvmCodegenError::AssignmentValueFlowMismatch {
+            tree: tree_id,
+            symbol: field,
+            expected: field_type,
             found: public_flow(found),
         }),
     }

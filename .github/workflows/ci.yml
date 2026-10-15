@@ -87,3 +87,4 @@ jobs:
           cargo +stable test -p dotty-classfile --test classfile_jvm_encoder --locked -- --nocapture
           cargo +stable test -p dotty-jvm --lib --locked -- --nocapture
           cargo +stable test --test jvm_source_compilation --locked -- --nocapture
+          cargo +stable test --test jvm_stateful_class_contract --locked -- --nocapture

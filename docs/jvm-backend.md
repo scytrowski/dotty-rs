@@ -57,8 +57,9 @@ primitive type, then emits one `istore` and marks that symbol initialized.
 Assignments to already initialized mutable `Int` and `Boolean` locals inspect
 the exact local symbol without loading it, lower the RHS once, and emit one
 `istore`; the expression leaves Unit on the operand stack. Immutable locals,
-parameters, fields, selections, unsupported types, and locals not initialized
-on every reachable path are rejected.
+parameters, field selections outside the supported current-instance form,
+unsupported types, and locals not initialized on every reachable path are
+rejected.
 Missing bindings, missing initializers, unsupported types and modifiers,
 initializer type mismatches, and detectable reads before the store fail with
 typed errors. `PatDef` remains unsupported. Initialized
@@ -215,6 +216,16 @@ metadata-only API emits no fields. `emit_class` returns
 initialization plan claims `ImplicitNoArg`; field plans never imply a
 stateful-constructor proof. Existing empty-field plans keep their previous
 metadata and emitted class shape.
+
+Method-body lowering accepts assignments to planned mutable primitive fields
+that resolve canonically to the current class's unqualified field identifier or
+`this.field`. It validates field ownership, plan membership, mutability and
+primitive type, then emits `aload_0`, the RHS once, and `putfield`; a successful
+assignment completes with Unit and no value on the operand stack. Local
+assignments continue to use their canonical local slot and `istore`, including
+when a local shadows a field. Immutable fields, arbitrary receivers, and field
+writes in methods whose emitted code contains branches return typed errors.
+Whole-class field installation remains unsupported by `emit_class`.
 
 The backend treats each field/RHS pair as frontend proof. A `TreeId<Typed>`
 does not carry a session tag, so the producer must obtain the ID from the same

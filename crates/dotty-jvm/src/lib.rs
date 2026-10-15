@@ -515,6 +515,18 @@ pub enum JvmCodegenError {
         expected: JvmType,
         found: JvmExpressionFlow,
     },
+    /// The assignment target is an immutable current-instance field.
+    ImmutableFieldAssignment {
+        tree: TreeId<Typed>,
+        field: SymbolId,
+    },
+    /// Semantic mutability and validated JVM field metadata disagree.
+    JvmFieldMutabilityMismatch {
+        tree: TreeId<Typed>,
+        field: SymbolId,
+        symbol_mutable: bool,
+        metadata_mutable: bool,
+    },
     /// An initializer reads its local before the corresponding store.
     UninitializedLocalRead {
         tree: TreeId<Typed>,
@@ -570,6 +582,17 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         method: SymbolId,
         field: SymbolId,
+    },
+    /// A primitive field write is outside the currently modeled CFG stack flow.
+    JvmFieldWriteInUnsupportedControlFlow {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+        field: SymbolId,
+    },
+    /// A field write was attempted without a validated class and method plan.
+    JvmFieldWriteContextUnavailable {
+        tree: TreeId<Typed>,
+        method: SymbolId,
     },
     /// The typed field reference prefix does not name the current instance.
     InvalidJvmFieldReferencePrefix {
@@ -1452,8 +1475,8 @@ impl JvmCompilationUnit<'_> {
 
     /// Lowers one explicitly planned method body using this unit's validated
     /// class, field, and method metadata. This method-level path can lower
-    /// private primitive field reads while whole-class field installation is
-    /// still unsupported by [`emit_class`].
+    /// private primitive field reads and mutable field assignments while
+    /// whole-class field installation is still unsupported by [`emit_class`].
     pub fn lower_method_body(
         &self,
         class: SymbolId,
