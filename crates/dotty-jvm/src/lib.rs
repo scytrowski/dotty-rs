@@ -397,6 +397,8 @@ pub enum JvmCodegenError {
     UnknownClass { class: SymbolId },
     /// The method ID is outside the supplied symbol table.
     UnknownMethod { method: SymbolId },
+    /// A method was requested from a class plan that does not contain it.
+    MethodNotInJvmPlanForBody { class: SymbolId, method: SymbolId },
     /// The field ID is outside the supplied symbol table.
     UnknownField { field: SymbolId },
     /// The parameter ID is outside the supplied symbol table.
@@ -541,6 +543,39 @@ pub enum JvmCodegenError {
     UnknownFieldInitializer {
         field: SymbolId,
         initializer: TreeId<Typed>,
+    },
+    /// A field identifier is not present in the selected class field plan.
+    FieldNotInJvmPlan {
+        tree: TreeId<Typed>,
+        class: SymbolId,
+        field: SymbolId,
+    },
+    /// A field read was attempted without a validated class and method plan.
+    JvmFieldReadContextUnavailable {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+    },
+    /// A typed field read has a missing target symbol.
+    UnknownJvmFieldReference {
+        tree: TreeId<Typed>,
+        field: SymbolId,
+    },
+    /// A field selection does not use the current class's unqualified `this`.
+    UnsupportedJvmFieldReceiver {
+        tree: TreeId<Typed>,
+        field: SymbolId,
+    },
+    /// A primitive field read is outside the currently modeled CFG stack flow.
+    JvmFieldReadInUnsupportedControlFlow {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+        field: SymbolId,
+    },
+    /// The typed field reference prefix does not name the current instance.
+    InvalidJvmFieldReferencePrefix {
+        tree: TreeId<Typed>,
+        field: SymbolId,
+        class: SymbolId,
     },
     /// A field initializer's `TermRef` points outside the semantic symbol table.
     UnknownFieldInitializerSymbol {
@@ -1413,6 +1448,39 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<JvmLocalLayout, JvmCodegenError> {
         locals::method_local_layout_for(self, method, bindings, definitions)
+    }
+
+    /// Lowers one explicitly planned method body using this unit's validated
+    /// class, field, and method metadata. This method-level path can lower
+    /// private primitive field reads while whole-class field installation is
+    /// still unsupported by [`emit_class`].
+    pub fn lower_method_body(
+        &self,
+        class: SymbolId,
+        method: SymbolId,
+        definitions: &Definitions,
+    ) -> Result<dotty_classfile::bytecode::CodeBuilder, JvmCodegenError> {
+        self.validate()?;
+        let plan = self
+            .classes
+            .iter()
+            .find(|plan| plan.class == class)
+            .ok_or(JvmCodegenError::MissingClassPlan { class })?;
+        let metadata = plan.metadata_with_typed_ast(self.store, self.typed_ast, definitions)?;
+        let method_plan = plan
+            .methods
+            .iter()
+            .find(|candidate| candidate.method == method)
+            .ok_or(JvmCodegenError::MethodNotInJvmPlanForBody { class, method })?;
+        let method_metadata = metadata
+            .methods()
+            .iter()
+            .find(|candidate| candidate.symbol() == method)
+            .ok_or(JvmCodegenError::MethodNotInJvmPlanForBody { class, method })?;
+        let body = method_plan
+            .body
+            .ok_or(JvmCodegenError::MissingTypedBody { method })?;
+        expression::lower_planned_method_body(self, &metadata, definitions, method_metadata, body)
     }
 
     /// Resolves a typed ordinary call to a planned same-class virtual target.

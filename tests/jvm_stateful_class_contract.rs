@@ -1,10 +1,15 @@
+use dotty_classfile::access_flags::{ACC_PUBLIC, MethodAccessFlags};
+use dotty_classfile::class_file::ClassFileVersion;
+use dotty_classfile::class_file_builder::ClassFileBuilder;
+use dotty_classfile::reader::Reader;
 use dotty_core::ast::{TreeKind, Untyped};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolInfo,
     SymbolKind, TermRefTarget, TreeId, Type, Visibility,
 };
 use dotty_jvm::{
-    JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmFieldPlan, emit_class,
+    JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmFieldPlan, JvmMethodPlan,
+    emit_class,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -760,6 +765,347 @@ fn real_source_private_primitive_fields_project_in_frontend_order() {
             assert_eq!(field_metadata.descriptor(), "I");
             assert!(field_metadata.access_flags().is_private());
             assert!(!field_metadata.access_flags().is_final());
+        },
+    );
+}
+
+#[test]
+fn real_typed_current_instance_field_reads_lower_to_aload_getfield() {
+    with_source(
+        "class Current { private var current: Int = 5; private val flag: Boolean = true; def get(): Int = current; def getThis(): Int = this.current; def isEnabled(): Boolean = this.flag }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Current");
+            typer.complete_symbol(class).unwrap();
+
+            let mut fields = Vec::new();
+            for name in ["current", "flag"] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(initializer),
+                });
+            }
+
+            let mut methods = Vec::new();
+            for name in ["get", "getThis", "isEnabled"] {
+                let (method, rhs) = ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::DefDef(definition) = &node.kind else {
+                            return None;
+                        };
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            == name
+                        {
+                            Some((index.symbol_at(source, tree)?, definition.rhs?))
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_else(|| panic!("missing method {name}"));
+                typer.complete_symbol(method).unwrap();
+                let context = typer.expression_context_for(method).unwrap();
+                let body = typer.type_expression(rhs, context).unwrap();
+                methods.push(JvmMethodPlan {
+                    method,
+                    parameters: Vec::new(),
+                    locals: Vec::new(),
+                    body: Some(body),
+                });
+            }
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods,
+                    fields,
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+
+            let lower_and_encode = |name: &str, descriptor: &str| {
+                let method = unit.classes[0]
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(method.method).name.text())
+                            == name
+                    })
+                    .unwrap()
+                    .method;
+                let code = unit.lower_method_body(class, method, definitions).unwrap();
+                let mut builder = ClassFileBuilder::new(
+                    "Current",
+                    ClassFileVersion {
+                        major: 65,
+                        minor: 0,
+                    },
+                )
+                .unwrap();
+                builder
+                    .add_prebuilt_code_method(name, descriptor, MethodAccessFlags(ACC_PUBLIC), code)
+                    .unwrap();
+                let bytes = builder.encode().unwrap();
+                let mut reader = Reader::new(&bytes);
+                let class_file =
+                    dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+                let code = class_file.methods[0]
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        dotty_classfile::attribute::Attribute::Code(code) => {
+                            Some(code.code.to_vec())
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                let index = u16::from_be_bytes([code[2], code[3]]);
+                let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                    class_index,
+                    name_and_type_index,
+                } = class_file
+                    .constant_pool
+                    .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
+                    .unwrap()
+                else {
+                    panic!("getfield must reference Fieldref")
+                };
+                let owner = class_file
+                    .constant_pool
+                    .class_name(*class_index)
+                    .unwrap()
+                    .to_owned();
+                let (field, field_descriptor) = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap();
+                (code, owner, field.to_owned(), field_descriptor.to_owned())
+            };
+
+            let integer = lower_and_encode("get", "()I");
+            let explicit = lower_and_encode("getThis", "()I");
+            let boolean = lower_and_encode("isEnabled", "()Z");
+            for ((code, owner, field, descriptor), method, expected_field, expected_descriptor) in [
+                (&integer, "get", "current", "I"),
+                (&explicit, "getThis", "current", "I"),
+                (&boolean, "isEnabled", "flag", "Z"),
+            ] {
+                assert_eq!(&code[0..1], &[0x2a], "aload_0 for {method}");
+                assert_eq!(code[1], 0xb4, "getfield for {method}");
+                assert_eq!(code[4], 0xac, "ireturn for {method}");
+                assert_eq!(owner, "Current");
+                assert_eq!(field, expected_field);
+                assert_eq!(descriptor, expected_descriptor);
+            }
+        },
+    );
+}
+
+#[test]
+fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_subset() {
+    with_source(
+        "class Current { private val current: Int = 5; private val hidden: Int = 6; def get(): Int = current; def shadow(current: Int): Int = current; def branch(flag: Boolean): Int = if (flag) current else 0; def select(other: Current): Int = other.current; def readHidden(): Int = hidden }\nclass Other { private val foreign: Int = 1; def read(): Int = this.foreign }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Current");
+            let other_class = symbol_named(ast, index, source, typer, "Other");
+            typer.complete_symbol(class).unwrap();
+            typer.complete_symbol(other_class).unwrap();
+
+            let mut fields = Vec::new();
+            for name in ["current", "hidden", "foreign"] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(initializer),
+                });
+            }
+
+            let mut methods = Vec::new();
+            for (owner, name) in [
+                (class, "get"),
+                (class, "shadow"),
+                (class, "branch"),
+                (class, "select"),
+                (class, "readHidden"),
+                (other_class, "read"),
+            ] {
+                let (method, rhs, parameters) = ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        let TreeKind::DefDef(definition) = &node.kind else {
+                            return None;
+                        };
+                        if typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            != name
+                        {
+                            return None;
+                        }
+                        let method = index.symbol_at(source, tree)?;
+                        if typer.store().symbols.get(method).owner != Some(owner) {
+                            return None;
+                        }
+                        let rhs = definition.rhs?;
+                        let parameters = definition
+                            .value_param_clauses
+                            .iter()
+                            .flatten()
+                            .map(|parameter| index.symbol_at(source, *parameter))
+                            .collect::<Option<Vec<_>>>()?;
+                        Some((method, rhs, parameters))
+                    })
+                    .unwrap_or_else(|| panic!("missing source method {name}"));
+                typer.complete_symbol(method).unwrap();
+                let context = typer.expression_context_for(method).unwrap();
+                let body = typer.type_expression(rhs, context).unwrap();
+                methods.push((name, method, body, parameters));
+            }
+
+            let method = |name: &str| {
+                methods
+                    .iter()
+                    .find(|(candidate, _, _, _)| *candidate == name)
+                    .unwrap()
+            };
+            let plan_for = |method: SymbolId, body, parameters: Vec<SymbolId>, planned_fields| {
+                JvmCompilationUnit {
+                    store: typer.store(),
+                    typed_ast: typer.typed_ast(),
+                    classes: vec![JvmClassPlan {
+                        class,
+                        methods: vec![JvmMethodPlan {
+                            method,
+                            parameters,
+                            locals: Vec::new(),
+                            body: Some(body),
+                        }],
+                        fields: planned_fields,
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    }],
+                }
+            };
+            let current_field = fields
+                .iter()
+                .find(|field| {
+                    typer
+                        .store()
+                        .names
+                        .resolve(typer.store().symbols.get(field.field).name.text())
+                        == "current"
+                })
+                .unwrap();
+            let current_plan = vec![*current_field];
+            let current_id = current_field.field;
+
+            let (_, shadow_method, shadow_body, shadow_parameters) = method("shadow");
+            let shadow = plan_for(
+                *shadow_method,
+                *shadow_body,
+                shadow_parameters.clone(),
+                current_plan.clone(),
+            );
+            let shadow_code = shadow
+                .lower_method_body(class, *shadow_method, definitions)
+                .unwrap();
+            assert!(format!("{shadow_code:?}").contains("ILoad"));
+            assert!(!format!("{shadow_code:?}").contains("GetField"));
+
+            let (_, branch_method, branch_body, branch_parameters) = method("branch");
+            let branch = plan_for(
+                *branch_method,
+                *branch_body,
+                branch_parameters.clone(),
+                current_plan.clone(),
+            );
+            assert!(matches!(
+                branch.lower_method_body(class, *branch_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
+                    method,
+                    field,
+                    ..
+                }) if method == *branch_method && field == current_id
+            ));
+
+            let (_, get_method, _, _) = method("get");
+            let (_, _, select_body, _) = method("select");
+            let other_receiver =
+                plan_for(*get_method, *select_body, Vec::new(), current_plan.clone());
+            assert!(matches!(
+                other_receiver.lower_method_body(class, *get_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmFieldReceiver {
+                    field,
+                    ..
+                }) if field == current_id
+            ));
+            let (_, _, hidden_body, _) = method("readHidden");
+            let hidden = plan_for(*get_method, *hidden_body, Vec::new(), current_plan.clone());
+            let hidden_field = fields
+                .iter()
+                .find(|field| {
+                    typer
+                        .store()
+                        .names
+                        .resolve(typer.store().symbols.get(field.field).name.text())
+                        == "hidden"
+                })
+                .unwrap()
+                .field;
+            assert!(matches!(
+                hidden.lower_method_body(class, *get_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::FieldNotInJvmPlan {
+                    class: actual_class,
+                    field,
+                    ..
+                }) if actual_class == class && field == hidden_field
+            ));
+            let (_, _, foreign_body, _) = method("read");
+            let wrong_owner = plan_for(*get_method, *foreign_body, Vec::new(), current_plan);
+            let foreign_field = fields
+                .iter()
+                .find(|field| {
+                    typer
+                        .store()
+                        .names
+                        .resolve(typer.store().symbols.get(field.field).name.text())
+                        == "foreign"
+                })
+                .unwrap()
+                .field;
+            assert!(matches!(
+                wrong_owner.lower_method_body(class, *get_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::WrongOwner {
+                    symbol,
+                    expected,
+                    actual: Some(actual),
+                }) if symbol == foreign_field && expected == class && actual == other_class
+            ));
         },
     );
 }

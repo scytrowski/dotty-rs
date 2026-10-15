@@ -209,7 +209,7 @@ pub(super) fn lower_value_expression(
 ) -> Result<JvmValueCategory, JvmCodegenError> {
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
     context.visit(tree_id, 0)?;
-    match lower_leaf(&context, tree_id, code)? {
+    match lower_leaf(&mut context, tree_id, code)? {
         Flow::Value(value) => Ok(value.category()),
         Flow::Unit => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
@@ -307,7 +307,7 @@ fn append_method_return(
 }
 
 fn lower_leaf(
-    context: &JvmLoweringContext<'_>,
+    context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
     code: &mut CodeBuilder,
 ) -> Result<Flow, JvmCodegenError> {
@@ -387,6 +387,13 @@ fn lower_leaf(
                     .find(|parameter| parameter.symbol() == symbol)
                     .copied()
             }) else {
+                if let Some(symbol) = symbol
+                    && context.store.symbols.contains(symbol)
+                    && context.store.symbols.get(symbol).kind
+                        == dotty_core::symbols::SymbolKind::Field
+                {
+                    return emit_field_read(context, tree_id, symbol, None, 0, code);
+                }
                 return Err(JvmCodegenError::InvalidParameterReference {
                     tree: tree_id,
                     symbol,
@@ -501,7 +508,16 @@ fn emit_expression(
     };
     match shape {
         ExpressionShape::Leaf => lower_leaf(context, tree_id, code),
-        ExpressionShape::Select => emit_boolean_not(context, tree_id, code, depth),
+        ExpressionShape::Select => {
+            if let Some(field) = selected_field_symbol(context, tree_id)? {
+                let TreeKind::Select(select) = &context.tree(tree_id)?.kind else {
+                    unreachable!("select shape was observed above");
+                };
+                emit_field_read(context, tree_id, field, Some(select.qualifier), depth, code)
+            } else {
+                emit_boolean_not(context, tree_id, code, depth)
+            }
+        }
         ExpressionShape::Block => emit_block(context, tree_id, code, depth),
         ExpressionShape::If => emit_if(context, tree_id, code, depth),
         ExpressionShape::While => emit_while(context, tree_id, code, depth),
@@ -513,6 +529,171 @@ fn emit_expression(
             node,
         }),
     }
+}
+
+fn selected_field_symbol(
+    context: &JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+) -> Result<Option<SymbolId>, JvmCodegenError> {
+    let tree = context.tree(tree_id)?;
+    let Some(Type::TermRef {
+        target: TermRefTarget::Symbol(symbol),
+        ..
+    }) = context.store.types.try_get(tree.ty)
+    else {
+        return Ok(None);
+    };
+    if !context.store.symbols.contains(*symbol) {
+        return Err(JvmCodegenError::UnknownJvmFieldReference {
+            tree: tree_id,
+            field: *symbol,
+        });
+    }
+    Ok(
+        (context.store.symbols.get(*symbol).kind == dotty_core::symbols::SymbolKind::Field)
+            .then_some(*symbol),
+    )
+}
+
+fn emit_field_read(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    field: SymbolId,
+    receiver: Option<TreeId<Typed>>,
+    depth: usize,
+    code: &mut CodeBuilder,
+) -> Result<Flow, JvmCodegenError> {
+    let Some((_, class)) = context.call_context else {
+        return Err(JvmCodegenError::JvmFieldReadContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    };
+    let class_symbol = class.identity().symbol();
+    if !class
+        .methods()
+        .iter()
+        .any(|method| method.symbol() == context.method.symbol())
+    {
+        return Err(JvmCodegenError::JvmFieldReadContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    }
+    if context.control_flow_depth > 0 {
+        return Err(JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
+            tree: tree_id,
+            method: context.method.symbol(),
+            field,
+        });
+    }
+
+    let field_symbol = context
+        .store
+        .symbols
+        .contains(field)
+        .then(|| context.store.symbols.get(field))
+        .ok_or(JvmCodegenError::UnknownJvmFieldReference {
+            tree: tree_id,
+            field,
+        })?;
+    if field_symbol.kind != dotty_core::symbols::SymbolKind::Field {
+        return Err(JvmCodegenError::FieldNotInJvmPlan {
+            tree: tree_id,
+            class: class_symbol,
+            field,
+        });
+    }
+    if field_symbol.owner != Some(class_symbol) {
+        return Err(JvmCodegenError::WrongOwner {
+            symbol: field,
+            expected: class_symbol,
+            actual: field_symbol.owner,
+        });
+    }
+    let field_metadata = class
+        .fields()
+        .iter()
+        .find(|metadata| metadata.symbol() == field)
+        .ok_or(JvmCodegenError::FieldNotInJvmPlan {
+            tree: tree_id,
+            class: class_symbol,
+            field,
+        })?;
+
+    let (reference_prefix, reference_target) =
+        match context.store.types.try_get(context.tree(tree_id)?.ty) {
+            Some(Type::TermRef { prefix, target }) => (*prefix, target.symbol()),
+            _ => (context.definitions.no_prefix, None),
+        };
+    if reference_target != Some(field) {
+        return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+            tree: tree_id,
+            field,
+            class: class_symbol,
+        });
+    }
+
+    if let Some(receiver) = receiver {
+        context.visit(receiver, depth + 1)?;
+        let receiver_tree = context.tree(receiver)?;
+        let valid_receiver =
+            matches!(
+                receiver_tree.kind,
+                TreeKind::This(dotty_core::ast::This { qual: None })
+            ) && is_current_this_type(context.store, receiver_tree.ty, class_symbol);
+        if !valid_receiver {
+            return Err(JvmCodegenError::UnsupportedJvmFieldReceiver {
+                tree: tree_id,
+                field,
+            });
+        }
+    } else if !is_current_this_type(context.store, reference_prefix, class_symbol) {
+        return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+            tree: tree_id,
+            field,
+            class: class_symbol,
+        });
+    }
+    if let Some(receiver) = receiver
+        && reference_prefix != context.tree(receiver)?.ty
+    {
+        return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+            tree: tree_id,
+            field,
+            class: class_symbol,
+        });
+    }
+
+    let field_type = match context.store.symbols.info(field) {
+        SymbolInfo::Complete(ty) => crate::descriptor::primitive_semantic_value_type(
+            context.store,
+            context.definitions,
+            field,
+            *ty,
+        )?,
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
+        }
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
+    };
+    code.aload(0)
+        .and_then(|code| {
+            code.getfield(
+                class.identity().internal_name(),
+                field_metadata.name(),
+                field_metadata.descriptor(),
+            )
+        })
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    Ok(Flow::Value(field_type))
+}
+
+fn is_current_this_type(store: &SemanticStore, ty: TypeId, class: SymbolId) -> bool {
+    matches!(store.types.try_get(ty), Some(Type::ThisType { class: found }) if *found == class)
 }
 
 fn emit_assignment(
