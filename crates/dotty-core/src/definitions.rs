@@ -126,6 +126,11 @@ pub enum IntPrimitiveOperatorRegistrationError {
         operator: &'static str,
         symbol: SymbolId,
     },
+    IncompatibleOperatorFlags {
+        operator: &'static str,
+        symbol: SymbolId,
+        flags: SymbolFlags,
+    },
     OperatorMethodInfoUnavailable {
         operator: &'static str,
         symbol: SymbolId,
@@ -183,6 +188,16 @@ struct BooleanOperatorSpec {
 fn is_boolean_operator_parameter(store: &SemanticStore, ty: TypeId, boolean: TypeId) -> bool {
     ty == boolean
         || matches!(store.types.try_get(ty), Some(Type::ByName { result }) if *result == boolean)
+}
+
+const BOOLEAN_OPERATOR_INCOMPATIBLE_FLAGS: SymbolFlags = SymbolFlags::STATIC
+    .union(SymbolFlags::EXTENSION)
+    .union(SymbolFlags::ERASED);
+
+fn has_incompatible_boolean_operator_flags(flags: SymbolFlags) -> bool {
+    !flags
+        .intersection(BOOLEAN_OPERATOR_INCOMPATIBLE_FLAGS)
+        .is_empty()
 }
 
 /// The builtin symbols and types every adapter (classfile/TASTy/source)
@@ -895,6 +910,13 @@ impl Definitions {
                                 symbol,
                             });
                         }
+                        if has_incompatible_boolean_operator_flags(candidate.flags) {
+                            return Err(BooleanPrimitiveOperatorRegistrationError::IncompatibleOperatorFlags {
+                                operator: spec.spelling,
+                                symbol,
+                                flags: candidate.flags,
+                            });
+                        }
                         if !compatible {
                             return Err(BooleanPrimitiveOperatorRegistrationError::IncompatibleOperatorSignature {
                                 operator: spec.spelling,
@@ -1073,6 +1095,7 @@ impl Definitions {
                 };
                 if same_signature_shape
                     && (member.visibility != Visibility::Public
+                        || has_incompatible_boolean_operator_flags(member.flags)
                         || !compatible
                         || ids[index].replace(symbol).is_some())
                 {
@@ -1327,6 +1350,84 @@ mod tests {
                 assert_eq!(info, definitions.boolean);
             }
         }
+    }
+
+    #[test]
+    fn boolean_registration_rejects_incompatible_flags_without_partial_mutation() {
+        for flags in [
+            SymbolFlags::STATIC,
+            SymbolFlags::EXTENSION,
+            SymbolFlags::ERASED,
+        ] {
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let boolean_class = store
+                .types
+                .get(definitions.boolean)
+                .reference_symbol()
+                .unwrap();
+            let registered = definitions
+                .boolean_primitive_operator_symbols(&store)
+                .unwrap();
+            let SymbolInfo::Complete(class_info_id) = store.symbols.get(boolean_class).info else {
+                unreachable!();
+            };
+            let Type::ClassInfo(class_info) = store.types.get(class_info_id) else {
+                unreachable!();
+            };
+            let scope = class_info.declarations;
+            let not_equal_name = Name::new(store.names.get("!=").unwrap(), Namespace::Term);
+            store.scopes.get_mut(scope).remove(registered.not_equal);
+            store.symbols.get_mut(registered.and_then).flags = flags;
+
+            assert_eq!(
+                definitions.ensure_boolean_primitive_operators(&mut store),
+                Err(
+                    BooleanPrimitiveOperatorRegistrationError::IncompatibleOperatorFlags {
+                        operator: "&&",
+                        symbol: registered.and_then,
+                        flags,
+                    }
+                )
+            );
+            assert_eq!(store.scopes.get(scope).lookup_all(&not_equal_name), &[]);
+            assert_eq!(
+                store
+                    .scopes
+                    .get(scope)
+                    .lookup_all(&Name::new(store.names.get("&&").unwrap(), Namespace::Term)),
+                &[registered.and_then]
+            );
+            assert_eq!(
+                store.symbols.get(boolean_class).info,
+                SymbolInfo::Complete(class_info_id)
+            );
+            assert_eq!(store.symbols.get(registered.and_then).flags, flags);
+            assert_eq!(definitions.boolean_primitive_operator_symbols(&store), None);
+        }
+    }
+
+    #[test]
+    fn boolean_registration_preserves_abstract_metadata_flags() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let registered = definitions
+            .boolean_primitive_operator_symbols(&store)
+            .unwrap();
+        store.symbols.get_mut(registered.and_then).flags = SymbolFlags::ABSTRACT;
+
+        assert_eq!(
+            definitions.ensure_boolean_primitive_operators(&mut store),
+            Ok(registered)
+        );
+        assert_eq!(
+            definitions.boolean_primitive_operator_symbols(&store),
+            Some(registered)
+        );
+        assert_eq!(
+            store.symbols.get(registered.and_then).flags,
+            SymbolFlags::ABSTRACT
+        );
     }
 
     #[test]

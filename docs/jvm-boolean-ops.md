@@ -109,6 +109,9 @@ references do not change that operator contract.
    and result `TypeId`s, and arity. Register `unary_!`, `&&`, `||`, `&`, `|`,
    `^`, and the Boolean overloads of `==`/`!=` by this identity. Keep
    `Any_==`/`Any_!=` separate.
+   `STATIC`, `EXTENSION`, and `ERASED` flags are incompatible with these
+   ordinary instance operators; metadata flags such as `ABSTRACT` are
+   preserved. Registration and the read-only accessor enforce the same rule.
 4. A method named `&&` on a user class remains an ordinary call. The Typer
    retains the selected symbol identity; future intrinsic lowering must require
    that exact canonical identity. A spelling match, Boolean result type, or
