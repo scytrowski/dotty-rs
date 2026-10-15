@@ -4159,7 +4159,7 @@ fn emits_short_circuit_boolean_intrinsics_without_evaluating_skipped_rhs() {
     if require_jdk_or_skip() {
         verify_emitted_call_class_with_jdk(
             generated.bytes(),
-            "public final class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); if (!answer.ordinaryProbe()) throw new AssertionError(\"ordinary call baseline\"); if (answer.andSkips() || !answer.orSkips()) throw new AssertionError(\"short-circuit result\"); try { answer.andEvaluates(); throw new AssertionError(\"true && evaluated RHS should throw\"); } catch (ArithmeticException expected) { } try { answer.orEvaluates(); throw new AssertionError(\"false || evaluated RHS should throw\"); } catch (ArithmeticException expected) { } for (boolean a : new boolean[] { false, true }) for (boolean b : new boolean[] { false, true }) for (boolean c : new boolean[] { false, true }) { if (answer.andChain(a, b, c) != (a && b && c)) throw new AssertionError(\"and chain\"); if (answer.orChain(a, b, c) != (a || b || c)) throw new AssertionError(\"or chain\"); if (answer.nestedInIf(a, b) != a) throw new AssertionError(\"short circuit nested in if\"); } if (answer.whileAnd(false) || !answer.whileAnd(true)) throw new AssertionError(\"short circuit nested in while\"); System.out.println(\"short circuit ok\"); } }\n",
+            "public final class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); if (!answer.ordinaryProbe()) throw new AssertionError(\"ordinary call baseline\"); if (answer.andSkips() || !answer.orSkips()) throw new AssertionError(\"short-circuit result\"); try { answer.andEvaluates(); throw new AssertionError(\"true && evaluated RHS should throw\"); } catch (ArithmeticException expected) { } try { answer.orEvaluates(); throw new AssertionError(\"false || evaluated RHS should throw\"); } catch (ArithmeticException expected) { } for (boolean a : new boolean[] { false, true }) for (boolean b : new boolean[] { false, true }) for (boolean c : new boolean[] { false, true }) { if (answer.andChain(a, b, c) != (a && b && c)) throw new AssertionError(\"and chain\"); if (answer.orChain(a, b, c) != (a || b || c)) throw new AssertionError(\"or chain\"); if (answer.nestedInIf(a, b) != (a ? 1 : 0)) throw new AssertionError(\"short circuit nested in if\"); } if (answer.whileAnd(false) || !answer.whileAnd(true)) throw new AssertionError(\"short circuit nested in while\"); System.out.println(\"short circuit ok\"); } }\n",
             "short circuit ok",
         );
     }
@@ -4309,6 +4309,11 @@ fn short_circuit_rhs_local_effects_run_once_and_join_initialization_safely() {
     );
     planned_locals.push((left_once_index, left_hits, left_hits_declaration));
 
+    let probe = add_call_target_method(&mut fixture, "localEffectProbe", &[], boolean);
+    add_call_target_method(&mut fixture, "ordinaryLocalEffectProbe", &[], boolean);
+    let probe_call = typed_call_to(&mut fixture, probe, Vec::new(), boolean, false);
+    *fixture.bodies.last_mut().unwrap() = probe_call;
+
     let mut unit = fixture.unit();
     for (method_index, symbol, declaration) in planned_locals {
         unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
@@ -4321,7 +4326,7 @@ fn short_circuit_rhs_local_effects_run_once_and_join_initialization_safely() {
     if require_jdk_or_skip() {
         verify_emitted_call_class_with_jdk(
             generated.bytes(),
-            "public final class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); if (answer.andHits(false) != 0 || answer.andHits(true) != 1) throw new AssertionError(\"and RHS count\"); if (answer.orHits(true) != 0 || answer.orHits(false) != 1) throw new AssertionError(\"or RHS count\"); if (answer.leftOnce() != 1) throw new AssertionError(\"left operand count\"); System.out.println(\"short-circuit local effects ok\"); } }\n",
+            "public final class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); if (!answer.ordinaryLocalEffectProbe()) throw new AssertionError(\"ordinary call baseline\"); if (answer.andHits(false) != 0 || answer.andHits(true) != 1) throw new AssertionError(\"and RHS count\"); if (answer.orHits(true) != 0 || answer.orHits(false) != 1) throw new AssertionError(\"or RHS count\"); if (answer.leftOnce() != 1) throw new AssertionError(\"left operand count\"); System.out.println(\"short-circuit local effects ok\"); } }\n",
             "short-circuit local effects ok",
         );
     }
