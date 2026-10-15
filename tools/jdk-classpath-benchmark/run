@@ -270,7 +270,7 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="run the tiny checked-in JMOD fixture without a JDK")
     parser.add_argument("--binary", help="use an already built release benchmark executable")
     parser.add_argument("--source-revision", default="unspecified", help="classloader source revision represented by the run")
-    parser.add_argument("--purpose", default="after-1160", help="short label describing the measurement cohort")
+    parser.add_argument("--purpose", default="measurement", help="short label describing the measurement cohort")
     args = parser.parse_args()
 
     try:
