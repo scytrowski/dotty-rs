@@ -47,6 +47,9 @@
 //! | `IMul` | [`imul`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.imul) `0x68` | 0 | `[int, int] -> [int]` |
 //! | `IDiv` | [`idiv`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.idiv) `0x6c` | 0 | `[int, int] -> [int]` |
 //! | `IRem` | [`irem`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.irem) `0x70` | 0 | `[int, int] -> [int]` |
+//! | `IAnd` | [`iand`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iand) `0x7e` | 0 | `[int, int] -> [int]` |
+//! | `IOr` | [`ior`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ior) `0x80` | 0 | `[int, int] -> [int]` |
+//! | `IXor` | [`ixor`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ixor) `0x82` | 0 | `[int, int] -> [int]` |
 //! | `Dup` | [`dup`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.dup) `0x59` | 0 | `[category-1] -> [category-1, category-1]` |
 //! | `Pop` | [`pop`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.pop) `0x57` | 0 | `[category-1] -> []` |
 //! | `GetField(FieldReference)` | [`getfield`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.getfield) `0xb4` | 2 | `[reference] -> [field value]` |
@@ -377,6 +380,12 @@ pub enum Instruction {
     IDiv,
     /// Computes the signed remainder after integer division.
     IRem,
+    /// Computes the 32-bit bitwise AND of two integers.
+    IAnd,
+    /// Computes the 32-bit bitwise OR of two integers.
+    IOr,
+    /// Computes the 32-bit bitwise XOR of two integers.
+    IXor,
     /// Duplicates the top category-one stack value.
     Dup,
     /// Removes the top category-one stack value.

@@ -451,6 +451,24 @@ impl CodeBuilder {
         Ok(self)
     }
 
+    /// Computes the 32-bit bitwise AND of the top two integers.
+    pub fn iand(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::IAnd);
+        Ok(self)
+    }
+
+    /// Computes the 32-bit bitwise OR of the top two integers.
+    pub fn ior(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::IOr);
+        Ok(self)
+    }
+
+    /// Computes the 32-bit bitwise XOR of the top two integers.
+    pub fn ixor(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::IXor);
+        Ok(self)
+    }
+
     /// Duplicates the top category-one value.
     pub fn dup(&mut self) -> Result<&mut Self, CodeBuilderError> {
         self.push(Instruction::Dup);
@@ -839,6 +857,20 @@ mod tests {
                 SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IMul)),
                 SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IDiv)),
                 SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IRem)),
+            ]
+        ));
+    }
+
+    #[test]
+    fn int_bitwise_methods_append_exact_typed_instructions() {
+        let mut builder = CodeBuilder::new();
+        builder.iand().unwrap().ior().unwrap().ixor().unwrap();
+        assert!(matches!(
+            builder.elements.as_slice(),
+            [
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IAnd)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IOr)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::IXor)),
             ]
         ));
     }
