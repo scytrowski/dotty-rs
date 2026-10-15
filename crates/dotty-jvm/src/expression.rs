@@ -146,6 +146,7 @@ struct JvmLoweringContext<'a> {
     initialized_locals: HashSet<SymbolId>,
     call_context: Option<(&'a JvmCompilationUnit<'a>, &'a JvmClassMetadata)>,
     control_flow_depth: usize,
+    first_field_read: Option<(TreeId<Typed>, SymbolId)>,
     node_visits: usize,
 }
 
@@ -165,6 +166,7 @@ impl<'a> JvmLoweringContext<'a> {
             initialized_locals: HashSet::new(),
             call_context: None,
             control_flow_depth: 0,
+            first_field_read: None,
             node_visits: 0,
         }
     }
@@ -249,6 +251,7 @@ pub(super) fn lower_method_body(
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
+    validate_field_read_control_flow(&context, &code)?;
     Ok(code)
 }
 
@@ -267,7 +270,24 @@ pub(super) fn lower_planned_method_body(
     context.call_context = Some((unit, class));
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
+    validate_field_read_control_flow(&context, &code)?;
     Ok(code)
+}
+
+fn validate_field_read_control_flow(
+    context: &JvmLoweringContext<'_>,
+    code: &CodeBuilder,
+) -> Result<(), JvmCodegenError> {
+    if code.has_branches()
+        && let Some((tree, field)) = context.first_field_read
+    {
+        return Err(JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
+            tree,
+            method: context.method.symbol(),
+            field,
+        });
+    }
+    Ok(())
 }
 
 fn append_method_return(
@@ -677,6 +697,7 @@ fn emit_field_read(
         }
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
     };
+    context.first_field_read.get_or_insert((tree_id, field));
     code.aload(0)
         .and_then(|code| {
             code.getfield(

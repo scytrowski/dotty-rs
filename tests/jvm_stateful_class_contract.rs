@@ -920,7 +920,7 @@ fn real_typed_current_instance_field_reads_lower_to_aload_getfield() {
 #[test]
 fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_subset() {
     with_source(
-        "class Current { private val current: Int = 5; private val hidden: Int = 6; def get(): Int = current; def shadow(current: Int): Int = current; def branch(flag: Boolean): Int = if (flag) current else 0; def select(other: Current): Int = other.current; def readHidden(): Int = hidden }\nclass Other { private val foreign: Int = 1; def read(): Int = this.foreign }",
+        "class Current { private val current: Int = 5; private val hidden: Int = 6; private val flag: Boolean = true; def get(): Int = current; def shadow(current: Int): Int = current; def branch(flag: Boolean): Int = if (flag) current else 0; def shortCircuit(): Boolean = this.flag && true; def compared(): Boolean = this.current < 7; def select(other: Current): Int = other.current; def readHidden(): Int = hidden }\nclass Other { private val foreign: Int = 1; def read(): Int = this.foreign }",
         |ast, source, index, definitions, typer| {
             let class = symbol_named(ast, index, source, typer, "Current");
             let other_class = symbol_named(ast, index, source, typer, "Other");
@@ -928,7 +928,7 @@ fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_s
             typer.complete_symbol(other_class).unwrap();
 
             let mut fields = Vec::new();
-            for name in ["current", "hidden", "foreign"] {
+            for name in ["current", "hidden", "flag", "foreign"] {
                 let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
                 typer.complete_symbol(field).unwrap();
                 let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
@@ -950,6 +950,8 @@ fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_s
                 (class, "get"),
                 (class, "shadow"),
                 (class, "branch"),
+                (class, "shortCircuit"),
+                (class, "compared"),
                 (class, "select"),
                 (class, "readHidden"),
                 (other_class, "read"),
@@ -1023,6 +1025,16 @@ fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_s
                 .unwrap();
             let current_plan = vec![*current_field];
             let current_id = current_field.field;
+            let flag_field = fields
+                .iter()
+                .find(|field| {
+                    typer
+                        .store()
+                        .names
+                        .resolve(typer.store().symbols.get(field.field).name.text())
+                        == "flag"
+                })
+                .unwrap();
 
             let (_, shadow_method, shadow_body, shadow_parameters) = method("shadow");
             let shadow = plan_for(
@@ -1052,6 +1064,42 @@ fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_s
                     ..
                 }) if method == *branch_method && field == current_id
             ));
+
+            let (_, short_circuit_method, short_circuit_body, _) = method("shortCircuit");
+            let short_circuit = plan_for(
+                *short_circuit_method,
+                *short_circuit_body,
+                Vec::new(),
+                vec![*current_field, *flag_field],
+            );
+            assert!(matches!(
+                short_circuit.lower_method_body(class, *short_circuit_method, definitions),
+                Err(dotty_jvm::JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
+                    method,
+                    field,
+                    ..
+                }) if method == *short_circuit_method && field == flag_field.field
+            ));
+
+            let (_, compared_method, compared_body, _) = method("compared");
+            let compared = plan_for(
+                *compared_method,
+                *compared_body,
+                Vec::new(),
+                current_plan.clone(),
+            );
+            let compared_result = compared.lower_method_body(class, *compared_method, definitions);
+            assert!(
+                matches!(
+                    &compared_result,
+                    Err(dotty_jvm::JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
+                        method,
+                        field,
+                        ..
+                    }) if *method == *compared_method && *field == current_id
+                ),
+                "unexpected comparison result: {compared_result:?}"
+            );
 
             let (_, get_method, _, _) = method("get");
             let (_, _, select_body, _) = method("select");
