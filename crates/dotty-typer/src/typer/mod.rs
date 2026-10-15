@@ -8479,6 +8479,60 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_import_segment_probes_current_package_before_root() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package a.consumer { import b.Local.Relative; val x: Int = 1 }");
+        let value = val_symbol(&parsed, &store, &index, source, "x").0;
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .unwrap();
+        let declaration_context = index.declaration_context_of(value).unwrap();
+        let context = index
+            .source_context(declaration_context)
+            .parent
+            .expect("the import has a preceding package context");
+        let package_requests = Rc::new(RefCell::new(Vec::new()));
+        let resolver = ScriptedResolver {
+            member: None,
+            package: None,
+            member_requests: Rc::new(RefCell::new(Vec::new())),
+            package_requests: Rc::clone(&package_requests),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let resolved = typer
+            .import_qualifier_symbol(
+                import.1.expr,
+                context,
+                import.0.index(),
+                parsed.ast.get(import.0).position,
+            )
+            .unwrap();
+
+        assert_eq!(resolved, None);
+        assert_eq!(
+            *package_requests.borrow(),
+            vec![
+                vec!["a".to_owned(), "consumer".to_owned(), "b".to_owned()],
+                vec!["b".to_owned()],
+            ]
+        );
+    }
+
+    #[test]
     fn wildcard_package_import_resolves_a_type_name() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package lib { class Imported }\npackage app { import lib.*; val x: Imported = 1 }",

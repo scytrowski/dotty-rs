@@ -350,7 +350,11 @@ impl SourceTyper<'_> {
                     return Ok(Some(symbol));
                 }
                 let segment = self.store.names.resolve(ident.name.text()).to_owned();
-                self.resolve_external_package(&[segment], tree_index)
+                if segment == "_root_" {
+                    self.resolve_external_package(&[segment], tree_index)
+                } else {
+                    self.resolve_relative_import_segment(ident.name, context, tree_index, position)
+                }
             }
             TreeKind::Select(select) => {
                 let Some(qualifier) = self.resolve_qualifier_symbol_with_expression_context(
@@ -406,6 +410,39 @@ impl SourceTyper<'_> {
                 tree_kind: tree_kind_name(&node.kind),
             }),
         }
+    }
+
+    /// Resolves the first segment of an unrooted import qualifier. The source
+    /// package is probed before the root package; enclosing package contexts
+    /// are deliberately excluded because a dotted package clause does not
+    /// make its ancestors lexical import scopes.
+    fn resolve_relative_import_segment(
+        &mut self,
+        name: dotty_core::Name,
+        context: SourceContextId,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let candidates =
+            self.lexical_package_candidates(context, LexicalPackageSearch::Relative, tree_index)?;
+        for candidate in candidates.into_iter().filter(|candidate| {
+            matches!(
+                candidate.origin,
+                LexicalPackageCandidateOrigin::CurrentPackage | LexicalPackageCandidateOrigin::Root
+            )
+        }) {
+            if let Some(symbol) =
+                self.unique_scoped_symbol(candidate.scope, name, tree_index, position)?
+            {
+                return Ok(Some(symbol));
+            }
+            let mut path = candidate.package_path;
+            path.push(self.store.names.resolve(name.text()).to_owned());
+            if let Some(package) = self.resolve_external_package(&path, tree_index)? {
+                return Ok(Some(package));
+            }
+        }
+        Ok(None)
     }
 
     pub(in crate::typer) fn resolve_external_package(
