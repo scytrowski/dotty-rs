@@ -330,7 +330,13 @@ operands. Its JVM harness checks zero- and multi-iteration loops, verifies
 that short-circuit RHS effects occur only when selected, and confirms that
 strict `&`, `|`, and `^` evaluate both operands. Generated methods are checked
 against the classfile CFG's stack-map frame targets and run with
-`java -Xverify:all` in the JDK gate.
+`java -Xverify:all` in the JDK gate. `Logic.scala` is the focused complete
+operator fixture: two independent source frontend runs must emit identical
+class bytes, all decoded references and public instance method descriptors are
+checked, and `javap -c -v` verifies the descriptors, branch/Boolean opcodes,
+and `StackMapTable`. The Java harness checks short-circuit versus eager
+divide-by-zero behavior, Boolean `==`/`!=` truth tables, and side-effect counts
+for short-circuit and strict operators.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
 Negative source tests verify that field initialization, invalid while
