@@ -650,18 +650,21 @@ fn emit_block(
     let flow = emit_expression(context, expr, code, depth + 1)?;
     match flow {
         Flow::Value(value)
-            if block_types_match(context, tree_id, declared_type, expression_type)?
-                && block_value_type(context, tree_id, declared_type)? == Some(value) =>
+            if block_types_match(context, tree_id, expr, declared_type, expression_type)?
+                && block_value_type(context, tree_id, declared_type, Some(expr))?
+                    == Some(value) =>
         {
             Ok(flow)
         }
         Flow::Unit
             if is_unit_type(context.store, declared_type, context.definitions)
-                && block_types_match(context, tree_id, declared_type, expression_type)? =>
+                && block_types_match(context, tree_id, expr, declared_type, expression_type)? =>
         {
             Ok(flow)
         }
-        Flow::Diverges if block_types_match(context, tree_id, declared_type, expression_type)? => {
+        Flow::Diverges
+            if block_types_match(context, tree_id, expr, declared_type, expression_type)? =>
+        {
             Ok(flow)
         }
         _ => Err(JvmCodegenError::BlockResultTypeMismatch {
@@ -730,6 +733,7 @@ fn emit_local_declaration(
 fn block_types_match(
     context: &JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
+    expression_tree: TreeId<Typed>,
     declared: TypeId,
     expression: TypeId,
 ) -> Result<bool, JvmCodegenError> {
@@ -742,8 +746,8 @@ fn block_types_match(
         return Ok(true);
     }
 
-    let declared = block_value_type(context, tree, declared)?;
-    let expression = block_value_type(context, tree, expression)?;
+    let declared = block_value_type(context, tree, declared, Some(expression_tree))?;
+    let expression = block_value_type(context, tree, expression, Some(expression_tree))?;
     Ok(declared.is_some() && declared == expression)
 }
 
@@ -751,6 +755,7 @@ fn block_value_type(
     context: &JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
     ty: TypeId,
+    intrinsic_expression: Option<TreeId<Typed>>,
 ) -> Result<Option<JvmType>, JvmCodegenError> {
     if let Some(value_type) = primitive_type(context.store, ty, context.definitions) {
         return Ok(Some(value_type));
@@ -764,6 +769,26 @@ fn block_value_type(
     };
     if let Some(local) = local_reference_slot(context, tree, *symbol)? {
         return Ok(Some(local.ty()));
+    }
+    if let Some(expression) = intrinsic_expression {
+        if context
+            .tree(expression)
+            .is_ok_and(|expression_tree| expression_tree.ty == ty)
+        {
+            let intrinsic = crate::resolve_boolean_intrinsic(
+                context.store,
+                context.typed_ast,
+                expression,
+                context.definitions,
+            )
+            .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
+                tree: expression,
+                error,
+            })?;
+            if intrinsic == Some(JvmBooleanIntrinsic::Not) {
+                return Ok(Some(JvmType::Boolean));
+            }
+        }
     }
     let Some(parameter) = context
         .method

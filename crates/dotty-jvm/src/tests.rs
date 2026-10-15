@@ -3473,7 +3473,16 @@ fn emits_canonical_boolean_intrinsics_and_evaluates_boolean_truth_tables() {
     let no_prefix = fixture.definitions.no_prefix;
     let not_receiver = typed_method_ident_with_prefix(&mut fixture, not_parameter, no_prefix);
     let not_body = typed_boolean_not(&mut fixture, not_receiver);
-    *fixture.bodies.last_mut().unwrap() = not_body;
+    let ignored_stat = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(0),
+        }),
+        position: None,
+        ty: int,
+    });
+    let not_result_type = fixture.ast.get(not_body).ty;
+    let not_block = typed_block(&mut fixture, vec![ignored_stat], not_body, not_result_type);
+    *fixture.bodies.last_mut().unwrap() = not_block;
 
     let mut operation_methods = Vec::new();
     for (name, method, operation) in [
@@ -3743,7 +3752,7 @@ fn emits_canonical_boolean_intrinsics_and_evaluates_boolean_truth_tables() {
     let class = ClassFile::decode(&mut reader).unwrap();
     assert_eq!(
         emitted_method_code(&class, "negateFlag"),
-        [0x1b, 0x04, 0x82, 0xac]
+        [0x03, 0x57, 0x1b, 0x04, 0x82, 0xac]
     );
     for (name, _, opcode) in operation_methods {
         let method_code = emitted_method_code(&class, name);
@@ -3805,7 +3814,7 @@ fn emits_canonical_boolean_intrinsics_and_evaluates_boolean_truth_tables() {
     if require_jdk_or_skip() {
         verify_emitted_call_class_with_jdk(
             generated.bytes(),
-            "public final class BooleanHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); for (boolean left : new boolean[] { false, true }) { if (answer.negateFlag(left) != !left) throw new AssertionError(\"not\"); for (boolean right : new boolean[] { false, true }) { if (answer.andFlag(left, right) != (left & right)) throw new AssertionError(\"and\"); if (answer.orFlag(left, right) != (left | right)) throw new AssertionError(\"or\"); if (answer.xorFlag(left, right) != (left ^ right)) throw new AssertionError(\"xor\"); if (answer.equalFlag(left, right) != (left == right)) throw new AssertionError(\"eq\"); if (answer.notEqualFlag(left, right) != (left != right)) throw new AssertionError(\"ne\"); if (answer.localBoolean(left, right) != (left ^ right)) throw new AssertionError(\"local init and assign\"); } } if (answer.loopUntilTrue(false) != true || answer.loopUntilTrue(true) != true) throw new AssertionError(\"while condition\"); if (answer.branchOnAnd(true, true) != 1 || answer.branchOnAnd(true, false) != 0 || !answer.orderedAnd()) throw new AssertionError(\"control flow and eager order\"); try { answer.falseAndDivide(); throw new AssertionError(\"false & rhs was short-circuited\"); } catch (ArithmeticException expected) { } try { answer.trueOrDivide(); throw new AssertionError(\"true | rhs was short-circuited\"); } catch (ArithmeticException expected) { } System.out.println(\"boolean intrinsics ok\"); } }\n",
+            "public final class CallHarness { public static void main(String[] args) { example.Answer answer = new example.Answer(); for (boolean left : new boolean[] { false, true }) { if (answer.negateFlag(left) != !left) throw new AssertionError(\"not\"); for (boolean right : new boolean[] { false, true }) { if (answer.andFlag(left, right) != (left & right)) throw new AssertionError(\"and\"); if (answer.orFlag(left, right) != (left | right)) throw new AssertionError(\"or\"); if (answer.xorFlag(left, right) != (left ^ right)) throw new AssertionError(\"xor\"); if (answer.equalFlag(left, right) != (left == right)) throw new AssertionError(\"eq\"); if (answer.notEqualFlag(left, right) != (left != right)) throw new AssertionError(\"ne\"); if (answer.localBoolean(left, right) != (left ^ right)) throw new AssertionError(\"local init and assign\"); } } if (answer.loopUntilTrue(false) != true || answer.loopUntilTrue(true) != true) throw new AssertionError(\"while condition\"); if (answer.branchOnAnd(true, true) != 1 || answer.branchOnAnd(true, false) != 0 || !answer.orderedAnd()) throw new AssertionError(\"control flow and eager order\"); try { answer.falseAndDivide(); throw new AssertionError(\"false & rhs was short-circuited\"); } catch (ArithmeticException expected) { } try { answer.trueOrDivide(); throw new AssertionError(\"true | rhs was short-circuited\"); } catch (ArithmeticException expected) { } System.out.println(\"boolean intrinsics ok\"); } }\n",
             "boolean intrinsics ok",
         );
     }
