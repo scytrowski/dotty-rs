@@ -279,13 +279,11 @@ fn invalid_and_unresolved_operator_sources_fail_without_a_typed_application() {
         "class Invalid { def intPlusBoolean(x: Int): Int = x + true; def booleanPlusInt(x: Boolean): Boolean = x + 1; def unresolved(x: Int, y: Int): Int = x %% y }",
     );
     let int = fixture.definitions.int;
-    let boolean = fixture.definitions.boolean;
     let int_class = class_symbol(&fixture, int);
-    let boolean_class = class_symbol(&fixture, boolean);
 
     for (name, expected) in [
         ("intPlusBoolean", "no applicable overload"),
-        ("booleanPlusInt", "missing class info"),
+        ("booleanPlusInt", "missing member"),
         ("unresolved", "missing member"),
     ] {
         let (method, rhs) = fixture.method(name);
@@ -294,14 +292,6 @@ fn invalid_and_unresolved_operator_sources_fail_without_a_typed_application() {
         let error = typer.type_expression(rhs, context).unwrap_err();
         match (expected, error) {
             ("no applicable overload", TyperError::OverloadApplicationNoApplicable { .. }) => {}
-            ("missing class info", TyperError::MemberLookup(error))
-                if matches!(
-                    *error,
-                    dotty_typer::MemberLookupError::ClassInfoUnavailable {
-                        symbol,
-                        state: dotty_typer::SymbolInfoState::Missing,
-                    } if symbol == boolean_class
-                ) => {}
             ("missing member", TyperError::MemberNotFound { .. }) => {}
             (_, error) => panic!("unexpected diagnostic for {name}: {error:?}"),
         }

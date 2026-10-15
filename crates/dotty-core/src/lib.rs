@@ -58,7 +58,8 @@ pub mod core {
 
 pub use ast::{AstArena, AstPhase, Modifiers, Tree, TreeKind, Typed, TypedAstBuilder, Untyped};
 pub use definitions::{
-    Definitions, IntPrimitiveOperatorInfoState, IntPrimitiveOperatorRegistrationError,
+    BooleanPrimitiveOperatorRegistrationError, BooleanPrimitiveOperatorSymbols, Definitions,
+    IntPrimitiveOperatorInfoState, IntPrimitiveOperatorRegistrationError,
     IntPrimitiveOperatorSymbols,
 };
 pub use diagnostics::{Diagnostic, DiagnosticSeverity};
