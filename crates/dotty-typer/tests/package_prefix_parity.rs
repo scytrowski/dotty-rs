@@ -24,6 +24,8 @@ const HOLDER: &[u8] =
 const ISSUE_1173_LOCAL: &[u8] = include_bytes!("fixtures/issue-1173/a/consumer/b/Local.tasty");
 const ISSUE_1173_BINARY_LOCAL: &[u8] =
     include_bytes!("fixtures/issue-1173/a/consumer/binary/Local.tasty");
+const ISSUE_1174_PARENT_OBJ: &[u8] = include_bytes!("fixtures/issue-1174/a/core/Obj.tasty");
+const ISSUE_1174_CURRENT_OBJ: &[u8] = include_bytes!("fixtures/issue-1174/a/ast/core/Obj.tasty");
 
 struct Issue1173FixturePath;
 
@@ -47,6 +49,33 @@ impl ClassPathEntry for Issue1173FixturePath {
             package,
             ["a", "consumer", "b"] | ["a", "consumer", "binary"]
         ))
+    }
+}
+
+struct Issue1174StackedPath {
+    include_current_package: bool,
+}
+
+impl ClassPathEntry for Issue1174StackedPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let (bytes, format) = match name.as_internal() {
+            "a/core/Obj" => (ISSUE_1174_PARENT_OBJ.to_vec(), ClassFormat::Tasty),
+            "a/ast/core/Obj" if self.include_current_package => {
+                (ISSUE_1174_CURRENT_OBJ.to_vec(), ClassFormat::Tasty)
+            }
+            "java/lang/Object" => (java_object_stub(), ClassFormat::Class),
+            _ => return Ok(None),
+        };
+        Ok(Some(ClassResource::new(
+            bytes,
+            format,
+            ClassOrigin::Directory("<issue-1174-scala-3.9-fixture>".into()),
+        )))
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(matches!(package, ["a", "core"])
+            || (self.include_current_package && matches!(package, ["a", "ast", "core"])))
     }
 }
 
@@ -448,4 +477,240 @@ fn source_relative_class_import_resolves_through_the_scala39_classpath_artifact(
         typer.store().symbols.get(package).owner,
         Some(current_package)
     );
+}
+
+#[test]
+fn stacked_package_imports_use_current_then_enclosing_tasty_packages() {
+    let source_text = "package a { package core { object SourceOnly }; package ast { import core.Obj; object Use { def run: Int = Obj.value } } }";
+
+    for (index, include_current_package) in [true, false].into_iter().enumerate() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let source = SourceId::from_index(1175 + index as u32);
+        let scanner = ContextualScanner::new(source_text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(source_text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "Issue1174Stacked.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let expected_package = packages
+            .symbol(if include_current_package {
+                &["a", "ast"]
+            } else {
+                &["a"]
+            })
+            .unwrap();
+        let (run, rhs) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "run" =>
+                {
+                    Some((
+                        index.symbol_at(source, tree).unwrap(),
+                        definition.rhs.unwrap(),
+                    ))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(ClasspathSymbolResolver::new(
+            Issue1174StackedPath {
+                include_current_package,
+            },
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        )));
+
+        let context = typer.expression_context_for(run).unwrap();
+        let typed_rhs = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Select(selection) = &typer.typed_ast().get(typed_rhs).kind else {
+            panic!("expected a selection through the imported object")
+        };
+        let object_ref = typer.typed_ast().get(selection.qualifier);
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(object),
+            ..
+        } = typer.store().types.get(object_ref.ty)
+        else {
+            panic!("expected a canonical object reference")
+        };
+        let package = typer.store().symbols.get(*object).owner.unwrap();
+        assert_eq!(typer.store().symbols.get(package).kind, SymbolKind::Package);
+        assert_eq!(
+            typer.store().symbols.get(package).owner,
+            Some(expected_package)
+        );
+    }
+}
+
+#[test]
+fn explicit_import_shadows_a_same_named_package_qualifier() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let source = SourceId::from_index(1179);
+    let source_text = "package a.consumer.b { object Local { class PackageRelative } }; package other { object b { object Local { class Relative } } }; package a.consumer { import other.b; import b.Local.Relative; class Use { val value: Relative = new Relative } }";
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Issue1174PackageImportPrecedence.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (value, type_tree) = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| match &node.kind {
+            TreeKind::ValDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "value" =>
+            {
+                Some((index.symbol_at(source, tree).unwrap(), definition.tpt))
+            }
+            _ => None,
+        })
+        .next()
+        .unwrap();
+    let relative = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::TypeDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "Relative" =>
+            {
+                index.symbol_at(source, tree)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    typer.complete_symbol(value).unwrap();
+
+    let projected = typer
+        .source_type_index()
+        .type_at(source, type_tree)
+        .expect("the explicitly imported qualifier should resolve");
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(found),
+        ..
+    } = typer.store().types.get(projected)
+    else {
+        panic!("expected the imported Relative type")
+    };
+    assert_eq!(*found, relative);
+    let local_module = typer.store().symbols.get(relative).owner.unwrap();
+    assert_eq!(
+        typer.store().symbols.get(local_module).kind,
+        SymbolKind::ModuleClass
+    );
+    let imported_b = typer.store().symbols.get(local_module).owner.unwrap();
+    assert_eq!(
+        typer.store().symbols.get(imported_b).kind,
+        SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        typer.store().symbols.get(imported_b).owner,
+        Some(packages.symbol(&["other"]).unwrap())
+    );
+}
+
+#[test]
+fn dotted_package_declaration_does_not_expose_synthetic_parent_for_imports() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let source = SourceId::from_index(1177);
+    let source_text = "package a.ast\nimport core.Obj\nobject Use { def run: Int = Obj.value }";
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Issue1174Dotted.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (run, rhs) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "run" =>
+            {
+                Some((
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                ))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(ClasspathSymbolResolver::new(
+        Issue1174StackedPath {
+            include_current_package: false,
+        },
+        definitions,
+        LoadingSession::with_packages(packages.snapshot()),
+    )));
+
+    let context = typer.expression_context_for(run).unwrap();
+    assert!(matches!(
+        typer.type_expression(rhs, context),
+        Err(dotty_typer::TyperError::ImportQualifierNotFound { .. })
+    ));
 }

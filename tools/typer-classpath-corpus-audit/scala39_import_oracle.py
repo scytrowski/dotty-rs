@@ -55,6 +55,7 @@ def main() -> int:
             "ImportRoot.scala": "package fixture\nimport _root_.a.b.C\nobject ImportRoot { val value: C = new C }\n",
             "ImportIntermediate.scala": "package fixture\nimport _root_.middle.deep.third.Leaf\nobject ImportIntermediate { val value: Leaf = new Leaf }\n",
             "ImportSourceRelative.scala": "package a.consumer\nimport b.Local.Relative\nobject ImportSourceRelative { val value: Relative = new Relative }\n",
+            "ImportImportedQualifierShadowsPackage.scala": "package a.issue1174.consumer.b { object Local { class PackageRelative } }; package other { object b { object Local { class Relative } } }; package a.issue1174.consumer { import other.b; import b.Local.Relative; object ImportImportedQualifierShadowsPackage { val value: Relative = new Relative } }\n",
             "ImportStackedPackage.scala": "package a\npackage ast\nimport core.Obj\nobject ImportStackedPackage { val value = Obj.value }\n",
             "ImportRootFallback.scala": "package z.consumer\nimport b.Local.Root\nobject ImportRootFallback { val value: Root = new Root }\n",
             "ImportPackage.scala": "package fixture\nimport collision.Target.FromPackage\nobject ImportPackage { val value: FromPackage = new FromPackage }\n",
@@ -225,7 +226,7 @@ def main() -> int:
             raise SystemExit("Scala 3.9 did not prefer the lexical source package when both paths exist")
 
     print(
-        "scala=3.9.0 positive_imports=class,object,object_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate "
+        "scala=3.9.0 positive_imports=class,object,object_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate,imported_qualifier_shadows_package "
         "negative_imports=absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision,lexical_term_missing_member_no_root_fallback;root_fallback=success "
         "root_qualification=bypasses_relative_search;lexical_term_binding=normal_priority"
     )

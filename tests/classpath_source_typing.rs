@@ -630,6 +630,7 @@ fn method_rhs(unit: &NamedUnit, store: &SemanticStore, name: &str) -> (SymbolId,
 #[derive(Default)]
 struct ResolutionLog {
     packages: Vec<(Vec<String>, SymbolId)>,
+    package_requests: Vec<Vec<String>>,
     members: Vec<(String, SymbolId)>,
     session: Option<LoadingSession>,
     completions: Vec<SymbolId>,
@@ -769,6 +770,10 @@ impl<E: ClassPathEntry> SymbolResolver for RecordingResolver<E> {
         store: &mut SemanticStore,
         path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.log
+            .borrow_mut()
+            .package_requests
+            .push(path.iter().map(|part| (*part).to_owned()).collect());
         let result = self.inner().resolve_package(store, path)?;
         if let Some(symbol) = result {
             self.log
@@ -1162,6 +1167,7 @@ fn root_qualified_import_bypasses_a_local_name_that_shadows_a_package() {
         let definitions = Definitions::bootstrap(&mut store);
         let mut packages = Packages::new();
         let unit = parse_and_name(source_text, source, &mut store, &mut packages);
+        let typer_packages = packages.snapshot();
         let resolver = ClasspathSymbolResolver::new(
             DirectoryClassPath::new(files.path().to_path_buf()),
             definitions,
@@ -1169,7 +1175,6 @@ fn root_qualified_import_bypasses_a_local_name_that_shadows_a_package() {
         );
         let log = Rc::new(RefCell::new(ResolutionLog::default()));
         let resolver = RecordingResolver::new(resolver, Rc::clone(&log));
-        let typer_packages = Packages::new();
         let mut typer = SourceTyper::new(
             &unit.parsed.ast,
             source,
@@ -1194,9 +1199,15 @@ fn root_qualified_import_bypasses_a_local_name_that_shadows_a_package() {
             assert_eq!(typer.store().checkpoint(), checkpoint);
             assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
         }
+        let package_requests = log.borrow().package_requests.clone();
         drop(typer);
         let packages = log.borrow_mut().session.take().unwrap().into_packages();
         if succeeds {
+            assert!(
+                package_requests
+                    .iter()
+                    .all(|path| path.first().map(String::as_str) != Some("_root_"))
+            );
             let package_me = packages.symbol(&["me"]).unwrap();
             let semantic = packages
                 .symbol(&["me", "cytrowski", "tastyfixtures", "semantic"])

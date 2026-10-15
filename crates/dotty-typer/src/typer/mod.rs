@@ -8533,6 +8533,38 @@ mod tests {
     }
 
     #[test]
+    fn root_qualified_import_bypasses_a_same_named_source_relative_package() {
+        let source_text = "package b { object Local { class Root } }; package a.consumer.b { object Local { class Relative } }; package a.consumer { import _root_.b.Local.Root; class Use { val value: Root = new Root } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (value, _) = val_symbol(&parsed, &store, &index, source, "value");
+        let root_type = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Root" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let projected = typer.complete_symbol(value).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), projected), root_type);
+        assert_eq!(packages.symbol(&["_root_"]), None);
+    }
+
+    #[test]
     fn source_class_is_selected_after_a_current_package_relative_prefix() {
         let source_text = "package a.consumer.b { class Local }; package a.consumer { import b.Local; val value: Local = new Local }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
