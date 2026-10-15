@@ -59,6 +59,22 @@ impl Packages {
         Self::default()
     }
 
+    /// Copies the package identities and scopes currently entered in this
+    /// registry for another adapter over the same `SemanticStore`.
+    ///
+    /// The copy reuses the existing `SymbolId` and `ScopeId` values, but later
+    /// entries and rollbacks are independent. The snapshot must only be used
+    /// with the store that owns those IDs. Keep one registry read-only while
+    /// another adapter owns mutations; independently entering the same new
+    /// path into both registries can create duplicate package identities.
+    pub fn snapshot(&self) -> Self {
+        Self {
+            by_path: self.by_path.clone(),
+            scopes: self.scopes.clone(),
+            order: self.order.clone(),
+        }
+    }
+
     /// The package named by `path`, if it has been entered. The empty path is
     /// the root package.
     pub fn get<S: AsRef<str>>(&self, path: &[S]) -> Option<EnteredPackage> {
@@ -220,6 +236,24 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(packages.len(), 2);
+    }
+
+    #[test]
+    fn snapshot_reuses_existing_package_and_scope_identities() {
+        let (mut store, mut packages, origin) = setup();
+        let entered = packages.enter(&mut store, origin, &["a", "consumer"]);
+
+        let snapshot = packages.snapshot();
+
+        assert_eq!(
+            snapshot.get(&["a", "consumer"]),
+            packages.get(&["a", "consumer"])
+        );
+        assert_eq!(
+            snapshot.scope_of(entered[1].symbol),
+            packages.scope_of(entered[1].symbol)
+        );
+        assert_eq!(snapshot.symbol(&["a"]), packages.symbol(&["a"]));
     }
 
     #[test]

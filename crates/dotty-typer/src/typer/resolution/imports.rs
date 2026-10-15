@@ -16,7 +16,7 @@ pub(in crate::typer) enum LexicalPackageCandidateOrigin {
     Root,
 }
 
-/// Whether candidate enumeration starts from the lexical chain or explicit
+/// Whether candidate enumeration searches source package contexts or explicit
 /// `_root_` qualification.
 // Root-qualified enumeration remains unused until import resolution consumes
 // this contract in the following increment.
@@ -24,6 +24,9 @@ pub(in crate::typer) enum LexicalPackageCandidateOrigin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::typer) enum LexicalPackageSearch {
     Relative,
+    /// Search only the actual current package and then canonical root. This
+    /// excludes enclosing contexts represented by dotted package clauses.
+    CurrentPackageThenRoot,
     RootQualified,
 }
 
@@ -75,7 +78,10 @@ impl SourceTyper<'_> {
         let mut candidates = Vec::new();
         let mut seen_packages = HashSet::new();
 
-        if search == LexicalPackageSearch::Relative {
+        if matches!(
+            search,
+            LexicalPackageSearch::Relative | LexicalPackageSearch::CurrentPackageThenRoot
+        ) {
             let context_limit = self.index.source_context_count();
             let mut seen_contexts = HashSet::new();
             let mut current = Some(context);
@@ -114,6 +120,9 @@ impl SourceTyper<'_> {
                     )?;
                     if seen_packages.insert(candidate.package) {
                         candidates.push(candidate);
+                    }
+                    if search == LexicalPackageSearch::CurrentPackageThenRoot {
+                        break;
                     }
                     origin = LexicalPackageCandidateOrigin::EnclosingPackage;
                 }
@@ -423,8 +432,11 @@ impl SourceTyper<'_> {
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<Option<SymbolId>, TyperError> {
-        let candidates =
-            self.lexical_package_candidates(context, LexicalPackageSearch::Relative, tree_index)?;
+        let candidates = self.lexical_package_candidates(
+            context,
+            LexicalPackageSearch::CurrentPackageThenRoot,
+            tree_index,
+        )?;
         for candidate in candidates.into_iter().filter(|candidate| {
             matches!(
                 candidate.origin,

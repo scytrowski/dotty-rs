@@ -16,6 +16,7 @@ const WIDGET: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Widget.tasty");
 const HOLDER: &[u8] =
     include_bytes!("../../dotty-tasty-unpickler/tests/fixtures/semantic/Holder.tasty");
+// Compiled from Local.scala by the repository-pinned Scala 3.9.0 compiler.
 const ISSUE_1173_LOCAL: &[u8] = include_bytes!("fixtures/issue-1173/a/consumer/b/Local.tasty");
 
 struct ExistingPackageResolver {
@@ -208,9 +209,9 @@ fn source_and_tasty_references_use_the_same_package_prefix_identity() {
 fn current_package_import_reuses_package_identity_from_scala39_tasty() {
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
-    let mut packages = Packages::new();
+    let packages = Packages::new();
     let tasty_file = TastyFile::parse_scala_3_9(ISSUE_1173_LOCAL).unwrap();
-    let (entered_symbols, next_packages) = {
+    let (entered_symbols, packages) = {
         let mut unpickler =
             TastyUnpickler::with_packages(&tasty_file, &mut store, definitions, packages);
         let entered = unpickler
@@ -221,7 +222,7 @@ fn current_package_import_reuses_package_identity_from_scala39_tasty() {
         let (_, packages) = unpickler.into_parts();
         (entered, packages)
     };
-    packages = next_packages;
+    let mut packages = packages;
     let relative_package = packages.symbol(&["a", "consumer", "b"]).unwrap();
 
     let source = SourceId::from_index(1173);
@@ -244,12 +245,23 @@ fn current_package_import_reuses_package_identity_from_scala39_tasty() {
     )
     .unwrap();
 
+    let current_package = packages.symbol(&["a", "consumer"]).unwrap();
     // Model a package known to the binary package registry but absent from
     // the source lexical scope; the resolver must return that same identity.
-    let current_package = packages.symbol(&["a", "consumer"]).unwrap();
     let current_scope = packages.scope_of(current_package).unwrap();
     store.scopes.get_mut(current_scope).remove(relative_package);
-
+    let (_value, type_tree) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::ValDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "value" =>
+            {
+                Some((index.symbol_at(source, tree).unwrap(), definition.tpt))
+            }
+            _ => None,
+        })
+        .unwrap();
     let module_class = entered_symbols
         .iter()
         .copied()
@@ -289,18 +301,6 @@ fn current_package_import_reuses_package_identity_from_scala39_tasty() {
         relative,
         requests: std::rc::Rc::clone(&requests),
     };
-    let (_value, type_tree) = parsed
-        .ast
-        .iter()
-        .find_map(|(tree, node)| match &node.kind {
-            TreeKind::ValDef(definition)
-                if store.names.resolve(definition.name.as_name().text()) == "value" =>
-            {
-                Some((index.symbol_at(source, tree).unwrap(), definition.tpt))
-            }
-            _ => None,
-        })
-        .unwrap();
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -313,7 +313,6 @@ fn current_package_import_reuses_package_identity_from_scala39_tasty() {
 
     typer.complete_symbol(_value).unwrap();
 
-    assert_eq!(requests.borrow().as_slice(), [&["a", "consumer", "b"]]);
     let projected = typer
         .source_type_index()
         .type_at(source, type_tree)
@@ -326,4 +325,5 @@ fn current_package_import_reuses_package_identity_from_scala39_tasty() {
         panic!("expected the imported TASTy class type")
     };
     assert_eq!(*found, relative);
+    assert_eq!(requests.borrow().as_slice(), [&["a", "consumer", "b"]]);
 }
