@@ -1224,6 +1224,94 @@ fn root_qualified_import_bypasses_a_local_name_that_shadows_a_package() {
 }
 
 #[test]
+fn qualified_imports_keep_missing_segments_and_members_unresolved() {
+    let cases = [
+        (
+            "def use = { import me.cytrowski.tastyfixtures.missing.Both.make; 1 }",
+            true,
+        ),
+        (
+            "def use = { import me.cytrowski.tastyfixtures.semantic.Both.absent; absent }",
+            false,
+        ),
+    ];
+
+    for (index, (source_text, missing_segment)) in cases.into_iter().enumerate() {
+        let files = TemporaryDirectory::new(&format!("deep-import-missing-{index}"));
+        write_deep_both_tasty(files.path());
+        let source = SourceId::from_index(90 + index as u32);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut packages = Packages::new();
+        let unit = parse_and_name(source_text, source, &mut store, &mut packages);
+        let root_package = packages.symbol::<&str>(&[]).unwrap();
+        let root_scope = packages.scope_of(root_package).unwrap();
+        let me_name = Name::new(store.names.intern("me"), Namespace::Term);
+        let log = Rc::new(RefCell::new(ResolutionLog::default()));
+        let resolver = RecordingResolver::new(
+            ClasspathSymbolResolver::new(
+                DirectoryClassPath::new(files.path().to_path_buf()),
+                definitions,
+                LoadingSession::with_packages(packages),
+            ),
+            Rc::clone(&log),
+        );
+        let typer_packages = Packages::new();
+        let mut typer = SourceTyper::new(
+            &unit.parsed.ast,
+            source,
+            &unit.index,
+            &mut store,
+            definitions,
+            &typer_packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+        let context = typer.expression_context_for(method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_checkpoint = typer.typed_ast().checkpoint();
+        let error = typer
+            .type_expression(rhs, context)
+            .expect_err("missing package segments and selected members must remain errors");
+        if missing_segment {
+            assert!(matches!(error, TyperError::ImportQualifierNotFound { .. }));
+        } else {
+            assert!(matches!(error, TyperError::TermNameNotFound { .. }));
+        }
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+        assert!(
+            typer
+                .store()
+                .scopes
+                .get(root_scope)
+                .lookup_all(&me_name)
+                .is_empty()
+        );
+        let rolled_back_objects: Vec<_> = log
+            .borrow()
+            .members
+            .iter()
+            .filter_map(|(name, symbol)| (name == "Both").then_some(*symbol))
+            .collect();
+        if missing_segment {
+            assert!(rolled_back_objects.is_empty());
+        } else {
+            assert!(!rolled_back_objects.is_empty());
+            assert!(
+                rolled_back_objects
+                    .iter()
+                    .all(|symbol| !typer.store().symbols.contains(*symbol))
+            );
+        }
+
+        drop(typer);
+        let packages = log.borrow_mut().session.take().unwrap().into_packages();
+        assert_eq!(packages.symbol(&["me"]), None);
+    }
+}
+
+#[test]
 fn failed_expression_rolls_back_a_deep_object_import_and_retry_is_canonical() {
     let files = TemporaryDirectory::new("deep-object-import-rollback");
     write_deep_both_tasty(files.path());

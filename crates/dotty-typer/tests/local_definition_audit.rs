@@ -4061,6 +4061,7 @@ struct BaselineImportAttempt {
     file: String,
     method_tree: u32,
     blocker_origin_tree: u32,
+    target_key: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -6344,20 +6345,40 @@ fn pinned_scala39_import_prefix_typing_probe() {
         "777528f19a58e794c9954a42f433373472ec57f8",
         "import audit requires the repository's pinned Scala 3.9.0 source revision"
     );
-    let report = PathBuf::from(
-        std::env::var_os("SCALA39_IMPORT_PREFIX_BASELINE_REPORT")
-            .expect("SCALA39_IMPORT_PREFIX_BASELINE_REPORT is required"),
+    let profile = PathBuf::from(
+        std::env::var_os("SCALA39_IMPORT_PREFIX_BASELINE_PROFILE")
+            .expect("SCALA39_IMPORT_PREFIX_BASELINE_PROFILE is required"),
     );
-    let report = fs::read_to_string(report).expect("corrected baseline report should be readable");
-    let baseline_rows = baseline_import_blocker_attempts(&report);
-    assert_eq!(baseline_rows.len(), 2_573);
+    let profile = fs::read_to_string(profile).expect("frozen #1128 profile should be readable");
+    let baseline_rows = baseline_import_blocker_attempts(&profile);
+    assert_eq!(baseline_rows.len(), 2_394);
+    assert_eq!(
+        baseline_rows
+            .iter()
+            .map(|row| row.file.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        209
+    );
+    assert_eq!(
+        baseline_rows
+            .iter()
+            .map(|row| row.target_key.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        30
+    );
     let mut methods_by_file = BTreeMap::<String, BTreeSet<u32>>::new();
-    for attempt in baseline_rows {
+    for attempt in &baseline_rows {
         methods_by_file
-            .entry(attempt.file)
+            .entry(attempt.file.clone())
             .or_default()
             .insert(attempt.blocker_origin_tree);
     }
+    assert_eq!(
+        methods_by_file.values().map(BTreeSet::len).sum::<usize>(),
+        904
+    );
     let classpath = audit_classpath_from_environment();
     let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
     let mut audit = Audit::default();
@@ -6386,10 +6407,21 @@ fn pinned_scala39_import_prefix_typing_probe() {
         .iter()
         .filter(|row| {
             row.resolver_outcome
-                .ends_with("::first segment/package unresolved")
+                .ends_with("::truly unresolved next segment")
         })
         .cloned()
         .collect::<Vec<_>>();
+    let term_object_gaps = all_observations
+        .iter()
+        .filter(|row| {
+            row.resolver_outcome
+                .ends_with("::term/object materialization gap")
+        })
+        .count();
+    let unmatched_traces = all_observations
+        .iter()
+        .filter(|row| row.resolver_outcome == "unknown:no matching failed request")
+        .count();
     let files = first_segment_observations
         .iter()
         .map(|row| row.source_file.as_str())
@@ -6399,20 +6431,40 @@ fn pinned_scala39_import_prefix_typing_probe() {
         .map(|row| row.target_key.as_str())
         .collect::<BTreeSet<_>>();
     eprintln!(
-        "import-prefix totals: all={}, first-segment={}, files={}, targets={}",
+        "import-prefix totals: all={}, unresolved-next-segment={}, files={}, targets={}, term-object-gaps={}, unmatched-traces={}",
         all_observations.len(),
         first_segment_observations.len(),
         files.len(),
-        targets.len()
+        targets.len(),
+        term_object_gaps,
+        unmatched_traces
     );
-    assert_eq!(all_observations.len(), 2_573);
-    assert_eq!(first_segment_observations.len(), 2_394);
-    assert_eq!(files.len(), 209);
-    assert_eq!(targets.len(), 30);
+    assert_eq!(all_observations.len(), 2_342);
+    assert_eq!(first_segment_observations.len(), 2_342);
+    assert_eq!(files.len(), 196);
+    assert_eq!(targets.len(), 29);
+    assert_eq!(term_object_gaps, 0);
+    assert_eq!(unmatched_traces, 0);
+    assert!(
+        !targets.contains("dotty::<first-segment-unresolved>")
+            && !targets.contains("java::<first-segment-unresolved>"),
+        "the previously descendant-only dotty/java prefixes must move past this blocker"
+    );
     println!("AUDIT_IMPORT_PREFIX_BEGIN");
     print_import_prefix_profile(&ImportPrefixProfile {
         observations: first_segment_observations,
     });
+    println!("baseline_observations=2394");
+    println!("baseline_files=209");
+    println!("baseline_targets=30");
+    println!("baseline_blocker_origins=904");
+    println!(
+        "current_import_qualifier_not_found={}",
+        all_observations.len()
+    );
+    println!("current_unresolved_next_segment={}", all_observations.len());
+    println!("current_term_object_gaps={term_object_gaps}");
+    println!("current_unmatched_request_traces={unmatched_traces}");
     println!("AUDIT_IMPORT_PREFIX_END");
 }
 
@@ -11350,44 +11402,58 @@ fn print_import_prefix_profile(profile: &ImportPrefixProfile) {
     }
 }
 
-fn baseline_import_blocker_attempts(report: &str) -> BTreeSet<BaselineImportAttempt> {
+fn baseline_import_blocker_attempts(report: &str) -> Vec<BaselineImportAttempt> {
     let start = report
-        .rfind("local_method_attempts:")
-        .expect("corrected audit contains the local_method_attempts section");
-    let mut rows = BTreeSet::new();
-    for line in report[start..].lines().skip(1) {
-        let Some(line) = line.strip_prefix("  method=") else {
-            if line.starts_with("  ") {
-                continue;
-            }
+        .find("import_prefix_observations:\n")
+        .expect("frozen #1128 profile contains import-prefix observations");
+    let mut lines = report[start..].lines().skip(1);
+    let counts = lines
+        .next()
+        .expect("profile contains an observation count")
+        .trim()
+        .strip_prefix("observations=")
+        .expect("profile observation count is labeled")
+        .parse::<usize>()
+        .expect("profile observation count is numeric");
+    let header = lines.next().expect("profile contains the row header");
+    assert!(header.contains("\tmethod\tblocker_origin\t"));
+    let mut rows = Vec::with_capacity(counts);
+    for line in lines {
+        let Some(line) = line.strip_prefix("  ") else {
             break;
         };
-        let fields = line.split("::").collect::<Vec<_>>();
-        if fields.get(3).copied() != Some("blocker=ImportQualifierNotFound") {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 17 {
             continue;
         }
-        let (file, tree) = fields[0]
+        let (file, tree) = fields[1]
             .rsplit_once("#tree=")
-            .expect("method attempt has a stable source tree key");
+            .expect("baseline method has a stable source tree key");
         let method_tree = tree
             .parse::<u32>()
-            .expect("method tree key contains a numeric source tree index");
-        let attempt = fields
-            .get(2)
-            .and_then(|field| field.strip_prefix("attempt="))
-            .expect("method attempt records its first-blocker origin");
-        let (_, origin_tree) = attempt
+            .expect("baseline method tree key contains a numeric source tree index");
+        let origin = fields[2]
+            .split_once(':')
+            .map(|(_, origin)| origin)
+            .expect("baseline blocker origin has an attribution prefix");
+        let (_, origin_tree) = origin
             .rsplit_once("#tree=")
-            .expect("blocker origin contains a source tree index");
+            .expect("baseline blocker origin contains a source tree index");
         let blocker_origin_tree = origin_tree
             .parse::<u32>()
-            .expect("blocker origin tree is numeric");
-        rows.insert(BaselineImportAttempt {
+            .expect("baseline blocker origin tree is numeric");
+        rows.push(BaselineImportAttempt {
             file: file.to_owned(),
             method_tree,
             blocker_origin_tree,
+            target_key: fields[16].to_owned(),
         });
     }
+    assert_eq!(
+        rows.len(),
+        counts,
+        "frozen profile row count matches its header"
+    );
     rows
 }
 
