@@ -7918,6 +7918,198 @@ mod tests {
     }
 
     #[test]
+    fn lexical_package_candidates_follow_source_package_contexts() {
+        for (text, expected_paths, expected_origins) in [
+            (
+                "package a.b; class C",
+                vec![vec!["a", "b"], vec![]],
+                vec![
+                    resolution::imports::LexicalPackageCandidateOrigin::CurrentPackage,
+                    resolution::imports::LexicalPackageCandidateOrigin::Root,
+                ],
+            ),
+            (
+                "package a; package b; class C",
+                vec![vec!["a", "b"], vec!["a"], vec![]],
+                vec![
+                    resolution::imports::LexicalPackageCandidateOrigin::CurrentPackage,
+                    resolution::imports::LexicalPackageCandidateOrigin::EnclosingPackage,
+                    resolution::imports::LexicalPackageCandidateOrigin::Root,
+                ],
+            ),
+            (
+                "class C",
+                vec![vec![]],
+                vec![resolution::imports::LexicalPackageCandidateOrigin::CurrentPackage],
+            ),
+        ] {
+            let (parsed, mut store, packages, definitions, index, source) = parse_and_name(text);
+            let class = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .expect("fixture class should be named");
+            let context = index.declaration_context_of(class).unwrap();
+            let typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            );
+
+            let candidates = typer.lexical_package_candidates(context, false, 1).unwrap();
+
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate
+                        .package_path
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>())
+                    .collect::<Vec<_>>(),
+                expected_paths
+            );
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.origin)
+                    .collect::<Vec<_>>(),
+                expected_origins
+            );
+            assert!(candidates.iter().all(|candidate| {
+                typer.packages.symbol(&candidate.package_path) == Some(candidate.package)
+                    && typer.packages.scope_of(candidate.package) == Some(candidate.scope)
+                    && typer.index.definition_of(candidate.package).is_none()
+            }));
+        }
+    }
+
+    #[test]
+    fn lexical_package_candidates_ignore_non_package_owner_ancestors() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package a.b; object O { class C { def method(x: Int): Int = x } }");
+        let method = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "method" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("fixture method should be named");
+        let context = index.declaration_context_of(method).unwrap();
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidates = typer.lexical_package_candidates(context, false, 2).unwrap();
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].package_path, ["a", "b"]);
+        assert_eq!(
+            candidates[0].origin,
+            resolution::imports::LexicalPackageCandidateOrigin::CurrentPackage
+        );
+        assert!(candidates[1].package_path.is_empty());
+        assert_eq!(
+            candidates[1].origin,
+            resolution::imports::LexicalPackageCandidateOrigin::Root
+        );
+    }
+
+    #[test]
+    fn explicit_root_package_candidates_bypass_lexical_contexts() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package a; package b; class C");
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("fixture class should be named");
+        let context = index.declaration_context_of(class).unwrap();
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let candidates = typer.lexical_package_candidates(context, true, 3).unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].package_path.is_empty());
+        assert_eq!(
+            candidates[0].origin,
+            resolution::imports::LexicalPackageCandidateOrigin::Root
+        );
+    }
+
+    #[test]
+    fn lexical_package_candidates_reject_a_cyclic_package_owner_chain() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package a.b; class C");
+        let class = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "C" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("fixture class should be named");
+        let context = index.declaration_context_of(class).unwrap();
+        let package = packages.symbol(&["a", "b"]).unwrap();
+        store.symbols.get_mut(package).owner = Some(package);
+        let typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.lexical_package_candidates(context, false, 4),
+            Err(TyperError::LexicalPackageCandidateInvalid {
+                package: Some(found),
+                reason: "package owner chain contains a cycle",
+                ..
+            }) if found == package
+        ));
+    }
+
+    #[test]
     fn external_member_resolver_runs_only_after_source_lookup_misses() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Outer { class Local }; val local: Outer.Local = 1; val ext: Outer.External = 1",

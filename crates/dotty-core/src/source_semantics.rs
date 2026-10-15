@@ -242,6 +242,14 @@ impl SourceSemanticIndex {
         self.source_contexts.get(id.index() as usize)
     }
 
+    /// Number of source contexts allocated in this index.
+    ///
+    /// Traversals use this bound to reject malformed parent chains without
+    /// relying on symbol or context allocation order.
+    pub fn source_context_count(&self) -> usize {
+        self.source_contexts.len()
+    }
+
     /// Returns the source declaration context recorded for `symbol`.
     pub fn declaration_context_of(&self, symbol: SymbolId) -> Option<SourceContextId> {
         self.declaration_contexts_by_symbol.get(&symbol).copied()
