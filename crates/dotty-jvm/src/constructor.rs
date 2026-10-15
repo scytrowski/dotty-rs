@@ -44,6 +44,16 @@ pub struct JvmConstructorMetadata {
 }
 
 impl JvmPrimaryConstructorPlan {
+    /// Canonical primary constructor identity checked against source evidence.
+    pub fn symbol(&self) -> SymbolId {
+        self.constructor
+    }
+
+    /// Constructor-owned parameter identities in authoritative source order.
+    pub fn parameters(&self) -> &[SymbolId] {
+        &self.parameters
+    }
+
     /// Checks frontend-collected identities against Template.constructor and
     /// the index's derived parameter mappings. Unsupported syntax is rejected
     /// here, before semantic signatures can erase defaults/accessor markers.
@@ -418,6 +428,20 @@ mod tests {
         ] {
             store.symbols.set_info(plan.constructor, info);
             assert!(plan.metadata(&store, &definitions, plan.class).is_err());
+            let ast = dotty_core::ast::TypedAst::new();
+            let unit = crate::JvmCompilationUnit {
+                store: &store,
+                typed_ast: &ast,
+                classes: vec![crate::JvmClassPlan {
+                    class: plan.class,
+                    fields: Vec::new(),
+                    methods: Vec::new(),
+                    initialization: crate::JvmClassInitializationPlan::PrimaryConstructor(
+                        plan.clone(),
+                    ),
+                }],
+            };
+            assert!(unit.validate().is_err());
         }
         *store.symbols.get_mut(plan.constructor) = original;
         let SymbolInfo::Complete(ty) = store.symbols.get(plan.constructor).info else {

@@ -1623,6 +1623,10 @@ impl JvmCompilationUnit<'_> {
                 &class_plan.initialization
             {
                 constructor.validate_binding(self.store, class_plan.class)?;
+                self.validate_symbol_type(constructor.symbol())?;
+                for parameter in constructor.parameters() {
+                    self.validate_symbol_type(*parameter)?;
+                }
             }
 
             let mut class_field_symbols = HashSet::new();
