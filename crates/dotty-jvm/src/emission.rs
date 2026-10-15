@@ -35,7 +35,13 @@ pub(super) fn emit_class(
         });
     }
 
-    let metadata = plan.metadata(unit.store, definitions)?;
+    let metadata = plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
+    if let Some(field) = metadata.fields().first() {
+        return Err(JvmCodegenError::FieldEmissionUnsupported {
+            class: class_symbol,
+            field: field.symbol(),
+        });
+    }
     let class_info = super::identity::class_info(unit.store, class_symbol)?;
     validate_emittable_class(plan, unit.store, definitions, class_info)?;
 

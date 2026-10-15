@@ -75,6 +75,7 @@ impl Fixture {
             typed_ast: &self.ast,
             classes: vec![JvmClassPlan {
                 class: self.class,
+                fields: Vec::new(),
                 methods: vec![JvmMethodPlan {
                     method: self.method,
                     parameters: vec![self.parameter],
@@ -932,6 +933,7 @@ impl ClassIdentityFixture {
     fn identity(&self) -> Result<crate::JvmClassIdentity, JvmCodegenError> {
         JvmClassPlan {
             class: self.class,
+            fields: Vec::new(),
             methods: Vec::new(),
             initialization: JvmClassInitializationPlan::Unsupported,
         }
@@ -1054,6 +1056,7 @@ fn rejects_nested_and_invalid_package_owner_chains() {
     assert_eq!(
         JvmClassPlan {
             class: inner,
+            fields: Vec::new(),
             methods: Vec::new(),
             initialization: JvmClassInitializationPlan::Unsupported,
         }
@@ -1270,6 +1273,7 @@ fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
 
     let class_plan = JvmClassPlan {
         class: fixture.class,
+        fields: Vec::new(),
         methods: vec![fixture.plan.clone()],
         initialization: JvmClassInitializationPlan::Unsupported,
     };
@@ -2246,6 +2250,7 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
     assert_eq!(
         JvmClassPlan {
             class: invalid_name.class,
+            fields: Vec::new(),
             methods: vec![invalid_name.plan.clone()],
             initialization: JvmClassInitializationPlan::Unsupported,
         }
@@ -2274,6 +2279,7 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
         assert_eq!(
             JvmClassPlan {
                 class: fixture.class,
+                fields: Vec::new(),
                 methods: vec![fixture.plan.clone()],
                 initialization: JvmClassInitializationPlan::Unsupported,
             }
@@ -2291,6 +2297,7 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
     assert_eq!(
         JvmClassPlan {
             class: nonpublic.class,
+            fields: Vec::new(),
             methods: vec![nonpublic.plan.clone()],
             initialization: JvmClassInitializationPlan::Unsupported,
         }
@@ -2310,6 +2317,7 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
         .flags = SymbolFlags::FINAL;
     let final_metadata = JvmClassPlan {
         class: final_method.class,
+        fields: Vec::new(),
         methods: vec![final_method.plan.clone()],
         initialization: JvmClassInitializationPlan::Unsupported,
     }
@@ -2355,6 +2363,7 @@ fn same_named_method_from_a_different_owner_cannot_replace_the_planned_symbol() 
     assert_eq!(
         JvmClassPlan {
             class: fixture.class,
+            fields: Vec::new(),
             methods: vec![other_plan],
             initialization: JvmClassInitializationPlan::Unsupported,
         }
@@ -2385,6 +2394,7 @@ fn rejects_duplicate_emitted_method_names_and_descriptors() {
     assert_eq!(
         JvmClassPlan {
             class: fixture.class,
+            fields: Vec::new(),
             methods: vec![fixture.plan.clone(), duplicate_plan],
             initialization: JvmClassInitializationPlan::Unsupported,
         }
@@ -2426,11 +2436,13 @@ fn compilation_unit_rejects_distinct_symbols_with_the_same_jvm_class_name() {
         classes: vec![
             JvmClassPlan {
                 class: fixture.class,
+                fields: Vec::new(),
                 methods: Vec::new(),
                 initialization: JvmClassInitializationPlan::Unsupported,
             },
             JvmClassPlan {
                 class: duplicate,
+                fields: Vec::new(),
                 methods: Vec::new(),
                 initialization: JvmClassInitializationPlan::Unsupported,
             },
@@ -2969,6 +2981,7 @@ impl EmissionFixture {
             typed_ast: &self.ast,
             classes: vec![JvmClassPlan {
                 class: self.class,
+                fields: Vec::new(),
                 methods,
                 initialization: JvmClassInitializationPlan::ImplicitNoArg,
             }],
