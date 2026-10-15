@@ -8,6 +8,38 @@ pub(in crate::typer) enum ImportSelection {
     Wildcard,
 }
 
+/// Why a package is present in the ordered import fallback search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::typer) enum LexicalPackageCandidateOrigin {
+    CurrentPackage,
+    EnclosingPackage,
+    Root,
+}
+
+/// Whether candidate enumeration starts from the lexical chain or explicit
+/// `_root_` qualification.
+// Root-qualified enumeration remains unused until import resolution consumes
+// this contract in the following increment.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::typer) enum LexicalPackageSearch {
+    Relative,
+    RootQualified,
+}
+
+/// A validated package identity available from the source lexical context.
+///
+/// A candidate describes where qualified lookup may search. It does not mean
+/// that a requested source name or member has been resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::typer) struct LexicalPackageCandidate {
+    pub package: SymbolId,
+    pub scope: dotty_core::ScopeId,
+    pub source_context: SourceContextId,
+    pub origin: LexicalPackageCandidateOrigin,
+    pub package_path: Vec<String>,
+}
+
 #[derive(Clone)]
 pub(in crate::typer) struct SourceImport {
     tree: TreeId<Untyped>,
@@ -19,6 +51,252 @@ pub(in crate::typer) struct SourceImport {
 }
 
 impl SourceTyper<'_> {
+    /// Enumerates canonical source package candidates from the source context
+    /// chain, most specific first, then the canonical root package.
+    ///
+    /// This is intentionally separate from qualifier resolution: calling it
+    /// does not perform lookup, load symbols, or mutate semantic state.
+    // Kept separate from resolution until the follow-up increment consumes
+    // this contract; #1168 deliberately leaves import behavior unchanged.
+    #[allow(dead_code)]
+    pub(in crate::typer) fn lexical_package_candidates(
+        &self,
+        context: SourceContextId,
+        search: LexicalPackageSearch,
+        tree_index: u32,
+    ) -> Result<Vec<LexicalPackageCandidate>, TyperError> {
+        if self.index.try_source_context(context).is_none() {
+            return Err(TyperError::SourceContextMissing {
+                source: self.source,
+                tree_index,
+                context_index: context.index(),
+            });
+        }
+        let mut candidates = Vec::new();
+        let mut seen_packages = HashSet::new();
+
+        if search == LexicalPackageSearch::Relative {
+            let context_limit = self.index.source_context_count();
+            let mut seen_contexts = HashSet::new();
+            let mut current = Some(context);
+            let mut origin = LexicalPackageCandidateOrigin::CurrentPackage;
+            while let Some(context_id) = current {
+                if !seen_contexts.insert(context_id) || seen_contexts.len() > context_limit {
+                    return Err(self.invalid_package_candidate(
+                        tree_index,
+                        Some(context_id.index()),
+                        None,
+                        "source context chain contains a cycle",
+                    ));
+                }
+                let Some(source_context) = self.index.try_source_context(context_id) else {
+                    return Err(TyperError::SourceContextMissing {
+                        source: self.source,
+                        tree_index,
+                        context_index: context_id.index(),
+                    });
+                };
+                if !self.store.symbols.contains(source_context.owner) {
+                    return Err(self.invalid_package_candidate(
+                        tree_index,
+                        Some(context_id.index()),
+                        Some(source_context.owner),
+                        "source context owner is absent from the semantic store",
+                    ));
+                }
+                if self.store.symbols.get(source_context.owner).kind == SymbolKind::Package {
+                    let candidate = self.validated_package_candidate(
+                        source_context.owner,
+                        source_context.lexical_scope,
+                        context_id,
+                        origin,
+                        tree_index,
+                    )?;
+                    if seen_packages.insert(candidate.package) {
+                        candidates.push(candidate);
+                    }
+                    origin = LexicalPackageCandidateOrigin::EnclosingPackage;
+                }
+                current = source_context.parent;
+            }
+        }
+
+        let root = self.packages.get::<&str>(&[]).ok_or_else(|| {
+            self.invalid_package_candidate(
+                tree_index,
+                Some(context.index()),
+                None,
+                "canonical root package is absent from the package registry",
+            )
+        })?;
+        let root_candidate = self.validated_package_candidate(
+            root.symbol,
+            root.scope,
+            context,
+            LexicalPackageCandidateOrigin::Root,
+            tree_index,
+        )?;
+        if seen_packages.insert(root_candidate.package) {
+            candidates.push(root_candidate);
+        }
+        Ok(candidates)
+    }
+
+    fn validated_package_candidate(
+        &self,
+        package: SymbolId,
+        context_scope: dotty_core::ScopeId,
+        source_context: SourceContextId,
+        origin: LexicalPackageCandidateOrigin,
+        tree_index: u32,
+    ) -> Result<LexicalPackageCandidate, TyperError> {
+        let mut reversed_chain = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = Some(package);
+        let canonical_root = self.packages.get::<&str>(&[]).ok_or_else(|| {
+            self.invalid_package_candidate(
+                tree_index,
+                Some(source_context.index()),
+                Some(package),
+                "canonical root package is absent from the package registry",
+            )
+        })?;
+        loop {
+            let Some(symbol) = current else {
+                return Err(self.invalid_package_candidate(
+                    tree_index,
+                    Some(source_context.index()),
+                    Some(package),
+                    "package owner chain does not terminate at the canonical root",
+                ));
+            };
+            if !seen.insert(symbol) {
+                return Err(self.invalid_package_candidate(
+                    tree_index,
+                    Some(source_context.index()),
+                    Some(symbol),
+                    "package owner chain contains a cycle",
+                ));
+            }
+            if !self.store.symbols.contains(symbol) {
+                return Err(self.invalid_package_candidate(
+                    tree_index,
+                    Some(source_context.index()),
+                    Some(symbol),
+                    "package owner chain contains an unknown symbol",
+                ));
+            }
+            let entry = self.store.symbols.get(symbol);
+            if entry.kind != SymbolKind::Package {
+                return Err(self.invalid_package_candidate(
+                    tree_index,
+                    Some(source_context.index()),
+                    Some(symbol),
+                    "package owner chain contains a non-package symbol",
+                ));
+            }
+            let name = self.store.names.resolve(entry.name.text()).to_owned();
+            if entry.owner.is_none() {
+                if !name.is_empty() || symbol != canonical_root.symbol {
+                    return Err(self.invalid_package_candidate(
+                        tree_index,
+                        Some(source_context.index()),
+                        Some(symbol),
+                        "package owner chain does not end at the canonical root",
+                    ));
+                }
+                break;
+            }
+            if name.is_empty() {
+                return Err(self.invalid_package_candidate(
+                    tree_index,
+                    Some(source_context.index()),
+                    Some(symbol),
+                    "non-root package has an empty segment name",
+                ));
+            }
+            reversed_chain.push((symbol, name));
+            current = entry.owner;
+        }
+        reversed_chain.reverse();
+        let mut path = Vec::with_capacity(reversed_chain.len());
+        for (symbol, segment) in &reversed_chain {
+            path.push(segment.clone());
+            let Some(registered) = self.packages.get(&path) else {
+                return Err(self.invalid_package_candidate(
+                    tree_index,
+                    Some(source_context.index()),
+                    Some(*symbol),
+                    "package owner chain is absent from the canonical registry",
+                ));
+            };
+            if registered.symbol != *symbol
+                || self.packages.scope_of(*symbol) != Some(registered.scope)
+                || !self.store.scopes.contains(registered.scope)
+                || self.store.scopes.get(registered.scope).owner != Some(*symbol)
+            {
+                return Err(self.invalid_package_candidate(
+                    tree_index,
+                    Some(source_context.index()),
+                    Some(*symbol),
+                    "package segment and registry identity disagree",
+                ));
+            }
+        }
+        let registered = self.packages.get(&path).ok_or_else(|| {
+            self.invalid_package_candidate(
+                tree_index,
+                Some(source_context.index()),
+                Some(package),
+                "package owner chain is absent from the canonical registry",
+            )
+        })?;
+        let Some(registered_scope) = self.packages.scope_of(package) else {
+            return Err(self.invalid_package_candidate(
+                tree_index,
+                Some(source_context.index()),
+                Some(package),
+                "package scope is absent from the canonical registry",
+            ));
+        };
+        if registered.symbol != package
+            || registered.scope != registered_scope
+            || !self.store.scopes.contains(registered_scope)
+            || self.store.scopes.get(registered_scope).owner != Some(package)
+            || registered_scope != context_scope
+        {
+            return Err(self.invalid_package_candidate(
+                tree_index,
+                Some(source_context.index()),
+                Some(package),
+                "package symbol, lexical scope, and registry identity disagree",
+            ));
+        }
+        Ok(LexicalPackageCandidate {
+            package,
+            scope: registered_scope,
+            source_context,
+            origin,
+            package_path: path,
+        })
+    }
+
+    fn invalid_package_candidate(
+        &self,
+        tree_index: u32,
+        context_index: Option<u32>,
+        package: Option<SymbolId>,
+        reason: &'static str,
+    ) -> TyperError {
+        TyperError::LexicalPackageCandidateInvalid {
+            source: self.source,
+            tree_index,
+            context_index,
+            package,
+            reason,
+        }
+    }
+
     pub(in crate::typer) fn resolve_qualifier_symbol(
         &mut self,
         tree: TreeId<Untyped>,

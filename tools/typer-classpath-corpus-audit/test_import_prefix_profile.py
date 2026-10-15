@@ -7,7 +7,9 @@ from import_prefix_profile import (
     OBSERVATION_HEADER,
     classify_target,
     logical_resources,
+    ordered_source_package_candidates,
     package_resource_evidence,
+    render_lexical_candidate_evidence,
     render_profile,
     source_package_candidates,
 )
@@ -97,9 +99,71 @@ class ImportPrefixProfileTest(unittest.TestCase):
             )
         )
         self.assertEqual(
+            [
+                (candidate["origin"], candidate["path"], candidate["registry"])
+                for candidate in ordered_source_package_candidates(row)
+            ],
+            [
+                ("current", "a.b.ast.core", "missing"),
+                ("enclosing", "a.b.core", "found:Package"),
+                ("enclosing", "a.core", "missing"),
+                ("root", "<root>", "found:Package"),
+            ],
+        )
+        self.assertEqual(
+            ordered_source_package_candidates(row)[-1]["next_segment_lookup"],
+            "missing",
+        )
+        self.assertEqual(
             source_package_candidates(row),
             {"a.b.ast.core", "a.b.core", "a.core"},
         )
+
+    def test_lexical_candidate_report_keeps_snapshots_and_order_deterministic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            archive = self.make_archive(
+                Path(temporary),
+                "candidate.jar",
+                {"a/b/core/Thing.class": b"class", "a/b/ast/deep/Leaf.tasty": b"tasty"},
+            )
+            resources, versions, directories = logical_resources(archive, 21)
+            roots = [("JAR:candidate.jar", resources, versions, directories)]
+            core = self.observation(
+                target_key="core::<first-segment-unresolved>",
+                source_file="z.scala",
+                import_tree="z.scala#tree=8",
+                source_package_registry_lookup=(
+                    "relative=missing@a.b.ast.core;enclosing=a.b=found:Package@a.b.core;root=missing"
+                ),
+            )
+            ast = self.observation(
+                target_key="ast::<first-segment-unresolved>",
+                source_file="a.scala",
+                import_tree="a.scala#tree=4",
+                source_package_registry_lookup="relative=missing@a.b.ast;enclosing=none;root=missing",
+            )
+            families = ("core", "ast")
+            forward = render_lexical_candidate_evidence(
+                [core, ast], roots, "frozen-1128", families=families
+            )
+            reverse = render_lexical_candidate_evidence(
+                [ast, core], roots, "frozen-1128", families=families
+            )
+            combined = forward + render_lexical_candidate_evidence(
+                [core, ast],
+                roots,
+                "current-1132",
+                families=families,
+                include_header=False,
+            )
+
+        self.assertEqual(forward, reverse)
+        self.assertIn("frozen-1128\tast\ta.scala", forward)
+        self.assertIn("a.b.core", forward)
+        self.assertIn("source_classpath_overlap", forward)
+        self.assertNotIn("current-1132", forward)
+        self.assertEqual(combined.count("snapshot\ttarget_family"), 1)
+        self.assertIn("source_context_owners_in_priority_order", combined)
 
     def test_qualified_source_candidate_is_probed_in_classpath(self):
         with tempfile.TemporaryDirectory() as temporary:

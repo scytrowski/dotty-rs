@@ -15513,6 +15513,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::SourceProvenanceMissing { .. } => "SourceProvenanceMissing",
         TyperError::DeclarationContextMissing { .. } => "DeclarationContextMissing",
         TyperError::SourceContextMissing { .. } => "SourceContextMissing",
+        TyperError::LexicalPackageCandidateInvalid { .. } => "LexicalPackageCandidateInvalid",
         TyperError::ExpressionOwnerMissing { .. } => "ExpressionOwnerMissing",
         TyperError::ExpressionOwnerKindUnsupported { .. } => "ExpressionOwnerKindUnsupported",
         TyperError::ExpressionMethodScopeMissing { .. } => "ExpressionMethodScopeMissing",

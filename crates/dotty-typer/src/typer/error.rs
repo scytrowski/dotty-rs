@@ -157,6 +157,15 @@ pub enum TyperError {
         tree_index: u32,
         context_index: u32,
     },
+    /// A source context chain or package identity is inconsistent while
+    /// collecting lexical package candidates.
+    LexicalPackageCandidateInvalid {
+        source: SourceId,
+        tree_index: u32,
+        context_index: Option<u32>,
+        package: Option<SymbolId>,
+        reason: &'static str,
+    },
     /// The requested expression-context owner is not present in the semantic store.
     ExpressionOwnerMissing {
         owner: SymbolId,
