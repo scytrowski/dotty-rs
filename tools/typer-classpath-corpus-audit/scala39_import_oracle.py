@@ -40,7 +40,7 @@ def main() -> int:
         source.mkdir()
         output.mkdir()
         fixtures = {
-            "Defs.scala": "package a.b\nclass C\nobject Obj { val value = 1 }\n",
+            "Defs.scala": "package a.b\nclass C\nobject Obj { val value: String = \"object\" }\ndef value: Int = 1\n",
             "StackedCore.scala": "package a.core\nobject Obj { val value = 1 }\n",
             "Deep.scala": "package middle.deep.third\nclass Leaf\n",
             "RootLocal.scala": "package b\nobject Local { class Root }\n",
@@ -50,7 +50,7 @@ def main() -> int:
             "NameCollisionPackage.scala": "package collision.Target\nclass FromPackage\n",
             "ImportClass.scala": "package fixture\nimport a.b.C\nobject ImportClass { val value: C = new C }\n",
             "ImportObject.scala": "package fixture\nimport a.b.Obj\nobject ImportObject { val value = Obj.value }\n",
-            "ImportObjectMember.scala": "package fixture\nimport a.b.Obj.value\nobject ImportObjectMember { val result = value }\n",
+            "ImportObjectMember.scala": "package fixture\nimport a.b.Obj.value\nobject ImportObjectMember { val result: String = value }\n",
             "ImportRename.scala": "package fixture\nimport a.b.{C => Alias}\nobject ImportRename { val value: Alias = new Alias }\n",
             "ImportRoot.scala": "package fixture\nimport _root_.a.b.C\nobject ImportRoot { val value: C = new C }\n",
             "ImportIntermediate.scala": "package fixture\nimport _root_.middle.deep.third.Leaf\nobject ImportIntermediate { val value: Leaf = new Leaf }\n",
@@ -72,6 +72,21 @@ def main() -> int:
                 + compiled.stdout
                 + compiled.stderr
             )
+
+        class_as_term = source / "ImportClassAsTerm.scala"
+        class_as_term.write_text(
+            "package fixture\nimport a.b.C\nobject ImportClassAsTerm { val value = C }\n",
+            encoding="utf-8",
+        )
+        class_as_term_result = compile_sources(
+            java_home,
+            classpath + os.pathsep + str(output),
+            root / "class-as-term",
+            [class_as_term],
+        )
+        class_as_term_diagnostic = class_as_term_result.stdout + class_as_term_result.stderr
+        if class_as_term_result.returncode == 0 or "C" not in class_as_term_diagnostic:
+            raise SystemExit("Scala 3.9 accepted a class-only import as a term")
 
         dotted_package = source / "ImportDottedPackage.scala"
         dotted_package.write_text(
@@ -226,8 +241,8 @@ def main() -> int:
             raise SystemExit("Scala 3.9 did not prefer the lexical source package when both paths exist")
 
     print(
-        "scala=3.9.0 positive_imports=class,object,object_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate,imported_qualifier_shadows_package "
-        "negative_imports=absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision,lexical_term_missing_member_no_root_fallback;root_fallback=success "
+        "scala=3.9.0 positive_imports=class,object,object_member_with_same_named_package_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate,imported_qualifier_shadows_package "
+        "negative_imports=class_import_as_term,absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision,lexical_term_missing_member_no_root_fallback;root_fallback=success "
         "root_qualification=bypasses_relative_search;lexical_term_binding=normal_priority"
     )
     return 0
