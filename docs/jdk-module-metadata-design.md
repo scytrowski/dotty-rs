@@ -1,9 +1,9 @@
 # JDK module metadata contract
 
 This note freezes the Java 21 JPMS `module-info.class` wire contract and the
-current class-file crate boundary before a typed module descriptor API is
-introduced. It records an oracle audit; it does not implement module
-resolution, runtime support, or a semantic descriptor model.
+class-file crate boundary. `dotty-classfile` now exposes a typed, lossless
+codec for the JVMS `Module` attribute; this does not implement module
+resolution, runtime support, or whole-descriptor validation.
 
 The pinned real-JDK oracle is Eclipse Temurin `21.0.8+9-LTS` (class-file major
 version 65). The normative reference is [JVMS Java SE 21, Chapter 4](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html),
@@ -107,31 +107,35 @@ The audit of `dotty-classfile` found:
   `ConstantPoolEntry::Package`; encoding validation checks their name indices
   resolve to UTF-8 entries.
 * `ACC_MODULE` is represented by the existing access-flags type.
-* `Module`, `ModulePackages`, `ModuleMainClass`, `ModuleTarget`, and
-  `ModuleHashes` decode to `Attribute::Other`, retaining their name index and
-  payload. Encoding preserves those bytes.
-* Reference validation cannot inspect indices embedded in an `Other` payload.
-  It validates references represented by the current typed model, not the
-  module descriptor's full grammar or the `ACC_MODULE` class shape.
+* `Module` decodes to a typed attribute with ordered vectors and original
+  constant-pool indices. Its encoder preserves the payload fields and optional
+  version zero indices. Constant-pool validation checks Module, Package,
+  Class, and Utf8 references, including name indices inside Module/Package
+  constant-pool entries.
+* `ModulePackages`, `ModuleMainClass`, `ModuleTarget`, and `ModuleHashes`
+  remain `Attribute::Other`, retaining their name index and payload. Encoding
+  preserves those bytes.
+* Reference validation checks the typed `Module` payload, but does not
+  validate the full descriptor grammar or `ACC_MODULE` class shape.
 * Known structured attributes are decoded within their declared length and
   reject trailing bytes. Unknown payloads are intentionally opaque, so their
   internal structure cannot be validated. `ClassFile::decode` consumes one
   class file; callers can check `Reader::is_at_end()` when the enclosing input
   must contain no trailing bytes.
 
-Accordingly, the current error surface is deliberately split for a future
-implementation:
+The error surface is deliberately split across layers:
 
 | Layer | Errors owned by that layer |
 | --- | --- |
-| Byte decoder | truncated header/table/attribute; impossible declared length; malformed attribute-name reference; wrong constant-pool kind or out-of-range reference in a parsed payload; nonzero version index not pointing to UTF-8; `ModuleMainClass` length other than 2; trailing bytes in a recognized payload. |
-| Explicit descriptor validator | missing or duplicate `Module`; duplicate optional attributes; wrong placement or class-file version; invalid `ACC_MODULE` shape; reserved/incompatible flags; duplicate rows/targets/services/providers; open module with `opens`; malformed `java.base` requirement; zero provider count. |
+| Byte decoder / typed attribute codec | truncated header/table/attribute; impossible declared length; malformed attribute-name reference; reserved `Module` field flags; empty provider row; trailing bytes in the recognized payload. |
+| Constant-pool reference validation | wrong constant-pool kind or out-of-range reference in a typed payload; nonzero optional version index not pointing to UTF-8; bad Utf8 target inside a referenced Module/Package/Class entry. |
+| Explicit descriptor validator | missing or duplicate `Module`; duplicate optional attributes; wrong placement or class-file version; invalid `ACC_MODULE` shape; cross-row uniqueness; open-module/opens interaction; `java.base` row constraints and release-specific rules. |
 | Opaque preservation | unknown attributes are retained byte-for-byte; the decoder makes no semantic claims about their payloads. |
 
-The semantic checks belong in an explicit descriptor-validation operation, not
-in lossless decoding: structurally readable class files and their unknown
-attributes should remain inspectable even when they are not valid module
-descriptors. This issue adds no production API or behavior.
+Class-level semantic checks belong in an explicit descriptor-validation
+operation, not in lossless attribute decoding: structurally readable class
+files and their unknown attributes should remain inspectable even when they
+are not valid module descriptors.
 
 ## Pinned oracle and canonical metadata
 
@@ -187,7 +191,9 @@ pins absence of both optional attributes. The final variant changes only
 `module_version_index` and its `requires_version_index` to zero, pinning the
 optional-index encoding. The integration test checks major version 65,
 descriptor class shape, module-name constant-pool kind, modeled references,
-the exact opaque attribute set, and byte-for-byte decode/encode identity.
+the exact opaque companion-attribute set, and byte-for-byte decode/encode
+identity. A directed-fixture assertion checks decoded table ordering, flags,
+names, optional versions, and provider lists.
 
 ## Reproduction and oracle commands
 
@@ -215,9 +221,9 @@ tests.
 
 Keep the next work incremental and separate:
 
-1. **Typed codec**: introduce typed structures for the three JVMS attributes,
-   validate wire lengths and constant-pool kinds, and preserve ordering and
-   indices needed for exact re-encoding.
+1. **Typed `Module` codec**: completed by #1198, including ordered tables,
+   checked lengths, field flags, non-empty providers, constant-pool kinds,
+   optional version indices, and exact payload re-encoding.
 2. **Descriptor validation and metadata extras**: validate placement,
    cardinality, class shape, flags, uniqueness, release-specific constraints,
    plus an explicit representation for JDK-specific attributes where needed.

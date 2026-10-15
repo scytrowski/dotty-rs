@@ -23,8 +23,10 @@ TASTy semantic analysis (nesting, sealed hierarchies, records, generics,
 source-level names). It intentionally does not cover:
 
 - bytecode execution or verification (Chapters 4.9–4.11 of the JVMS);
-- the module system (`module-info.class`, `ACC_MODULE`, `Module*`
-  attributes) — out of scope until the compiler needs module resolution;
+- module resolution and `module-info.class` class-shape validation remain out
+  of scope; the class-file crate now decodes and encodes the `Module` attribute
+  payload and validates its constant-pool references (see
+  `docs/jdk-module-metadata-design.md`);
 - annotation *processing* beyond being able to skip or losslessly retain
   annotation attributes;
 - `invokedynamic`/`Dynamic` constant resolution semantics (`BootstrapMethods`
@@ -483,10 +485,13 @@ preserving unknown structures losslessly (see `docs/tasty-format-3.9.0.md`
 `(name, bytes)` pair rather than dropped, so re-encoding is possible.
 
 The subsections below cover the attributes relevant to symbol-level semantic
-analysis. Every other standard attribute (`StackMapTable`, `LineNumberTable`,
-`LocalVariableTable`, `LocalVariableTypeTable`, `SourceDebugExtension`,
-`Module*`, `AnnotationDefault`, etc.) is expected to be treated as opaque and
-preserved raw in the initial loader.
+analysis. The class-file crate also has a typed, lossless wire codec for the
+JVMS `Module` attribute (§4.7.25); it does not resolve module graphs or check
+whole-`module-info` class shape. Other module metadata (`ModulePackages`,
+`ModuleMainClass`, and JDK-specific attributes), along with
+`StackMapTable`, `LineNumberTable`, `LocalVariableTable`,
+`LocalVariableTypeTable`, `SourceDebugExtension`, `AnnotationDefault`, etc.,
+remains opaque and is preserved raw.
 
 ### 7.2. `ConstantValue`
 
@@ -787,14 +792,16 @@ authoritative source for reconstructing nesting — the `$`-separated name
 should be treated as a convention to fall back on, not as a guaranteed
 parseable structure (member names themselves may legally contain `$`).
 
-Module and package names (`CONSTANT_Module_info`, `CONSTANT_Package_info`,
-§3) use a distinct, non-internal-form encoding with a backslash escape
-scheme; out of scope while the module system is unsupported.
+`CONSTANT_Module_info` and `CONSTANT_Package_info` names are `Utf8` values
+using the module/package name grammar from JVMS §4.2.3, not class internal
+names. The typed `Module` codec checks their constant-pool kinds and UTF-8
+references; name-grammar validation and module resolution remain out of scope.
 
 ## 9. Out of scope for the initial loader
 
-- `module-info` class files (`ACC_MODULE`) and the `Module`, `ModulePackages`,
-  `ModuleMainClass` attributes.
+- `module-info` class-shape validation (`ACC_MODULE`), `ModulePackages`, and
+  `ModuleMainClass`; the `Module` payload itself has a typed wire codec, but
+  this does not enable descriptor validation or module resolution.
 - Bytecode verification and the `StackMapTable` attribute's type-checking
   semantics (the attribute itself is just skipped/preserved raw).
 - Resolving `invokedynamic`/`CONSTANT_Dynamic` call sites (structural parsing
