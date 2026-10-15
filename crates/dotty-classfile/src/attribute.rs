@@ -73,6 +73,65 @@ pub struct MethodParameterEntry {
     pub access_flags: u16,
 }
 
+/// One entry of a `Module` attribute's `requires` table (JVMS §4.7.25).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModuleRequire {
+    pub requires_index: ConstantPoolIndex,
+    pub requires_flags: u16,
+    /// `None` represents the on-wire zero index (no version recorded).
+    pub requires_version_index: Option<ConstantPoolIndex>,
+}
+
+/// One entry of a `Module` attribute's `exports` table (JVMS §4.7.25).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleExport {
+    pub exports_index: ConstantPoolIndex,
+    pub exports_flags: u16,
+    /// Empty for an unqualified export; otherwise ordered module indices.
+    pub exports_to: Vec<ConstantPoolIndex>,
+}
+
+/// One entry of a `Module` attribute's `opens` table (JVMS §4.7.25).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleOpen {
+    pub opens_index: ConstantPoolIndex,
+    pub opens_flags: u16,
+    /// Empty for an unqualified open; otherwise ordered module indices.
+    pub opens_to: Vec<ConstantPoolIndex>,
+}
+
+/// One entry of a `Module` attribute's `provides` table (JVMS §4.7.25).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleProvide {
+    pub provides_index: ConstantPoolIndex,
+    /// JVMS requires at least one provider. Order is preserved as encoded.
+    pub provides_with: Vec<ConstantPoolIndex>,
+}
+
+/// The structured payload of a `Module` attribute (JVMS §4.7.25).
+///
+/// Constant-pool indices and table order are retained verbatim. Optional
+/// version indices use `None` for the on-wire zero value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleAttribute {
+    pub module_name_index: ConstantPoolIndex,
+    pub module_flags: u16,
+    pub module_version_index: Option<ConstantPoolIndex>,
+    pub requires: Vec<ModuleRequire>,
+    pub exports: Vec<ModuleExport>,
+    pub opens: Vec<ModuleOpen>,
+    pub uses: Vec<ConstantPoolIndex>,
+    pub provides: Vec<ModuleProvide>,
+}
+
+/// Module attribute flag bits (JVMS §4.7.25). These have field-specific
+/// meanings; a bit valid in one table is not necessarily valid in another.
+pub const MODULE_ACC_OPEN: u16 = 0x0020;
+pub const MODULE_ACC_TRANSITIVE: u16 = 0x0020;
+pub const MODULE_ACC_STATIC_PHASE: u16 = 0x0040;
+pub const MODULE_ACC_SYNTHETIC: u16 = 0x1000;
+pub const MODULE_ACC_MANDATED: u16 = 0x8000;
+
 /// An `annotation` structure (JVMS §4.7.16).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Annotation {
@@ -126,7 +185,9 @@ pub const DEFAULT_MAX_ATTRIBUTE_DEPTH: usize = 128;
 /// (`docs/classfile-format-jdk25.md` §7). `Code`, `Record`, and runtime
 /// annotation payloads are represented structurally; unmodeled nested
 /// attributes such as `StackMapTable` and `LineNumberTable` fall through to
-/// [`Attribute::Other`] so their bytes can be preserved.
+/// [`Attribute::Other`] so their bytes can be preserved. The JPMS `Module`
+/// payload is also represented structurally, without validating the enclosing
+/// `module-info` class shape or resolving the module graph.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attribute<'a> {
     ConstantValue(ConstantPoolIndex),
@@ -149,6 +210,7 @@ pub enum Attribute<'a> {
     Code(CodeAttribute<'a>),
     BootstrapMethods(Vec<BootstrapMethodEntry>),
     MethodParameters(Vec<MethodParameterEntry>),
+    Module(ModuleAttribute),
     RuntimeVisibleAnnotations(Vec<Annotation>),
     RuntimeInvisibleAnnotations(Vec<Annotation>),
     /// An attribute name not (yet) modeled above, kept as raw bytes.
@@ -176,6 +238,13 @@ pub enum AttributeError {
     /// An `element_value` nested (via `annotation`/`array`) past
     /// [`DEFAULT_MAX_ANNOTATION_DEPTH`].
     TooDeeplyNestedAnnotation,
+    /// A Module attribute field contains flag bits reserved by JVMS §4.7.25.
+    InvalidModuleFlags {
+        field: &'static str,
+        flags: u16,
+    },
+    /// A `provides` entry has no provider, contrary to JVMS §4.7.25.
+    EmptyModuleProviders,
 }
 
 impl fmt::Display for AttributeError {
@@ -198,6 +267,13 @@ impl fmt::Display for AttributeError {
                 formatter,
                 "annotation element_value nested past depth {DEFAULT_MAX_ANNOTATION_DEPTH}"
             ),
+            Self::InvalidModuleFlags { field, flags } => write!(
+                formatter,
+                "reserved Module attribute flag bits {flags:#06x} in {field}"
+            ),
+            Self::EmptyModuleProviders => {
+                formatter.write_str("Module provides entry must contain at least one provider")
+            }
         }
     }
 }
@@ -228,6 +304,129 @@ pub(crate) fn read_optional_index(
 ) -> Result<Option<ConstantPoolIndex>, ReadError> {
     let index = read_index(reader)?;
     Ok(if index.0 == 0 { None } else { Some(index) })
+}
+
+fn validate_module_flags(
+    field: &'static str,
+    flags: u16,
+    allowed: u16,
+) -> Result<(), AttributeError> {
+    let reserved = flags & !allowed;
+    if reserved == 0 {
+        Ok(())
+    } else {
+        Err(AttributeError::InvalidModuleFlags {
+            field,
+            flags: reserved,
+        })
+    }
+}
+
+fn read_module_index_list(reader: &mut Reader<'_>) -> Result<Vec<ConstantPoolIndex>, ReadError> {
+    let count = reader.read_u16()?;
+    let mut indices = Vec::new();
+    for _ in 0..count {
+        indices.push(read_index(reader)?);
+    }
+    Ok(indices)
+}
+
+fn read_module_attribute(reader: &mut Reader<'_>) -> Result<ModuleAttribute, AttributeError> {
+    let module_name_index = read_index(reader)?;
+    let module_flags = reader.read_u16()?;
+    validate_module_flags(
+        "module_flags",
+        module_flags,
+        MODULE_ACC_OPEN | MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED,
+    )?;
+    let module_version_index = read_optional_index(reader)?;
+
+    let requires_count = reader.read_u16()?;
+    let mut requires = Vec::new();
+    for _ in 0..requires_count {
+        let requires_index = read_index(reader)?;
+        let requires_flags = reader.read_u16()?;
+        validate_module_flags(
+            "requires_flags",
+            requires_flags,
+            MODULE_ACC_TRANSITIVE
+                | MODULE_ACC_STATIC_PHASE
+                | MODULE_ACC_SYNTHETIC
+                | MODULE_ACC_MANDATED,
+        )?;
+        let requires_version_index = read_optional_index(reader)?;
+        requires.push(ModuleRequire {
+            requires_index,
+            requires_flags,
+            requires_version_index,
+        });
+    }
+
+    let exports_count = reader.read_u16()?;
+    let mut exports = Vec::new();
+    for _ in 0..exports_count {
+        let exports_index = read_index(reader)?;
+        let exports_flags = reader.read_u16()?;
+        validate_module_flags(
+            "exports_flags",
+            exports_flags,
+            MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED,
+        )?;
+        let exports_to = read_module_index_list(reader)?;
+        exports.push(ModuleExport {
+            exports_index,
+            exports_flags,
+            exports_to,
+        });
+    }
+
+    let opens_count = reader.read_u16()?;
+    let mut opens = Vec::new();
+    for _ in 0..opens_count {
+        let opens_index = read_index(reader)?;
+        let opens_flags = reader.read_u16()?;
+        validate_module_flags(
+            "opens_flags",
+            opens_flags,
+            MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED,
+        )?;
+        let opens_to = read_module_index_list(reader)?;
+        opens.push(ModuleOpen {
+            opens_index,
+            opens_flags,
+            opens_to,
+        });
+    }
+
+    let uses = read_module_index_list(reader)?;
+    let provides_count = reader.read_u16()?;
+    let mut provides = Vec::new();
+    for _ in 0..provides_count {
+        let provides_index = read_index(reader)?;
+        let provider_count = reader.read_u16()?;
+        if provider_count == 0 {
+            return Err(AttributeError::EmptyModuleProviders);
+        }
+        let mut provides_with = Vec::new();
+        for _ in 0..provider_count {
+            provides_with.push(read_index(reader)?);
+        }
+        provides.push(ModuleProvide {
+            provides_index,
+            provides_with,
+        });
+    }
+
+    Ok(ModuleAttribute {
+        module_name_index,
+        module_flags,
+        module_version_index,
+        requires,
+        exports,
+        opens,
+        uses,
+        provides,
+    })
 }
 
 fn read_bootstrap_methods(reader: &mut Reader<'_>) -> Result<Vec<BootstrapMethodEntry>, ReadError> {
@@ -504,6 +703,40 @@ fn validate_attribute_at_depth(
             }
             Ok(())
         }
+        Attribute::Module(module) => {
+            pool.module_name(module.module_name_index)?;
+            if let Some(version_index) = module.module_version_index {
+                pool.utf8(version_index)?;
+            }
+            for requires in &module.requires {
+                pool.module_name(requires.requires_index)?;
+                if let Some(version_index) = requires.requires_version_index {
+                    pool.utf8(version_index)?;
+                }
+            }
+            for export in &module.exports {
+                pool.package_name(export.exports_index)?;
+                for target in &export.exports_to {
+                    pool.module_name(*target)?;
+                }
+            }
+            for open in &module.opens {
+                pool.package_name(open.opens_index)?;
+                for target in &open.opens_to {
+                    pool.module_name(*target)?;
+                }
+            }
+            for service in &module.uses {
+                pool.class_name(*service)?;
+            }
+            for provide in &module.provides {
+                pool.class_name(provide.provides_index)?;
+                for provider in &provide.provides_with {
+                    pool.class_name(*provider)?;
+                }
+            }
+            Ok(())
+        }
         Attribute::Other(_) => Ok(()),
     }
 }
@@ -608,6 +841,7 @@ fn attribute_name(attribute: &Attribute<'_>) -> Option<&'static str> {
         Attribute::PermittedSubclasses(_) => Some("PermittedSubclasses"),
         Attribute::BootstrapMethods(_) => Some("BootstrapMethods"),
         Attribute::MethodParameters(_) => Some("MethodParameters"),
+        Attribute::Module(_) => Some("Module"),
         Attribute::Record(_) => Some("Record"),
         Attribute::Code(_) => Some("Code"),
         Attribute::RuntimeVisibleAnnotations(_) => Some("RuntimeVisibleAnnotations"),
@@ -620,6 +854,44 @@ fn write_index_list(writer: &mut Writer, indices: &[ConstantPoolIndex]) -> Resul
     writer.write_u2_length(indices.len())?;
     for index in indices {
         writer.write_u2(index.0);
+    }
+    Ok(())
+}
+
+fn write_module_attribute(
+    writer: &mut Writer,
+    module: &ModuleAttribute,
+) -> Result<(), EncodeError> {
+    writer.write_u2(module.module_name_index.0);
+    writer.write_u2(module.module_flags);
+    writer.write_u2(module.module_version_index.map_or(0, |index| index.0));
+
+    writer.write_u2_length(module.requires.len())?;
+    for entry in &module.requires {
+        writer.write_u2(entry.requires_index.0);
+        writer.write_u2(entry.requires_flags);
+        writer.write_u2(entry.requires_version_index.map_or(0, |index| index.0));
+    }
+
+    writer.write_u2_length(module.exports.len())?;
+    for entry in &module.exports {
+        writer.write_u2(entry.exports_index.0);
+        writer.write_u2(entry.exports_flags);
+        write_index_list(writer, &entry.exports_to)?;
+    }
+
+    writer.write_u2_length(module.opens.len())?;
+    for entry in &module.opens {
+        writer.write_u2(entry.opens_index.0);
+        writer.write_u2(entry.opens_flags);
+        write_index_list(writer, &entry.opens_to)?;
+    }
+
+    write_index_list(writer, &module.uses)?;
+    writer.write_u2_length(module.provides.len())?;
+    for entry in &module.provides {
+        writer.write_u2(entry.provides_index.0);
+        write_index_list(writer, &entry.provides_with)?;
     }
     Ok(())
 }
@@ -854,6 +1126,69 @@ fn element_value_length(value: &ElementValue, depth: usize) -> Result<usize, Enc
     }
 }
 
+fn module_payload_length(module: &ModuleAttribute) -> Result<usize, EncodeError> {
+    let module_flags_allowed = MODULE_ACC_OPEN | MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED;
+    let requires_flags_allowed = MODULE_ACC_TRANSITIVE
+        | MODULE_ACC_STATIC_PHASE
+        | MODULE_ACC_SYNTHETIC
+        | MODULE_ACC_MANDATED;
+    let exports_flags_allowed = MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED;
+    if module.module_flags & !module_flags_allowed != 0
+        || module
+            .requires
+            .iter()
+            .any(|entry| entry.requires_flags & !requires_flags_allowed != 0)
+        || module
+            .exports
+            .iter()
+            .any(|entry| entry.exports_flags & !exports_flags_allowed != 0)
+        || module
+            .opens
+            .iter()
+            .any(|entry| entry.opens_flags & !exports_flags_allowed != 0)
+    {
+        return Err(EncodeError::InvalidLayout);
+    }
+
+    checked_u16_len(module.requires.len())?;
+    checked_u16_len(module.exports.len())?;
+    checked_u16_len(module.opens.len())?;
+    checked_u16_len(module.uses.len())?;
+    checked_u16_len(module.provides.len())?;
+
+    // module_name_index, flags, version, and requires_count
+    let mut length = 8;
+    length = add_payload_length(length, repeated_payload_length(module.requires.len(), 6)?)?;
+    length = add_payload_length(length, 2)?; // exports_count
+    for export in &module.exports {
+        checked_u16_len(export.exports_to.len())?;
+        length = add_payload_length(length, 6)?;
+        length = add_payload_length(length, repeated_payload_length(export.exports_to.len(), 2)?)?;
+    }
+    length = add_payload_length(length, 2)?; // opens_count
+    for open in &module.opens {
+        checked_u16_len(open.opens_to.len())?;
+        length = add_payload_length(length, 6)?;
+        length = add_payload_length(length, repeated_payload_length(open.opens_to.len(), 2)?)?;
+    }
+    length = add_payload_length(length, 2)?; // uses_count
+    length = add_payload_length(length, repeated_payload_length(module.uses.len(), 2)?)?;
+    length = add_payload_length(length, 2)?; // provides_count
+    for provide in &module.provides {
+        if provide.provides_with.is_empty() {
+            return Err(EncodeError::InvalidLayout);
+        }
+        checked_u16_len(provide.provides_with.len())?;
+        length = add_payload_length(length, 4)?;
+        length = add_payload_length(
+            length,
+            repeated_payload_length(provide.provides_with.len(), 2)?,
+        )?;
+    }
+    checked_u32_len(length)?;
+    Ok(length)
+}
+
 fn encoded_payload_length(attribute: &Attribute<'_>, depth: usize) -> Result<usize, EncodeError> {
     if depth > DEFAULT_MAX_ATTRIBUTE_DEPTH {
         return Err(EncodeError::TooDeeplyNestedAttribute);
@@ -883,6 +1218,7 @@ fn encoded_payload_length(attribute: &Attribute<'_>, depth: usize) -> Result<usi
             checked_u8_len(parameters.len())?;
             add_payload_length(1, repeated_payload_length(parameters.len(), 4)?)?
         }
+        Attribute::Module(module) => module_payload_length(module)?,
         Attribute::Other(raw) => raw.bytes.len(),
         Attribute::Record(components) => record_payload_length(components, depth)?,
         Attribute::Code(code) => code_payload_length(code, depth)?,
@@ -1071,6 +1407,7 @@ impl<'a> Attribute<'a> {
                         writer.write_u2(parameter.access_flags);
                     }
                 }
+                Attribute::Module(module) => write_module_attribute(writer, module)?,
                 Attribute::Record(components) => {
                     writer.write_u2_length(components.len())?;
                     for component in components {
@@ -1148,6 +1485,7 @@ impl<'a> Attribute<'a> {
             "MethodParameters" => {
                 Attribute::MethodParameters(read_method_parameters(&mut sub_reader)?)
             }
+            "Module" => Attribute::Module(read_module_attribute(&mut sub_reader)?),
             "InnerClasses" => Attribute::InnerClasses(read_inner_classes(&mut sub_reader)?),
             "EnclosingMethod" => {
                 let class_index = read_index(&mut sub_reader)?;
@@ -3328,6 +3666,416 @@ mod tests {
                 needed: 2,
                 remaining: 1,
             }))
+        );
+    }
+}
+
+#[cfg(test)]
+mod module_attribute_tests {
+    use super::*;
+    use crate::constant_pool::EntryKind;
+
+    fn module_payload(module_flags: u16) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1u16.to_be_bytes()); // module_name_index
+        payload.extend_from_slice(&module_flags.to_be_bytes());
+        payload.extend_from_slice(&0u16.to_be_bytes()); // no module version
+        payload.extend_from_slice(&0u16.to_be_bytes()); // requires_count
+        payload.extend_from_slice(&0u16.to_be_bytes()); // exports_count
+        payload.extend_from_slice(&0u16.to_be_bytes()); // opens_count
+        payload.extend_from_slice(&0u16.to_be_bytes()); // uses_count
+        payload.extend_from_slice(&0u16.to_be_bytes()); // provides_count
+        payload
+    }
+
+    fn module_attribute_bytes(payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&1u16.to_be_bytes());
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    fn push_u2(bytes: &mut Vec<u8>, value: u16) {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+
+    fn module_name_pool() -> ConstantPool {
+        ConstantPool::from_entries(vec![Some(ConstantPoolEntry::Utf8("Module".to_owned()))])
+    }
+
+    fn reference_pool() -> ConstantPool {
+        ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Module".to_owned())), // #1
+            Some(ConstantPoolEntry::Utf8("m".to_owned())),      // #2
+            Some(ConstantPoolEntry::Module {
+                name_index: ConstantPoolIndex(2),
+            }), // #3
+            Some(ConstantPoolEntry::Utf8("p".to_owned())),      // #4
+            Some(ConstantPoolEntry::Package {
+                name_index: ConstantPoolIndex(4),
+            }), // #5
+            Some(ConstantPoolEntry::Utf8("C".to_owned())),      // #6
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(6),
+            }), // #7
+            Some(ConstantPoolEntry::Utf8("v".to_owned())),      // #8
+            Some(ConstantPoolEntry::Integer(0)),                // #9
+        ])
+    }
+
+    fn valid_reference_model() -> ModuleAttribute {
+        ModuleAttribute {
+            module_name_index: ConstantPoolIndex(3),
+            module_flags: 0,
+            module_version_index: Some(ConstantPoolIndex(8)),
+            requires: vec![ModuleRequire {
+                requires_index: ConstantPoolIndex(3),
+                requires_flags: 0,
+                requires_version_index: Some(ConstantPoolIndex(8)),
+            }],
+            exports: vec![ModuleExport {
+                exports_index: ConstantPoolIndex(5),
+                exports_flags: 0,
+                exports_to: vec![ConstantPoolIndex(3)],
+            }],
+            opens: vec![ModuleOpen {
+                opens_index: ConstantPoolIndex(5),
+                opens_flags: 0,
+                opens_to: vec![ConstantPoolIndex(3)],
+            }],
+            uses: vec![ConstantPoolIndex(7)],
+            provides: vec![ModuleProvide {
+                provides_index: ConstantPoolIndex(7),
+                provides_with: vec![ConstantPoolIndex(7)],
+            }],
+        }
+    }
+
+    #[test]
+    fn decodes_zero_optional_versions_and_preserves_table_order() {
+        let payload = module_payload(0);
+        let bytes = module_attribute_bytes(&payload);
+        let pool = module_name_pool();
+        let mut reader = Reader::new(&bytes);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Module(ModuleAttribute {
+                module_name_index: ConstantPoolIndex(1),
+                module_flags: 0,
+                module_version_index: None,
+                requires: vec![],
+                exports: vec![],
+                opens: vec![],
+                uses: vec![],
+                provides: vec![],
+            }))
+        );
+        assert!(reader.is_at_end());
+
+        let open_payload = module_payload(MODULE_ACC_OPEN);
+        let bytes = module_attribute_bytes(&open_payload);
+        let decoded = Attribute::decode(&mut Reader::new(&bytes), &pool).unwrap();
+        assert!(matches!(
+            decoded,
+            Attribute::Module(ModuleAttribute {
+                module_flags: MODULE_ACC_OPEN,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_and_trailing_module_payloads() {
+        let pool = module_name_pool();
+        let bytes = module_attribute_bytes(&[0, 1, 0, 0, 0, 0]);
+        assert!(matches!(
+            Attribute::decode(&mut Reader::new(&bytes), &pool),
+            Err(AttributeError::Read(ReadError::UnexpectedEof { .. }))
+        ));
+
+        let mut missing_required_row = module_payload(0);
+        missing_required_row.truncate(6);
+        push_u2(&mut missing_required_row, 1); // requires_count but no row
+        let bytes = module_attribute_bytes(&missing_required_row);
+        assert!(matches!(
+            Attribute::decode(&mut Reader::new(&bytes), &pool),
+            Err(AttributeError::Read(ReadError::UnexpectedEof { .. }))
+        ));
+
+        let mut huge_count_without_rows = module_payload(0);
+        huge_count_without_rows.truncate(6);
+        push_u2(&mut huge_count_without_rows, u16::MAX);
+        let bytes = module_attribute_bytes(&huge_count_without_rows);
+        assert!(matches!(
+            Attribute::decode(&mut Reader::new(&bytes), &pool),
+            Err(AttributeError::Read(ReadError::UnexpectedEof { .. }))
+        ));
+
+        let mut too_large = vec![0, 1];
+        too_large.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert!(matches!(
+            Attribute::decode(&mut Reader::new(&too_large), &pool),
+            Err(AttributeError::Read(ReadError::UnexpectedEof { .. }))
+        ));
+
+        let mut payload = module_payload(0);
+        payload.push(0xff);
+        let bytes = module_attribute_bytes(&payload);
+        assert_eq!(
+            Attribute::decode(&mut Reader::new(&bytes), &pool),
+            Err(AttributeError::TrailingBytes {
+                name: "Module".to_owned(),
+                unread: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_reserved_flags_in_each_flag_field() {
+        let pool = module_name_pool();
+        let module_flags_payload = module_payload(0x0001);
+        let bytes = module_attribute_bytes(&module_flags_payload);
+        assert_eq!(
+            Attribute::decode(&mut Reader::new(&bytes), &pool),
+            Err(AttributeError::InvalidModuleFlags {
+                field: "module_flags",
+                flags: 0x0001,
+            })
+        );
+
+        let mut module_flags_payload = Vec::new();
+        push_u2(&mut module_flags_payload, 1); // module_name_index
+        push_u2(&mut module_flags_payload, 0); // module_flags
+        push_u2(&mut module_flags_payload, 0); // module_version_index
+        push_u2(&mut module_flags_payload, 1); // requires_count
+        push_u2(&mut module_flags_payload, 1); // requires_index
+        push_u2(&mut module_flags_payload, 1); // requires_flags
+        push_u2(&mut module_flags_payload, 0); // requires_version_index
+        push_u2(&mut module_flags_payload, 0); // exports_count
+        push_u2(&mut module_flags_payload, 0); // opens_count
+        push_u2(&mut module_flags_payload, 0); // uses_count
+        push_u2(&mut module_flags_payload, 0); // provides_count
+        let bytes = module_attribute_bytes(&module_flags_payload);
+        assert!(matches!(
+            Attribute::decode(&mut Reader::new(&bytes), &pool),
+            Err(AttributeError::InvalidModuleFlags {
+                field: "requires_flags",
+                flags: 0x0001,
+            })
+        ));
+
+        for (field, reserved_bit) in [
+            ("exports_flags", MODULE_ACC_OPEN),
+            ("opens_flags", MODULE_ACC_STATIC_PHASE),
+        ] {
+            let mut payload = Vec::new();
+            push_u2(&mut payload, 1); // module_name_index
+            push_u2(&mut payload, 0); // module_flags
+            push_u2(&mut payload, 0); // module_version_index
+            push_u2(&mut payload, 0); // requires_count
+            if field == "opens_flags" {
+                push_u2(&mut payload, 0); // exports_count
+                push_u2(&mut payload, 1); // opens_count
+                push_u2(&mut payload, 1); // opens_index
+                push_u2(&mut payload, reserved_bit); // opens_flags
+                push_u2(&mut payload, 0); // opens_to_count
+            } else {
+                push_u2(&mut payload, 1); // exports_count
+                push_u2(&mut payload, 1); // exports_index
+                push_u2(&mut payload, reserved_bit); // exports_flags
+                push_u2(&mut payload, 0); // exports_to_count
+                push_u2(&mut payload, 0); // opens_count
+            }
+            push_u2(&mut payload, 0); // uses_count
+            push_u2(&mut payload, 0); // provides_count
+            let bytes = module_attribute_bytes(&payload);
+            assert!(matches!(
+                Attribute::decode(&mut Reader::new(&bytes), &pool),
+                Err(AttributeError::InvalidModuleFlags { field: actual, flags })
+                    if actual == field && flags == reserved_bit
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_zero_provider_count_and_invalid_encoder_models() {
+        let pool = module_name_pool();
+        let mut payload = Vec::new();
+        push_u2(&mut payload, 1); // module_name_index
+        push_u2(&mut payload, 0); // module_flags
+        push_u2(&mut payload, 0); // module_version_index
+        push_u2(&mut payload, 0); // requires_count
+        push_u2(&mut payload, 0); // exports_count
+        push_u2(&mut payload, 0); // opens_count
+        push_u2(&mut payload, 0); // uses_count
+        push_u2(&mut payload, 1); // provides_count
+        push_u2(&mut payload, 1); // provides_index
+        push_u2(&mut payload, 0); // provides_with_count
+        let bytes = module_attribute_bytes(&payload);
+        assert_eq!(
+            Attribute::decode(&mut Reader::new(&bytes), &pool),
+            Err(AttributeError::EmptyModuleProviders)
+        );
+
+        let mut invalid_flags = valid_reference_model();
+        invalid_flags.module_flags = 1;
+        assert_eq!(
+            Attribute::Module(invalid_flags).encode(&reference_pool()),
+            Err(EncodeError::InvalidLayout)
+        );
+
+        let mut empty_providers = valid_reference_model();
+        empty_providers.provides[0].provides_with.clear();
+        assert_eq!(
+            Attribute::Module(empty_providers).encode(&reference_pool()),
+            Err(EncodeError::InvalidLayout)
+        );
+    }
+
+    #[test]
+    fn validates_each_module_attribute_reference_kind() {
+        let pool = reference_pool();
+        let base = valid_reference_model();
+        assert_eq!(
+            validate_attribute(&Attribute::Module(base.clone()), &pool),
+            Ok(())
+        );
+
+        let cases = [
+            ("module", 5, EntryKind::Module),
+            ("module_version", 3, EntryKind::Utf8),
+            ("requires", 5, EntryKind::Module),
+            ("requires_version", 3, EntryKind::Utf8),
+            ("exports", 3, EntryKind::Package),
+            ("exports_to", 5, EntryKind::Module),
+            ("opens", 3, EntryKind::Package),
+            ("opens_to", 5, EntryKind::Module),
+            ("uses", 5, EntryKind::Class),
+            ("provides", 5, EntryKind::Class),
+            ("provider", 5, EntryKind::Class),
+        ];
+        for (field, index, expected) in cases {
+            let mut module = base.clone();
+            match field {
+                "module" => module.module_name_index = ConstantPoolIndex(index),
+                "module_version" => module.module_version_index = Some(ConstantPoolIndex(index)),
+                "requires" => module.requires[0].requires_index = ConstantPoolIndex(index),
+                "requires_version" => {
+                    module.requires[0].requires_version_index = Some(ConstantPoolIndex(index))
+                }
+                "exports" => module.exports[0].exports_index = ConstantPoolIndex(index),
+                "exports_to" => module.exports[0].exports_to[0] = ConstantPoolIndex(index),
+                "opens" => module.opens[0].opens_index = ConstantPoolIndex(index),
+                "opens_to" => module.opens[0].opens_to[0] = ConstantPoolIndex(index),
+                "uses" => module.uses[0] = ConstantPoolIndex(index),
+                "provides" => module.provides[0].provides_index = ConstantPoolIndex(index),
+                "provider" => module.provides[0].provides_with[0] = ConstantPoolIndex(index),
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                validate_attribute(&Attribute::Module(module), &pool),
+                Err(PoolRefError::WrongKind {
+                    index: ConstantPoolIndex(index),
+                    expected,
+                }),
+                "{field} reference has exact tag validation"
+            );
+        }
+
+        let mut zero_required = base;
+        zero_required.module_name_index = ConstantPoolIndex(0);
+        assert_eq!(
+            validate_attribute(&Attribute::Module(zero_required), &pool),
+            Err(PoolRefError::InvalidIndex {
+                index: ConstantPoolIndex(0),
+            })
+        );
+    }
+
+    #[test]
+    fn module_and_package_entries_must_themselves_name_utf8_entries() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Module".to_owned())),
+            Some(ConstantPoolEntry::Integer(1)),
+            Some(ConstantPoolEntry::Module {
+                name_index: ConstantPoolIndex(2),
+            }),
+        ]);
+        let mut module = valid_reference_model();
+        module.module_name_index = ConstantPoolIndex(3);
+        assert_eq!(
+            validate_attribute(&Attribute::Module(module), &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(2),
+                expected: EntryKind::Utf8,
+            })
+        );
+    }
+
+    #[test]
+    fn roundtrips_non_ascii_module_and_package_names_by_constant_pool_index() {
+        let pool = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("Module".to_owned())), // #1
+            Some(ConstantPoolEntry::Utf8("π.mod".to_owned())),  // #2
+            Some(ConstantPoolEntry::Module {
+                name_index: ConstantPoolIndex(2),
+            }), // #3
+            Some(ConstantPoolEntry::Utf8("café/api".to_owned())), // #4
+            Some(ConstantPoolEntry::Package {
+                name_index: ConstantPoolIndex(4),
+            }), // #5
+            Some(ConstantPoolEntry::Utf8("café/服务".to_owned())), // #6
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(6),
+            }), // #7
+        ]);
+        let module = ModuleAttribute {
+            module_name_index: ConstantPoolIndex(3),
+            module_flags: 0,
+            module_version_index: None,
+            requires: vec![],
+            exports: vec![ModuleExport {
+                exports_index: ConstantPoolIndex(5),
+                exports_flags: 0,
+                exports_to: vec![],
+            }],
+            opens: vec![],
+            uses: vec![ConstantPoolIndex(7)],
+            provides: vec![],
+        };
+        let encoded = Attribute::Module(module.clone()).encode(&pool).unwrap();
+        let mut reader = Reader::new(&encoded);
+
+        assert_eq!(
+            Attribute::decode(&mut reader, &pool),
+            Ok(Attribute::Module(module))
+        );
+        assert!(reader.is_at_end());
+        assert_eq!(pool.module_name(ConstantPoolIndex(3)), Ok("π.mod"));
+        assert_eq!(pool.package_name(ConstantPoolIndex(5)), Ok("café/api"));
+        assert_eq!(pool.class_name(ConstantPoolIndex(7)), Ok("café/服务"));
+    }
+
+    #[test]
+    fn rejects_u2_count_overflow_when_encoding_module_tables() {
+        let module = ModuleAttribute {
+            module_name_index: ConstantPoolIndex(1),
+            module_flags: 0,
+            module_version_index: None,
+            requires: vec![],
+            exports: vec![],
+            opens: vec![],
+            uses: vec![ConstantPoolIndex(1); usize::from(u16::MAX) + 1],
+            provides: vec![],
+        };
+        assert_eq!(
+            encoded_payload_length(&Attribute::Module(module.clone()), 0),
+            Err(EncodeError::CountOverflow {
+                value: usize::from(u16::MAX) + 1,
+                width: crate::encode_error::LengthWidth::U16,
+            })
         );
     }
 }

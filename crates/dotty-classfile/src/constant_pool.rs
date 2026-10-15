@@ -174,6 +174,10 @@ pub enum EntryKind {
     /// One of the tags allowed for a `ConstantValue` attribute (JVMS
     /// §4.7.2): `Integer`, `Float`, `Long`, `Double`, or `String`.
     ConstantValue,
+    /// A `CONSTANT_Module_info` entry (JVMS §4.4.11).
+    Module,
+    /// A `CONSTANT_Package_info` entry (JVMS §4.4.12).
+    Package,
 }
 
 impl fmt::Display for EntryKind {
@@ -189,6 +193,8 @@ impl fmt::Display for EntryKind {
             Self::Double => "a Double entry",
             Self::Loadable => "a loadable constant",
             Self::ConstantValue => "a ConstantValue-compatible constant",
+            Self::Module => "a Module entry",
+            Self::Package => "a Package entry",
         };
         formatter.write_str(description)
     }
@@ -518,6 +524,32 @@ impl ConstantPool {
             Some(_) => Err(PoolRefError::WrongKind {
                 index,
                 expected: EntryKind::Class,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Resolves `index` to a `CONSTANT_Module_info` and its `name_index` to
+    /// `Utf8` (JVMS §4.4.11).
+    pub fn module_name(&self, index: ConstantPoolIndex) -> Result<&str, PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::Module { name_index }) => self.utf8(*name_index),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Module,
+            }),
+            None => Err(PoolRefError::InvalidIndex { index }),
+        }
+    }
+
+    /// Resolves `index` to a `CONSTANT_Package_info` and its `name_index` to
+    /// `Utf8` (JVMS §4.4.12).
+    pub fn package_name(&self, index: ConstantPoolIndex) -> Result<&str, PoolRefError> {
+        match self.get(index) {
+            Some(ConstantPoolEntry::Package { name_index }) => self.utf8(*name_index),
+            Some(_) => Err(PoolRefError::WrongKind {
+                index,
+                expected: EntryKind::Package,
             }),
             None => Err(PoolRefError::InvalidIndex { index }),
         }
