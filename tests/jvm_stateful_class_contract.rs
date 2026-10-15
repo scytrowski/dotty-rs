@@ -19,6 +19,45 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+fn require_jdk21_or_skip() -> bool {
+    let unavailable = ["java", "javac"]
+        .into_iter()
+        .filter_map(|tool| match jdk_tool_major_version(tool) {
+            Some(major) if major >= 21 => None,
+            Some(major) => Some(format!("{tool} {major} (requires JDK 21+)")),
+            None => Some(format!("{tool} (missing or version unavailable)")),
+        })
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() {
+        return true;
+    }
+
+    let message = format!(
+        "mutable field assignment JVM harness requires java and javac from JDK 21+ on PATH; unavailable: {}",
+        unavailable.join(", ")
+    );
+    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
+        panic!("{message}");
+    }
+    eprintln!("skipping optional mutable field assignment JVM harness: {message}");
+    false
+}
+
+fn jdk_tool_major_version(tool: &str) -> Option<u32> {
+    let output = Command::new(tool).arg("-version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    version_text
+        .split(|character: char| !character.is_ascii_digit())
+        .find_map(|component| component.parse::<u32>().ok())
+}
+
 fn with_source<R>(
     source_text: &str,
     f: impl FnOnce(
@@ -923,7 +962,7 @@ fn real_typed_current_instance_field_reads_lower_to_aload_getfield() {
 #[test]
 fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() {
     with_source(
-        "class State { private var current: Int = 0; private var active: Boolean = false; private val fixed: Int = 1; def set(current: Int): Unit = { this.current = current }; def setUnqualified(value: Int): Unit = { current = value }; def setActive(value: Boolean): Unit = { this.active = value }; def increment(): Unit = { current = current + 1 }; def localShadow(): Unit = { var current = 1; current = 2 }; def branch(flag: Boolean): Unit = if (flag) { current = 3 } else (); def loop(flag: Boolean): Unit = while (flag) { current = 4 }; def external(other: State): Unit = { other.current = 5 } }",
+        "class State { private var current: Int = 0; private var active: Boolean = false; private val fixed: Int = 1; def set(current: Int): Unit = { this.current = current }; def setUnqualified(value: Int): Unit = { current = value }; def setActive(value: Boolean): Unit = { this.active = value }; def increment(): Unit = { current = current + 1 }; def stop(): Unit = { current = { return } }; def localShadow(): Unit = { var current = 1; current = 2 }; def branch(flag: Boolean): Unit = if (flag) { current = 3 } else (); def loop(flag: Boolean): Unit = while (flag) { current = 4 }; def external(other: State): Unit = { other.current = 5 } }",
         |ast, source, index, definitions, typer| {
             let class = symbol_named(ast, index, source, typer, "State");
             typer.complete_symbol(class).unwrap();
@@ -951,6 +990,7 @@ fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() 
                 "setUnqualified",
                 "setActive",
                 "increment",
+                "stop",
                 "localShadow",
                 "branch",
                 "loop",
@@ -1169,8 +1209,22 @@ fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() 
                 ("setActive", "(Z)V", "active", "Z"),
             ] {
                 let (code, field_ref, _) = encode_body(name, descriptor);
-                assert_eq!(code[0], 0x2a, "aload_0 precedes RHS for {name}");
-                assert!(matches!(code[1], 0x1b..=0x1d), "parameter load for {name}");
+                assert_eq!(
+                    code[0], 0x2a,
+                    "aload_0 evaluates the receiver first for {name}"
+                );
+                let rhs_load = code
+                    .iter()
+                    .position(|opcode| *opcode == 0x1b)
+                    .expect("parameter is loaded for the RHS");
+                let receiver_reload = code
+                    .iter()
+                    .rposition(|opcode| *opcode == 0x2c)
+                    .expect("saved receiver is reloaded after the RHS");
+                assert!(
+                    rhs_load < receiver_reload,
+                    "RHS follows receiver for {name}"
+                );
                 let putfield = code.iter().position(|opcode| *opcode == 0xb5).unwrap();
                 assert_eq!(code.iter().filter(|opcode| **opcode == 0xb5).count(), 1);
                 assert!(!code.contains(&0xb4), "LHS is not evaluated as a read");
@@ -1220,9 +1274,12 @@ fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() 
             assert!(local_code.contains(&0x3c), "local var stores to its slot");
             assert!(local_field.is_none());
 
-            if Command::new("java").arg("--version").output().is_ok()
-                && Command::new("javac").arg("--version").output().is_ok()
-            {
+            let (stop_code, stop_field, _) = encode_body("stop", "()V");
+            assert!(stop_code.contains(&0xb1), "local return is encoded");
+            assert!(!stop_code.contains(&0xb5), "diverging RHS does not store");
+            assert!(stop_field.is_none());
+
+            if require_jdk21_or_skip() {
                 for (name, descriptor, harness_body) in [
                     (
                         "set",

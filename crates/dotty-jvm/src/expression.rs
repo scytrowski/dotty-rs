@@ -992,7 +992,21 @@ fn emit_field_assignment(
     };
 
     context.first_field_write.get_or_insert((tree_id, field));
+    let Some(local_layout) = context.local_layout else {
+        return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    };
+    let receiver_slot = usize::from(local_layout.max_locals());
+    let value_slot = receiver_slot
+        .checked_add(1)
+        .filter(|slot| *slot < usize::from(u16::MAX))
+        .ok_or(JvmCodegenError::TooManyLocalSlots {
+            method: context.method.symbol(),
+        })?;
     code.aload(0)
+        .and_then(|code| code.astore(receiver_slot))
         .map_err(|error| JvmCodegenError::CodeBuilder {
             tree: tree_id,
             error,
@@ -1000,6 +1014,13 @@ fn emit_field_assignment(
     match emit_expression(context, rhs, code, depth + 1)? {
         Flow::Diverges => Ok(Flow::Diverges),
         Flow::Value(found) if found == field_type => {
+            code.istore(value_slot)
+                .and_then(|code| code.aload(receiver_slot))
+                .and_then(|code| code.iload(value_slot))
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
             code.putfield(
                 class.identity().internal_name(),
                 field_metadata.name(),
