@@ -169,6 +169,7 @@ struct ResolverRequestObservation {
     outcome: String,
     cause: Option<String>,
     materialized_prefix: Option<String>,
+    selected_identity: Option<String>,
     enclosing_attempt: String,
 }
 
@@ -1071,6 +1072,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         }
         let method = current_method;
         let materialized_prefix = materialized_request_prefix(store, &prefix);
+        let selected_identity = match &result {
+            Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
+                Some(audit_symbol_identity(store, *symbol))
+            }
+            _ => None,
+        };
         if !method.is_empty() {
             metrics
                 .resolver_requests_by_method
@@ -1081,6 +1088,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     outcome: outcome.clone(),
                     cause: member_request_cause(&outcome, &actual_target, &result),
                     materialized_prefix,
+                    selected_identity,
                     enclosing_attempt: method.clone(),
                 });
         }
@@ -1315,6 +1323,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 None,
             ),
         };
+        let selected_identity = match &result {
+            Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
+                Some(audit_symbol_identity(store, *symbol))
+            }
+            _ => None,
+        };
         if !metrics.current_method.is_empty() {
             let method = metrics.current_method.clone();
             metrics
@@ -1326,6 +1340,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     outcome,
                     cause,
                     materialized_prefix,
+                    selected_identity,
                     enclosing_attempt: method.clone(),
                 });
         }
@@ -1377,6 +1392,22 @@ fn audit_symbol_path(store: &SemanticStore, symbol: SymbolId) -> String {
     }
     parts.reverse();
     parts.join(".")
+}
+
+fn audit_symbol_identity(store: &SemanticStore, symbol: SymbolId) -> String {
+    let entry = store.symbols.get(symbol);
+    let kind = format!("{:?}", entry.kind);
+    let origin = match entry.origin {
+        dotty_core::SymbolOrigin::Source(_) => "source",
+        dotty_core::SymbolOrigin::Classfile(_) => "classfile",
+        dotty_core::SymbolOrigin::Tasty(_) => "tasty",
+        dotty_core::SymbolOrigin::Builtin => "builtin",
+        dotty_core::SymbolOrigin::Synthetic => "synthetic",
+    };
+    format!(
+        "kind={kind}::origin={origin}::path={}",
+        audit_symbol_path(store, symbol)
+    )
 }
 
 fn symbol_info_label(info: dotty_core::SymbolInfo) -> &'static str {
@@ -4013,6 +4044,7 @@ struct Audit {
     missing_declared_type_profile: MissingDeclaredTypeProfile,
     local_method_first_blockers: BTreeMap<String, String>,
     local_method_attempts: BTreeSet<String>,
+    import_prefix_selectors: BTreeMap<String, Vec<String>>,
     local_value_blocker_profile: LocalValueBlockerProfile,
     local_value_baseline_outcomes: BTreeSet<LocalValueBaselineOutcome>,
     by_name_method_outcomes: BTreeMap<String, String>,
@@ -4074,10 +4106,13 @@ struct ImportPrefixReconciliation {
     import_tree: u32,
     baseline_target_key: String,
     qualifier_segments: String,
+    current_import_selectors: String,
     current_outcome: String,
     current_method_blocker: String,
+    current_method_typed: bool,
     current_blocker_origin: String,
     current_selected_identity: String,
+    final_import_identity: String,
     current_resolver_requests: String,
 }
 
@@ -4350,6 +4385,7 @@ impl Default for Audit {
             missing_declared_type_profile: MissingDeclaredTypeProfile::default(),
             local_method_first_blockers: BTreeMap::new(),
             local_method_attempts: BTreeSet::new(),
+            import_prefix_selectors: BTreeMap::new(),
             local_value_blocker_profile: LocalValueBlockerProfile::default(),
             local_value_baseline_outcomes: BTreeSet::new(),
             by_name_method_outcomes: BTreeMap::new(),
@@ -5199,6 +5235,8 @@ impl Audit {
             .extend(other.local_method_first_blockers);
         self.local_method_attempts
             .extend(other.local_method_attempts);
+        self.import_prefix_selectors
+            .extend(other.import_prefix_selectors);
         self.resolution_blocker_profile
             .observations
             .extend(other.resolution_blocker_profile.observations);
@@ -6448,6 +6486,7 @@ fn pinned_scala39_import_prefix_typing_probe() {
         &all_observations,
         &audit.local_method_first_blockers,
         &audit.local_method_attempts,
+        &audit.import_prefix_selectors,
         &metrics.borrow().resolver_requests_by_method,
     );
     assert_eq!(reconciliation.len(), baseline_rows.len());
@@ -6458,6 +6497,12 @@ fn pinned_scala39_import_prefix_typing_probe() {
     let advanced_baseline_rows = reconciliation.len() - unresolved_baseline_rows;
     assert_eq!(unresolved_baseline_rows, 2_336);
     assert_eq!(advanced_baseline_rows, 58);
+    assert!(reconciliation.iter().all(|row| {
+        row.current_method_typed == (row.current_method_blocker == "typed")
+            && row.final_import_identity.starts_with("outcomes::")
+            && (row.final_import_identity.contains("resolved::")
+                || row.final_import_identity.contains("absent::"))
+    }));
     assert!(
         reconciliation
             .iter()
@@ -9331,6 +9376,28 @@ fn audit_source_inner_filtered(
         &mut store.names,
     );
     let mut audit = collect_local_nodes(&parsed.ast);
+    if import_prefix_only {
+        for (tree, node) in parsed.ast.iter() {
+            let TreeKind::Import(import) = &node.kind else {
+                continue;
+            };
+            audit.import_prefix_selectors.insert(
+                format!("{path}#tree={}", tree.index()),
+                import
+                    .selectors
+                    .iter()
+                    .map(|selector| {
+                        let name = store.names.resolve(selector.imported.text());
+                        if selector.bound.is_some() {
+                            format!("given:{name}")
+                        } else {
+                            name.to_owned()
+                        }
+                    })
+                    .collect(),
+            );
+        }
+    }
     audit.files_attempted = 1;
     audit.patdef_profile = collect_local_patdefs(&parsed.ast, &store.names, path);
     audit.expression_forms = collect_expression_histogram(&parsed.ast);
@@ -11584,6 +11651,7 @@ fn reconcile_import_prefix_observations(
     current_rows: &[ImportPrefixObservation],
     current_blockers: &BTreeMap<String, String>,
     current_attempts: &BTreeSet<String>,
+    import_selectors: &BTreeMap<String, Vec<String>>,
     resolver_requests: &BTreeMap<String, Vec<ResolverRequestObservation>>,
 ) -> Vec<ImportPrefixReconciliation> {
     let mut current_by_identity = BTreeMap::new();
@@ -11629,6 +11697,12 @@ fn reconcile_import_prefix_observations(
             .get(&method_key)
             .cloned()
             .unwrap_or_else(|| "not observed".to_owned());
+        let current_method_typed = current_method_blocker == "typed";
+        let import_key = format!("{}#tree={}", baseline.file, baseline.import_tree);
+        let current_import_selectors = import_selectors
+            .get(&import_key)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing current selector inventory for {import_key}"));
         let current_blocker_origin = attempt_by_method
             .get(&method_key)
             .cloned()
@@ -11644,6 +11718,70 @@ fn reconcile_import_prefix_observations(
             })
             .cloned()
             .collect::<BTreeSet<_>>();
+        let wildcard_selector = current_import_selectors
+            .iter()
+            .any(|selector| selector == "*");
+        let selected_targets = if current_import_selectors.is_empty() {
+            vec![("<self>".to_owned(), baseline.qualifier_segments.clone())]
+        } else {
+            current_import_selectors
+                .iter()
+                .filter(|selector| selector.as_str() != "*" && !selector.starts_with("given:"))
+                .map(|selector| {
+                    (
+                        selector.clone(),
+                        format!("{}.{}", baseline.qualifier_segments, selector),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut final_selector_outcomes = selected_targets
+            .iter()
+            .map(|(selector, target)| {
+                let exact_requests = matching_requests
+                    .iter()
+                    .filter(|request| resolver_request_targets_exact_qualifier(request, target))
+                    .collect::<Vec<_>>();
+                let resolved = exact_requests
+                    .iter()
+                    .filter_map(|request| request.selected_identity.as_deref())
+                    .collect::<BTreeSet<_>>();
+                if !resolved.is_empty() {
+                    format!(
+                        "{selector}=resolved::{}",
+                        resolved.into_iter().collect::<Vec<_>>().join("|")
+                    )
+                } else if let Some(request) = exact_requests.first() {
+                    format!(
+                        "{selector}=absent::outcome={}::cause={}",
+                        request.outcome,
+                        request.cause.as_deref().unwrap_or("no resolver cause")
+                    )
+                } else if let Some(current) = current {
+                    format!(
+                        "{selector}=absent::qualifier unresolved::{}",
+                        current.resolver_outcome
+                    )
+                } else {
+                    format!("{selector}=absent::no exact successful final-symbol resolution")
+                }
+            })
+            .collect::<Vec<_>>();
+        if wildcard_selector {
+            final_selector_outcomes
+                .push("*=absent::wildcard import has no singular final selected symbol".to_owned());
+        }
+        final_selector_outcomes.extend(
+            current_import_selectors
+                .iter()
+                .filter(|selector| selector.starts_with("given:"))
+                .map(|selector| {
+                    format!(
+                        "{selector}=absent::given selector has no singular symbol in this audit"
+                    )
+                }),
+        );
+        let final_import_identity = format!("outcomes::{}", final_selector_outcomes.join(";"));
         let current_resolver_requests = if matching_requests.is_empty() {
             "no matching resolver request".to_owned()
         } else {
@@ -11651,11 +11789,12 @@ fn reconcile_import_prefix_observations(
                 .iter()
                 .map(|request| {
                     format!(
-                        "target={}::outcome={}::cause={}::selected={}",
+                        "target={}::outcome={}::cause={}::materialized={}::identity={}",
                         request.target,
                         request.outcome,
                         request.cause.as_deref().unwrap_or("-"),
-                        request.materialized_prefix.as_deref().unwrap_or("-")
+                        request.materialized_prefix.as_deref().unwrap_or("-"),
+                        request.selected_identity.as_deref().unwrap_or("-")
                     )
                 })
                 .collect::<Vec<_>>()
@@ -11699,10 +11838,17 @@ fn reconcile_import_prefix_observations(
             import_tree: baseline.import_tree,
             baseline_target_key: baseline.target_key.clone(),
             qualifier_segments: baseline.qualifier_segments.clone(),
+            current_import_selectors: if current_import_selectors.is_empty() {
+                "<self>".to_owned()
+            } else {
+                current_import_selectors.join(",")
+            },
             current_outcome,
             current_method_blocker,
+            current_method_typed,
             current_blocker_origin: current_origin,
             current_selected_identity,
+            final_import_identity,
             current_resolver_requests,
         });
     }
@@ -11744,23 +11890,86 @@ fn resolver_request_matches_qualifier(
     qualifier == selected || qualifier.starts_with(&format!("{selected}."))
 }
 
+fn resolver_request_targets_exact_qualifier(
+    request: &ResolverRequestObservation,
+    qualifier: &str,
+) -> bool {
+    let qualifier = qualifier.strip_prefix("_root_.").unwrap_or(qualifier);
+    if request.outcome.starts_with("package ") {
+        return request.target.replace('/', ".") == qualifier;
+    }
+    let Some(prefix) = request
+        .target
+        .strip_prefix("prefix=")
+        .and_then(|target| target.split("::").next())
+    else {
+        return false;
+    };
+    let Some(name) = request
+        .target
+        .split("::")
+        .find_map(|field| field.strip_prefix("name="))
+    else {
+        return false;
+    };
+    format!("{}.{}", prefix.replace('/', "."), name) == qualifier
+}
+
+#[test]
+fn final_import_identity_requires_an_exact_resolver_target() {
+    let package = ResolverRequestObservation {
+        target: "scala.collection".to_owned(),
+        outcome: "package success".to_owned(),
+        cause: None,
+        materialized_prefix: Some("package=scala.collection::owner=scala".to_owned()),
+        selected_identity: Some("kind=Package::origin=classfile::path=scala.collection".to_owned()),
+        enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
+    };
+    let class = ResolverRequestObservation {
+        target: "prefix=scala.collection::namespace=type::name=List::space=Prefix".to_owned(),
+        outcome: "class member success".to_owned(),
+        cause: None,
+        materialized_prefix: Some("package=scala.collection::owner=scala".to_owned()),
+        selected_identity: Some(
+            "kind=Class::origin=classfile::path=scala.collection.List".to_owned(),
+        ),
+        enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
+    };
+
+    assert!(!resolver_request_targets_exact_qualifier(
+        &package,
+        "scala.collection.List"
+    ));
+    assert!(resolver_request_targets_exact_qualifier(
+        &class,
+        "scala.collection.List"
+    ));
+    assert_eq!(
+        class.selected_identity.as_deref(),
+        Some("kind=Class::origin=classfile::path=scala.collection.List")
+    );
+}
+
 fn print_import_prefix_reconciliation(rows: &[ImportPrefixReconciliation]) {
     println!(
-        "source_file\tmethod_tree\tblocker_origin_tree\timport_tree\tbaseline_target_key\tqualifier_segments\tcurrent_outcome\tcurrent_method_blocker\tcurrent_blocker_origin\tcurrent_selected_identity\tcurrent_resolver_requests"
+        "source_file\tmethod_tree\tblocker_origin_tree\timport_tree\tbaseline_target_key\tqualifier_segments\tcurrent_import_selectors\tcurrent_outcome\tcurrent_method_blocker\tcurrent_method_typed\tcurrent_blocker_origin\tcurrent_selected_identity\tfinal_import_identity\tcurrent_resolver_requests"
     );
     for row in rows {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.source_file,
             row.method_tree,
             row.blocker_origin_tree,
             row.import_tree,
             row.baseline_target_key,
             tsv_or_dash(&row.qualifier_segments),
+            tsv_or_dash(&row.current_import_selectors),
             row.current_outcome,
             row.current_method_blocker,
+            row.current_method_typed,
             row.current_blocker_origin,
             tsv_or_dash(&row.current_selected_identity),
+            row.final_import_identity,
             row.current_resolver_requests
         );
     }
@@ -16782,6 +16991,7 @@ mod resolver_profile_tests {
                 outcome: "package term member unsupported".to_owned(),
                 cause: Some("term/object materialization gap".to_owned()),
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16789,6 +16999,7 @@ mod resolver_profile_tests {
                 outcome: "package type member unresolved".to_owned(),
                 cause: Some("package resolved but member unresolved".to_owned()),
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
         ];
@@ -16818,6 +17029,7 @@ mod resolver_profile_tests {
                 outcome: "package success".to_owned(),
                 cause: None,
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16825,6 +17037,7 @@ mod resolver_profile_tests {
                 outcome: "package success".to_owned(),
                 cause: None,
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16832,6 +17045,7 @@ mod resolver_profile_tests {
                 outcome: "package unresolved".to_owned(),
                 cause: Some("first segment/package unresolved".to_owned()),
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16840,6 +17054,7 @@ mod resolver_profile_tests {
                 outcome: "package type member unresolved".to_owned(),
                 cause: Some("package resolved but member unresolved".to_owned()),
                 materialized_prefix: Some("scala/Function1".to_owned()),
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
             ResolverRequestObservation {
@@ -16847,6 +17062,7 @@ mod resolver_profile_tests {
                 outcome: "class member scope unavailable: incomplete class info".to_owned(),
                 cause: Some("incomplete class identity".to_owned()),
                 materialized_prefix: None,
+                selected_identity: None,
                 enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
             },
         ];
@@ -16992,6 +17208,7 @@ mod resolver_profile_tests {
             outcome: "package term member unsupported".to_owned(),
             cause: Some("term/object materialization gap".to_owned()),
             materialized_prefix: None,
+            selected_identity: None,
             enclosing_attempt: "Use.scala#tree=12::Use.test".to_owned(),
         }];
 
