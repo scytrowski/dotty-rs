@@ -17,20 +17,24 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 
 | Source shape | Canonical field identity | Initializer / constructor evidence | Status |
 | --- | --- | --- | --- |
-| `class Plain { private val seed: Int = 42; private val enabled: Boolean = true }` | Each declaration maps to a distinct `SymbolKind::Field`, owned by `Plain`, with `Visibility::Private`; neither has `MUTABLE`. `SymbolInfo` completes to the canonical Int or Boolean type. | Template body order is `seed`, then `enabled`. Each source RHS is typed using `field_initializer_context_for`; its literal `TreeId<Typed>` is read back unchanged through `source_typed_index().get(source, rhs)`. The literal keeps its singleton `Type::Constant` type. | Frontend characterized. Backend rejects class fields today. |
+| `class Plain { private val seed: Int = 42; private val enabled: Boolean = true }` | Each declaration maps to a distinct `SymbolKind::Field`, owned by `Plain`, with `Visibility::Private`; neither has `MUTABLE`. `SymbolInfo` completes to the canonical Int or Boolean type. | Template body order is `seed`, then `enabled`. Each source RHS is typed with `type_expression_expected(rhs, context, completed_field_type)` using `field_initializer_context_for`; its literal `TreeId<Typed>` is read back unchanged through `source_typed_index().get(source, rhs)`. The literal keeps its singleton `Type::Constant` type. | Frontend characterized. Backend rejects class fields today. |
 | `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | Source signature and binding characterized. No JVM constructor plan or field emission exists. |
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The parameter order comes from the source constructor clause. | Identity audit only; public accessor ABI is out of scope. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same clause ordering as `val`. | Identity audit only; public getter/setter ABI is out of scope. |
 
 The `Counter.get` method body also types to a `TermRef` for the canonical
 `current` field symbol. The exact typed RHS can be exported without a new API or retyping in
-`dotty-jvm`: `SourceTyper::type_expression` returns the typed tree ID,
+`dotty-jvm`: `SourceTyper::type_expression_expected` returns the typed tree ID,
 `SourceTyper::source_typed_index` is a read-only source-to-typed mapping, and
 `SourceTyper::typed_ast` exposes the corresponding arena read-only. Repeating
 the same successful request returns the same typed ID. A wrong Int/Boolean
 initializer produces the typed `ExpectedExpressionTypeMismatch` at the Typer
-stage; the expression transaction restores the semantic store, typed arena,
-and source mapping. There is no partially published typed root on failure.
+stage when the expected type is the completed canonical field type; the
+expression transaction restores the semantic store, typed arena, and source
+mapping. There is no partially published typed root on failure. The
+unconstrained `type_expression` API can type an RHS without checking it against
+the field type, so its success alone is not initializer conformance evidence
+and must not be used to build a JVM field plan.
 
 No adapter should look up a field or parameter by printed name. In particular,
 the source tree for `start` has more than one related symbol identity, and only
@@ -50,9 +54,12 @@ That layout is a proposed lowering rule, not an API currently represented in
 `dotty-core` or `dotty-jvm`.
 
 Earlier initialized fields can be read after their initializer has executed.
-The current source Typer resolves class members independent of runtime
-initialization order, and explicit self/forward field reads are not rejected by
-the context accessor. Inferred self and mutual cycles do fail in Typer with
+The integration characterization also confirms that explicitly typed
+`this.self` and unqualified forward `later` initializers type successfully to
+the canonical field symbols, including the self-reference. The current source
+Typer resolves class members independent of runtime initialization order, and
+`field_initializer_context_for` neither checks initialization order nor
+rejects those explicit references. Inferred self and mutual cycles do fail in Typer with
 `RecursiveInferredFieldType`, and rollback leaves their symbols incomplete;
 the existing regression is
 `inferred_field_recursion_guard_reports_direct_and_indirect_cycles` in
@@ -95,16 +102,21 @@ reference launcher requires missing `sbt`, and no Java runtime is installed.
 | Inferred direct or mutual field cycle | `complete_symbol` returns `RecursiveInferredFieldType`; recursion state and symbol completion roll back. | Reject before class artifact publication. |
 | `object` / `trait` field or non-field symbol | Typer context validation returns `FieldInitializerContextInvalid` with the actual owner/symbol kind. | This contract only covers top-level ordinary classes. |
 | Plain `private` visibility on an instance field | Namer records `Visibility::Private`; this is the required supported visibility. | Backend must validate visibility from the canonical symbol. |
-| Public/protected, qualified-private, lazy, static, or synthetic field | Outside the private ordinary instance field subset; not accepted as an implicit ABI shape. | Reject with a contextual plan error until an explicit ABI contract covers the form. |
+| Public, `protected`, or `private[this]` instance field | Parser and Namer accept these source forms. The integration characterization observes `Visibility::Public`, `Visibility::Protected`, and `Visibility::Private` respectively; the shared visibility value does not preserve the `private[this]` qualifier. | Outside the characterized plain-private field subset; reject until an explicit ABI contract covers each form. |
+| Qualified-private, lazy, static, or synthetic field | Not covered by the current source integration characterization; acceptance and exact canonical representation remain unclaimed here. | Reject with a contextual plan error until an explicit ABI contract covers the form. |
 | `val`/`var` constructor parameter | Namer retains separate class field and constructor parameter identities. | Do not substitute either identity for the other; public accessor emission remains unsupported. |
 | Duplicate same-named field declarations | Parser and Namer currently accept both declarations without diagnostics and create distinct class-owned `Field` IDs with the same name. This is a recorded frontend gap, not valid backend input. | Plan validation must detect repeated names/identities and return a contextual error before publishing a class. |
-| Secondary, `using`, defaulted, multiple-clause, generic, or otherwise unsupported constructor | These are outside the characterized plan subset. The current source frontend may accept them; backend planning must mark them unsupported rather than infer a JVM layout. | Return a typed contextual backend error before emitting any artifact. |
-| Explicit self or forward field reference | Current field context can resolve the symbol; the Typer does not provide initialization-order proof for explicit field types. | Reject or defer until a separate safe-initialization analysis exists. |
+| Secondary constructor | Parser and Namer accept `class WithSecondary(value: Int) { def this() = this(0) }`; Typer completes the primary and secondary constructors as distinct plain method signatures with one and zero parameters respectively. | Return a typed contextual backend error until secondary constructor lowering is supported. |
+| `using` primary constructor | Parser and Namer accept `class WithUsing(using context: Int)`; Typer completes its signature as one `Contextual` clause with one Int parameter. | Return a typed contextual backend error until contextual constructor lowering is supported. |
+| Defaulted primary constructor parameter | Parser and Namer accept `class WithDefault(value: Int = 1)`; Typer completes its signature as one plain clause with one Int parameter. This signature alone does not characterize default-getter behavior or JVM ABI. | Return a typed contextual backend error until default arguments are explicitly supported. |
+| Multiple-clause, generic, or otherwise unsupported constructor | These shapes remain outside the current source integration characterization. No frontend acceptance or canonical representation is claimed here. | Return a typed contextual backend error before emitting any artifact. |
+| Explicit self or forward field reference | Integration tests show `this.self` and unqualified `later` type to the canonical `self` and `later` field IDs. This is successful name/type resolution only; Typer does not provide initialization-order proof. | Reject or defer until a separate safe-initialization analysis exists. |
 
 The negative evidence remains executable: Typer tests
 `field_initializer_context_rejects_unsupported_owners_and_non_fields` and
 `inferred_field_recursion_guard_reports_direct_and_indirect_cycles`, plus the
-new wrong-type rollback and duplicate-field characterization tests. The
+integration tests for initializer conformance and rollback, constructor forms,
+visibility, self/forward references, and duplicate fields. The
 duplicate-field result is intentionally marked as an unresolved Namer gap;
 the backend must not treat the current absence of a diagnostic as evidence of
 a valid field plan.

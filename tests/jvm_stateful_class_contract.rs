@@ -160,7 +160,7 @@ fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots()
                 );
 
                 let context = typer.field_initializer_context_for(field).unwrap();
-                let typed_rhs = typer.type_expression(rhs, context).unwrap();
+                let typed_rhs = typer.type_expression_expected(rhs, context, ty).unwrap();
                 assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
                 assert_eq!(
                     typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
@@ -305,7 +305,9 @@ fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
 
             typer.complete_symbol(field).unwrap();
             let context = typer.field_initializer_context_for(field).unwrap();
-            let typed_rhs = typer.type_expression(rhs, context).unwrap();
+            let typed_rhs = typer
+                .type_expression_expected(rhs, context, constructor_parameter_type)
+                .unwrap();
             assert_eq!(typer.type_expression(rhs, context).unwrap(), typed_rhs);
             assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
             assert!(matches!(
@@ -409,6 +411,13 @@ fn wrong_typed_field_initializer_is_a_typer_error_and_rolls_back_mapping() {
             assert_eq!(typer.store().checkpoint(), store_checkpoint);
             assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
             assert_eq!(typer.source_typed_index().get(source, rhs), None);
+
+            let unchecked = typer.type_expression(rhs, context).unwrap();
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(unchecked));
+            assert_eq!(
+                typer.store().types.get(typer.typed_ast().get(unchecked).ty),
+                &Type::Constant(dotty_core::Constant::Boolean(true))
+            );
         },
     );
 }
@@ -470,4 +479,143 @@ fn duplicate_source_fields_are_not_yet_rejected_by_frontend() {
             "value"
         );
     }
+}
+
+#[test]
+fn unsupported_constructor_forms_are_accepted_with_canonical_typer_signatures() {
+    with_source(
+        "class WithSecondary(value: Int) { def this() = this(0) }",
+        |ast, source, index, definitions, typer| {
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let primary = index.symbol_at(source, template.constructor).unwrap();
+            let secondary = template
+                .body
+                .iter()
+                .find_map(|tree| {
+                    let symbol = index.symbol_at(source, *tree)?;
+                    (symbol != primary
+                        && typer.store().symbols.get(symbol).kind == SymbolKind::Constructor)
+                        .then_some(symbol)
+                })
+                .expect("secondary constructor should have a source symbol");
+
+            for (constructor, parameter_count) in [(primary, 1), (secondary, 0)] {
+                typer.complete_symbol(constructor).unwrap();
+                let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
+                    panic!("constructor signature should be complete");
+                };
+                let Type::Method(signature) = typer.store().types.get(ty) else {
+                    panic!("constructor should have a method signature");
+                };
+                assert_eq!(signature.params.len(), parameter_count);
+                assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
+                if parameter_count == 1 {
+                    assert_eq!(signature.params[0].ty, definitions.int);
+                }
+            }
+        },
+    );
+
+    with_source(
+        "class WithUsing(using context: Int)",
+        |ast, source, index, definitions, typer| {
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
+                panic!("using constructor signature should be complete");
+            };
+            let Type::Method(signature) = typer.store().types.get(ty) else {
+                panic!("using constructor should have a method signature");
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert_eq!(signature.params[0].ty, definitions.int);
+            assert_eq!(signature.kind, dotty_core::MethodKind::Contextual);
+        },
+    );
+
+    with_source(
+        "class WithDefault(value: Int = 1)",
+        |ast, source, index, definitions, typer| {
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
+                panic!("defaulted constructor signature should be complete");
+            };
+            let Type::Method(signature) = typer.store().types.get(ty) else {
+                panic!("defaulted constructor should have a method signature");
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert_eq!(signature.params[0].ty, definitions.int);
+            assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
+        },
+    );
+}
+
+#[test]
+fn non_private_visibility_forms_are_canonicalized_and_self_forward_reads_type() {
+    with_source(
+        "class Visibility { val publicField: Int = 1; protected val protectedField: Int = 2; private[this] val thisOnly: Int = 3 }",
+        |ast, source, index, _definitions, typer| {
+            for (name, visibility) in [
+                ("publicField", Visibility::Public),
+                ("protectedField", Visibility::Protected),
+                ("thisOnly", Visibility::Private),
+            ] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                assert_eq!(typer.store().symbols.get(field).visibility, visibility);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(expected) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed = typer
+                    .type_expression_expected(rhs, context, expected)
+                    .unwrap();
+                assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
+            }
+        },
+    );
+
+    with_source(
+        "class Reads { private val self: Int = this.self; private val earlier: Int = 1; private val forward: Int = later; private val later: Int = 2 }",
+        |ast, source, index, _, typer| {
+            for (name, target_name) in [("self", "self"), ("forward", "later")] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                let target = field_tree_and_rhs(ast, index, source, typer, target_name).0;
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(expected) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed = typer
+                    .type_expression_expected(rhs, context, expected)
+                    .unwrap();
+                assert!(matches!(
+                    typer.store().types.get(typer.typed_ast().get(typed).ty),
+                    Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                        if *symbol == target
+                ));
+            }
+        },
+    );
 }
