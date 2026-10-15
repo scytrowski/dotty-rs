@@ -1640,6 +1640,19 @@ class/object member at the package name. Package entry and rollback use the
 shared `Packages` registry, preserving its existing origin and ownership
 rules.
 
+### #1131 qualified source imports through descendant packages
+
+Source imports have end-to-end regressions for classes and real Scala 3.9
+TASTy Objects when the classpath contains only a deeper package descendant.
+Coverage includes explicit, renamed, wildcard, and block-local Object imports;
+`_root_` qualification when a local term shadows the first package segment;
+source-owned package identity and declarations; and coexistence of a TASTy
+class and Object with the same name. A failure after resolving an Object import
+must roll back package and symbol state, typed trees, and source indexes, while
+a subsequent valid expression must resolve the canonical Object again. These
+checks exercise the shared typer import path without adding default imports or
+a second resolver.
+
 ### #1072 post-parity Object module reprofile
 
 The current audit also emits
