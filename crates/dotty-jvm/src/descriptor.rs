@@ -66,7 +66,11 @@ pub(super) fn descriptor_for(
     if method.kind != expected_kind {
         return Err(JvmCodegenError::UnsupportedSymbolKind {
             symbol: plan.method,
-            expected: crate::SymbolRole::Method,
+            expected: if constructor {
+                crate::SymbolRole::Constructor
+            } else {
+                crate::SymbolRole::Method
+            },
             found: method.kind,
         });
     }

@@ -127,8 +127,11 @@ a valid field plan.
 
 ## Platform-neutral adapter shapes
 
-The field plan is implemented in `dotty-jvm`. The primary-constructor shape
-below remains proposed:
+Field plans and explicit primary-constructor metadata are implemented in
+`dotty-jvm`; constructor emission remains unsupported. The constructor plan
+retains private source evidence checked by `JvmPrimaryConstructorPlan::from_source`
+against the shared AST/index. Its inputs include the exact constructor and
+ordered derived parameter IDs. The field shape below remains unchanged:
 
 ```rust
 enum JvmFieldSourceVisibility {
@@ -141,11 +144,6 @@ struct JvmFieldPlan {
     source_visibility: JvmFieldSourceVisibility,
     initializer: Option<TreeId<Typed>>,
 }
-
-struct JvmPrimaryConstructorPlan {
-    symbol: SymbolId,
-    ordered_parameters: Vec<SymbolId>,
-}
 ```
 
 The frontend adapter owns plan construction because it has the parser, namer,
@@ -157,7 +155,14 @@ initializer conformance, source-order initialization, and the supported class
 and constructor shape. The class artifact must only be returned after every
 field, method, constructor, and class-file structure validates successfully.
 
-The current `JvmClassInitializationPlan::ImplicitNoArg` remains the only
-implemented initialization proof. It is valid only for the already documented
+`JvmClassInitializationPlan::PrimaryConstructor` now projects explicit metadata
+without permitting emission. `ImplicitNoArg` remains the only implemented
+proof authorizing constructor bytecode. It is valid only for the already documented
 empty no-argument class subset and must not be upgraded based on an empty
 method list when source fields or constructor parameters exist.
+
+The constructor metadata regressions in `jvm_stateful_class_contract.rs` cover
+`()V`, `(I)V`, `(ZI)V`, private access, canonical identity order, and the
+254-parameter instance limit. Unsupported source shapes are rejected before
+projection; malformed semantic information is also checked independently.
+See [the backend contract](jvm-backend.md#explicit-primary-constructor-metadata).

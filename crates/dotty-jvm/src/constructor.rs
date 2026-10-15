@@ -30,6 +30,7 @@ pub struct JvmPrimaryConstructorPlan {
     constructor: SymbolId,
     parameters: Vec<SymbolId>,
     visibility: Visibility,
+    source: dotty_core::SourceId,
 }
 
 /// Read-only JVM constructor signature and instance-parameter slot metadata.
@@ -123,7 +124,54 @@ impl JvmPrimaryConstructorPlan {
             constructor,
             parameters,
             visibility,
+            source,
         })
+    }
+
+    pub(crate) fn validate_binding(
+        &self,
+        store: &SemanticStore,
+        owner: SymbolId,
+    ) -> Result<(), JvmCodegenError> {
+        let fail = |issue| JvmCodegenError::InvalidPrimaryConstructor {
+            constructor: self.constructor,
+            issue,
+        };
+        if owner != self.class
+            || !store.symbols.contains(owner)
+            || !store.symbols.contains(self.constructor)
+        {
+            return Err(fail(JvmConstructorIssue::SourceIdentity));
+        }
+        let constructor = store.symbols.get(self.constructor);
+        if constructor.kind != SymbolKind::Constructor
+            || constructor.owner != Some(owner)
+            || constructor.origin != dotty_core::SymbolOrigin::Source(self.source)
+            || store.symbols.get(owner).origin != dotty_core::SymbolOrigin::Source(self.source)
+            || constructor.name.namespace() != dotty_core::Namespace::Term
+            || store.names.try_resolve(constructor.name.text()) != Some("<init>")
+        {
+            return Err(fail(JvmConstructorIssue::SourceIdentity));
+        }
+        if constructor.visibility != self.visibility {
+            return Err(fail(JvmConstructorIssue::Visibility));
+        }
+        if !constructor.flags.is_empty() {
+            return Err(fail(JvmConstructorIssue::Flags));
+        }
+        for id in &self.parameters {
+            if !store.symbols.contains(*id) {
+                return Err(JvmCodegenError::UnknownParameter { parameter: *id });
+            }
+            let parameter = store.symbols.get(*id);
+            if parameter.kind != SymbolKind::Parameter
+                || parameter.owner != Some(self.constructor)
+                || parameter.origin != dotty_core::SymbolOrigin::Source(self.source)
+            {
+                return Err(fail(JvmConstructorIssue::ParameterIdentity));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn metadata(
@@ -139,9 +187,13 @@ impl JvmPrimaryConstructorPlan {
         if owner != self.class {
             return Err(fail(JvmConstructorIssue::SourceIdentity));
         }
+        self.validate_binding(store, owner)?;
         let identity = crate::identity::class_identity(store, owner)?;
         let info = crate::identity::class_info(store, owner)?;
-        if info.self_type.is_some() || info.parents.as_slice() != [definitions.object_type] {
+        if info.self_type.is_some()
+            || info.parents.as_slice() != [definitions.object_type]
+            || !matches!(store.types.try_get(definitions.object_type), Some(dotty_core::Type::TypeRef { target: dotty_core::TypeRefTarget::Symbol(symbol), .. }) if *symbol == definitions.object_class)
+        {
             return Err(JvmCodegenError::UnsupportedJvmSuperclass {
                 class: owner,
                 parent: info.parents.first().copied(),
@@ -196,6 +248,11 @@ impl JvmPrimaryConstructorPlan {
             let parameter = store.symbols.get(*id);
             if !parameter.flags.is_empty()
                 || parameter.name.text() != signature_param.name.as_name().text()
+                || ![
+                    store.types.try_get(definitions.int),
+                    store.types.try_get(definitions.boolean),
+                ]
+                .contains(&store.types.try_get(signature_param.ty))
             {
                 return Err(fail(JvmConstructorIssue::ParameterSignature));
             }
@@ -241,5 +298,201 @@ impl JvmConstructorMetadata {
     /// Proven public or private constructor accessibility.
     pub fn access_flags(&self) -> MethodAccessFlags {
         self.access_flags
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotty_core::{MethodType, Name, Namespace, Scope, Symbol, SymbolLinks, SymbolOrigin, Type};
+
+    fn fixture() -> (SemanticStore, Definitions, JvmPrimaryConstructorPlan) {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let source = dotty_core::SourceId::from_index(1);
+        let mut alloc = |text: &str, namespace, kind, owner| {
+            let name = Name::new(store.names.intern(text), namespace);
+            store.symbols.alloc(Symbol {
+                name,
+                kind,
+                owner,
+                flags: dotty_core::SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Source(source),
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            })
+        };
+        let package = alloc("", Namespace::Term, SymbolKind::Package, None);
+        let class = alloc("C", Namespace::Type, SymbolKind::Class, Some(package));
+        let constructor = alloc(
+            "<init>",
+            Namespace::Term,
+            SymbolKind::Constructor,
+            Some(class),
+        );
+        let scope = store.scopes.alloc(Scope::new(Some(class)));
+        store
+            .scopes
+            .get_mut(scope)
+            .enter(store.symbols.get(constructor).name, constructor);
+        let info = store.types.alloc(Type::ClassInfo(dotty_core::ClassInfo {
+            prefix: definitions.no_prefix,
+            class,
+            parents: vec![definitions.object_type],
+            declarations: scope,
+            self_type: None,
+        }));
+        store.symbols.set_info(class, SymbolInfo::Complete(info));
+        let result = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, class));
+        let signature = store.types.alloc(Type::Method(MethodType {
+            params: Vec::new(),
+            result,
+            kind: dotty_core::MethodKind::Plain,
+        }));
+        store
+            .symbols
+            .set_info(constructor, SymbolInfo::Complete(signature));
+        (
+            store,
+            definitions,
+            JvmPrimaryConstructorPlan {
+                class,
+                constructor,
+                parameters: Vec::new(),
+                visibility: Visibility::Public,
+                source,
+            },
+        )
+    }
+
+    #[test]
+    fn malformed_constructor_metadata_fails_without_mutation() {
+        let (mut store, definitions, plan) = fixture();
+        let checkpoint = store.checkpoint();
+        assert_eq!(
+            plan.metadata(&store, &definitions, plan.class)
+                .unwrap()
+                .descriptor()
+                .as_str(),
+            "()V"
+        );
+        assert_eq!(store.checkpoint(), checkpoint);
+        let original = store.symbols.get(plan.constructor).clone();
+        store.symbols.get_mut(plan.constructor).owner = None;
+        assert!(matches!(
+            plan.metadata(&store, &definitions, plan.class),
+            Err(JvmCodegenError::InvalidPrimaryConstructor {
+                issue: JvmConstructorIssue::SourceIdentity,
+                ..
+            })
+        ));
+        *store.symbols.get_mut(plan.constructor) = original.clone();
+        store.symbols.get_mut(plan.constructor).kind = SymbolKind::Method;
+        assert!(matches!(
+            plan.metadata(&store, &definitions, plan.class),
+            Err(JvmCodegenError::InvalidPrimaryConstructor {
+                issue: JvmConstructorIssue::SourceIdentity,
+                ..
+            })
+        ));
+        *store.symbols.get_mut(plan.constructor) = original.clone();
+        store.symbols.get_mut(plan.constructor).visibility = Visibility::Private;
+        assert!(matches!(
+            plan.metadata(&store, &definitions, plan.class),
+            Err(JvmCodegenError::InvalidPrimaryConstructor {
+                issue: JvmConstructorIssue::Visibility,
+                ..
+            })
+        ));
+        *store.symbols.get_mut(plan.constructor) = original.clone();
+        let unfilled = store.types.reserve().id();
+        for info in [
+            SymbolInfo::Missing,
+            SymbolInfo::Error,
+            SymbolInfo::Complete(unfilled),
+        ] {
+            store.symbols.set_info(plan.constructor, info);
+            assert!(plan.metadata(&store, &definitions, plan.class).is_err());
+        }
+        *store.symbols.get_mut(plan.constructor) = original;
+        let SymbolInfo::Complete(ty) = store.symbols.get(plan.constructor).info else {
+            panic!()
+        };
+        let Type::Method(mut signature) = store.types.get(ty).clone() else {
+            panic!()
+        };
+        signature.result = definitions.int;
+        let wrong_result = store.types.alloc(Type::Method(signature));
+        store
+            .symbols
+            .set_info(plan.constructor, SymbolInfo::Complete(wrong_result));
+        assert!(matches!(
+            plan.metadata(&store, &definitions, plan.class),
+            Err(JvmCodegenError::InvalidPrimaryConstructor {
+                issue: JvmConstructorIssue::ResultType,
+                ..
+            })
+        ));
+    }
+    #[test]
+    fn stale_parameter_and_constructor_identities_are_typed_errors() {
+        let (mut store, definitions, mut plan) = fixture();
+        plan.parameters.push(plan.class);
+        assert!(matches!(
+            plan.metadata(&store, &definitions, plan.class),
+            Err(JvmCodegenError::InvalidPrimaryConstructor {
+                issue: JvmConstructorIssue::ParameterIdentity,
+                ..
+            })
+        ));
+        plan.parameters.clear();
+        let mut other = SemanticStore::new();
+        let stale = loop {
+            let name =
+                dotty_core::Name::new(other.names.intern("stale"), dotty_core::Namespace::Term);
+            let id = other.symbols.alloc(Symbol {
+                name,
+                owner: None,
+                kind: SymbolKind::Parameter,
+                flags: dotty_core::SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Missing,
+                origin: SymbolOrigin::Synthetic,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            if !store.symbols.contains(id) {
+                break id;
+            }
+        };
+        plan.parameters.push(stale);
+        assert_eq!(
+            plan.metadata(&store, &definitions, plan.class),
+            Err(JvmCodegenError::UnknownParameter { parameter: stale })
+        );
+        plan.parameters.clear();
+        plan.constructor = stale;
+        assert!(matches!(
+            plan.metadata(&store, &definitions, plan.class),
+            Err(JvmCodegenError::InvalidPrimaryConstructor {
+                issue: JvmConstructorIssue::SourceIdentity,
+                ..
+            })
+        ));
+        // A valid source proof also fails closed if the class signature is corrupted.
+        let (_, _, valid) = fixture();
+        store
+            .symbols
+            .set_info(valid.class, SymbolInfo::Complete(definitions.int));
+        assert!(matches!(
+            valid.metadata(&store, &definitions, valid.class),
+            Err(JvmCodegenError::InvalidJvmClassInfo { .. })
+        ));
     }
 }

@@ -996,6 +996,7 @@ pub enum JvmCodegenError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolRole {
     Class,
+    Constructor,
     Field,
     Method,
     Parameter,
@@ -1618,6 +1619,11 @@ impl JvmCompilationUnit<'_> {
                 });
             }
             self.validate_symbol_type(class_plan.class)?;
+            if let JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+                &class_plan.initialization
+            {
+                constructor.validate_binding(self.store, class_plan.class)?;
+            }
 
             let mut class_field_symbols = HashSet::new();
             for field_plan in &class_plan.fields {

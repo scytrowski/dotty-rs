@@ -470,3 +470,41 @@ within the current subset when their stack flow is primitive or Unit.
 non-Int/Boolean literals, object/reference joins, and all other typed nodes
 remain unsupported. No source name lookup, implicit boxing, general-purpose
 coercion, constant folding, or frontend dependency is introduced.
+
+### Explicit primary constructor metadata
+
+`JvmClassInitializationPlan::PrimaryConstructor` carries a
+`JvmPrimaryConstructorPlan` for metadata projection only. It does not authorize
+constructor bytecode emission: `emit_class` rejects this mode, including an
+explicit empty-parameter plan. Existing frontend proofs of `ImplicitNoArg`
+retain their prior empty public `<init>()V` emission and do not require a new
+plan.
+
+The frontend collects the constructor through `Template.constructor` and its
+parameters through `SourceSemanticIndex::derived_symbol_at(constructor, source,
+parameter_tree)`, in source clause order. `JvmPrimaryConstructorPlan::from_source`
+checks those supplied identities against the shared core AST and semantic
+index, then retains a private, owned proof. It does not tokenize, parse,
+complete symbols, type expressions, or depend on the parser/namer/typer crates.
+This source check is necessary because default arguments and parameter
+accessor syntax cannot be recovered safely from the completed method type.
+The producer must supply the same frontend session's AST, index, and store;
+typed IDs themselves do not encode session identity.
+
+`JvmClassMetadata::constructor()` exposes the explicit constructor's canonical
+symbol, owner internal name, descriptor, access flags, and ordered
+`JvmParameterLocal` values. Semantic constructor results are class types; JVM
+constructor results are always `V`. Plain `Int`/`Boolean` parameters occupy
+one slot each starting at 1, with slot 0 reserved for `this`. At most 254
+parameters are supported. Exact constructor-owned parameter identities are
+preserved; class-owned parameter copies and `val`/`var` accessor fields never
+substitute for them.
+
+Projection checks the live constructor kind, source origin, owner, declaration
+scope, complete plain monomorphic signature, primitive parameter types, and
+proven public/private visibility. Private constructors stay private. Generic,
+secondary, contextual, defaulted, by-name, erased and repeated parameters,
+parameter accessors, annotations, qualified visibility, and non-primitive
+parameters fail with structured errors. Source proof rejection does not
+publish partial metadata or mutate semantic state. No new Scala constructor,
+accessor, field store, `new` expression, or JVM constructor body is synthesized.

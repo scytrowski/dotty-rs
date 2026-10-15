@@ -2054,6 +2054,15 @@ fn ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result
                 initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
             };
             let metadata = plan.metadata(typer.store(), definitions).unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![plan],
+            };
+            assert_eq!(
+                emit_class(&unit, class, definitions),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedConstructor { class })
+            );
             let constructor_metadata = metadata.constructor().unwrap();
             assert_eq!(constructor_metadata.descriptor().as_str(), descriptor);
             assert_eq!(constructor_metadata.owner_internal_name(), "C");
@@ -2077,5 +2086,268 @@ fn ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result
                 assert_eq!(typer.store().symbols.get(expected).owner, Some(constructor));
             }
         });
+    }
+}
+
+#[test]
+fn primary_constructor_source_proof_rejects_wrong_identities_and_unsupported_forms() {
+    use dotty_jvm::{JvmCodegenError, JvmConstructorIssue, JvmPrimaryConstructorPlan};
+    for text in [
+        "class C(val x: Int)",
+        "class C(var x: Int)",
+        "class C(x: Int = 1)",
+        "class C(using x: Int)",
+        "class C[A](x: Int)",
+        "class C(x: Int)(y: Boolean)",
+    ] {
+        with_source(text, |ast, source, index, _, typer| {
+            let class = symbol_named(ast, index, source, typer, "C");
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(t) => Some(t),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
+                panic!()
+            };
+            let parameters = def
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                matches!(
+                    JvmPrimaryConstructorPlan::from_source(
+                        class,
+                        constructor,
+                        parameters,
+                        ast,
+                        index
+                    ),
+                    Err(JvmCodegenError::InvalidPrimaryConstructor {
+                        issue: JvmConstructorIssue::SourceShape,
+                        ..
+                    })
+                ),
+                "{text}"
+            );
+        });
+    }
+    with_source(
+        "class C(a: Int, b: Int) { def this() = this(0, 0) }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "C");
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(t) => Some(t),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
+                panic!()
+            };
+            let parameters = def.value_param_clauses[0]
+                .iter()
+                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                .collect::<Vec<_>>();
+            for wrong in [
+                Vec::new(),
+                vec![parameters[0], parameters[0]],
+                vec![parameters[1], parameters[0]],
+                vec![
+                    index
+                        .symbol_at(source, def.value_param_clauses[0][0])
+                        .unwrap(),
+                    parameters[1],
+                ],
+            ] {
+                assert!(matches!(
+                    JvmPrimaryConstructorPlan::from_source(class, constructor, wrong, ast, index),
+                    Err(JvmCodegenError::InvalidPrimaryConstructor {
+                        issue: JvmConstructorIssue::ParameterIdentity,
+                        ..
+                    })
+                ));
+            }
+            assert!(matches!(
+                JvmPrimaryConstructorPlan::from_source(
+                    class,
+                    class,
+                    parameters.clone(),
+                    ast,
+                    index
+                ),
+                Err(JvmCodegenError::InvalidPrimaryConstructor {
+                    issue: JvmConstructorIssue::SourceIdentity,
+                    ..
+                })
+            ));
+            let proof =
+                JvmPrimaryConstructorPlan::from_source(class, constructor, parameters, ast, index)
+                    .unwrap();
+            typer.complete_symbol(class).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let plan = JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            };
+            assert!(matches!(
+                plan.metadata(typer.store(), definitions),
+                Err(JvmCodegenError::InvalidPrimaryConstructor {
+                    issue: JvmConstructorIssue::SecondaryConstructor,
+                    ..
+                })
+            ));
+        },
+    );
+}
+
+#[test]
+fn primary_constructor_signature_rejects_reference_and_special_parameter_types() {
+    for text in [
+        "class C(x: C)",
+        "class C(x: => Int)",
+        "class C(xs: Int*)",
+        "class C(x: 1)",
+    ] {
+        with_source(text, |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "C");
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(t) => Some(t),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
+                panic!()
+            };
+            let parameters = def.value_param_clauses[0]
+                .iter()
+                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                .collect();
+            let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters,
+                ast,
+                index,
+            )
+            .unwrap();
+            typer.complete_symbol(class).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let plan = JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            };
+            let error = plan.metadata(typer.store(), definitions).unwrap_err();
+            match text {
+                "class C(x: C)" => assert!(matches!(
+                    error,
+                    dotty_jvm::JvmCodegenError::UnsupportedJvmType {
+                        kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                        ..
+                    }
+                )),
+                "class C(x: => Int)" => assert!(matches!(
+                    error,
+                    dotty_jvm::JvmCodegenError::UnsupportedJvmType {
+                        kind: dotty_jvm::UnsupportedJvmTypeKind::ByName,
+                        ..
+                    }
+                )),
+                "class C(xs: Int*)" => assert!(matches!(
+                    error,
+                    dotty_jvm::JvmCodegenError::UnsupportedMethodParameter {
+                        kind: dotty_jvm::UnsupportedMethodParameterKind::Varargs,
+                        ..
+                    }
+                )),
+                _ => assert!(matches!(
+                    error,
+                    dotty_jvm::JvmCodegenError::InvalidPrimaryConstructor {
+                        issue: dotty_jvm::JvmConstructorIssue::ParameterSignature,
+                        ..
+                    }
+                )),
+            }
+        });
+    }
+}
+
+#[test]
+fn primary_constructor_enforces_the_instance_parameter_slot_limit() {
+    for count in [254, 255] {
+        let params = (0..count)
+            .map(|i| format!("p{i}: Int"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        with_source(
+            &format!("class C({params})"),
+            |ast, source, index, definitions, typer| {
+                let class = symbol_named(ast, index, source, typer, "C");
+                let template = ast
+                    .iter()
+                    .find_map(|(_, node)| match &node.kind {
+                        TreeKind::Template(t) => Some(t),
+                        _ => None,
+                    })
+                    .unwrap();
+                let constructor = index.symbol_at(source, template.constructor).unwrap();
+                let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
+                    panic!()
+                };
+                let parameters = def.value_param_clauses[0]
+                    .iter()
+                    .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                    .collect();
+                let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                    class,
+                    constructor,
+                    parameters,
+                    ast,
+                    index,
+                )
+                .unwrap();
+                typer.complete_symbol(class).unwrap();
+                typer.complete_symbol(constructor).unwrap();
+                let plan = JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: Vec::new(),
+                    initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+                };
+                let result = plan.metadata(typer.store(), definitions);
+                if count == 254 {
+                    assert_eq!(
+                        result
+                            .unwrap()
+                            .constructor()
+                            .unwrap()
+                            .parameters()
+                            .last()
+                            .unwrap()
+                            .slot(),
+                        254
+                    );
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(dotty_jvm::JvmCodegenError::TooManyParameterSlots { slots: 256, .. })
+                    ));
+                }
+            },
+        );
     }
 }
