@@ -84,9 +84,16 @@ def main() -> int:
             root / "class-as-term",
             [class_as_term],
         )
-        class_as_term_diagnostic = class_as_term_result.stdout + class_as_term_result.stderr
-        if class_as_term_result.returncode == 0 or "C" not in class_as_term_diagnostic:
-            raise SystemExit("Scala 3.9 accepted a class-only import as a term")
+        class_as_term_diagnostic = re.sub(
+            r"\x1b\[[0-9;]*m", "", class_as_term_result.stdout + class_as_term_result.stderr
+        )
+        if class_as_term_result.returncode == 0 or not all(
+            fragment in class_as_term_diagnostic
+            for fragment in ("object C", "cannot be used as a value")
+        ):
+            raise SystemExit(
+                "Scala 3.9 class-only import diagnostic changed:\n" + class_as_term_diagnostic
+            )
 
         dotted_package = source / "ImportDottedPackage.scala"
         dotted_package.write_text(

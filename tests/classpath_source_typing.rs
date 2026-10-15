@@ -1897,7 +1897,7 @@ fn ambiguous_external_object_member_import_rolls_back_and_retries() {
     let typed_checkpoint = typer.typed_ast().checkpoint();
     let error = typer
         .type_expression(broken_rhs, broken_context)
-        .expect_err("an overloaded imported method remains deferred");
+        .expect_err("an overloaded imported method must remain ambiguous");
     assert!(
         matches!(
             error,
