@@ -51,8 +51,37 @@ impl IntPrimitiveOperatorSymbols {
     }
 }
 
-/// A conflict or malformed class/member encountered while registering the
-/// bounded canonical `Int` operators.
+/// The canonical source member identities for Boolean primitive operators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BooleanPrimitiveOperatorSymbols {
+    pub unary_not: SymbolId,
+    pub and_then: SymbolId,
+    pub or_else: SymbolId,
+    pub eager_and: SymbolId,
+    pub eager_or: SymbolId,
+    pub xor: SymbolId,
+    pub equal: SymbolId,
+    pub not_equal: SymbolId,
+}
+
+impl BooleanPrimitiveOperatorSymbols {
+    /// Returns the eight supported method identities in the audit order.
+    pub const fn all(self) -> [SymbolId; 8] {
+        [
+            self.unary_not,
+            self.and_then,
+            self.or_else,
+            self.eager_and,
+            self.eager_or,
+            self.xor,
+            self.equal,
+            self.not_equal,
+        ]
+    }
+}
+
+/// A conflict or malformed class/member encountered while registering
+/// canonical primitive operators.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IntPrimitiveOperatorRegistrationError {
     ClassInfoUnavailable {
@@ -93,6 +122,10 @@ pub enum IntPrimitiveOperatorRegistrationError {
         symbol: SymbolId,
         owner: Option<SymbolId>,
     },
+    OperatorMethodNotPublic {
+        operator: &'static str,
+        symbol: SymbolId,
+    },
     OperatorMethodInfoUnavailable {
         operator: &'static str,
         symbol: SymbolId,
@@ -116,6 +149,10 @@ pub enum IntPrimitiveOperatorRegistrationError {
     BooleanTypeIsNotCanonical,
 }
 
+/// Registration errors shared by the bounded builtin `Int` and `Boolean`
+/// operator registries.
+pub type BooleanPrimitiveOperatorRegistrationError = IntPrimitiveOperatorRegistrationError;
+
 /// The completion state reported for the canonical `Int` class.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IntPrimitiveOperatorInfoState {
@@ -135,6 +172,17 @@ impl std::error::Error for IntPrimitiveOperatorRegistrationError {}
 struct IntOperatorSpec {
     spelling: &'static str,
     result: TypeId,
+}
+
+#[derive(Clone, Copy)]
+struct BooleanOperatorSpec {
+    spelling: &'static str,
+    has_argument: bool,
+}
+
+fn is_boolean_operator_parameter(store: &SemanticStore, ty: TypeId, boolean: TypeId) -> bool {
+    ty == boolean
+        || matches!(store.types.try_get(ty), Some(Type::ByName { result }) if *result == boolean)
 }
 
 /// The builtin symbols and types every adapter (classfile/TASTy/source)
@@ -251,6 +299,9 @@ impl Definitions {
         definitions
             .ensure_int_primitive_operators(store)
             .expect("fresh canonical Int class should accept builtin operators");
+        definitions
+            .ensure_boolean_primitive_operators(store)
+            .expect("fresh canonical Boolean class should accept builtin operators");
         definitions
     }
 
@@ -635,6 +686,416 @@ impl Definitions {
         })
     }
 
+    /// Ensures the supported Boolean operators live in the existing canonical
+    /// `Boolean` declaration scope. The parameterless `unary_!` member stores
+    /// its result type directly; binary operators store ordinary one-parameter
+    /// method types. Existing class information and unrelated overloads are
+    /// preserved, and malformed/conflicting canonical entries are reported
+    /// before any mutation.
+    pub fn ensure_boolean_primitive_operators(
+        &self,
+        store: &mut SemanticStore,
+    ) -> Result<BooleanPrimitiveOperatorSymbols, BooleanPrimitiveOperatorRegistrationError> {
+        let boolean_class = store
+            .types
+            .get(self.boolean)
+            .reference_symbol()
+            .ok_or(BooleanPrimitiveOperatorRegistrationError::BooleanTypeIsNotCanonical)?;
+        let specs = [
+            BooleanOperatorSpec {
+                spelling: "unary_!",
+                has_argument: false,
+            },
+            BooleanOperatorSpec {
+                spelling: "&&",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "||",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "&",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "|",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "^",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "==",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "!=",
+                has_argument: true,
+            },
+        ];
+
+        let info = store.symbols.get(boolean_class).info;
+        let (scope, needs_class_info) = match info {
+            SymbolInfo::Missing => (None, true),
+            SymbolInfo::Deferred(_) => {
+                return Err(
+                    BooleanPrimitiveOperatorRegistrationError::ClassInfoUnavailable {
+                        state: IntPrimitiveOperatorInfoState::Deferred,
+                    },
+                );
+            }
+            SymbolInfo::Error => {
+                return Err(
+                    BooleanPrimitiveOperatorRegistrationError::ClassInfoUnavailable {
+                        state: IntPrimitiveOperatorInfoState::Error,
+                    },
+                );
+            }
+            SymbolInfo::Complete(info_id) => {
+                let Some(Type::ClassInfo(class_info)) = store.types.try_get(info_id) else {
+                    return Err(if store.types.contains(info_id) {
+                        BooleanPrimitiveOperatorRegistrationError::ClassInfoNotClassInfo {
+                            info: info_id,
+                        }
+                    } else {
+                        BooleanPrimitiveOperatorRegistrationError::InvalidClassInfoType {
+                            info: info_id,
+                        }
+                    });
+                };
+                if class_info.class != boolean_class {
+                    return Err(
+                        BooleanPrimitiveOperatorRegistrationError::MalformedClassInfoIdentity {
+                            recorded_class: class_info.class,
+                        },
+                    );
+                }
+                if store.types.try_get(class_info.prefix).is_none()
+                    || class_info
+                        .parents
+                        .iter()
+                        .any(|parent| store.types.try_get(*parent).is_none())
+                    || class_info
+                        .self_type
+                        .is_some_and(|ty| store.types.try_get(ty).is_none())
+                {
+                    return Err(
+                        BooleanPrimitiveOperatorRegistrationError::MalformedClassInfo {
+                            info: info_id,
+                        },
+                    );
+                }
+                if !store.scopes.contains(class_info.declarations) {
+                    return Err(
+                        BooleanPrimitiveOperatorRegistrationError::InvalidDeclarationScope {
+                            scope: class_info.declarations,
+                        },
+                    );
+                }
+                let declaration_scope = store.scopes.get(class_info.declarations);
+                if declaration_scope.owner != Some(boolean_class) {
+                    return Err(
+                        BooleanPrimitiveOperatorRegistrationError::DeclarationScopeOwnerMismatch {
+                            actual: declaration_scope.owner,
+                        },
+                    );
+                }
+                (Some(class_info.declarations), false)
+            }
+        };
+
+        let mut found = [None; 8];
+        if let Some(scope) = scope {
+            for (index, spec) in specs.iter().enumerate() {
+                let name = Name::new(store.names.intern(spec.spelling), Namespace::Term);
+                let mut matching_signature = None;
+                for &symbol in store.scopes.get(scope).lookup_all(&name) {
+                    if !store.symbols.contains(symbol) {
+                        return Err(
+                            BooleanPrimitiveOperatorRegistrationError::UnknownMemberSymbol {
+                                symbol,
+                            },
+                        );
+                    }
+                    let candidate = store.symbols.get(symbol);
+                    if candidate.name != name {
+                        return Err(
+                            BooleanPrimitiveOperatorRegistrationError::OperatorMethodNameMismatch {
+                                operator: spec.spelling,
+                                symbol,
+                                actual: candidate.name,
+                            },
+                        );
+                    }
+                    if candidate.kind != SymbolKind::Method {
+                        return Err(
+                            BooleanPrimitiveOperatorRegistrationError::OperatorNameIsNotMethod {
+                                operator: spec.spelling,
+                                symbol,
+                            },
+                        );
+                    }
+                    if candidate.owner != Some(boolean_class) {
+                        return Err(BooleanPrimitiveOperatorRegistrationError::OperatorMethodOwnerMismatch {
+                            operator: spec.spelling,
+                            symbol,
+                            owner: candidate.owner,
+                        });
+                    }
+                    let SymbolInfo::Complete(method_info) = candidate.info else {
+                        return Err(BooleanPrimitiveOperatorRegistrationError::OperatorMethodInfoUnavailable {
+                            operator: spec.spelling,
+                            symbol,
+                        });
+                    };
+                    let Some(method_type) = store.types.try_get(method_info) else {
+                        return Err(BooleanPrimitiveOperatorRegistrationError::OperatorMethodInfoMalformed {
+                            operator: spec.spelling,
+                            symbol,
+                        });
+                    };
+                    if (spec.has_argument && !matches!(method_type, Type::Method(_)))
+                        || (!spec.has_argument
+                            && method_info != self.boolean
+                            && !matches!(method_type, Type::Method(_) | Type::Poly(_)))
+                    {
+                        return Err(BooleanPrimitiveOperatorRegistrationError::OperatorMethodInfoMalformed {
+                            operator: spec.spelling,
+                            symbol,
+                        });
+                    }
+
+                    let compatible = if spec.has_argument {
+                        matches!(method_type,
+                            Type::Method(method)
+                                if method.kind == MethodKind::Plain
+                                    && method.params.len() == 1
+                                    && method.params[0].ty == self.boolean
+                                    && !method.params[0].erased
+                                    && !method.params[0].varargs
+                                    && method.result == self.boolean)
+                    } else {
+                        method_info == self.boolean
+                    };
+                    let same_arity = if spec.has_argument {
+                        matches!(method_type,
+                            Type::Method(method)
+                                if method.params.len() == 1
+                                    && is_boolean_operator_parameter(store, method.params[0].ty, self.boolean))
+                    } else {
+                        method_info == self.boolean
+                            || matches!(method_type, Type::Method(method) if method.params.is_empty())
+                    };
+                    if same_arity {
+                        if candidate.visibility != Visibility::Public {
+                            return Err(BooleanPrimitiveOperatorRegistrationError::OperatorMethodNotPublic {
+                                operator: spec.spelling,
+                                symbol,
+                            });
+                        }
+                        if !compatible {
+                            return Err(BooleanPrimitiveOperatorRegistrationError::IncompatibleOperatorSignature {
+                                operator: spec.spelling,
+                                symbol,
+                            });
+                        }
+                        if matching_signature.replace(symbol).is_some() {
+                            return Err(BooleanPrimitiveOperatorRegistrationError::DuplicateOperatorSignature {
+                                operator: spec.spelling,
+                            });
+                        }
+                        if found[..index].contains(&Some(symbol)) {
+                            return Err(BooleanPrimitiveOperatorRegistrationError::DuplicateOperatorSymbol {
+                                operator: spec.spelling,
+                                symbol,
+                            });
+                        }
+                    }
+                }
+                found[index] = matching_signature;
+            }
+        }
+
+        let scope = scope.unwrap_or_else(|| store.scopes.alloc(Scope::new(Some(boolean_class))));
+        let mut ids = [None; 8];
+        for (index, spec) in specs.into_iter().enumerate() {
+            if let Some(symbol) = found[index] {
+                ids[index] = Some(symbol);
+                continue;
+            }
+            let name = Name::new(store.names.intern(spec.spelling), Namespace::Term);
+            let info = if spec.has_argument {
+                store.types.alloc(Type::Method(MethodType {
+                    params: vec![MethodParam {
+                        name: TermName::new(store.names.intern("x")),
+                        ty: self.boolean,
+                        erased: false,
+                        varargs: false,
+                    }],
+                    result: self.boolean,
+                    kind: MethodKind::Plain,
+                }))
+            } else {
+                self.boolean
+            };
+            let symbol = store.symbols.alloc(Symbol {
+                name,
+                owner: Some(boolean_class),
+                kind: SymbolKind::Method,
+                flags: SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(info),
+                origin: SymbolOrigin::Builtin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            store.scopes.get_mut(scope).enter(name, symbol);
+            ids[index] = Some(symbol);
+        }
+        let ids = ids.map(Option::unwrap);
+
+        if needs_class_info {
+            let info = store.types.alloc(Type::ClassInfo(ClassInfo {
+                prefix: self.no_prefix,
+                class: boolean_class,
+                parents: Vec::new(),
+                declarations: scope,
+                self_type: None,
+            }));
+            store.symbols.get_mut(boolean_class).info = SymbolInfo::Complete(info);
+        }
+
+        Ok(BooleanPrimitiveOperatorSymbols {
+            unary_not: ids[0],
+            and_then: ids[1],
+            or_else: ids[2],
+            eager_and: ids[3],
+            eager_or: ids[4],
+            xor: ids[5],
+            equal: ids[6],
+            not_equal: ids[7],
+        })
+    }
+
+    /// Reads canonical Boolean operator identities without changing state.
+    pub fn boolean_primitive_operator_symbols(
+        &self,
+        store: &SemanticStore,
+    ) -> Option<BooleanPrimitiveOperatorSymbols> {
+        let boolean_class = store.types.get(self.boolean).reference_symbol()?;
+        let SymbolInfo::Complete(info_id) = store.symbols.get(boolean_class).info else {
+            return None;
+        };
+        let Type::ClassInfo(info) = store.types.try_get(info_id)? else {
+            return None;
+        };
+        if info.class != boolean_class
+            || !store.scopes.contains(info.declarations)
+            || store.scopes.get(info.declarations).owner != Some(boolean_class)
+        {
+            return None;
+        }
+        let specs = [
+            BooleanOperatorSpec {
+                spelling: "unary_!",
+                has_argument: false,
+            },
+            BooleanOperatorSpec {
+                spelling: "&&",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "||",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "&",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "|",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "^",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "==",
+                has_argument: true,
+            },
+            BooleanOperatorSpec {
+                spelling: "!=",
+                has_argument: true,
+            },
+        ];
+        let mut ids = [None; 8];
+        for (index, spec) in specs.iter().enumerate() {
+            let name = Name::new(store.names.get(spec.spelling)?, Namespace::Term);
+            for &symbol in store.scopes.get(info.declarations).lookup_all(&name) {
+                if !store.symbols.contains(symbol) {
+                    return None;
+                }
+                let member = store.symbols.get(symbol);
+                if member.name != name
+                    || member.kind != SymbolKind::Method
+                    || member.owner != Some(boolean_class)
+                {
+                    return None;
+                }
+                let SymbolInfo::Complete(member_info) = member.info else {
+                    return None;
+                };
+                let member_type = store.types.try_get(member_info)?;
+                let compatible = if spec.has_argument {
+                    matches!(member_type,
+                        Type::Method(method)
+                            if method.kind == MethodKind::Plain
+                                && method.params.len() == 1
+                                && method.params[0].ty == self.boolean
+                                && !method.params[0].erased
+                                && !method.params[0].varargs
+                                && method.result == self.boolean)
+                } else {
+                    member_info == self.boolean
+                };
+                let same_signature_shape = if spec.has_argument {
+                    matches!(member_type,
+                        Type::Method(method)
+                            if method.params.len() == 1
+                                && is_boolean_operator_parameter(store, method.params[0].ty, self.boolean))
+                } else {
+                    member_info == self.boolean
+                        || matches!(member_type, Type::Method(method) if method.params.is_empty())
+                };
+                if same_signature_shape
+                    && (member.visibility != Visibility::Public
+                        || !compatible
+                        || ids[index].replace(symbol).is_some())
+                {
+                    return None;
+                }
+            }
+            ids[index]?;
+        }
+        if (0..ids.len()).any(|index| ids[..index].contains(&ids[index])) {
+            return None;
+        }
+        Some(BooleanPrimitiveOperatorSymbols {
+            unary_not: ids[0]?,
+            and_then: ids[1]?,
+            or_else: ids[2]?,
+            eager_and: ids[3]?,
+            eager_or: ids[4]?,
+            xor: ids[5]?,
+            equal: ids[6]?,
+            not_equal: ids[7]?,
+        })
+    }
+
     /// Returns the session-canonical type for a source-level builtin name.
     ///
     /// Lookup compares interned names and does not depend on builtin symbols
@@ -809,6 +1270,156 @@ mod tests {
 
         assert_eq!(store.symbols.get(symbol).origin, SymbolOrigin::Builtin);
         assert_eq!(store.symbols.get(symbol).kind, SymbolKind::Class);
+    }
+
+    #[test]
+    fn boolean_operator_registration_is_canonical_complete_and_idempotent() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let boolean_class = store
+            .types
+            .get(definitions.boolean)
+            .reference_symbol()
+            .unwrap();
+        let int_before = definitions.int_primitive_operator_symbols(&store).unwrap();
+        let registered = definitions
+            .boolean_primitive_operator_symbols(&store)
+            .unwrap();
+        assert_eq!(registered.all().len(), 8);
+        assert_eq!(
+            definitions
+                .ensure_boolean_primitive_operators(&mut store)
+                .unwrap(),
+            registered
+        );
+        assert_eq!(
+            definitions.int_primitive_operator_symbols(&store),
+            Some(int_before)
+        );
+
+        for (symbol, spelling, has_argument) in [
+            (registered.unary_not, "unary_!", false),
+            (registered.and_then, "&&", true),
+            (registered.or_else, "||", true),
+            (registered.eager_and, "&", true),
+            (registered.eager_or, "|", true),
+            (registered.xor, "^", true),
+            (registered.equal, "==", true),
+            (registered.not_equal, "!=", true),
+        ] {
+            let member = store.symbols.get(symbol);
+            assert_eq!(member.kind, SymbolKind::Method);
+            assert_eq!(member.origin, SymbolOrigin::Builtin);
+            assert_eq!(member.owner, Some(boolean_class));
+            assert_eq!(store.names.resolve(member.name.text()), spelling);
+            let SymbolInfo::Complete(info) = member.info else {
+                panic!("canonical Boolean operator info should be complete");
+            };
+            if has_argument {
+                let Type::Method(method) = store.types.get(info) else {
+                    panic!("binary Boolean operators have ordinary MethodType info");
+                };
+                assert_eq!(method.kind, MethodKind::Plain);
+                assert_eq!(method.params.len(), 1);
+                assert_eq!(method.params[0].ty, definitions.boolean);
+                assert_eq!(method.result, definitions.boolean);
+            } else {
+                assert_eq!(info, definitions.boolean);
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_boolean_operator_signature_is_rejected_without_mutation() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let boolean_class = store
+            .types
+            .get(definitions.boolean)
+            .reference_symbol()
+            .unwrap();
+        let registered = definitions
+            .boolean_primitive_operator_symbols(&store)
+            .unwrap();
+        let SymbolInfo::Complete(info) = store.symbols.get(boolean_class).info else {
+            unreachable!();
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            unreachable!();
+        };
+        let scope = info.declarations;
+        let and_name = Name::new(store.names.get("&&").unwrap(), Namespace::Term);
+        store
+            .scopes
+            .get_mut(scope)
+            .enter(and_name, registered.and_then);
+
+        assert_eq!(
+            definitions.ensure_boolean_primitive_operators(&mut store),
+            Err(
+                BooleanPrimitiveOperatorRegistrationError::DuplicateOperatorSignature {
+                    operator: "&&",
+                }
+            )
+        );
+        assert_eq!(
+            store.scopes.get(scope).lookup_all(&and_name),
+            &[registered.and_then, registered.and_then]
+        );
+    }
+
+    #[test]
+    fn boolean_registration_preserves_unrelated_overloads_in_existing_class_info() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let boolean_class = store
+            .types
+            .get(definitions.boolean)
+            .reference_symbol()
+            .unwrap();
+        let SymbolInfo::Complete(info) = store.symbols.get(boolean_class).info else {
+            unreachable!();
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            unreachable!();
+        };
+        let scope = info.declarations;
+        let and_name = Name::new(store.names.get("&&").unwrap(), Namespace::Term);
+        let other_signature = store.types.alloc(Type::Method(MethodType {
+            params: vec![MethodParam {
+                name: TermName::new(store.names.intern("value")),
+                ty: definitions.int,
+                erased: false,
+                varargs: false,
+            }],
+            result: definitions.boolean,
+            kind: MethodKind::Plain,
+        }));
+        let other = store.symbols.alloc(Symbol {
+            name: and_name,
+            owner: Some(boolean_class),
+            kind: SymbolKind::Method,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(other_signature),
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        store.scopes.get_mut(scope).enter(and_name, other);
+
+        let registered = definitions
+            .ensure_boolean_primitive_operators(&mut store)
+            .unwrap();
+        assert_eq!(
+            definitions.boolean_primitive_operator_symbols(&store),
+            Some(registered)
+        );
+        let members = store.scopes.get(scope).lookup_all(&and_name);
+        assert_eq!(members.len(), 2);
+        assert!(members.contains(&other));
+        assert!(members.contains(&registered.and_then));
     }
 
     #[test]
