@@ -2,10 +2,78 @@
 
 use dotty_core::ast::TreeKind;
 use dotty_core::types::{TermRefTarget, Type};
-use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+use dotty_core::{Definitions, NoResolver, Packages, SemanticStore, SourceId, SourceText};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
 use dotty_typer::{ExpressionContext, SourceTyper};
+
+#[test]
+fn types_a_small_source_program_with_no_resolver_or_jdk_fixture() {
+    let text = "class C { def answer: Int = 42 }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "no-resolver.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (method, rhs) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "answer").then(|| {
+                (
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                )
+            })
+        })
+        .expect("source should contain method answer");
+    let context = ExpressionContext {
+        lexical: index.declaration_context_of(method).unwrap(),
+        owner: method,
+        local_scopes: None,
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(NoResolver));
+
+    let typed = typer.type_expression(rhs, context).unwrap();
+
+    assert_eq!(
+        typer
+            .widen_expression_type(typer.typed_ast().get(typed).ty)
+            .unwrap(),
+        definitions.int
+    );
+    assert!(matches!(
+        typer.typed_ast().get(typed).kind,
+        TreeKind::Literal(_)
+    ));
+}
 
 #[test]
 fn types_a_synthetic_field_selection_through_the_public_pipeline() {
