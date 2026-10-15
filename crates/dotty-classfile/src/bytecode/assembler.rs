@@ -519,6 +519,9 @@ fn write_instruction(
         Instruction::IMul => writer.write_u1(0x68),
         Instruction::IDiv => writer.write_u1(0x6c),
         Instruction::IRem => writer.write_u1(0x70),
+        Instruction::IAnd => writer.write_u1(0x7e),
+        Instruction::IOr => writer.write_u1(0x80),
+        Instruction::IXor => writer.write_u1(0x82),
         Instruction::Dup => writer.write_u1(0x59),
         Instruction::Pop => writer.write_u1(0x57),
         Instruction::GetField(reference) => {
@@ -989,6 +992,29 @@ mod tests {
             [0x03, 0x99, 0x00, 0x07, 0x64, 0x68, 0x6c, 0x70, 0xb1]
         );
         assert_eq!(assembled.layout.code_length(), 9);
+    }
+
+    #[test]
+    fn encodes_int_bitwise_opcodes_in_straight_and_labeled_code() {
+        let pool = ConstantPool::default();
+        let operations = [Instruction::IAnd, Instruction::IOr, Instruction::IXor];
+        assert_eq!(assemble(&operations, &pool).unwrap(), [0x7e, 0x80, 0x82]);
+
+        let mut sequence = super::super::CodeSequence::new();
+        let end = sequence.new_label().unwrap();
+        sequence.instruction(Instruction::IConst(SmallIntConstant::Zero));
+        sequence.branch(super::super::BranchInstruction::IfEq(end.clone()));
+        for operation in operations {
+            sequence.instruction(operation);
+        }
+        sequence.bind(end).unwrap();
+        sequence.instruction(Instruction::Return);
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        assert_eq!(
+            assembled.bytes,
+            [0x03, 0x99, 0x00, 0x06, 0x7e, 0x80, 0x82, 0xb1]
+        );
+        assert_eq!(assembled.layout.instruction_offsets(), [0, 1, 4, 5, 6, 7]);
     }
 
     #[test]

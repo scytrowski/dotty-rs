@@ -886,3 +886,141 @@ fn integer_arithmetic_instructions_execute_with_jvm_signed_semantics() {
         "integer arithmetic semantics ok"
     );
 }
+
+#[test]
+fn int_bitwise_instructions_execute_and_verify_with_jvm_semantics() {
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut class =
+        ClassFileBuilder::new("IntBitwise", version).expect("Java 21 class builder is supported");
+    class
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    for (name, operation, opcode) in [("and", 0u8, 0x7e), ("or", 1, 0x80), ("xor", 2, 0x82)] {
+        class
+            .add_static_method(name, "(II)I", move |code| {
+                code.iload(0)?;
+                code.iload(1)?;
+                match operation {
+                    0 => code.iand()?,
+                    1 => code.ior()?,
+                    2 => code.ixor()?,
+                    _ => unreachable!(),
+                };
+                code.ireturn()?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(opcode, [0x7e, 0x80, 0x82][operation as usize]);
+    }
+    class
+        .add_static_method("branched", "()I", |code| {
+            let otherwise = code.new_label()?;
+            let join = code.new_label()?;
+            code.iconst(1)?;
+            code.iconst(1)?;
+            code.ixor()?;
+            code.ifeq(otherwise.clone())?;
+            code.iconst(10)?;
+            code.goto(join.clone())?;
+            code.mark(otherwise)?;
+            code.iconst(20)?;
+            code.mark(join)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = class.encode().expect("typed bitwise bytecode encodes");
+    let decoded = decode_and_validate(&bytes);
+    assert_eq!(decoded.methods.len(), 4);
+    for (index, opcode) in [0x7e, 0x80, 0x82].into_iter().enumerate() {
+        assert_eq!(
+            code(&decoded.methods[index]).code,
+            [0x1a, 0x1b, opcode, 0xac]
+        );
+        assert_eq!(
+            (
+                code(&decoded.methods[index]).max_stack,
+                code(&decoded.methods[index]).max_locals
+            ),
+            (2, 2)
+        );
+    }
+    let branched = code(&decoded.methods[3]);
+    assert_eq!(
+        branched.code,
+        [
+            0x04, 0x04, 0x82, 0x99, 0x00, 0x08, 0x10, 10, 0xa7, 0x00, 0x05, 0x10, 20, 0xac,
+        ]
+    );
+    assert_eq!(branched.max_stack, 2);
+    assert_eq!(branched.max_locals, 0);
+    assert_eq!(
+        branched
+            .attributes
+            .iter()
+            .filter_map(|attribute| match attribute {
+                Attribute::Other(attribute)
+                    if decoded.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable") =>
+                {
+                    Some(attribute)
+                }
+                _ => None,
+            })
+            .count(),
+        1
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let class_path = directory.path().join("IntBitwise.class");
+    fs::write(&class_path, bytes)
+        .unwrap_or_else(|error| panic!("write {}: {error}", class_path.display()));
+    let harness_path = directory.path().join("IntBitwiseHarness.java");
+    fs::write(
+        &harness_path,
+        "public final class IntBitwiseHarness {\n    public static void main(String[] args) {\n        if (IntBitwise.and(1, 0) != 0 || IntBitwise.or(1, 0) != 1 || IntBitwise.xor(1, 1) != 0) throw new AssertionError(\"boolean encodings\");\n        if (IntBitwise.and(0x5a5a, 0x0ff0) != 0x0a50 || IntBitwise.or(0x5a5a, 0x0ff0) != 0x5ffa || IntBitwise.xor(0x5a5a, 0x0ff0) != 0x55aa) throw new AssertionError(\"integer masks\");\n        if (IntBitwise.branched() != 20) throw new AssertionError(\"branched StackMapTable\");\n        System.out.println(\"int bitwise semantics ok\");\n    }\n}\n",
+    )
+    .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
+    let directory_arg = directory.path().to_string_lossy().into_owned();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            &directory_arg,
+            "-d",
+            &directory_arg,
+            harness_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for bitwise harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            &directory_arg,
+            "IntBitwiseHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed to execute bitwise class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "int bitwise semantics ok"
+    );
+}

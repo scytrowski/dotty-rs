@@ -187,6 +187,78 @@ fn integer_arithmetic_underflow_is_reported_by_cfg_analysis() {
 }
 
 #[test]
+fn int_bitwise_ops_preserve_integer_branch_join_states_and_frames() {
+    let mut sequence = CodeSequence::new();
+    let otherwise = sequence.new_label().unwrap();
+    let join = sequence.new_label().unwrap();
+    sequence.instruction(Instruction::ILoad(local(0)));
+    sequence.instruction(Instruction::ILoad(local(1)));
+    sequence.instruction(Instruction::IAnd);
+    sequence.branch(BranchInstruction::IfEq(otherwise.clone()));
+    sequence.instruction(Instruction::ILoad(local(0)));
+    sequence.instruction(Instruction::ILoad(local(1)));
+    sequence.instruction(Instruction::IOr);
+    sequence.branch(BranchInstruction::Goto(join.clone()));
+    sequence.bind(otherwise.clone()).unwrap();
+    sequence.instruction(Instruction::ILoad(local(0)));
+    sequence.instruction(Instruction::ILoad(local(1)));
+    sequence.instruction(Instruction::IXor);
+    sequence.bind(join.clone()).unwrap();
+    sequence.instruction(Instruction::IReturn);
+
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "(II)I", true, &ConstantPool::default()).unwrap();
+    assert_eq!(flow.max_stack, 2);
+    assert_eq!(flow.max_locals, 2);
+    let assembled = assemble_labeled(&sequence, &ConstantPool::default()).unwrap();
+    assert_eq!(
+        assembled
+            .bytes
+            .iter()
+            .copied()
+            .filter(|byte| [0x7e, 0x80, 0x82].contains(byte))
+            .collect::<Vec<_>>(),
+        [0x7e, 0x80, 0x82]
+    );
+    let frames = generate_stack_map_frames(&flow, &graph, &assembled).unwrap();
+    assert_eq!(frames.frames.len(), 2);
+    assert_eq!(frames.frames[0].stack, []);
+    assert_eq!(frames.frames[1].stack, [VerificationTypeInfo::Integer]);
+}
+
+#[test]
+fn int_bitwise_ops_reject_category_two_values_and_underflow_in_cfg() {
+    for operation in [Instruction::IAnd, Instruction::IOr, Instruction::IXor] {
+        let mut underflow = CodeSequence::new();
+        underflow.instruction(operation);
+        underflow.instruction(Instruction::IReturn);
+        let graph = ControlFlowGraph::build(&underflow).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze(&graph, "()I", true, &ConstantPool::default()),
+            Err(AnalysisError::StackUnderflow {
+                instruction: 0,
+                needed: 1,
+                available: 0,
+            }),
+            "{operation:?}"
+        );
+    }
+    let mut sequence = CodeSequence::new();
+    sequence.instruction(Instruction::LLoad(local(0)));
+    sequence.instruction(Instruction::IConst(SmallIntConstant::One));
+    sequence.instruction(Instruction::IXor);
+    sequence.instruction(Instruction::IReturn);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    assert_eq!(
+        CfgCodeAnalyzer::analyze(&graph, "(J)I", true, &ConstantPool::default()),
+        Err(AnalysisError::UnsupportedFlowParameter {
+            parameter: 0,
+            actual: ValueKind::Long,
+        })
+    );
+}
+
+#[test]
 fn two_early_returns_and_nested_conditionals_have_stable_states() {
     let mut sequence = CodeSequence::new();
     let outer_else = sequence.new_label().unwrap();

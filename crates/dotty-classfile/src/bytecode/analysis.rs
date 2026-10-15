@@ -626,7 +626,10 @@ impl Frame {
             | Instruction::ISub
             | Instruction::IMul
             | Instruction::IDiv
-            | Instruction::IRem => {
+            | Instruction::IRem
+            | Instruction::IAnd
+            | Instruction::IOr
+            | Instruction::IXor => {
                 self.pop_expected(instruction_index, ValueKind::Int)?;
                 self.pop_expected(instruction_index, ValueKind::Int)?;
                 self.push(instruction_index, ValueKind::Int)?;
@@ -1525,6 +1528,9 @@ fn validate_flow_instruction(
             | Instruction::IMul
             | Instruction::IDiv
             | Instruction::IRem
+            | Instruction::IAnd
+            | Instruction::IOr
+            | Instruction::IXor
             | Instruction::Dup
             | Instruction::Pop
             | Instruction::Return
