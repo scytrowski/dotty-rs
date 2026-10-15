@@ -876,6 +876,14 @@ fn emit_apply(
         error,
     })?;
     if let Some(intrinsic) = intrinsic {
+        if matches!(
+            intrinsic,
+            JvmBooleanIntrinsic::ShortCircuitAnd | JvmBooleanIntrinsic::ShortCircuitOr
+        ) {
+            return emit_short_circuit_boolean_intrinsic(
+                context, tree_id, function, &arguments, intrinsic, code, depth,
+            );
+        }
         return emit_boolean_intrinsic(
             context, tree_id, function, &arguments, intrinsic, code, depth,
         );
@@ -967,6 +975,113 @@ fn emit_apply(
         JvmReturnType::Value(value) => Flow::Value(value),
         JvmReturnType::Void => Flow::Unit,
     })
+}
+
+fn emit_short_circuit_boolean_intrinsic(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    function: TreeId<Typed>,
+    arguments: &[TreeId<Typed>],
+    intrinsic: JvmBooleanIntrinsic,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let receiver = match &context.tree(function)?.kind {
+        TreeKind::Select(select) => select.qualifier,
+        _ => {
+            return Err(JvmCodegenError::BooleanIntrinsicResolution {
+                tree: tree_id,
+                error: crate::JvmBooleanIntrinsicError::UnsupportedFunctionShape { tree: function },
+            });
+        }
+    };
+    let [argument] = arguments else {
+        return Err(JvmCodegenError::BooleanIntrinsicResolution {
+            tree: tree_id,
+            error: crate::JvmBooleanIntrinsicError::WrongArity {
+                tree: tree_id,
+                expected: 1,
+                found: arguments.len(),
+            },
+        });
+    };
+    let short_circuit_and = match intrinsic {
+        JvmBooleanIntrinsic::ShortCircuitAnd => true,
+        JvmBooleanIntrinsic::ShortCircuitOr => false,
+        _ => {
+            return Err(JvmCodegenError::BooleanIntrinsicResolution {
+                tree: tree_id,
+                error: crate::JvmBooleanIntrinsicError::UnsupportedTreeShape { tree: tree_id },
+            });
+        }
+    };
+
+    let receiver_flow = emit_expression(context, receiver, code, depth + 1)?;
+    if receiver_flow != Flow::Value(JvmType::Boolean) {
+        return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
+            tree: tree_id,
+            operand: receiver,
+            index: 0,
+            found: public_flow(receiver_flow),
+        });
+    }
+
+    let short_circuit = code
+        .new_label()
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    let end = code
+        .new_label()
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    if short_circuit_and {
+        code.ifeq(short_circuit.clone())
+    } else {
+        code.ifne(short_circuit.clone())
+    }
+    .map_err(|error| JvmCodegenError::CodeBuilder {
+        tree: tree_id,
+        error,
+    })?;
+
+    let initialized_on_skip = context.initialized_locals.clone();
+    context.control_flow_depth += 1;
+    let argument_flow = emit_expression(context, *argument, code, depth + 1);
+    context.control_flow_depth -= 1;
+    let argument_flow = argument_flow?;
+    if argument_flow != Flow::Value(JvmType::Boolean) {
+        return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
+            tree: tree_id,
+            operand: *argument,
+            index: 1,
+            found: public_flow(argument_flow),
+        });
+    }
+    let initialized_after_argument = context.initialized_locals.clone();
+    if short_circuit_and {
+        code.ifeq(short_circuit.clone())
+            .and_then(|code| code.iconst(1))
+    } else {
+        code.ifne(short_circuit.clone())
+            .and_then(|code| code.iconst(0))
+    }
+    .and_then(|code| code.goto(end.clone()))
+    .and_then(|code| code.mark(short_circuit))
+    .and_then(|code| code.iconst(i32::from(!short_circuit_and)))
+    .and_then(|code| code.mark(end))
+    .map_err(|error| JvmCodegenError::CodeBuilder {
+        tree: tree_id,
+        error,
+    })?;
+    context.initialized_locals = initialized_on_skip
+        .intersection(&initialized_after_argument)
+        .copied()
+        .collect();
+    Ok(Flow::Value(JvmType::Boolean))
 }
 
 fn emit_boolean_not(
@@ -1110,9 +1225,9 @@ fn emit_boolean_intrinsic(
         }
         JvmBooleanIntrinsic::Not
         | JvmBooleanIntrinsic::ShortCircuitAnd
-        | JvmBooleanIntrinsic::ShortCircuitOr => unreachable!(
-            "unary and short-circuit Boolean operators were rejected before operand lowering"
-        ),
+        | JvmBooleanIntrinsic::ShortCircuitOr => {
+            unreachable!("unary and short-circuit Boolean operators use dedicated lowering paths")
+        }
     }
     .map_err(|error| JvmCodegenError::CodeBuilder {
         tree: tree_id,

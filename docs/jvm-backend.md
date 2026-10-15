@@ -163,10 +163,13 @@ semantic store or typed tree, or route short-circuit operators through
 eager `&`, `|`, and `^` evaluate the selected receiver and argument once in
 source order before `iand`, `ior`, or `ixor`. Canonical Boolean `==` and `!=`
 compare their int-like values and materialize a normalized 0/1 result.
-Universal `Any.==`/`Any.!=`, user-defined same-spelled methods, and
-short-circuit `&&`/`||` are not substituted. These Boolean values compose with
-the supported locals, assignments, blocks, and integer-like `If`/`While`
-flow; ordinary calls inside branched CFGs keep their existing restriction.
+Canonical `&&` and `||` branch after evaluating the receiver, evaluate the
+argument only on the required path, and join with a normalized 0/1 result.
+Locals initialized only while evaluating the argument are not considered
+initialized after the join. Short-circuit operators compose with supported
+locals, assignments, blocks, and integer-like `If`/`While` flow; ordinary calls
+inside branched CFGs keep their existing restriction. Universal
+`Any.==`/`Any.!=` and user-defined same-spelled methods are not substituted.
 
 ## Class and method metadata subset
 
