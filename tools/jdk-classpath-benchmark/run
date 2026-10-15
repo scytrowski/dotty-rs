@@ -37,10 +37,32 @@ def run_checked(command, *, env=None):
     return result
 
 
-def build_driver():
-    run_checked(["cargo", "build", "--release", "--locked", "-p", "dotty-classloader",
-                 "--example", "jdk_classpath_benchmark"])
-    return ROOT / "target/release/examples/jdk_classpath_benchmark"
+def build_driver(env=None):
+    result = run_checked([
+        "cargo",
+        "build",
+        "--release",
+        "--locked",
+        "--message-format=json-render-diagnostics",
+        "-p",
+        "dotty-classloader",
+        "--example",
+        "jdk_classpath_benchmark",
+    ], env=env)
+    for line in result.stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        target = message.get("target", {})
+        if (
+            message.get("reason") == "compiler-artifact"
+            and target.get("name") == "jdk_classpath_benchmark"
+            and "example" in target.get("kind", [])
+            and message.get("executable")
+        ):
+            return Path(message["executable"]).resolve()
+    raise RuntimeError("Cargo did not report the jdk_classpath_benchmark executable artifact")
 
 
 def smoke(binary):
@@ -61,12 +83,12 @@ def smoke(binary):
 
 def jdk_path(args):
     if args.jmods:
-        path = Path(args.jmods).expanduser()
+        path = Path(args.jmods).expanduser().resolve()
     else:
         java_home = os.environ.get("JAVA_HOME")
         if not java_home:
             raise RuntimeError("provide --jmods PATH or set JAVA_HOME to a JDK 21 installation")
-        path = Path(java_home).expanduser() / "jmods"
+        path = (Path(java_home).expanduser() / "jmods").resolve()
     if not path.is_dir():
         raise RuntimeError(
             f"JMOD directory is unavailable: {path}; install/provide a JDK 21 and pass --jmods PATH or set JAVA_HOME"
