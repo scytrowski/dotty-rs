@@ -1279,6 +1279,320 @@ fn canonical_boolean_intrinsics_compose_with_source_control_flow_and_locals() {
     }
 }
 
+#[test]
+fn logic_fixture_compiles_deterministically_and_executes_boolean_semantics() {
+    let first_output = TestOutputDirectory::new("logic-first");
+    let second_output = TestOutputDirectory::new("logic-second");
+    let first = compile_fixture("Logic.scala", first_output.path()).unwrap();
+    let second = compile_fixture("Logic.scala", second_output.path()).unwrap();
+
+    assert_eq!(first.class.internal_name(), "Logic");
+    assert_eq!(first.class.bytes(), second.class.bytes());
+    assert_eq!(first_output.class_files(), vec![first.path.clone()]);
+    assert_eq!(second_output.class_files(), vec![second.path.clone()]);
+
+    let mut reader = Reader::new(first.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("Logic class should decode completely");
+    assert!(
+        reader.is_at_end(),
+        "decoder consumes the complete class file"
+    );
+    class
+        .validate_references()
+        .expect("Logic constant-pool references should all be valid");
+    assert_eq!(class.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    assert_eq!(class.version.major, 65, "Logic targets JDK 21 class files");
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class),
+        Ok("Logic")
+    );
+    assert!(class.access_flags.is_public());
+
+    let signatures = class
+        .methods
+        .iter()
+        .map(|method| {
+            method
+                .descriptor(&class.constant_pool)
+                .expect("method descriptor should parse");
+            (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signatures,
+        [
+            ("<init>", "()V"),
+            ("both", "(ZZ)Z"),
+            ("either", "(ZZ)Z"),
+            ("negate", "(Z)Z"),
+            ("exclusive", "(ZZ)Z"),
+            ("equal", "(ZZ)Z"),
+            ("notEqual", "(ZZ)Z"),
+            ("skipRight", "()Z"),
+            ("skipOrRight", "()Z"),
+            ("runOrRight", "()Z"),
+            ("runAndRight", "()Z"),
+            ("eagerAndRight", "()Z"),
+            ("eagerOrRight", "()Z"),
+            ("eagerXorRight", "()Z"),
+            ("countRight", "(Z)I"),
+            ("countStrictAnd", "(ZZ)I"),
+            ("countStrictOr", "(ZZ)I"),
+            ("countStrictXor", "(ZZ)I"),
+        ]
+    );
+    for method in &class.methods {
+        assert!(method.access_flags.is_public());
+        assert!(!method.access_flags.is_static());
+        assert!(matches!(method.attributes.as_slice(), [Attribute::Code(_)]));
+    }
+    for (name, max_stack, max_locals) in [
+        ("both", 1, 3),
+        ("either", 1, 3),
+        ("negate", 2, 2),
+        ("exclusive", 2, 3),
+        ("countRight", 2, 4),
+    ] {
+        let method = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+            .unwrap_or_else(|| panic!("missing Logic method {name}"));
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("Logic.{name} should have one Code attribute")
+        };
+        assert_eq!(
+            (code.max_stack, code.max_locals),
+            (max_stack, max_locals),
+            "{name}"
+        );
+    }
+
+    for (name, descriptor) in [
+        ("both", "(ZZ)Z"),
+        ("either", "(ZZ)Z"),
+        ("negate", "(Z)Z"),
+        ("exclusive", "(ZZ)Z"),
+        ("skipRight", "()Z"),
+        ("countRight", "(Z)I"),
+    ] {
+        assert!(
+            signatures.contains(&(name, descriptor)),
+            "Logic is missing {name}{descriptor}"
+        );
+    }
+
+    let expected_opcode = [
+        ("both", 0x99),
+        ("either", 0x9a),
+        ("negate", 0x82),
+        ("exclusive", 0x82),
+        ("equal", 0x9f),
+        ("notEqual", 0xa0),
+        ("countStrictAnd", 0x7e),
+        ("countStrictOr", 0x80),
+        ("countStrictXor", 0x82),
+    ];
+    for (name, opcode) in expected_opcode {
+        assert!(
+            decode_subset_instructions(emitted_method_code(&class, name))
+                .iter()
+                .any(|(_, found)| *found == opcode),
+            "{name} should contain expected JVM opcode {opcode:#04x}"
+        );
+    }
+    for method in &class.methods {
+        let name = class.constant_pool.utf8(method.name_index).unwrap();
+        let code = emitted_method_code(&class, name);
+        let mut expected_frames = decode_branch_targets(code)
+            .into_iter()
+            .map(|(_, _, target)| target)
+            .collect::<Vec<_>>();
+        expected_frames.sort_unstable();
+        expected_frames.dedup();
+        if !expected_frames.is_empty() {
+            assert_eq!(
+                stack_map_frame_pcs(&class, name),
+                expected_frames,
+                "{name} StackMapTable should cover each symbolic branch target"
+            );
+        }
+    }
+
+    for index in 1..=u16::MAX {
+        let Some(ConstantPoolEntry::Methodref {
+            name_and_type_index,
+            ..
+        }) = class.constant_pool.get(ConstantPoolIndex(index))
+        else {
+            continue;
+        };
+        let (name, _) = class
+            .constant_pool
+            .name_and_type(*name_and_type_index)
+            .expect("Methodref name and descriptor");
+        assert!(
+            !["&&", "||", "!", "&", "|", "^", "==", "!="].contains(&name),
+            "canonical Boolean intrinsic {name} must not be a Methodref"
+        );
+    }
+
+    if require_jdk_or_skip() {
+        let output_path = first_output.path().to_str().expect("UTF-8 output path");
+        let javap = Command::new("javap")
+            .args(["-c", "-v", "-classpath", output_path, "Logic"])
+            .output()
+            .expect("start javap");
+        assert!(
+            javap.status.success(),
+            "javap rejected Logic\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap_output = String::from_utf8_lossy(&javap.stdout);
+        for expected in [
+            "major version: 65",
+            "descriptor: (ZZ)Z",
+            "descriptor: (Z)Z",
+            "descriptor: ()Z",
+            "descriptor: (Z)I",
+            "ifeq",
+            "ifne",
+            "goto",
+            "ixor",
+            "iand",
+            "ior",
+            "stack=1, locals=3",
+            "stack=2, locals=4",
+            "StackMapTable",
+        ] {
+            assert!(
+                javap_output.contains(expected),
+                "javap output omitted {expected:?}:\n{javap_output}"
+            );
+        }
+        let harness_path = first_output.path().join("LogicHarness.java");
+        fs::write(
+            &harness_path,
+            r#"public final class LogicHarness {
+  private static void expectArithmetic(Runnable action, String name) {
+    try {
+      action.run();
+      throw new AssertionError(name + " did not evaluate its RHS");
+    } catch (ArithmeticException expected) { }
+  }
+
+  public static void main(String[] args) {
+    Logic logic = new Logic();
+    if (logic.both(true, false) || !logic.both(true, true)) throw new AssertionError("&& truth table");
+    if (!logic.either(false, true) || logic.either(false, false)) throw new AssertionError("|| truth table");
+    if (logic.negate(true) || !logic.negate(false)) throw new AssertionError("! truth table");
+    if (logic.exclusive(true, true) || !logic.exclusive(true, false)) throw new AssertionError("^ truth table");
+    for (boolean a : new boolean[] {false, true}) {
+      for (boolean b : new boolean[] {false, true}) {
+        if (logic.equal(a, b) != (a == b)) throw new AssertionError("== truth table");
+        if (logic.notEqual(a, b) != (a != b)) throw new AssertionError("!= truth table");
+      }
+    }
+    if (logic.skipRight() || !logic.skipOrRight()) throw new AssertionError("short-circuit divide-by-zero");
+    if (logic.countRight(false) != 0 || logic.countRight(true) != 1) throw new AssertionError("RHS side effect count");
+    if (logic.countStrictAnd(false, true) != 2 || logic.countStrictOr(false, true) != 2
+        || logic.countStrictXor(false, true) != 2) throw new AssertionError("strict operand side effects");
+    expectArithmetic(() -> logic.runOrRight(), "false || rhs");
+    expectArithmetic(() -> logic.runAndRight(), "true && rhs");
+    expectArithmetic(() -> logic.eagerAndRight(), "false & rhs");
+    expectArithmetic(() -> logic.eagerOrRight(), "true | rhs");
+    expectArithmetic(() -> logic.eagerXorRight(), "true ^ rhs");
+    System.out.println("Logic Boolean operators ok");
+  }
+}
+"#,
+        )
+        .expect("write Logic Java harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected LogicHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args(["-Xverify:all", "-classpath", output_path, "LogicHarness"])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected Logic\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "Logic Boolean operators ok"
+        );
+    }
+}
+
+#[test]
+fn boolean_source_errors_and_user_defined_operators_keep_typed_failures() {
+    assert_source_failure(
+        "boolean-and-wrong-rhs",
+        "class WrongBooleanRhs { def run(flag: Boolean): Boolean = flag && 42 }\n",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::OverloadApplicationNoApplicable { .. })
+            )
+        },
+    );
+    assert_source_failure(
+        "boolean-not-on-int",
+        "class BooleanNotOnInt { def run(): Boolean = !1 }\n",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::MemberNotFound { .. })
+            )
+        },
+    );
+    assert_source_failure(
+        "short-circuit-reference-call",
+        "class ShortCircuitReferenceCall { def probe(): Boolean = false; def run(flag: Boolean): Boolean = flag && probe() }\n",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::JvmCallInUnsupportedControlFlow { .. })
+            )
+        },
+    );
+
+    let output = TestOutputDirectory::new("user-defined-boolean-and");
+    let error = compile_fixture("UserDefinedAnd.scala", output.path())
+        .expect_err("same-spelled user Boolean operator is outside the classfile subset");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::InvalidJvmName {
+                kind: JvmNameKind::Method,
+                text,
+                ..
+            }) if text == "&&"
+        ),
+        "user-defined && must remain an ordinary method: {error:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "unsupported user-defined operator must not leave a partial class"
+    );
+}
+
 fn assert_invoked_method_names(class: &ClassFile<'_>, code: &[u8], expected: &[&str]) {
     let instructions = decode_subset_instructions(code);
     let calls = instructions

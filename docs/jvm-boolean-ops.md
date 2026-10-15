@@ -1,11 +1,36 @@
-# JVM Boolean operator audit
+# JVM Boolean operator support and audit
 
-This document records the source and typed-tree contract for Boolean
-operators against Scala 3.9.0 at revision
+This document records the source and typed-tree contract and bounded JVM
+support for Boolean operators against Scala 3.9.0 at revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
-The source typer registers the canonical Boolean methods; JVM bytecode
-emission remains out of scope. Source-level observations are reproduced by
+The source typer registers canonical Boolean methods and `dotty-jvm` lowers
+those exact symbols to Boolean JVM instructions and control flow. Source-level
+observations are reproduced by
 [`boolean_operator_audit.rs`](../crates/dotty-typer/tests/boolean_operator_audit.rs).
+
+## End-to-end support
+
+`tests/fixtures/jvm/Logic.scala` is compiled through the real lexer, parser,
+namer, typer, JVM plan adapter, and classfile encoder. The source integration
+test compiles it twice using fresh stores and output directories and compares
+the complete class bytes. It decodes and validates the complete class file,
+checks the public instance method descriptors, classfile major version 65,
+branch targets, `StackMapTable` frames, and key `javap -c -v` output. The
+JDK-required Java harness runs with `java -Xverify:all`.
+
+| Behavior | Supported evidence |
+| --- | --- |
+| `!`, `&&`, `||`, `&`, `|`, `^`, Boolean `==` and `!=` | Only canonical Boolean member `SymbolId`s are intrinsic; `Any` equality remains unsupported. |
+| Short-circuit RHS | `&&` skips when false; `||` skips when true. Division-by-zero cases and a mutable hit counter check the selected and skipped paths. |
+| Strict Boolean RHS | `&`, `|`, and `^` evaluate both operands left to right. Hit counters and division-by-zero cases check eager behavior. |
+| Branching and verifier state | Symbolic branches and classfile CFG analysis produce the checked `StackMapTable` frames. The JDK gate verifies the emitted class at runtime. |
+| User-defined same-spelled operator | Remains an ordinary selected method and is not dispatched as a Boolean intrinsic. |
+| Ordinary reference-bearing call inside short-circuit CFG | Rejected with `JvmCallInUnsupportedControlFlow`; no class file is published. |
+
+The tested subset supports Boolean parameters and locals, canonical Boolean
+operator results, and composition with the currently implemented expression
+control flow. General reference-bearing CFG states, ordinary method calls
+inside short-circuit branches, and universal `Any.==`/`Any.!=` are unsupported.
 
 ## Contract matrix
 
@@ -80,11 +105,12 @@ operators through normal member lookup and overload resolution:
   user-defined method's `SymbolId`, owner, and ordinary signature. It is not a
   Boolean intrinsic.
 
-There are no parser or namer failures in these cases. This issue does not
-implement Codegen. The RHS effect examples are source-level scenarios, not
-runtime claims about dotty-rs. Under Scala 3.9 semantics, `false && (1 / 0 > 0)`
-and `true || (1 / 0 > 0)` do not evaluate the division; `false & (1 / 0 > 0)`
-and `true | (1 / 0 > 0)` evaluate it and throw `ArithmeticException`.
+There are no parser or namer failures in these cases. The `Logic.scala` JVM
+fixture verifies these semantics at runtime: `false && (1 / 0 > 0)` and
+`true || (1 / 0 > 0)` return without evaluating the division, while
+`false & (1 / 0 > 0)` and `true | (1 / 0 > 0)` throw `ArithmeticException`.
+It also checks the complementary `false ||` and `true &&` paths, eager `^`,
+and truth tables for Boolean `==` and `!=`.
 
 The expected typed shape is based on the Scala frontend's selected method
 symbols and the backend's handling of primitive `Apply` trees. `!a` has no
@@ -113,19 +139,20 @@ references do not change that operator contract.
    ordinary instance operators; metadata flags such as `ABSTRACT` are
    preserved. Registration and the read-only accessor enforce the same rule.
 4. A method named `&&` on a user class remains an ordinary call. The Typer
-   retains the selected symbol identity; future intrinsic lowering must require
-   that exact canonical identity. A spelling match, Boolean result type, or
-   Boolean operands alone do not establish intrinsic identity.
-5. Preserve the distinction in later lowering: `&&`/`||` need conditional
-   RHS control flow; `&`/`|`/`^` need left-to-right evaluation of both sides;
-   `Any` equality needs universal equality handling.
+   retains the selected symbol identity and the JVM resolver requires that
+   exact canonical identity. A spelling match, Boolean result type, or Boolean
+   operands alone do not establish intrinsic identity.
+5. Preserve the lowering distinction: `&&`/`||` use conditional RHS control
+   flow; `&`/`|`/`^` evaluate both sides left to right; `Any` equality needs
+   universal equality handling and is outside this supported subset.
 
 `Definitions::bootstrap` installs canonical Boolean member signatures alongside
-the existing bounded `Int` operator registry. This enables source typing only;
-`dotty-jvm` can now resolve the eight canonical typed operations into
-`JvmBooleanIntrinsic` values with explicit RHS evaluation behavior. This
-read-only resolver does not emit bytecode; Boolean JVM intrinsic lowering
-remains a follow-up increment.
+the existing bounded `Int` operator registry. `dotty-jvm` resolves the eight
+canonical typed operations into `JvmBooleanIntrinsic` values and lowers them
+without a method-name fallback. Short-circuit and eager paths preserve their
+distinct evaluation behavior. `Logic.scala` provides source-to-runtime evidence
+for this contract, with the JDK 21+ CI gate running `javap`, `javac`, and
+`java -Xverify:all`.
 
 ## Scala 3.9.0 source references
 
@@ -141,5 +168,7 @@ remains a follow-up increment.
 cargo test -p dotty-typer --test boolean_operator_audit --locked
 ```
 
-This audit adds no Boolean intrinsic implementation, no skipped/failing CI
-case, and no runtime expectation for code that dotty-rs does not yet emit.
+This audit and the JVM fixture cover distinct stages: the Typer audit checks
+canonical source selection, while the root integration test verifies emitted
+class files and runtime behavior for the documented subset. CI sets
+`DOTTY_CLASSFILE_REQUIRE_JDK=1`, so unavailable JDK tools fail the JVM gate.
