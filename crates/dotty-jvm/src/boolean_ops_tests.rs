@@ -456,6 +456,63 @@ fn reports_a_missing_live_registry_entry_for_a_cached_canonical_identity() {
 }
 
 #[test]
+fn rejects_a_replacement_live_registry_entry_for_a_cached_canonical_identity() {
+    let mut fixture = BooleanIntrinsicFixture::new();
+    let method = fixture.symbols().and_then;
+    let expression = fixture.expression(method, fixture.definitions.boolean);
+    let boolean_class = fixture
+        .store
+        .types
+        .get(fixture.definitions.boolean)
+        .reference_symbol()
+        .unwrap();
+    let SymbolInfo::Complete(class_info) = fixture.store.symbols.get(boolean_class).info else {
+        unreachable!();
+    };
+    let Type::ClassInfo(class_info) = fixture.store.types.get(class_info) else {
+        unreachable!();
+    };
+    let declarations = class_info.declarations;
+    let replacement_name = fixture.store.symbols.get(method).name;
+    let replacement_symbol = fixture.store.symbols.get(method).clone();
+    fixture.store.scopes.get_mut(declarations).remove(method);
+    let replacement = fixture.store.symbols.alloc(replacement_symbol);
+    fixture
+        .store
+        .scopes
+        .get_mut(declarations)
+        .enter(replacement_name, replacement);
+
+    let live_registry = fixture
+        .definitions
+        .boolean_primitive_operator_symbols(&fixture.store)
+        .unwrap();
+    assert_eq!(live_registry.and_then, replacement);
+    assert_ne!(replacement, method);
+    assert_eq!(
+        fixture
+            .definitions
+            .boolean_primitive_operator_ids()
+            .unwrap()
+            .and_then,
+        method
+    );
+
+    assert_eq!(
+        resolve_boolean_intrinsic(
+            &fixture.store,
+            &fixture.ast,
+            expression,
+            &fixture.definitions,
+        ),
+        Err(JvmBooleanIntrinsicError::MissingBuiltinRegistry {
+            tree: expression,
+            method,
+        })
+    );
+}
+
+#[test]
 fn accepts_boolean_singleton_receiver_and_argument_types() {
     let mut fixture = BooleanIntrinsicFixture::new();
     let method = fixture.symbols().xor;

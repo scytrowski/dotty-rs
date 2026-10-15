@@ -366,9 +366,8 @@ fn resolve_registered_method(
         return Ok(None);
     };
     validate_method_signature(store, definitions, boolean_class, tree, method, intrinsic)?;
-    if definitions
-        .boolean_primitive_operator_symbols(store)
-        .is_none()
+    if definitions.boolean_primitive_operator_symbols(store)
+        != definitions.boolean_primitive_operator_ids()
     {
         return Err(JvmBooleanIntrinsicError::MissingBuiltinRegistry { tree, method });
     }
