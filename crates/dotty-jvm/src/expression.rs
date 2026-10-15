@@ -770,24 +770,23 @@ fn block_value_type(
     if let Some(local) = local_reference_slot(context, tree, *symbol)? {
         return Ok(Some(local.ty()));
     }
-    if let Some(expression) = intrinsic_expression {
-        if context
+    if let Some(expression) = intrinsic_expression
+        && context
             .tree(expression)
             .is_ok_and(|expression_tree| expression_tree.ty == ty)
-        {
-            let intrinsic = crate::resolve_boolean_intrinsic(
-                context.store,
-                context.typed_ast,
-                expression,
-                context.definitions,
-            )
-            .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
-                tree: expression,
-                error,
-            })?;
-            if intrinsic == Some(JvmBooleanIntrinsic::Not) {
-                return Ok(Some(JvmType::Boolean));
-            }
+    {
+        let intrinsic = crate::resolve_boolean_intrinsic(
+            context.store,
+            context.typed_ast,
+            expression,
+            context.definitions,
+        )
+        .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
+            tree: expression,
+            error,
+        })?;
+        if intrinsic == Some(JvmBooleanIntrinsic::Not) {
+            return Ok(Some(JvmType::Boolean));
         }
     }
     let Some(parameter) = context
