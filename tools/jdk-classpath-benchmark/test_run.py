@@ -28,6 +28,8 @@ class SummaryTests(unittest.TestCase):
                 "rss_kib": 100 + sample,
                 "measurements": {
                     "init_ns": sample * 1_000_000,
+                    "fd_count_after_init": 3 + sample,
+                    "fd_count_after_workload": 4 + sample,
                     "class_lookups": [{
                         "class": "java/lang/Object",
                         "first_lookup_ns": sample * 1_000_000,
@@ -45,6 +47,13 @@ class SummaryTests(unittest.TestCase):
                         "iterations": 2,
                         "total_ns": sample * 5_000_000,
                     }],
+                    "concurrent_lookups": [{
+                        "module": "java.net.http",
+                        "class": "java/net/http/HttpClient",
+                        "threads": 4,
+                        "iterations_per_thread": 10,
+                        "total_ns": sample * 40_000_000,
+                    }],
                 },
             })
 
@@ -55,6 +64,14 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(
             result["package_lookup_ms_per_op"]["contains_package:java/lang"],
             {"median": 13.75, "p95": 25.0},
+        )
+        self.assertEqual(
+            result["concurrent_lookup_ms_per_op"]["java.net.http:java/net/http/HttpClient"],
+            {"median": 5.5, "p95": 10.0},
+        )
+        self.assertEqual(
+            result["open_file_descriptors"]["fd_count_after_init"],
+            {"median": 8.5, "p95": 13},
         )
 
     def test_missing_jmods_path_is_actionable(self):

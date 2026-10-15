@@ -78,6 +78,8 @@ def smoke(binary):
         raise RuntimeError(f"unexpected smoke output: {result.stdout.strip()}")
     if not isinstance(report["peak_rss_kib"], int) or report["peak_rss_kib"] <= 0:
         raise RuntimeError(f"smoke output has no positive VmHWM RSS: {result.stdout.strip()}")
+    if not isinstance(report["fd_count_after_init"], int) or report["fd_count_after_init"] <= 0:
+        raise RuntimeError(f"smoke output has no positive open file descriptor count: {result.stdout.strip()}")
     print(json.dumps(report, sort_keys=True))
 
 
@@ -234,12 +236,29 @@ def summarize(samples):
             sample["measurements"]["package_lookups"][index]["iterations"] / 1_000_000
             for sample in samples
         ])
+    concurrent_lookups = {}
+    for index, first_row in enumerate(samples[0]["measurements"].get("concurrent_lookups", [])):
+        operation_count = (
+            first_row["threads"] * first_row["iterations_per_thread"]
+        )
+        concurrent_lookups[f"{first_row['module']}:{first_row['class']}"] = quantiles([
+            sample["measurements"]["concurrent_lookups"][index]["total_ns"] /
+            operation_count / 1_000_000
+            for sample in samples
+        ])
+    fd_counts = {
+        key: quantiles([sample["measurements"][key] for sample in samples])
+        for key in ("fd_count_after_init", "fd_count_after_workload")
+        if key in samples[0]["measurements"]
+    }
     return {
         "init_ms": quantiles(init_ms),
         "peak_rss_kib": quantiles(rss),
         "class_lookups": classes,
         "negative_lookup": negative,
         "package_lookup_ms_per_op": package_queries,
+        "concurrent_lookup_ms_per_op": concurrent_lookups,
+        "open_file_descriptors": fd_counts,
     }
 
 
@@ -249,6 +268,9 @@ def main():
     parser.add_argument("--samples", type=int, default=10, help="independent fresh-process runs (minimum 10)")
     parser.add_argument("--output", default="docs/jdk-classpath-performance-raw.json")
     parser.add_argument("--smoke", action="store_true", help="run the tiny checked-in JMOD fixture without a JDK")
+    parser.add_argument("--binary", help="use an already built release benchmark executable")
+    parser.add_argument("--source-revision", default="unspecified", help="classloader source revision represented by the run")
+    parser.add_argument("--purpose", default="after-1160", help="short label describing the measurement cohort")
     args = parser.parse_args()
 
     try:
@@ -261,11 +283,14 @@ def main():
         environment_info = environment(path, modules, bool(args.jmods))
         if not PROC_STATUS.is_file():
             raise RuntimeError("Linux /proc/self/status with VmHWM is required to measure peak RSS")
-        binary = build_driver()
+        binary = Path(args.binary).expanduser().resolve() if args.binary else build_driver()
+        if not binary.is_file() or not os.access(binary, os.X_OK):
+            raise RuntimeError(f"benchmark executable is unavailable or not executable: {binary}")
         results = run_samples(binary, path, args.samples)
         report = {
             "schema_version": 1,
-            "purpose": "unmodified pre-optimization JdkClassPath baseline",
+            "purpose": args.purpose,
+            "source_revision": args.source_revision,
             "sample_count": args.samples,
             "process_model": "each raw row is one independently launched release binary process; OS page cache is not flushed",
             "environment": environment_info,
