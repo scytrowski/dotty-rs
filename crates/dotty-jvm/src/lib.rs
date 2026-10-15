@@ -19,6 +19,7 @@ use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
 
+mod boolean_ops;
 mod call_target;
 mod descriptor;
 mod emission;
@@ -27,6 +28,10 @@ mod identity;
 mod locals;
 mod primitive_ops;
 
+pub use boolean_ops::{
+    JvmBooleanIntrinsic, JvmBooleanIntrinsicError, JvmBooleanRhsEvaluation,
+    resolve_boolean_intrinsic,
+};
 pub use primitive_ops::{JvmIntIntrinsic, JvmIntIntrinsicError, resolve_int_intrinsic};
 
 /// Maximum number of nested typed expression nodes visited by JVM lowering.
