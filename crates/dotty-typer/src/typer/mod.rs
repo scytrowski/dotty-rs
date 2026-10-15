@@ -7966,7 +7966,13 @@ mod tests {
                 &packages,
             );
 
-            let candidates = typer.lexical_package_candidates(context, false, 1).unwrap();
+            let candidates = typer
+                .lexical_package_candidates(
+                    context,
+                    resolution::imports::LexicalPackageSearch::Relative,
+                    1,
+                )
+                .unwrap();
 
             assert_eq!(
                 candidates
@@ -8020,7 +8026,13 @@ mod tests {
             &packages,
         );
 
-        let candidates = typer.lexical_package_candidates(context, false, 2).unwrap();
+        let candidates = typer
+            .lexical_package_candidates(
+                context,
+                resolution::imports::LexicalPackageSearch::Relative,
+                2,
+            )
+            .unwrap();
 
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].package_path, ["a", "b"]);
@@ -8061,7 +8073,13 @@ mod tests {
             &packages,
         );
 
-        let candidates = typer.lexical_package_candidates(context, true, 3).unwrap();
+        let candidates = typer
+            .lexical_package_candidates(
+                context,
+                resolution::imports::LexicalPackageSearch::RootQualified,
+                3,
+            )
+            .unwrap();
 
         assert_eq!(candidates.len(), 1);
         assert!(candidates[0].package_path.is_empty());
@@ -8098,7 +8116,13 @@ mod tests {
             &packages,
         );
 
-        let candidates = typer.lexical_package_candidates(context, false, 5).unwrap();
+        let candidates = typer
+            .lexical_package_candidates(
+                context,
+                resolution::imports::LexicalPackageSearch::Relative,
+                5,
+            )
+            .unwrap();
 
         assert_eq!(
             candidates
@@ -8145,7 +8169,11 @@ mod tests {
         );
 
         assert!(matches!(
-            typer.lexical_package_candidates(context, false, 4),
+            typer.lexical_package_candidates(
+                context,
+                resolution::imports::LexicalPackageSearch::Relative,
+                4
+            ),
             Err(TyperError::LexicalPackageCandidateInvalid {
                 package: Some(found),
                 reason: "package owner chain contains a cycle",
@@ -8182,7 +8210,11 @@ mod tests {
         );
 
         assert!(matches!(
-            typer.lexical_package_candidates(foreign_context, false, 6),
+            typer.lexical_package_candidates(
+                foreign_context,
+                resolution::imports::LexicalPackageSearch::Relative,
+                6
+            ),
             Err(TyperError::SourceContextMissing {
                 source: found_source,
                 tree_index: 6,

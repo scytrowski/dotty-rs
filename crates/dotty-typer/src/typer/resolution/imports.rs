@@ -16,6 +16,17 @@ pub(in crate::typer) enum LexicalPackageCandidateOrigin {
     Root,
 }
 
+/// Whether candidate enumeration starts from the lexical chain or explicit
+/// `_root_` qualification.
+// Root-qualified enumeration remains unused until import resolution consumes
+// this contract in the following increment.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::typer) enum LexicalPackageSearch {
+    Relative,
+    RootQualified,
+}
+
 /// A validated package identity available from the source lexical context.
 ///
 /// A candidate describes where qualified lookup may search. It does not mean
@@ -51,7 +62,7 @@ impl SourceTyper<'_> {
     pub(in crate::typer) fn lexical_package_candidates(
         &self,
         context: SourceContextId,
-        root_qualified: bool,
+        search: LexicalPackageSearch,
         tree_index: u32,
     ) -> Result<Vec<LexicalPackageCandidate>, TyperError> {
         if self.index.try_source_context(context).is_none() {
@@ -64,7 +75,7 @@ impl SourceTyper<'_> {
         let mut candidates = Vec::new();
         let mut seen_packages = HashSet::new();
 
-        if !root_qualified {
+        if search == LexicalPackageSearch::Relative {
             let context_limit = self.index.source_context_count();
             let mut seen_contexts = HashSet::new();
             let mut current = Some(context);
@@ -250,7 +261,6 @@ impl SourceTyper<'_> {
         };
         if registered.symbol != package
             || registered.scope != registered_scope
-            || self.packages.scope_of(package) != Some(registered.scope)
             || !self.store.scopes.contains(registered_scope)
             || self.store.scopes.get(registered_scope).owner != Some(package)
             || registered_scope != context_scope
