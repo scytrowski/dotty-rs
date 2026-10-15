@@ -256,6 +256,10 @@ pub struct Definitions {
     pub and_type: SymbolId,
     /// The identity of `scala.|`, `defn.orType`; see [`and_type`](Self::and_type).
     pub or_type: SymbolId,
+    /// The canonical Boolean operator IDs installed during bootstrap. These
+    /// identities remain available to validate a selected member even if its
+    /// mutable semantic metadata later becomes malformed.
+    boolean_primitive_operators: Option<BooleanPrimitiveOperatorSymbols>,
 }
 
 impl Definitions {
@@ -287,7 +291,7 @@ impl Definitions {
         let any_type = store.types.alloc(Type::type_ref(no_prefix, any_class));
         let nothing_type = store.types.alloc(Type::type_ref(no_prefix, nothing_class));
 
-        let definitions = Self {
+        let mut definitions = Self {
             no_prefix,
             byte,
             char,
@@ -306,6 +310,7 @@ impl Definitions {
             nothing_class,
             and_type,
             or_type,
+            boolean_primitive_operators: None,
         };
 
         // `Int` is a compiler-owned class shell rather than a classfile
@@ -314,10 +319,21 @@ impl Definitions {
         definitions
             .ensure_int_primitive_operators(store)
             .expect("fresh canonical Int class should accept builtin operators");
+        definitions.boolean_primitive_operators = Some(
+            definitions
+                .ensure_boolean_primitive_operators(store)
+                .expect("fresh canonical Boolean class should accept builtin operators"),
+        );
         definitions
-            .ensure_boolean_primitive_operators(store)
-            .expect("fresh canonical Boolean class should accept builtin operators");
-        definitions
+    }
+
+    /// Returns the Boolean member identities captured at bootstrap.
+    ///
+    /// Unlike [`boolean_primitive_operator_symbols`](Self::boolean_primitive_operator_symbols),
+    /// this identity snapshot does not revalidate mutable store metadata.
+    /// Consumers must still validate a selected symbol before using it.
+    pub const fn boolean_primitive_operator_ids(&self) -> Option<BooleanPrimitiveOperatorSymbols> {
+        self.boolean_primitive_operators
     }
 
     /// Ensures the supported primitive operators live in the existing
@@ -1309,6 +1325,10 @@ mod tests {
             .boolean_primitive_operator_symbols(&store)
             .unwrap();
         assert_eq!(registered.all().len(), 8);
+        assert_eq!(
+            definitions.boolean_primitive_operator_ids(),
+            Some(registered)
+        );
         assert_eq!(
             definitions
                 .ensure_boolean_primitive_operators(&mut store)
