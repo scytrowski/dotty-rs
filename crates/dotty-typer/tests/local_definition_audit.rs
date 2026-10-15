@@ -4094,7 +4094,13 @@ struct BaselineImportAttempt {
     method_tree: u32,
     blocker_origin_tree: u32,
     import_tree: u32,
+    baseline_method: String,
+    baseline_attempted_method: String,
+    baseline_attribution: String,
+    baseline_import_tree: String,
     qualifier_segments: String,
+    first_failing_segment: String,
+    evidence_category: String,
     target_key: String,
 }
 
@@ -4104,8 +4110,14 @@ struct ImportPrefixReconciliation {
     method_tree: u32,
     blocker_origin_tree: u32,
     import_tree: u32,
+    baseline_method: String,
+    baseline_attempted_method: String,
+    baseline_attribution: String,
+    baseline_import_tree: String,
     baseline_target_key: String,
     qualifier_segments: String,
+    baseline_first_failing_segment: String,
+    baseline_evidence_category: String,
     current_import_selectors: String,
     current_outcome: String,
     current_method_blocker: String,
@@ -6405,8 +6417,18 @@ fn pinned_scala39_import_prefix_typing_probe() {
             .expect("SCALA39_IMPORT_PREFIX_BASELINE_PROFILE is required"),
     );
     let profile = fs::read_to_string(profile).expect("frozen #1128 profile should be readable");
-    let baseline_rows = baseline_import_blocker_attempts(&profile);
+    let baseline_target_categories = frozen_import_target_categories();
+    let baseline_rows = baseline_import_blocker_attempts(&profile, &baseline_target_categories);
     assert_eq!(baseline_rows.len(), 2_394);
+    assert!(baseline_rows.iter().all(|row| {
+        !row.baseline_method.is_empty()
+            && !row.baseline_attempted_method.is_empty()
+            && matches!(row.baseline_attribution.as_str(), "direct" | "inherited")
+            && !row.baseline_import_tree.is_empty()
+            && !row.qualifier_segments.is_empty()
+            && !row.first_failing_segment.is_empty()
+            && !row.evidence_category.is_empty()
+    }));
     assert_eq!(
         baseline_rows
             .iter()
@@ -11583,7 +11605,38 @@ fn print_import_prefix_profile(profile: &ImportPrefixProfile) {
     }
 }
 
-fn baseline_import_blocker_attempts(report: &str) -> Vec<BaselineImportAttempt> {
+fn frozen_import_target_categories() -> BTreeMap<String, String> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = repo_root
+        .join("docs/typer-classpath-import-prefix-profile-3.9.0-import-prefix-targets.tsv");
+    let report = fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "cannot read frozen #1128 target evidence {}: {error}",
+            path.display()
+        )
+    });
+    let mut categories = BTreeMap::new();
+    for line in report.lines().skip(1) {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(
+            fields.len(),
+            10,
+            "frozen target evidence row has ten columns"
+        );
+        assert!(
+            categories
+                .insert(fields[0].to_owned(), fields[9].to_owned())
+                .is_none(),
+            "frozen target evidence keys are unique"
+        );
+    }
+    categories
+}
+
+fn baseline_import_blocker_attempts(
+    report: &str,
+    target_categories: &BTreeMap<String, String>,
+) -> Vec<BaselineImportAttempt> {
     let start = report
         .find("import_prefix_observations:\n")
         .expect("frozen #1128 profile contains import-prefix observations");
@@ -11610,12 +11663,15 @@ fn baseline_import_blocker_attempts(report: &str) -> Vec<BaselineImportAttempt> 
         let (file, tree) = fields[1]
             .rsplit_once("#tree=")
             .expect("baseline method has a stable source tree key");
+        assert_eq!(
+            file, fields[0],
+            "baseline source path matches its method key"
+        );
         let method_tree = tree
             .parse::<u32>()
             .expect("baseline method tree key contains a numeric source tree index");
-        let origin = fields[2]
+        let (attribution, origin) = fields[2]
             .split_once(':')
-            .map(|(_, origin)| origin)
             .expect("baseline blocker origin has an attribution prefix");
         let (_, origin_tree) = origin
             .rsplit_once("#tree=")
@@ -11629,12 +11685,22 @@ fn baseline_import_blocker_attempts(report: &str) -> Vec<BaselineImportAttempt> 
         let import_tree = import_tree
             .parse::<u32>()
             .expect("baseline import tree key contains a numeric source tree index");
+        let evidence_category = target_categories
+            .get(fields[16])
+            .unwrap_or_else(|| panic!("missing frozen evidence category for {}", fields[16]))
+            .clone();
         rows.push(BaselineImportAttempt {
-            file: file.to_owned(),
+            file: fields[0].to_owned(),
             method_tree,
             blocker_origin_tree,
             import_tree,
+            baseline_method: fields[1].to_owned(),
+            baseline_attempted_method: origin.to_owned(),
+            baseline_attribution: attribution.to_owned(),
+            baseline_import_tree: fields[3].to_owned(),
             qualifier_segments: fields[6].to_owned(),
+            first_failing_segment: fields[13].to_owned(),
+            evidence_category,
             target_key: fields[16].to_owned(),
         });
     }
@@ -11836,8 +11902,14 @@ fn reconcile_import_prefix_observations(
             method_tree: baseline.method_tree,
             blocker_origin_tree: baseline.blocker_origin_tree,
             import_tree: baseline.import_tree,
+            baseline_method: baseline.baseline_method.clone(),
+            baseline_attempted_method: baseline.baseline_attempted_method.clone(),
+            baseline_attribution: baseline.baseline_attribution.clone(),
+            baseline_import_tree: baseline.baseline_import_tree.clone(),
             baseline_target_key: baseline.target_key.clone(),
             qualifier_segments: baseline.qualifier_segments.clone(),
+            baseline_first_failing_segment: baseline.first_failing_segment.clone(),
+            baseline_evidence_category: baseline.evidence_category.clone(),
             current_import_selectors: if current_import_selectors.is_empty() {
                 "<self>".to_owned()
             } else {
@@ -11916,6 +11988,57 @@ fn resolver_request_targets_exact_qualifier(
 }
 
 #[test]
+fn frozen_import_reconciliation_preserves_original_provenance() {
+    let row = [
+        "compiler/Foo.scala",
+        "compiler/Foo.scala#tree=10",
+        "inherited:compiler/Foo.scala#tree=20",
+        "compiler/Foo.scala#tree=30",
+        "5",
+        "old.pkg",
+        "old.pkg",
+        "owner",
+        "pkg",
+        "Term",
+        "missing",
+        "relative=found:Package@pkg.old;enclosing=none;root=missing",
+        "-",
+        "old",
+        "resolve_package",
+        "Ok(None)::package unresolved::first segment/package unresolved",
+        "old::<first-segment-unresolved>",
+    ]
+    .join("\t");
+    let report = format!(
+        "import_prefix_observations:\n  observations=1\n  source_file\tmethod\tblocker_origin\timport_tree\tline\tqualifier_source\tqualifier_segments\tcontext_owner\tcontext_package\tnamespace\tsource_lookup\tsource_package_registry_lookup\tresolved_prefix\tfirst_failing_segment\trequest_kind\tresolver_outcome\ttarget_key\n  {row}\n"
+    );
+    let categories = BTreeMap::from([(
+        "old::<first-segment-unresolved>".to_owned(),
+        "descendant_only_intermediate,source_relative_candidate".to_owned(),
+    )]);
+
+    let baseline = baseline_import_blocker_attempts(&report, &categories);
+    assert_eq!(baseline.len(), 1);
+    assert_eq!(baseline[0].file, "compiler/Foo.scala");
+    assert_eq!(baseline[0].baseline_method, "compiler/Foo.scala#tree=10");
+    assert_eq!(
+        baseline[0].baseline_attempted_method,
+        "compiler/Foo.scala#tree=20"
+    );
+    assert_eq!(baseline[0].baseline_attribution, "inherited");
+    assert_eq!(
+        baseline[0].baseline_import_tree,
+        "compiler/Foo.scala#tree=30"
+    );
+    assert_eq!(baseline[0].qualifier_segments, "old.pkg");
+    assert_eq!(baseline[0].first_failing_segment, "old");
+    assert_eq!(
+        baseline[0].evidence_category,
+        "descendant_only_intermediate,source_relative_candidate"
+    );
+}
+
+#[test]
 fn final_import_identity_requires_an_exact_resolver_target() {
     let package = ResolverRequestObservation {
         target: "scala.collection".to_owned(),
@@ -11952,17 +12075,23 @@ fn final_import_identity_requires_an_exact_resolver_target() {
 
 fn print_import_prefix_reconciliation(rows: &[ImportPrefixReconciliation]) {
     println!(
-        "source_file\tmethod_tree\tblocker_origin_tree\timport_tree\tbaseline_target_key\tqualifier_segments\tcurrent_import_selectors\tcurrent_outcome\tcurrent_method_blocker\tcurrent_method_typed\tcurrent_blocker_origin\tcurrent_selected_identity\tfinal_import_identity\tcurrent_resolver_requests"
+        "source_file\tmethod_tree\tblocker_origin_tree\timport_tree\tbaseline_method\tbaseline_attempted_method\tbaseline_attribution\tbaseline_import_tree\tbaseline_target_key\tbaseline_failed_qualifier\tbaseline_first_failing_segment\tbaseline_evidence_category\tcurrent_import_selectors\tcurrent_outcome\tcurrent_method_blocker\tcurrent_method_typed\tcurrent_blocker_origin\tcurrent_selected_identity\tfinal_import_identity\tcurrent_resolver_requests"
     );
     for row in rows {
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             row.source_file,
             row.method_tree,
             row.blocker_origin_tree,
             row.import_tree,
+            row.baseline_method,
+            row.baseline_attempted_method,
+            row.baseline_attribution,
+            row.baseline_import_tree,
             row.baseline_target_key,
             tsv_or_dash(&row.qualifier_segments),
+            tsv_or_dash(&row.baseline_first_failing_segment),
+            tsv_or_dash(&row.baseline_evidence_category),
             tsv_or_dash(&row.current_import_selectors),
             row.current_outcome,
             row.current_method_blocker,
