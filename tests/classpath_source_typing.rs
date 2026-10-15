@@ -1060,6 +1060,86 @@ fn source_import_resolves_a_class_through_descendant_only_packages() {
 }
 
 #[test]
+fn source_import_selects_members_from_the_chosen_class_scope() {
+    let source = SourceId::from_index(58);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "package owner { class C { def selected: Int = 1 }; def selected: Int = 2 }\npackage client { import owner.C.selected\ndef use: Int = selected }",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let owner_package = packages.symbol(&["owner"]).unwrap();
+    let class_name = Name::new(store.names.intern("C"), Namespace::Type);
+    let class = store
+        .scopes
+        .get(packages.scope_of(owner_package).unwrap())
+        .lookup(&class_name)
+        .expect("source class C should be entered");
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    );
+    let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer
+        .type_expression(rhs, context)
+        .expect("the selected class member should resolve");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(selected),
+        ..
+    } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+    else {
+        panic!("the import should retain a reference to its selected method")
+    };
+    let selected = *selected;
+    assert_eq!(
+        typer.store().symbols.get(selected).kind,
+        dotty_core::SymbolKind::Method
+    );
+    assert_eq!(typer.store().symbols.get(selected).owner, Some(class));
+}
+
+#[test]
+fn source_class_import_does_not_leak_into_the_term_namespace() {
+    let source = SourceId::from_index(59);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "package owner { class C }\npackage client { import owner.C\ndef use = C }",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    );
+    let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+    let context = typer.expression_context_for(method).unwrap();
+    let error = typer
+        .type_expression(rhs, context)
+        .expect_err("a class-only import must not resolve as a term reference");
+    assert!(
+        matches!(error, TyperError::TermNameNotFound { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn source_import_resolves_a_real_tasty_object_member_through_deep_packages() {
     let cases = [
         "import me.cytrowski.tastyfixtures.semantic.Both.make\ndef use = make",
