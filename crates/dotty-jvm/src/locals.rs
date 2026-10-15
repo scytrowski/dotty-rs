@@ -107,7 +107,7 @@ pub(super) fn method_local_layout(
         .find(|plan| plan.method == method)
         .ok_or(JvmCodegenError::CallerMethodNotInJvmPlan { class, method })?;
     let metadata = class_plan
-        .metadata(unit.store, definitions)?
+        .metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?
         .methods()
         .iter()
         .find(|metadata| metadata.symbol() == method)
@@ -141,7 +141,8 @@ pub(super) fn method_local_layout_for(
             method: method_symbol,
         });
     }
-    let class_metadata = class_plan.metadata(unit.store, definitions)?;
+    let class_metadata =
+        class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
     let fresh_metadata = class_metadata
         .methods()
         .iter()
@@ -173,7 +174,7 @@ pub(super) fn method_local_layout_for(
             }
         };
         let primitive =
-            descriptor::primitive_local_type(unit.store, definitions, binding.symbol, ty)?;
+            descriptor::primitive_semantic_value_type(unit.store, definitions, binding.symbol, ty)?;
         allocator.reserve(*binding, primitive)?;
     }
     allocator.finish()

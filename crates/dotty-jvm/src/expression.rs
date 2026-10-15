@@ -461,7 +461,7 @@ fn local_reference_slot(
         }
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol }),
     };
-    let found = crate::descriptor::primitive_local_type(
+    let found = crate::descriptor::primitive_semantic_value_type(
         context.store,
         context.definitions,
         symbol,

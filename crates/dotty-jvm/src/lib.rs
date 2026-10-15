@@ -198,7 +198,41 @@ pub struct JvmMethodMetadata {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmClassMetadata {
     identity: JvmClassIdentity,
+    fields: Vec<JvmFieldMetadata>,
     methods: Vec<JvmMethodMetadata>,
+}
+
+/// A frontend-issued binding from one canonical field to its exact typed
+/// initializer root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmFieldPlan {
+    /// Canonical class-owned field symbol in the compilation unit store.
+    pub field: SymbolId,
+    /// Source access form retained by the frontend when it builds this plan.
+    pub source_visibility: JvmFieldSourceVisibility,
+    /// Exact typed RHS that the frontend associated with `field`.
+    pub initializer: Option<TreeId<Typed>>,
+}
+
+/// Private source visibility distinctions needed by the JVM field subset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmFieldSourceVisibility {
+    /// Unqualified `private`, the only currently supported field form.
+    PlainPrivate,
+    /// Object-private `private[this]`, which shares `Visibility::Private` in
+    /// the semantic store but has a distinct Scala accessor/storage contract.
+    PrivateThis,
+}
+
+/// Validated JVM metadata for one private primitive instance field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmFieldMetadata {
+    symbol: SymbolId,
+    name: String,
+    descriptor: String,
+    access_flags: dotty_classfile::access_flags::FieldAccessFlags,
+    owner: SymbolId,
+    initializer: TreeId<Typed>,
 }
 
 /// Frontend evidence about class initialization for whole-class emission.
@@ -276,6 +310,7 @@ pub enum UnsupportedJvmSymbolFlag {
 pub enum JvmNameKind {
     PackageSegment,
     Class,
+    Field,
     Method,
 }
 
@@ -311,6 +346,8 @@ pub struct JvmClassPlan {
     pub class: SymbolId,
     /// Methods in deterministic frontend order.
     pub methods: Vec<JvmMethodPlan>,
+    /// Fields in deterministic frontend source declaration order.
+    pub fields: Vec<JvmFieldPlan>,
     /// Evidence that the synthesized minimal constructor preserves source
     /// initialization behavior.
     pub initialization: JvmClassInitializationPlan,
@@ -360,6 +397,8 @@ pub enum JvmCodegenError {
     UnknownClass { class: SymbolId },
     /// The method ID is outside the supplied symbol table.
     UnknownMethod { method: SymbolId },
+    /// The field ID is outside the supplied symbol table.
+    UnknownField { field: SymbolId },
     /// The parameter ID is outside the supplied symbol table.
     UnknownParameter { parameter: SymbolId },
     /// A local symbol ID is outside the supplied symbol table.
@@ -378,6 +417,8 @@ pub enum JvmCodegenError {
     },
     /// The same canonical method appears more than once in the unit.
     DuplicateMethodPlan { method: SymbolId },
+    /// The same canonical field appears more than once in a class plan.
+    DuplicateFieldPlan { field: SymbolId },
     /// The same canonical class appears more than once in the unit.
     DuplicateClassPlan { class: SymbolId },
     /// The same parameter identity appears more than once in a method plan.
@@ -496,6 +537,49 @@ pub enum JvmCodegenError {
     },
     /// A method plan does not name a typed body root.
     MissingTypedBody { method: SymbolId },
+    /// A planned typed initializer is outside the supplied arena.
+    UnknownFieldInitializer {
+        field: SymbolId,
+        initializer: TreeId<Typed>,
+    },
+    /// A field initializer's `TermRef` points outside the semantic symbol table.
+    UnknownFieldInitializerSymbol {
+        field: SymbolId,
+        initializer: TreeId<Typed>,
+        symbol: SymbolId,
+    },
+    /// The declared field has no typed initializer.
+    MissingFieldInitializer { field: SymbolId },
+    /// The canonical class declaration scope does not contain this field.
+    FieldNotInClassScope { class: SymbolId, field: SymbolId },
+    /// The canonical field type and its typed initializer disagree.
+    FieldInitializerTypeMismatch {
+        field: SymbolId,
+        initializer: TreeId<Typed>,
+        expected: JvmType,
+        found: Option<JvmType>,
+    },
+    /// The source field modifier has no supported JVM field mapping.
+    UnsupportedJvmFieldFlag {
+        field: SymbolId,
+        flag: UnsupportedJvmFieldFlag,
+    },
+    /// Source visibility has the same canonical visibility but another ABI form.
+    UnsupportedJvmFieldSourceVisibility {
+        field: SymbolId,
+        visibility: JvmFieldSourceVisibility,
+    },
+    /// Two distinct planned fields have the same class-file field name.
+    DuplicateJvmFieldName {
+        class: SymbolId,
+        field: SymbolId,
+        previous: SymbolId,
+        name: String,
+    },
+    /// Actual class-file field emission is outside this metadata-only increment.
+    FieldEmissionUnsupported { class: SymbolId, field: SymbolId },
+    /// Field metadata needs a typed AST to verify its planned RHS root.
+    FieldTypedAstRequired { class: SymbolId },
     /// A method body's typed root does not belong to the supplied arena.
     UnknownBodyRoot {
         method: SymbolId,
@@ -844,6 +928,7 @@ pub enum JvmCodegenError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolRole {
     Class,
+    Field,
     Method,
     Parameter,
     Local,
@@ -857,6 +942,28 @@ pub enum UnsupportedJvmLocalFlag {
     Implicit,
     Erased,
     Inline,
+}
+
+/// Unsupported source modifier on a planned JVM field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmFieldFlag {
+    Abstract,
+    Sealed,
+    Case,
+    Implicit,
+    Given,
+    Lazy,
+    Inline,
+    Transparent,
+    Opaque,
+    Extension,
+    Static,
+    Synthetic,
+    JavaDefined,
+    Erased,
+    Override,
+    Enum,
+    Exported,
 }
 
 /// Why a typed semantic slot cannot be consumed as an actual type.
@@ -971,12 +1078,25 @@ impl JvmClassPlan {
     }
 
     /// Derives this class and its selected public instance-method metadata.
+    /// This legacy entry point supports only empty field plans; use
+    /// [`Self::metadata_with_typed_ast`] when planned fields are present.
     pub fn metadata(
         &self,
         store: &SemanticStore,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, definitions)
+        identity::class_metadata(self, store, None, definitions)
+    }
+
+    /// Derives class, field, and selected method metadata while validating
+    /// each frontend-issued field/RHS binding against this exact typed AST.
+    pub fn metadata_with_typed_ast(
+        &self,
+        store: &SemanticStore,
+        typed_ast: &TypedAst,
+        definitions: &Definitions,
+    ) -> Result<JvmClassMetadata, JvmCodegenError> {
+        identity::class_metadata(self, store, Some(typed_ast), definitions)
     }
 }
 
@@ -989,6 +1109,43 @@ impl JvmClassMetadata {
     /// Selected method metadata in the class plan's order.
     pub fn methods(&self) -> &[JvmMethodMetadata] {
         &self.methods
+    }
+
+    /// Validated instance field metadata in the class plan's source order.
+    pub fn fields(&self) -> &[JvmFieldMetadata] {
+        &self.fields
+    }
+}
+
+impl JvmFieldMetadata {
+    /// Canonical field symbol used to derive this metadata.
+    pub const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    /// JVM field name projected from the canonical symbol.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Exact primitive field descriptor (`I` or `Z`).
+    pub fn descriptor(&self) -> &str {
+        &self.descriptor
+    }
+
+    /// JVM access flags (`private`, with `final` for immutable Scala vals).
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::FieldAccessFlags {
+        self.access_flags
+    }
+
+    /// Canonical owning class symbol.
+    pub const fn owner(&self) -> SymbolId {
+        self.owner
+    }
+
+    /// Exact typed initializer root validated for this field.
+    pub const fn initializer(&self) -> TreeId<Typed> {
+        self.initializer
     }
 }
 
@@ -1300,7 +1457,8 @@ impl JvmCompilationUnit<'_> {
             .ok_or(JvmCodegenError::MissingClassPlan {
                 class: caller_class,
             })?;
-        let class_metadata = class_plan.metadata(self.store, definitions)?;
+        let class_metadata =
+            class_plan.metadata_with_typed_ast(self.store, self.typed_ast, definitions)?;
         let caller_metadata = class_metadata
             .methods()
             .iter()
@@ -1328,6 +1486,7 @@ impl JvmCompilationUnit<'_> {
     pub fn validate(&self) -> Result<(), JvmCodegenError> {
         let mut seen_classes = HashSet::new();
         let mut seen_methods = HashSet::new();
+        let mut seen_fields = HashSet::new();
         let mut seen_local_declarations = HashSet::new();
         let mut seen_local_symbols = HashSet::new();
 
@@ -1354,6 +1513,79 @@ impl JvmCompilationUnit<'_> {
                 });
             }
             self.validate_symbol_type(class_plan.class)?;
+
+            let mut class_field_symbols = HashSet::new();
+            for field_plan in &class_plan.fields {
+                if !class_field_symbols.insert(field_plan.field)
+                    || !seen_fields.insert(field_plan.field)
+                {
+                    return Err(JvmCodegenError::DuplicateFieldPlan {
+                        field: field_plan.field,
+                    });
+                }
+                let field = self
+                    .store
+                    .symbols
+                    .contains(field_plan.field)
+                    .then(|| self.store.symbols.get(field_plan.field))
+                    .ok_or(JvmCodegenError::UnknownField {
+                        field: field_plan.field,
+                    })?;
+                if field.kind != SymbolKind::Field {
+                    return Err(JvmCodegenError::UnsupportedSymbolKind {
+                        symbol: field_plan.field,
+                        expected: SymbolRole::Field,
+                        found: field.kind,
+                    });
+                }
+                if field.owner != Some(class_plan.class) {
+                    return Err(JvmCodegenError::WrongOwner {
+                        symbol: field_plan.field,
+                        expected: class_plan.class,
+                        actual: field.owner,
+                    });
+                }
+                if field.visibility != dotty_core::symbols::Visibility::Private {
+                    return Err(JvmCodegenError::UnsupportedJvmVisibility {
+                        symbol: field_plan.field,
+                        visibility: field.visibility,
+                    });
+                }
+                if field_plan.source_visibility != JvmFieldSourceVisibility::PlainPrivate {
+                    return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
+                        field: field_plan.field,
+                        visibility: field_plan.source_visibility,
+                    });
+                }
+                identity::validate_field_flags(field_plan.field, field.flags)?;
+                let class_info = identity::class_info(self.store, class_plan.class)?;
+                if !self
+                    .store
+                    .scopes
+                    .get(class_info.declarations)
+                    .entered_symbols()
+                    .any(|declaration| declaration == field_plan.field)
+                {
+                    return Err(JvmCodegenError::FieldNotInClassScope {
+                        class: class_plan.class,
+                        field: field_plan.field,
+                    });
+                }
+                self.validate_symbol_type(field_plan.field)?;
+                let initializer =
+                    field_plan
+                        .initializer
+                        .ok_or(JvmCodegenError::MissingFieldInitializer {
+                            field: field_plan.field,
+                        })?;
+                let initializer_tree = self.typed_ast.try_get(initializer).ok_or(
+                    JvmCodegenError::UnknownFieldInitializer {
+                        field: field_plan.field,
+                        initializer,
+                    },
+                )?;
+                validate_tree_type(self.store, initializer, initializer_tree)?;
+            }
 
             for method_plan in &class_plan.methods {
                 if !seen_methods.insert(method_plan.method) {

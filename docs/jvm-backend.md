@@ -190,6 +190,38 @@ the exact method `SymbolId`; overload identity is the pair of JVM name and
 descriptor, and duplicate pairs on a class are rejected. A compilation unit
 also rejects distinct class symbols with the same emitted internal name.
 
+`JvmClassPlan::fields` is an ordered frontend-issued list of
+`JvmFieldPlan { field, source_visibility, initializer }` bindings. `field` is
+the existing class-owned `SymbolKind::Field` ID and `initializer` is the exact
+typed RHS obtained from the same frontend session's source-to-typed mapping.
+The frontend records whether source visibility was plain `private` or
+`private[this]`: `Visibility::Private` alone cannot distinguish those forms,
+and only plain `private` is accepted. The
+frontend owns that association because `dotty-jvm` must not depend on the
+Typer or rediscover it from names, spans, or allocation order. The compilation
+unit metadata path checks that the field belongs to the planned class and its
+actual `ClassInfo::declarations` scope, that the supplied RHS exists in the
+unit's typed arena, and that its widened primitive value matches the
+completed field type.
+
+Only plain-private, non-static, non-lazy, non-synthetic instance fields of
+ordinary classes whose sole parent is canonical `java.lang.Object` project to
+metadata. Exact `Int` and `Boolean` types produce `I` and `Z`. Immutable
+fields produce `ACC_PRIVATE | ACC_FINAL`; mutable fields produce
+`ACC_PRIVATE` without `ACC_FINAL`. Metadata preserves the caller's field plan
+order and rejects repeated field symbols and duplicate JVM field names. The
+metadata-only API emits no fields. `emit_class` returns
+`FieldEmissionUnsupported` for a class with field metadata, even if its
+initialization plan claims `ImplicitNoArg`; field plans never imply a
+stateful-constructor proof. Existing empty-field plans keep their previous
+metadata and emitted class shape.
+
+The backend treats each field/RHS pair as frontend proof. A `TreeId<Typed>`
+does not carry a session tag, so the producer must obtain the ID from the same
+typed arena it passes in the compilation unit. The backend checks arena
+membership and type conformance, but it cannot independently reconstruct the
+source-to-typed mapping without violating the frontend dependency boundary.
+
 Formal parameter identities stay in the plan's explicit order and are checked
 against the canonical method owner, completed parameter info, and descriptor
 types. Instance local slot zero is reserved for `this`; supported `Int` and
@@ -286,7 +318,8 @@ not infer initialization safety from an empty method list. The synthesized
 constructor calls `java/lang/Object.<init>()V` and returns.
 
 The emitted class has no fields, interfaces, class initializer, Scala/TASTy
-metadata, or unplanned methods. Constructors with parameters, additional
+metadata, or unplanned methods. Field plans are currently metadata only and
+cause class emission to fail closed. Constructors with parameters, additional
 constructors, field initializers, nested types, explicit superclass behavior,
 and other class initialization semantics remain unsupported. The API returns
 only after encoding succeeds, so a failure does not expose a partial artifact.

@@ -3,6 +3,9 @@ use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolInfo,
     SymbolKind, TermRefTarget, TreeId, Type, Visibility,
 };
+use dotty_jvm::{
+    JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit, JvmFieldPlan, emit_class,
+};
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
@@ -616,6 +619,508 @@ fn non_private_visibility_forms_are_canonicalized_and_self_forward_reads_type() 
                         if *symbol == target
                 ));
             }
+        },
+    );
+}
+
+#[test]
+fn real_source_private_primitive_fields_project_in_frontend_order() {
+    let snapshot = || {
+        with_source(
+            "class Fields { private val seed: Int = 42; private var enabled: Boolean = true }",
+            |ast, source, index, definitions, typer| {
+                let class = symbol_named(ast, index, source, typer, "Fields");
+                typer.complete_symbol(class).unwrap();
+
+                let mut fields = Vec::new();
+                for name in ["seed", "enabled"] {
+                    let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                    typer.complete_symbol(field).unwrap();
+                    let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info
+                    else {
+                        panic!("field type should be complete");
+                    };
+                    let context = typer.field_initializer_context_for(field).unwrap();
+                    let initializer = typer
+                        .type_expression_expected(rhs, context, field_type)
+                        .unwrap();
+                    fields.push(JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(initializer),
+                    });
+                }
+
+                let unit = JvmCompilationUnit {
+                    store: typer.store(),
+                    typed_ast: typer.typed_ast(),
+                    classes: vec![JvmClassPlan {
+                        class,
+                        methods: Vec::new(),
+                        fields,
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    }],
+                };
+                let metadata = unit.metadata(definitions).unwrap();
+                let projected = metadata[0].fields();
+                assert_eq!(projected.len(), 2);
+                assert_eq!(projected[0].name(), "seed");
+                assert_eq!(projected[0].descriptor(), "I");
+                assert!(projected[0].access_flags().is_private());
+                assert!(projected[0].access_flags().is_final());
+                assert_eq!(projected[1].name(), "enabled");
+                assert_eq!(projected[1].descriptor(), "Z");
+                assert!(projected[1].access_flags().is_private());
+                assert!(!projected[1].access_flags().is_final());
+
+                assert_eq!(unit.metadata(definitions).unwrap(), metadata);
+                let snapshot = projected
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name().to_owned(),
+                            field.descriptor().to_owned(),
+                            field.access_flags().0,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut emission_plan = unit.classes[0].clone();
+                emission_plan.initialization = JvmClassInitializationPlan::ImplicitNoArg;
+                let emission_unit = JvmCompilationUnit {
+                    store: unit.store,
+                    typed_ast: unit.typed_ast,
+                    classes: vec![emission_plan],
+                };
+                assert!(matches!(
+                    emit_class(&emission_unit, class, definitions),
+                    Err(dotty_jvm::JvmCodegenError::FieldEmissionUnsupported {
+                        class: actual_class,
+                        field: actual_field,
+                    }) if actual_class == class && actual_field == projected[0].symbol()
+                ));
+                snapshot
+            },
+        )
+    };
+    assert_eq!(snapshot(), snapshot());
+
+    with_source(
+        "class Counter(start: Int) { private var current: Int = start }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Counter");
+            typer.complete_symbol(class).unwrap();
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "current");
+            typer.complete_symbol(field).unwrap();
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let source_parameter = constructor_def.value_param_clauses[0][0];
+            let constructor_parameter = index
+                .derived_symbol_at(constructor, source, source_parameter)
+                .unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(initializer).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == constructor_parameter
+            ));
+
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(initializer),
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            let metadata = unit.metadata(definitions).unwrap();
+            let field_metadata = &metadata[0].fields()[0];
+            assert_eq!(field_metadata.symbol(), field);
+            assert_eq!(field_metadata.descriptor(), "I");
+            assert!(field_metadata.access_flags().is_private());
+            assert!(!field_metadata.access_flags().is_final());
+        },
+    );
+}
+
+#[test]
+fn field_metadata_fails_closed_for_invalid_bindings_types_and_modifiers() {
+    with_source(
+        "class Fields { private val seed: Int = 42; private var enabled: Boolean = true; val visible: Int = 1; private lazy val delayed: Int = 2 }\nclass Other { private val foreign: Int = 3 }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Fields");
+            let other = symbol_named(ast, index, source, typer, "Other");
+            typer.complete_symbol(class).unwrap();
+            typer.complete_symbol(other).unwrap();
+
+            let typed_field = |typer: &mut SourceTyper<'_>, name: &str| {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                (field, initializer)
+            };
+            let (seed, seed_rhs) = typed_field(typer, "seed");
+            let (_enabled, enabled_rhs) = typed_field(typer, "enabled");
+            let (visible, visible_rhs) = typed_field(typer, "visible");
+            let (delayed, delayed_rhs) = typed_field(typer, "delayed");
+            let (foreign, foreign_rhs) = typed_field(typer, "foreign");
+            let plan = |fields| JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields,
+                initialization: JvmClassInitializationPlan::Unsupported,
+            };
+            let metadata = |plan: &JvmClassPlan| {
+                plan.metadata_with_typed_ast(typer.store(), typer.typed_ast(), definitions)
+            };
+
+            assert!(matches!(
+                metadata(&plan(vec![JvmFieldPlan {
+                    field: foreign,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(foreign_rhs),
+                }])),
+                Err(dotty_jvm::JvmCodegenError::WrongOwner {
+                    symbol,
+                    expected,
+                    actual: Some(actual),
+                }) if symbol == foreign && expected == class && actual == other
+            ));
+            assert_eq!(
+                metadata(&plan(vec![
+                    JvmFieldPlan {
+                        field: seed,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(seed_rhs),
+                    };
+                    2
+                ])),
+                Err(dotty_jvm::JvmCodegenError::DuplicateFieldPlan { field: seed })
+            );
+            assert_eq!(
+                metadata(&plan(vec![JvmFieldPlan {
+                    field: seed,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: None,
+                }])),
+                Err(dotty_jvm::JvmCodegenError::MissingFieldInitializer { field: seed })
+            );
+            assert_eq!(
+                metadata(&plan(vec![JvmFieldPlan {
+                    field: seed,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(enabled_rhs),
+                }])),
+                Err(dotty_jvm::JvmCodegenError::FieldInitializerTypeMismatch {
+                    field: seed,
+                    initializer: enabled_rhs,
+                    expected: dotty_jvm::JvmType::Int,
+                    found: Some(dotty_jvm::JvmType::Boolean),
+                })
+            );
+            assert_eq!(
+                metadata(&plan(vec![JvmFieldPlan {
+                    field: visible,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(visible_rhs),
+                }])),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmVisibility {
+                    symbol: visible,
+                    visibility: Visibility::Public,
+                })
+            );
+            assert_eq!(
+                metadata(&plan(vec![JvmFieldPlan {
+                    field: delayed,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(delayed_rhs),
+                }])),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmFieldFlag {
+                    field: delayed,
+                    flag: dotty_jvm::UnsupportedJvmFieldFlag::Lazy,
+                })
+            );
+        },
+    );
+
+    with_source(
+        "class Missing { private val value: Int = 1 }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Missing");
+            let field = field_tree_and_rhs(ast, index, source, typer, "value").0;
+            typer.complete_symbol(class).unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: None,
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            assert_eq!(
+                unit.metadata(definitions),
+                Err(dotty_jvm::JvmCodegenError::MissingSemanticInfo { symbol: field })
+            );
+        },
+    );
+
+    with_source(
+        "class Duplicate { private val value: Int = 1; private val value: Boolean = true }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Duplicate");
+            typer.complete_symbol(class).unwrap();
+            let mut fields = Vec::new();
+            for tree in ast
+                .iter()
+                .filter_map(|(tree, node)| matches!(node.kind, TreeKind::ValDef(_)).then_some(tree))
+            {
+                let Some(field) = index.symbol_at(source, tree) else {
+                    continue;
+                };
+                if typer.store().symbols.get(field).owner != Some(class) {
+                    continue;
+                }
+                let TreeKind::ValDef(definition) = &ast.get(tree).kind else {
+                    unreachable!();
+                };
+                let rhs = definition.rhs.unwrap();
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(initializer),
+                });
+            }
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields,
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            assert!(matches!(
+                unit.metadata(definitions),
+                Err(dotty_jvm::JvmCodegenError::DuplicateJvmFieldName {
+                    class: actual_class,
+                    name,
+                    ..
+                }) if actual_class == class && name == "value"
+            ));
+        },
+    );
+}
+
+#[test]
+fn field_metadata_never_resolves_a_shadowing_local_by_name() {
+    with_source(
+        "class Shadow { private val seed: Int = 42; private def read(): Int = { val seed = 7; seed } }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Shadow");
+            let field = field_tree_and_rhs(ast, index, source, typer, "seed").0;
+            let method = symbol_named(ast, index, source, typer, "read");
+            typer.complete_symbol(class).unwrap();
+            let (field, field_rhs) = {
+                let (_, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "seed");
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                (field, typed)
+            };
+            typer.complete_symbol(method).unwrap();
+            let method_rhs = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    (index.symbol_at(source, tree) == Some(method))
+                        .then_some(definition.rhs)
+                        .flatten()
+                })
+                .unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            typer
+                .type_expression_expected(method_rhs, context, definitions.int)
+                .unwrap();
+            let local_tree = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::ValDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    (typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        == "seed"
+                        && index.symbol_at(source, tree) != Some(field))
+                    .then_some(tree)
+                })
+                .unwrap();
+            let local = typer
+                .typed_local_binding_at(source, local_tree)
+                .expect("the shadowing local should have a typed binding");
+
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field: local.symbol(),
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(field_rhs),
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            assert_eq!(
+                unit.metadata(definitions),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedSymbolKind {
+                    symbol: local.symbol(),
+                    expected: dotty_jvm::SymbolRole::Field,
+                    found: SymbolKind::Local,
+                })
+            );
+        },
+    );
+}
+
+#[test]
+fn field_metadata_rejects_reference_valued_fields() {
+    with_source(
+        "class References { private val self: References = this }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "References");
+            typer.complete_symbol(class).unwrap();
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "self");
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(initializer),
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            assert!(matches!(
+                unit.metadata(definitions),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmType {
+                    symbol,
+                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                    ..
+                }) if symbol == field
+            ));
+        },
+    );
+}
+
+#[test]
+fn field_metadata_distinguishes_private_this_from_plain_private() {
+    with_source(
+        "class ObjectPrivate { private[this] val value: Int = 1 }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "ObjectPrivate");
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "value");
+            typer.complete_symbol(class).unwrap();
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            assert_eq!(
+                typer.store().symbols.get(field).visibility,
+                Visibility::Private
+            );
+
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PrivateThis,
+                        initializer: Some(initializer),
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            assert_eq!(
+                unit.metadata(definitions),
+                Err(
+                    dotty_jvm::JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
+                        field,
+                        visibility: dotty_jvm::JvmFieldSourceVisibility::PrivateThis,
+                    }
+                )
+            );
         },
     );
 }

@@ -302,7 +302,7 @@ fn primitive_value_type(
     }
 }
 
-pub(super) fn primitive_local_type(
+pub(super) fn primitive_semantic_value_type(
     store: &SemanticStore,
     definitions: &Definitions,
     symbol: SymbolId,
@@ -420,7 +420,8 @@ fn unsupported_type_error(store: &SemanticStore, symbol: SymbolId, ty: TypeId) -
 }
 
 impl JvmType {
-    const fn descriptor_char(self) -> char {
+    /// Primitive JVM descriptor letter (`I` or `Z`).
+    pub const fn descriptor_char(self) -> char {
         match self {
             Self::Int => 'I',
             Self::Boolean => 'Z',

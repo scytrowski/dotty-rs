@@ -229,6 +229,7 @@ fn compile_source(
         typed_ast: typer.typed_ast(),
         classes: vec![JvmClassPlan {
             class: class_symbol,
+            fields: Vec::new(),
             methods,
             initialization,
         }],
@@ -2886,6 +2887,7 @@ fn source_local_declarations_export_method_scoped_canonical_bindings() {
         typed_ast: typer.typed_ast(),
         classes: vec![JvmClassPlan {
             class: class_symbol,
+            fields: Vec::new(),
             methods: method_plans,
             initialization: JvmClassInitializationPlan::Unsupported,
         }],

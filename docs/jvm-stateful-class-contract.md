@@ -17,7 +17,7 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 
 | Source shape | Canonical field identity | Initializer / constructor evidence | Status |
 | --- | --- | --- | --- |
-| `class Plain { private val seed: Int = 42; private val enabled: Boolean = true }` | Each declaration maps to a distinct `SymbolKind::Field`, owned by `Plain`, with `Visibility::Private`; neither has `MUTABLE`. `SymbolInfo` completes to the canonical Int or Boolean type. | Template body order is `seed`, then `enabled`. Each source RHS is typed with `type_expression_expected(rhs, context, completed_field_type)` using `field_initializer_context_for`; its literal `TreeId<Typed>` is read back unchanged through `source_typed_index().get(source, rhs)`. The literal keeps its singleton `Type::Constant` type. | Frontend characterized. Backend rejects class fields today. |
+| `class Plain { private val seed: Int = 42; private val enabled: Boolean = true }` | Each declaration maps to a distinct `SymbolKind::Field`, owned by `Plain`, with `Visibility::Private`; neither has `MUTABLE`. `SymbolInfo` completes to the canonical Int or Boolean type. | Template body order is `seed`, then `enabled`. Each source RHS is typed with `type_expression_expected(rhs, context, completed_field_type)` using `field_initializer_context_for`; its literal `TreeId<Typed>` is read back unchanged through `source_typed_index().get(source, rhs)`. The literal keeps its singleton `Type::Constant` type. The frontend-issued `JvmFieldPlan`s preserve this order and project `I`/`Z`, private access, and immutable `ACC_FINAL`. | Frontend and JVM field metadata characterized; class-file field emission is unsupported. |
 | `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | Source signature and binding characterized. No JVM constructor plan or field emission exists. |
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The parameter order comes from the source constructor clause. | Identity audit only; public accessor ABI is out of scope. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same clause ordering as `val`. | Identity audit only; public getter/setter ABI is out of scope. |
@@ -85,8 +85,9 @@ These rules are visible in the pinned compiler sources:
 - [`Memoize.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/transform/Memoize.scala) adds private backing fields and directs getters/setters to storage.
 - [`SymDenotations.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/core/SymDenotations.scala) defines class parameter accessors and distinguishes getters from setters.
 
-The future backend increment is limited to private instance storage fields and
-ordinary user methods. It must not claim compatibility for public Scala
+The current JVM metadata increment is limited to private primitive instance
+fields and ordinary user methods. It does not emit storage and must not claim
+compatibility for public Scala
 getters/setters, constructor parameter accessors, bridges, inheritance,
 qualified access, `lazy`, generic/reference-valued members, or secondary
 constructors. Scala 3.9.0 source inspection is recorded here; a generated
@@ -101,11 +102,11 @@ reference launcher requires missing `sbt`, and no Java runtime is installed.
 | Field has no RHS | `field_initializer_context_for` returns `FieldInitializerContextInvalid(InitializerMissing)` at Typer context construction. | Do not invent a default initializer. |
 | Inferred direct or mutual field cycle | `complete_symbol` returns `RecursiveInferredFieldType`; recursion state and symbol completion roll back. | Reject before class artifact publication. |
 | `object` / `trait` field or non-field symbol | Typer context validation returns `FieldInitializerContextInvalid` with the actual owner/symbol kind. | This contract only covers top-level ordinary classes. |
-| Plain `private` visibility on an instance field | Namer records `Visibility::Private`; this is the required supported visibility. | Backend must validate visibility from the canonical symbol. |
-| Public, `protected`, or `private[this]` instance field | Parser and Namer accept these source forms. The integration characterization observes `Visibility::Public`, `Visibility::Protected`, and `Visibility::Private` respectively; the shared visibility value does not preserve the `private[this]` qualifier. | Outside the characterized plain-private field subset; reject until an explicit ABI contract covers each form. |
+| Plain `private` visibility on an instance field | Namer records `Visibility::Private`; real-source integration projects this visibility to JVM `ACC_PRIVATE`. | Field metadata validates visibility from the canonical symbol. |
+| Public, `protected`, or `private[this]` instance field | Parser and Namer accept these source forms. The integration characterization observes `Visibility::Public`, `Visibility::Protected`, and `Visibility::Private` respectively; the shared visibility value does not preserve the `private[this]` qualifier. | Public and protected fail the canonical visibility check. The frontend must label object-private plans explicitly, and metadata rejects `PrivateThis` while accepting only plain `private`. |
 | Qualified-private, lazy, static, or synthetic field | Not covered by the current source integration characterization; acceptance and exact canonical representation remain unclaimed here. | Reject with a contextual plan error until an explicit ABI contract covers the form. |
 | `val`/`var` constructor parameter | Namer retains separate class field and constructor parameter identities. | Do not substitute either identity for the other; public accessor emission remains unsupported. |
-| Duplicate same-named field declarations | Parser and Namer currently accept both declarations without diagnostics and create distinct class-owned `Field` IDs with the same name. This is a recorded frontend gap, not valid backend input. | Plan validation must detect repeated names/identities and return a contextual error before publishing a class. |
+| Duplicate same-named field declarations | Parser and Namer currently accept both declarations without diagnostics and create distinct class-owned `Field` IDs with the same name. This is a recorded frontend gap, not valid backend input. | Metadata rejects repeated field IDs and duplicate JVM field names with structured errors. |
 | Secondary constructor | Parser and Namer accept `class WithSecondary(value: Int) { def this() = this(0) }`; Typer completes the primary and secondary constructors as distinct plain method signatures with one and zero parameters respectively. | Return a typed contextual backend error until secondary constructor lowering is supported. |
 | `using` primary constructor | Parser and Namer accept `class WithUsing(using context: Int)`; Typer completes its signature as one `Contextual` clause with one Int parameter. | Return a typed contextual backend error until contextual constructor lowering is supported. |
 | Defaulted primary constructor parameter | Parser and Namer accept `class WithDefault(value: Int = 1)`; Typer completes its signature as one plain clause with one Int parameter. This signature alone does not characterize default-getter behavior or JVM ABI. | Return a typed contextual backend error until default arguments are explicitly supported. |
@@ -116,19 +117,29 @@ The negative evidence remains executable: Typer tests
 `field_initializer_context_rejects_unsupported_owners_and_non_fields` and
 `inferred_field_recursion_guard_reports_direct_and_indirect_cycles`, plus the
 integration tests for initializer conformance and rollback, constructor forms,
-visibility, self/forward references, and duplicate fields. The
+visibility, self/forward references, duplicate fields, and the real-source JVM
+metadata boundary. Field metadata rejects wrong owners, non-field IDs,
+incomplete types, missing/mismatched initializers, public/lazy fields,
+references, duplicate symbols, and duplicate JVM names. The
 duplicate-field result is intentionally marked as an unresolved Namer gap;
 the backend must not treat the current absence of a diagnostic as evidence of
 a valid field plan.
 
-## Proposed platform-neutral adapter shapes
+## Platform-neutral adapter shapes
 
-These are proposed data shapes, not implemented APIs:
+The field plan is implemented in `dotty-jvm`. The primary-constructor shape
+below remains proposed:
 
 ```rust
+enum JvmFieldSourceVisibility {
+    PlainPrivate,
+    PrivateThis,
+}
+
 struct JvmFieldPlan {
-    symbol: SymbolId,
-    initializer: TreeId<Typed>,
+    field: SymbolId,
+    source_visibility: JvmFieldSourceVisibility,
+    initializer: Option<TreeId<Typed>>,
 }
 
 struct JvmPrimaryConstructorPlan {

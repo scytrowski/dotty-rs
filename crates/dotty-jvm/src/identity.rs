@@ -3,18 +3,19 @@
 use std::collections::{HashMap, HashSet};
 
 use dotty_classfile::access_flags::{
-    ACC_FINAL, ACC_PUBLIC, ACC_SUPER, ClassAccessFlags, MethodAccessFlags,
+    ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, ACC_SUPER, ClassAccessFlags, FieldAccessFlags,
+    MethodAccessFlags,
 };
 use dotty_core::definitions::Definitions;
 use dotty_core::names::Namespace;
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, Visibility};
-use dotty_core::types::Type;
+use dotty_core::types::{Type, TypeRefTarget};
 
 use crate::{
-    InvalidJvmClassInfoKind, JvmClassIdentity, JvmClassMetadata, JvmCodegenError,
-    JvmMethodMetadata, JvmNameKind, JvmParameterLocal, UnsupportedJvmClassKind,
-    UnsupportedJvmSymbolFlag,
+    InvalidJvmClassInfoKind, JvmClassIdentity, JvmClassMetadata, JvmCodegenError, JvmFieldMetadata,
+    JvmFieldPlan, JvmMethodMetadata, JvmNameKind, JvmParameterLocal, UnsupportedJvmClassKind,
+    UnsupportedJvmFieldFlag, UnsupportedJvmSymbolFlag,
 };
 
 pub(super) fn class_identity(
@@ -147,9 +148,36 @@ pub(super) fn class_identity(
 pub(super) fn class_metadata(
     plan: &crate::JvmClassPlan,
     store: &SemanticStore,
+    typed_ast: Option<&dotty_core::ast::TypedAst>,
     definitions: &Definitions,
 ) -> Result<JvmClassMetadata, JvmCodegenError> {
     let identity = class_identity(store, plan.class)?;
+    let mut fields = Vec::with_capacity(plan.fields.len());
+    let mut field_names = HashMap::<String, dotty_core::SymbolId>::new();
+    let mut field_symbols = HashSet::new();
+    let typed_ast = if plan.fields.is_empty() {
+        None
+    } else {
+        Some(typed_ast.ok_or(JvmCodegenError::FieldTypedAstRequired { class: plan.class })?)
+    };
+    for field_plan in &plan.fields {
+        if !field_symbols.insert(field_plan.field) {
+            return Err(JvmCodegenError::DuplicateFieldPlan {
+                field: field_plan.field,
+            });
+        }
+        let field = field_metadata(field_plan, plan.class, store, typed_ast, definitions)?;
+        if let Some(previous) = field_names.insert(field.name().to_owned(), field.symbol()) {
+            return Err(JvmCodegenError::DuplicateJvmFieldName {
+                class: plan.class,
+                field: field.symbol(),
+                previous,
+                name: field.name().to_owned(),
+            });
+        }
+        fields.push(field);
+    }
+
     let mut methods = Vec::with_capacity(plan.methods.len());
     let mut identities = HashMap::<(String, String), dotty_core::SymbolId>::new();
 
@@ -171,7 +199,226 @@ pub(super) fn class_metadata(
         methods.push(method);
     }
 
-    Ok(JvmClassMetadata { identity, methods })
+    Ok(JvmClassMetadata {
+        identity,
+        fields,
+        methods,
+    })
+}
+
+fn field_metadata(
+    plan: &JvmFieldPlan,
+    owner: dotty_core::SymbolId,
+    store: &SemanticStore,
+    typed_ast: Option<&dotty_core::ast::TypedAst>,
+    definitions: &Definitions,
+) -> Result<JvmFieldMetadata, JvmCodegenError> {
+    let field = store
+        .symbols
+        .contains(plan.field)
+        .then(|| store.symbols.get(plan.field))
+        .ok_or(JvmCodegenError::UnknownField { field: plan.field })?;
+    if field.kind != SymbolKind::Field {
+        return Err(JvmCodegenError::UnsupportedSymbolKind {
+            symbol: plan.field,
+            expected: crate::SymbolRole::Field,
+            found: field.kind,
+        });
+    }
+    if field.owner != Some(owner) {
+        return Err(JvmCodegenError::WrongOwner {
+            symbol: plan.field,
+            expected: owner,
+            actual: field.owner,
+        });
+    }
+    if field.visibility != Visibility::Private {
+        return Err(JvmCodegenError::UnsupportedJvmVisibility {
+            symbol: plan.field,
+            visibility: field.visibility,
+        });
+    }
+    if plan.source_visibility != crate::JvmFieldSourceVisibility::PlainPrivate {
+        return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
+            field: plan.field,
+            visibility: plan.source_visibility,
+        });
+    }
+    validate_field_flags(plan.field, field.flags)?;
+
+    let class_info = class_info(store, owner)?;
+    let valid_object_definition = matches!(
+        store.types.try_get(definitions.object_type),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) if *symbol == definitions.object_class
+    );
+    if let Some(self_type) = class_info.self_type {
+        return Err(JvmCodegenError::UnsupportedJvmSelfType {
+            class: owner,
+            self_type,
+        });
+    }
+    if class_info.parents.as_slice() != [definitions.object_type] || !valid_object_definition {
+        return Err(JvmCodegenError::UnsupportedJvmSuperclass {
+            class: owner,
+            parent: class_info.parents.first().copied(),
+        });
+    }
+    if !store
+        .scopes
+        .get(class_info.declarations)
+        .entered_symbols()
+        .any(|declaration| declaration == plan.field)
+    {
+        return Err(JvmCodegenError::FieldNotInClassScope {
+            class: owner,
+            field: plan.field,
+        });
+    }
+
+    let field_type_id = match store.symbols.info(plan.field) {
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol: plan.field });
+        }
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: plan.field }),
+        SymbolInfo::Complete(ty) => *ty,
+    };
+    let field_type = crate::descriptor::primitive_semantic_value_type(
+        store,
+        definitions,
+        plan.field,
+        field_type_id,
+    )?;
+
+    let initializer_id = plan
+        .initializer
+        .ok_or(JvmCodegenError::MissingFieldInitializer { field: plan.field })?;
+    let typed_ast = typed_ast.ok_or(JvmCodegenError::FieldTypedAstRequired { class: owner })?;
+    let initializer =
+        typed_ast
+            .try_get(initializer_id)
+            .ok_or(JvmCodegenError::UnknownFieldInitializer {
+                field: plan.field,
+                initializer: initializer_id,
+            })?;
+    let initializer_type = typed_expression_primitive_type(
+        store,
+        definitions,
+        plan.field,
+        initializer_id,
+        initializer.ty,
+    )?;
+    if initializer_type != field_type {
+        return Err(JvmCodegenError::FieldInitializerTypeMismatch {
+            field: plan.field,
+            initializer: initializer_id,
+            expected: field_type,
+            found: Some(initializer_type),
+        });
+    }
+
+    let name = store
+        .names
+        .try_resolve(field.name.text())
+        .ok_or_else(|| invalid_name(plan.field, JvmNameKind::Field, "<unresolved>"))?;
+    if field.name.namespace() != Namespace::Term || !is_simple_identifier(name) {
+        return Err(invalid_name(
+            plan.field,
+            JvmNameKind::Field,
+            name.to_owned(),
+        ));
+    }
+
+    Ok(JvmFieldMetadata {
+        symbol: plan.field,
+        name: name.to_owned(),
+        descriptor: field_type.descriptor_char().to_string(),
+        access_flags: FieldAccessFlags(
+            ACC_PRIVATE
+                | if field.flags.contains(SymbolFlags::MUTABLE) {
+                    0
+                } else {
+                    ACC_FINAL
+                },
+        ),
+        owner,
+        initializer: initializer_id,
+    })
+}
+
+fn typed_expression_primitive_type(
+    store: &SemanticStore,
+    definitions: &Definitions,
+    symbol: dotty_core::SymbolId,
+    initializer: dotty_core::TreeId<dotty_core::ast::Typed>,
+    ty: dotty_core::TypeId,
+) -> Result<crate::JvmType, JvmCodegenError> {
+    match store.types.try_get(ty) {
+        Some(Type::TermRef {
+            target: dotty_core::types::TermRefTarget::Symbol(target),
+            ..
+        }) => {
+            if !store.symbols.contains(*target) {
+                return Err(JvmCodegenError::UnknownFieldInitializerSymbol {
+                    field: symbol,
+                    initializer,
+                    symbol: *target,
+                });
+            }
+            let target_ty = match store.symbols.info(*target) {
+                SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                    return Err(JvmCodegenError::MissingSemanticInfo { symbol: *target });
+                }
+                SymbolInfo::Error => {
+                    return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *target });
+                }
+                SymbolInfo::Complete(target_ty) => *target_ty,
+            };
+            crate::descriptor::primitive_semantic_value_type(store, definitions, symbol, target_ty)
+        }
+        _ => crate::descriptor::primitive_semantic_value_type(store, definitions, symbol, ty),
+    }
+}
+
+pub(super) fn validate_field_flags(
+    field: dotty_core::SymbolId,
+    flags: SymbolFlags,
+) -> Result<(), JvmCodegenError> {
+    for (flag, unsupported) in [
+        (SymbolFlags::ABSTRACT, UnsupportedJvmFieldFlag::Abstract),
+        (SymbolFlags::SEALED, UnsupportedJvmFieldFlag::Sealed),
+        (SymbolFlags::CASE, UnsupportedJvmFieldFlag::Case),
+        (SymbolFlags::IMPLICIT, UnsupportedJvmFieldFlag::Implicit),
+        (SymbolFlags::GIVEN, UnsupportedJvmFieldFlag::Given),
+        (SymbolFlags::LAZY, UnsupportedJvmFieldFlag::Lazy),
+        (SymbolFlags::INLINE, UnsupportedJvmFieldFlag::Inline),
+        (
+            SymbolFlags::TRANSPARENT,
+            UnsupportedJvmFieldFlag::Transparent,
+        ),
+        (SymbolFlags::OPAQUE, UnsupportedJvmFieldFlag::Opaque),
+        (SymbolFlags::EXTENSION, UnsupportedJvmFieldFlag::Extension),
+        (SymbolFlags::STATIC, UnsupportedJvmFieldFlag::Static),
+        (SymbolFlags::SYNTHETIC, UnsupportedJvmFieldFlag::Synthetic),
+        (
+            SymbolFlags::JAVA_DEFINED,
+            UnsupportedJvmFieldFlag::JavaDefined,
+        ),
+        (SymbolFlags::ERASED, UnsupportedJvmFieldFlag::Erased),
+        (SymbolFlags::OVERRIDE, UnsupportedJvmFieldFlag::Override),
+        (SymbolFlags::ENUM, UnsupportedJvmFieldFlag::Enum),
+        (SymbolFlags::EXPORTED, UnsupportedJvmFieldFlag::Exported),
+    ] {
+        if flags.contains(flag) {
+            return Err(JvmCodegenError::UnsupportedJvmFieldFlag {
+                field,
+                flag: unsupported,
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn unit_metadata(
@@ -181,7 +428,7 @@ pub(super) fn unit_metadata(
     let mut metadata = Vec::with_capacity(unit.classes.len());
     let mut identities = HashMap::<String, dotty_core::SymbolId>::new();
     for class_plan in &unit.classes {
-        let class = class_plan.metadata(unit.store, definitions)?;
+        let class = class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
         let internal_name = class.identity().internal_name().to_owned();
         if let Some(previous) = identities.insert(internal_name.clone(), class.identity().symbol())
         {

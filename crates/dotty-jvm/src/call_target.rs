@@ -164,7 +164,8 @@ pub(super) fn resolve_same_class_call(
         });
     }
 
-    let class_metadata = class_plan.metadata(unit.store, definitions)?;
+    let class_metadata =
+        class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
     let method_metadata = class_metadata
         .methods()
         .iter()
