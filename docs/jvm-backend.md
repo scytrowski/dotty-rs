@@ -145,6 +145,22 @@ General Scala library lowering, Long/Float/Double, Java classpath loading,
 TASTy emission, the full Scala ABI, equality operators, and arbitrary
 reference-bearing calls inside branched CFGs remain outside this subset.
 
+## Canonical Boolean intrinsic resolution
+
+`resolve_boolean_intrinsic` is a read-only semantic resolver. It recognizes
+the eight Boolean primitive members only through their canonical `SymbolId`s
+from `Definitions`, checks their owner, signature, receiver, argument, result,
+and tree shape, then reports a `JvmBooleanIntrinsic`. A method on a user class
+with the same name and signature, and universal `Any.==`/`Any.!=`, remain
+ordinary calls. `unary_!` is a parameterless `Select`; the binary members are
+regular `Apply(Select(receiver, member), [argument])` trees.
+
+The intrinsic value reports whether the operation has no RHS, evaluates it
+strictly, or short-circuits it. Resolution does not emit bytecode, mutate the
+semantic store or typed tree, or route short-circuit operators through
+`invokevirtual`. Boolean JVM code generation remains outside the current
+backend subset.
+
 ## Class and method metadata subset
 
 `JvmClassPlan::identity` derives top-level class names by following canonical

@@ -122,7 +122,10 @@ references do not change that operator contract.
 
 `Definitions::bootstrap` installs canonical Boolean member signatures alongside
 the existing bounded `Int` operator registry. This enables source typing only;
-Boolean JVM intrinsic lowering remains a follow-up increment.
+`dotty-jvm` can now resolve the eight canonical typed operations into
+`JvmBooleanIntrinsic` values with explicit RHS evaluation behavior. This
+read-only resolver does not emit bytecode; Boolean JVM intrinsic lowering
+remains a follow-up increment.
 
 ## Scala 3.9.0 source references
 
