@@ -379,3 +379,42 @@ add default imports. TASTy parent work and anonymous classes remain measured
 alternatives with separate owners and higher scope/identity risk. Generic
 member adaptation has no isolated corpus blocker that justifies implementing
 it speculatively.
+
+## #1132 Import-prefix audit and source typing rollback
+
+The pinned full-corpus audit and the frozen #1128 reprofile each ran twice and
+matched byte-for-byte on Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`, Scala 3.9.0, and Temurin 21.0.8.
+The full audit covered 1,236 files. Its 3,297 local-method denominator is
+unchanged and remains at 0 typed methods. Full-corpus `ImportQualifierNotFound`
+stands at 2,501. This is a broader set than the selected frozen #1128 cohort.
+
+| Measure | Full pinned audit | Frozen #1128 cohort, reprofiled |
+| --- | ---: | ---: |
+| Import blocker observations | 2,501 | 2,394 frozen; 2,342 unresolved at next segment |
+| Files / target keys | Full corpus | 209 / 30 frozen; 196 / 29 unresolved |
+| Distinct blocker origins | — | 904 frozen; 879 unresolved |
+| External class-symbol successes | 18,169 | Not a method success metric |
+| External non-class member successes | 59 | Not a method success metric |
+| Distinct classes / p95 eager depth | 135 / 3 | — |
+| Max fully completed classes per request | 9 (hard gate <= 16) | — |
+
+Within the selected cohort, the 58 descendant-only `dotty` and `java` target
+observations no longer stop at the package blocker. The unresolved count fell
+by 52 overall; the difference is not attributed solely to those 58 rows. The
+remaining unresolved observations include 1,618 source-package registry hits
+across five qualified targets with direct class/TASTy resources. The audit
+reports blocker movement only: none of the 3,297 local methods typed.
+
+The end-to-end regressions also preserve atomic rollback for a missing
+intermediate package and a missing final imported member. Both leave semantic
+store and typed-AST checkpoints unchanged and do not leave a `me` package
+entry; the final-member case confirms the temporary loaded class identity is
+removed.
+
+**Recommend exactly one next sprint: source-owned lexical package lookup for
+qualified import candidates.** Preserve current-package precedence, `_root_`
+lookup, ambiguity diagnostics, and rollback. Candidates without source or
+classpath evidence should continue to remain unresolved. The frozen #1128
+profile remains unchanged; the full current corpus report and row sidecars are
+in [the generated audit](typer-classpath-corpus-audit-3.9.0.md).
