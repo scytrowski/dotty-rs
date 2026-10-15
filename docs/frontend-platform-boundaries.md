@@ -42,11 +42,14 @@ count as production edges; for example, `dotty-typer` uses classloader fixtures
 in tests while its only production dependency is `dotty-core`.
 
 `tools/check-frontend-boundaries.py` obtains Cargo's resolved dependency graph
-with `cargo metadata --locked`, then walks only normal/build transitive edges
-from `dotty-core`, `dotty-lexer`, `dotty-parser`, `dotty-namer`, and
-`dotty-typer`. Its built-in self-test accepts a dev-only classloader edge and
-rejects a transitive build-only classfile edge. CI runs this same script once;
-there is no second dependency parser or network service.
+with `cargo metadata --locked --all-features`, then walks only normal/build
+transitive edges from `dotty-core`, `dotty-lexer`, `dotty-parser`,
+`dotty-namer`, and `dotty-typer`. Enabling all workspace features ensures an
+optional production dependency cannot hide behind an inactive feature. Its
+built-in self-test accepts a dev-only classloader edge, rejects a transitive
+build-only classfile edge, and asks Cargo to resolve a fixture whose optional
+classfile dependency is visible only with `--all-features`. CI runs this same
+script once; there is no second dependency parser or network service.
 
 ## Semantic boundary and target-specific facts
 

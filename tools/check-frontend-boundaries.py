@@ -8,6 +8,7 @@ import subprocess
 import sys
 from collections import deque
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 
@@ -30,7 +31,9 @@ def _production_edge(dependency: dict[str, Any]) -> bool:
     return not kinds or any(kind.get("kind") != "dev" for kind in kinds)
 
 
-def find_violations(metadata: dict[str, Any]) -> list[str]:
+def find_violations(
+    metadata: dict[str, Any], frontend_crates: tuple[str, ...] = FRONTEND_CRATES
+) -> list[str]:
     packages = {package["id"]: package for package in metadata["packages"]}
     package_ids_by_name = {
         package["name"]: package["id"]
@@ -40,7 +43,7 @@ def find_violations(metadata: dict[str, Any]) -> list[str]:
     nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
     violations: list[str] = []
 
-    for root_name in FRONTEND_CRATES:
+    for root_name in frontend_crates:
         root_id = package_ids_by_name.get(root_name)
         if root_id is None:
             violations.append(f"missing workspace package {root_name}")
@@ -115,12 +118,101 @@ def self_test() -> None:
     if expected not in rejected:
         raise AssertionError(f"injected build dependency was not rejected: {rejected}")
 
+    optional_dependency_self_test()
+
+
+def optional_dependency_self_test() -> None:
+    """Prove --all-features exposes optional forbidden dependencies to Cargo."""
+    with TemporaryDirectory(prefix="frontend-boundary-self-test-") as temp:
+        root = Path(temp)
+        typer = root / "dotty-typer"
+        classfile = root / "dotty-classfile"
+        typer.mkdir()
+        classfile.mkdir()
+        (typer / "src").mkdir()
+        (classfile / "src").mkdir()
+        (typer / "src" / "lib.rs").write_text("", encoding="utf-8")
+        (classfile / "src" / "lib.rs").write_text("", encoding="utf-8")
+        (root / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["dotty-typer", "dotty-classfile"]\nresolver = "3"\n',
+            encoding="utf-8",
+        )
+        (typer / "Cargo.toml").write_text(
+            """[package]
+name = "dotty-typer"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+jvm = ["dep:dotty-classfile"]
+
+[dependencies]
+dotty-classfile = { path = "../dotty-classfile", optional = true }
+""",
+            encoding="utf-8",
+        )
+        (classfile / "Cargo.toml").write_text(
+            """[package]
+name = "dotty-classfile"
+version = "0.1.0"
+edition = "2024"
+""",
+            encoding="utf-8",
+        )
+
+        def metadata(*, all_features: bool) -> dict[str, Any]:
+            command = [
+                "cargo",
+                "metadata",
+                "--format-version",
+                "1",
+                "--offline",
+                "--manifest-path",
+                str(root / "Cargo.toml"),
+            ]
+            if all_features:
+                command.append("--all-features")
+            result = subprocess.run(
+                command,
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return json.loads(result.stdout)
+
+        default_violations = find_violations(
+            metadata(all_features=False), frontend_crates=("dotty-typer",)
+        )
+        if default_violations:
+            raise AssertionError(
+                f"optional edge unexpectedly appeared without its feature: {default_violations}"
+            )
+
+        feature_violations = find_violations(
+            metadata(all_features=True), frontend_crates=("dotty-typer",)
+        )
+        expected = "dotty-typer -> dotty-classfile"
+        if expected not in feature_violations:
+            raise AssertionError(
+                "all-features metadata did not expose the injected optional "
+                f"forbidden dependency: {feature_violations}"
+            )
+
 
 def main() -> int:
     try:
         self_test()
         result = subprocess.run(
-            ["cargo", "metadata", "--format-version", "1", "--locked"],
+            [
+                "cargo",
+                "metadata",
+                "--format-version",
+                "1",
+                "--locked",
+                "--all-features",
+            ],
             cwd=ROOT,
             check=True,
             capture_output=True,
