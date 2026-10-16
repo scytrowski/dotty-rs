@@ -4,7 +4,21 @@ use dotty_core::{
     NameId, ScopeId, SourceId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TreeId, TypeId,
     Typed, Untyped,
 };
-use dotty_tasty::tasty::TastyFileError;
+use dotty_tasty::tasty::{AstBuildError, TastyFileError};
+
+/// Why a canonical symbol cannot be represented by the bounded reference API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReferenceError {
+    Namespace,
+    Kind,
+    Owner,
+    Ambiguous,
+    NotRegistered,
+    NotLocal,
+    NotExternal,
+    Metadata,
+    DeclarationTag,
+}
 
 /// A bounded builtin identity required by the minimal contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,17 +75,31 @@ pub enum UnsupportedFeature {
     Name,
 }
 
-/// Bounded validation work; encoding limits will be introduced with encoding.
+/// Bounded validation and semantic projection work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LimitKind {
     OwnerDepth,
     Items,
     NameBytes,
+    Names,
+    TypeDepth,
 }
 
 /// Typed failures, with canonical identities rather than parsed display strings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickleError {
+    /// A failed projection context cannot publish or accept further work.
+    ProjectionAborted,
+    CyclicType {
+        ty: TypeId,
+    },
+    Reference {
+        symbol: SymbolId,
+        reason: ReferenceError,
+    },
+    Construction {
+        cause: Box<AstBuildError>,
+    },
     InvalidSymbol {
         symbol: SymbolId,
     },
@@ -191,7 +219,7 @@ pub enum PickleError {
         kind: LimitKind,
         limit: usize,
     },
-    /// Reserved for the eventual encoder; no current validation path encodes.
+    /// Preserves name-table and primitive codec errors during projection.
     Encoding {
         cause: Box<TastyFileError>,
     },
@@ -207,6 +235,7 @@ impl Error for PickleError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Encoding { cause } => Some(cause.as_ref()),
+            Self::Construction { cause } => Some(cause.as_ref()),
             _ => None,
         }
     }
