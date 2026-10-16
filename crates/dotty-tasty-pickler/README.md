@@ -1,8 +1,9 @@
 # Source semantic TASTy pickler boundary
 
-This crate implements **read-only plan validation and semantic type/reference
-projection** for Scala 3.9.0 TASTy (28.9.0). It does not assemble class/definition
-trees or complete TASTy files yet.
+This crate implements **read-only plan validation, semantic type/reference
+projection and declaration skeletons** for Scala 3.9.0 TASTy (28.9.0).
+Declaration documents are explicitly incomplete: method RHS emission and
+completed interoperable artifacts remain downstream work.
 
 `PicklePlan` borrows the canonical semantic store, Definitions, untyped/typed ASTs,
 source semantic index and a `SourceTypedBindings` provider. Source metadata is
@@ -69,6 +70,36 @@ supplied. `AstBuildLimits` independently bounds flat wire items, iterative
 traversal depth, output bytes and layout passes. Default limits are 1,000,000
 semantic items, 100,000 names, 4,096 bytes/name, 256 owner/type depth; wire defaults
 are 1,000,000 items, 256 depth, 16 MiB and 64 layout passes.
+
+`ValidatedPicklePlan::declaration_skeleton()` assembles the frozen one-package,
+one-class structure using that projection context. The result is a
+`DeclarationSkeleton`, with `provisional_bytes()` for structural inspection,
+canonical declaration/owner IDs and AST-relative addresses, original source
+metadata, the intended package-derived `.tasty` path, and `omitted_bodies()`
+containing the exact real typed RHS roots. It does not write a file. The
+`declaration_skeleton_with_limits(ProjectionLimits)` variant applies the existing
+semantic/name/wire budgets; any failure returns a typed error without publishing
+partial output or mutating the compilation session.
+
+The parent application comes from the validated ClassInfo's canonical Object
+parent and the frozen oracle's `APPLY/SELECTin/NEW` shape. The default constructor
+has EMPTYCLAUSE, direct Unit return syntax, no RHS and its provenance-required
+STABLE marker. Its semantic signature still returns the class. The ordinary
+parameterless method has an Int IDENTtpt and no fabricated empty clause,
+METHODtype payload, abstract flag or substitute RHS. Public visibility and empty
+modifier/annotation tails are checked from symbol records; other metadata is
+unsupported. Parameterized/empty-parens methods and other class forms remain
+outside the validated v0 contract.
+
+The provisional document uses TastyFileBuilder with exact 28.9.0 version checks,
+ASTs and SOURCEFILEattr, and structural validation before returning bytes. Its
+tooling string says `incomplete declaration skeleton`, with a fixed diagnostic
+UUID. Positions, Comments and the compiler SourceFile annotation are omitted per
+the reduced-oracle contract. **These bytes are not a completed compiler artifact
+and carry no Scala interoperability claim.** #1194 adds real RHS emission; #1195
+owns independent compilation. Tests compare canonicalized declarations against
+the frozen Scala Answer fixture, normalizing only the real method RHS, the
+permitted SourceFile annotation omission, sharing layout and header/section data.
 
 Only `dotty-core` and `dotty-tasty` are normal dependencies. Frontend dependencies
 are test-only, and the tests need no Scala/JDK installation:

@@ -287,14 +287,19 @@ package, implicit Object parent, default constructor and one public parameterles
 method with a declared Int result and an actual typed Int literal. Other valid
 forms remain explicitly unsupported. Validation does not re-type source, mutate
 stores/arenas/indices/symbols, or publish files. A separate `EncodingContext` now
-projects names/types/references into owned AST fragments; no class/definition
-tree assembly, full-file encoding API or root-facade export exists yet.
+projects names/types/references into owned AST fragments. The checked plan's
+`declaration_skeleton` API assembles declaration trees into an explicitly
+incomplete structural document; completed method bodies/files and a root-facade
+export remain deferred.
 
 The crate's only normal dependencies are `dotty-core` and `dotty-tasty`. A test-only
 closure implements the binding port with `SourceTyper::source_typed_index().get`;
 the production crate neither imports nor depends on Typer, Namer, Parser or JVM.
 The source integration test consumes the unchanged #1190 Answer fixture and
-asserts exact canonical class/constructor/method identities and typed RHS root.
+asserts exact canonical class/constructor/method identities and typed RHS root,
+then emits and structurally validates the provisional skeleton without mutating
+the frontend state. Implicit and explicit-empty default constructor source
+clauses normalize to identical wire skeletons.
 
 The source filename is supplied by the integration layer: `SymbolOrigin::Source`
 contains a SourceId, not a path, so the store cannot authenticate that filename.
@@ -436,14 +441,15 @@ precondition; no name-based symbol discovery occurs. Local scope checks use the
 source semantic index and canonical ClassInfo declaration scopes.
 
 `ProjectedFragment` owns names and label-resolved AST bytes only. Bind reserved
-definitions through `bind_declaration` using downstream-supplied wire nodes of
-the correct declaration kind; this increment does not construct those trees.
+definitions through `bind_declaration` using supplied wire nodes of
+the correct declaration kind. The #1193 skeleton producer now constructs the
+frozen definition trees using this API.
 Every label must be bound and emitted once. Caller root/child order must preserve
 type projection order so SHAREDtype links point backward. Addresses are relative
 to fragment byte zero, so compose one whole intended AST in its context before
-finishing. Definition payload grammar, sections and full-file validation belong
-to #1193. A mutating-call error poisons the context, and no failed operation can
-publish a partial fragment or mutate compiler state.
+finishing. The skeleton producer owns declaration payload grammar, sections and
+structural file validation. A mutating-call error poisons the context, and no
+failed operation can publish a partial fragment or mutate compiler state.
 
 Projection defaults bound semantic work to 1,000,000 items, 100,000 names,
 4,096 bytes/name, and owner/type depth 256. Recursive type lowering has a hard
@@ -452,7 +458,56 @@ bound labels/fields to 1,000,000, depth to 256, bytes to 16 MiB and layout passe
 to 64. Type cycles, incomplete/unsupported types, invalid IDs/owners/namespaces
 and nested codec causes remain structured typed errors. The oracle comparison
 asserts reference/name meaning; it claims neither byte identity nor independent
-Scala acceptance of newly generated full files (none are generated here).
+Scala acceptance of completed files. The skeleton below remains intentionally
+incomplete.
+
+### Declaration-only provisional documents (#1193)
+
+`ValidatedPicklePlan::declaration_skeleton()` (or the variant accepting
+`ProjectionLimits`) produces an owned `DeclarationSkeleton`. It reuses the
+validated one-class plan and `EncodingContext` reservations. The constructor and
+methods keep their exact canonical identities, checked owners and source order;
+`declarations()` exposes their final addresses within ASTs, never core numeric
+IDs substituted for byte addresses. `intended_tasty_path()` comes from the
+canonical package/class names, independently of the source filename retained in
+`SourceMetadata` and SOURCEFILEattr. No API publishes a file.
+
+The wire shape is PACKAGE, TERMREFpkg, class TYPEDEF/TEMPLATE, the checked
+ClassInfo Object parent application, default constructor, then ordinary method.
+The parent is APPLY of the signed Object constructor SELECTin with NEW of the
+Object type and its shared owner type. Constructor EMPTYCLAUSE, direct Unit
+return syntax, absent RHS and STABLE match the oracle; STABLE derives from
+validated default-constructor provenance rather than inventing a core flag.
+The semantic constructor signature remains empty-clause/class-instance result.
+The ordinary method remains parameterless: Int IDENTtpt, no EMPTYCLAUSE and no
+extra METHODtype payload. Its source symbol remains concrete; the skeleton adds
+neither an abstract flag nor a replacement RHS. Only the already validated
+public/empty semantic metadata is emitted; unsupported flags and visibility
+return errors before serialization.
+
+`omitted_bodies()` records the exact canonical method/typed-RHS roots deliberately
+not emitted. `provisional_bytes()` is explicitly for structural inspection.
+TastyFileBuilder supplies the 28.9.0 header, ASTs and Attributes/SOURCEFILEattr,
+and validates the assembled document before returning bytes. The diagnostic
+header tooling string says `incomplete declaration skeleton`; its UUID is fixed,
+not a completed artifact content identity. The permitted Positions, Comments and
+compiler-injected SourceFile annotation omissions follow #1190. Concrete bodies
+are still missing: this output is non-interoperable and must not be published as
+a completed artifact. #1194 adds actual body emission and #1195 independently
+compiles Rust-produced output.
+
+The structural oracle test compares normalized package/class/template/parent,
+constructor and method shapes against the unchanged Scala Answer TASTy fixture.
+It preserves declaration names, nesting, parameter clauses, return syntax,
+signed names and modifier tails. The only expression omission is the ordinary
+method's real Int RHS; the only class annotation ignored is precisely the
+compiler SourceFile annotation. Shared types normalize to their targets and
+header/section layout is outside the declaration comparison. Additional tests
+assert exact canonical ID/address relationships, failure isolation, normalized
+constructor source clauses, Unicode names/output paths, filename provenance,
+missing/ambiguous identities, unsupported metadata, limits and deterministic
+output. This is a structural declaration guarantee, not byte equality with Scala
+or independent compiler acceptance.
 
 Use `NameTableBuilder`, `EncodedSection` and `TastyFileBuilder`; section order is
 `ASTs`, then optional `Positions`, optional `Comments`, then `Attributes`. Target

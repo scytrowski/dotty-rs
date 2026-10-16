@@ -219,7 +219,7 @@ pub enum PickleError {
         kind: LimitKind,
         limit: usize,
     },
-    /// Preserves name-table and primitive codec errors during projection.
+    /// Preserves nested codec errors during projection and provisional assembly.
     Encoding {
         cause: Box<TastyFileError>,
     },
