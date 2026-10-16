@@ -210,12 +210,10 @@ ordinary classes whose sole parent is canonical `java.lang.Object` project to
 metadata. Exact `Int` and `Boolean` types produce `I` and `Z`. Immutable
 fields produce `ACC_PRIVATE | ACC_FINAL`; mutable fields produce
 `ACC_PRIVATE` without `ACC_FINAL`. Metadata preserves the caller's field plan
-order and rejects repeated field symbols and duplicate JVM field names. The
-metadata-only API emits no fields. `emit_class` returns
-`FieldEmissionUnsupported` for a class with field metadata, even if its
-initialization plan claims `ImplicitNoArg`; field plans never imply a
-stateful-constructor proof. Existing empty-field plans keep their previous
-metadata and emitted class shape.
+order and rejects repeated field symbols and duplicate JVM field names. Whole
+class emission installs these fields only when a validated primary constructor
+plan proves their initialization. `ImplicitNoArg` remains restricted to
+empty-field classes and preserves the previous public `<init>()V` shape.
 
 Method-body lowering accepts assignments to planned mutable primitive fields
 that resolve canonically to the current class's unqualified field identifier or
@@ -225,7 +223,8 @@ assignment completes with Unit and no value on the operand stack. Local
 assignments continue to use their canonical local slot and `istore`, including
 when a local shadows a field. Immutable fields, arbitrary receivers, and field
 writes in methods whose emitted code contains branches return typed errors.
-Whole-class field installation remains unsupported by `emit_class`.
+`emit_class` carries these field references into the classfile after validating
+the field and constructor plans.
 
 The backend treats each field/RHS pair as frontend proof. A `TreeId<Typed>`
 does not carry a session tag, so the producer must obtain the ID from the same
@@ -314,8 +313,8 @@ and locals keep their existing loads. Other receivers, fields absent from the
 plan, stale targets, and prefixes that do not identify the current instance
 return contextual errors. Field reads within `If`, `While`, or other branching
 CFG regions are rejected explicitly until the stack-map analyzer can track the
-temporary reference operand. This method-level API does not publish a class
-file; `emit_class` continues to fail closed for plans containing fields.
+temporary reference operand. Whole-class emission uses this same lowering path
+for planned methods and emits no artifact if any method fails.
 
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
@@ -325,29 +324,32 @@ forms must be handled by a separate contract before they can be emitted.
 ## Whole-class emission
 
 `emit_class` composes one planned class into a class file at
-`JVM_CLASSFILE_MAJOR_VERSION` (65). The artifact contains a public ordinary
-class extending canonical `java/lang/Object`, one synthesized public
-`<init>()V`, and the public instance methods listed in `JvmClassPlan::methods`
-in plan order. Method bodies are lowered through the same typed expression
-path described above. The file is encoded into an owned `GeneratedClass` only
-after every method and class-file structure has been built successfully.
+`JVM_CLASSFILE_MAJOR_VERSION` (65). The artifact contains an ordinary class extending canonical
+`java/lang/Object`, validated fields in frontend source order, one constructor,
+and the planned instance methods in plan order. `ImplicitNoArg` emits the
+existing public `<init>()V` and accepts no fields. `PrimaryConstructor` emits
+the exact validated descriptor and public/private access from canonical
+constructor metadata; its code calls `Object.<init>()V`, then appends each
+source-ordered primitive field initializer, then returns. No parameterized
+class gets an extra `()V`. Method bodies use the same typed lowering path as
+before. The file is encoded into an owned `GeneratedClass` only after every
+method and class-file structure has been built successfully.
 
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
 arguments, fields, or template initialization expressions. The backend checks
 that the class's completed `ClassInfo` has exactly its canonical `Object`
-parent, has no self type, declares no non-method members, and has at most one
-no-argument primary constructor. A missing plan, a plan marked `Unsupported`,
-or a class shape outside those checks returns a typed error; the backend does
-not infer initialization safety from an empty method list. The synthesized
-constructor calls `java/lang/Object.<init>()V` and returns.
+parent and has no self type. It checks that every field and method declaration
+is represented by the supplied plan. A missing plan, a plan marked
+`Unsupported`, an unplanned member, or a class shape outside the supported
+subset returns a typed error; the backend does not infer initialization
+safety from an empty method list.
 
-The emitted class has no fields, interfaces, class initializer, Scala/TASTy
-metadata, or unplanned methods. Field plans are currently metadata only and
-cause class emission to fail closed. Constructors with parameters, additional
-constructors, field initializers, nested types, explicit superclass behavior,
-and other class initialization semantics remain unsupported. The API returns
-only after encoding succeeds, so a failure does not expose a partial artifact.
+The emitted class has no interfaces, class initializer, Scala/TASTy metadata,
+or unplanned methods. Additional constructors, nested types, explicit
+superclass behavior, and other class initialization semantics remain
+unsupported. The API returns only after encoding succeeds, so a failure does
+not expose a partial artifact.
 
 The lower-level `dotty-classfile::CodeBuilder::pop` operation discards one
 category-one JVM stack value. Linear analysis accepts represented
@@ -474,15 +476,16 @@ coercion, constant folding, or frontend dependency is introduced.
 ### Explicit primary constructor metadata
 
 `JvmClassInitializationPlan::PrimaryConstructor` carries a
-`JvmPrimaryConstructorPlan` for metadata projection only. It does not authorize
-constructor bytecode emission: `emit_class` rejects this mode, including an
-explicit empty-parameter plan. Existing frontend proofs of `ImplicitNoArg`
-retain their prior empty public `<init>()V` emission and do not require a new
-plan.
+`JvmPrimaryConstructorPlan` that authorizes emission only after its constructor,
+field, class, and typed initializer metadata all validate. Existing frontend
+proofs of `ImplicitNoArg` retain their prior empty public `<init>()V` emission
+and do not require a new constructor plan.
 
 The frontend collects the constructor through `Template.constructor` and its
 parameters through `SourceSemanticIndex::derived_symbol_at(constructor, source,
-parameter_tree)`, in source clause order. `JvmPrimaryConstructorPlan::from_source`
+parameter_tree)`, in source clause order. A constructor with no value-parameter
+clause is treated as the zero-parameter form; one ordinary clause is also
+supported. `JvmPrimaryConstructorPlan::from_source`
 checks those supplied identities against the shared core AST and semantic
 index, then retains a private, owned proof. It does not tokenize, parse,
 complete symbols, type expressions, or depend on the parser/namer/typer crates.
@@ -506,8 +509,10 @@ proven public/private visibility. Private constructors stay private. Generic,
 secondary, contextual, defaulted, by-name, erased and repeated parameters,
 parameter accessors, annotations, qualified visibility, and non-primitive
 parameters fail with structured errors. Source proof rejection does not
-publish partial metadata or mutate semantic state. No new Scala constructor,
-accessor, field store, `new` expression, or JVM constructor body is synthesized.
+publish partial metadata or mutate semantic state. Emission creates only the
+proved constructor, with its exact descriptor and access flags; it does not add
+a fallback constructor, Scala accessors, field stores outside the approved
+initializer path, or `new` expressions.
 
 ### Constructor field initializer fragments
 
@@ -530,7 +535,7 @@ user method calls, `this` escape, control-flow expressions, and other
 unsupported typed nodes fail with contextual `JvmCodegenError`s.
 
 `JvmConstructorFieldInitializerPlan::append_to` appends only those field
-instructions. The caller must emit `aload_0; invokespecial
-java/lang/Object.<init>()V` before the plan and append `return` after it. This
-API does not install class fields or synthesize a JVM constructor; complete
-class and constructor emission remains a separate increment.
+instructions. `emit_class` emits `aload_0; invokespecial
+java/lang/Object.<init>()V` before the plan and appends `return` afterward. It
+also installs the validated private field_info entries and uses the exact
+constructor descriptor and access flags from metadata.
