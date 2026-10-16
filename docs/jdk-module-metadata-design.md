@@ -242,8 +242,10 @@ Keep the next work incremental and separate:
    filename/descriptor mismatches; it does not perform resolution.
 4. **Benchmark**: measure decoding and metadata projection on a bounded JDK
    fixture set; do not benchmark full JMOD archive loading as codec work.
-5. **Compatibility gate**: compare against the pinned Java 21 oracle and add
-   malformed-input expectations before changing the source-language typer.
+5. **Compatibility gate**: completed by #1202. The opt-in real JDK 21 gate
+   decodes `java.base`, `java.net.http`, and `jdk.jshell` descriptors and
+   compares typed metadata with `jmod describe`; malformed-input expectations
+   remain covered by focused classfile and classloader fixtures.
 
 `dotty-classfile` owns the wire codec, `dotty-classloader` owns discovery and
 catalog concerns, and `dotty-typer`/`SymbolResolver` are outside this issue's
