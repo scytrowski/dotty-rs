@@ -21,7 +21,14 @@ use dotty_core::types::Type;
 
 mod boolean_ops;
 mod call_target;
+mod constructor;
+mod constructor_initializers;
 mod descriptor;
+pub use constructor::{JvmConstructorIssue, JvmConstructorMetadata, JvmPrimaryConstructorPlan};
+pub use constructor_initializers::{
+    JvmConstructorFieldInitializer, JvmConstructorFieldInitializerPlan,
+    JvmConstructorInitializerInstruction,
+};
 mod emission;
 mod expression;
 mod identity;
@@ -199,6 +206,7 @@ pub struct JvmMethodMetadata {
 pub struct JvmClassMetadata {
     identity: JvmClassIdentity,
     fields: Vec<JvmFieldMetadata>,
+    constructor: Option<JvmConstructorMetadata>,
     methods: Vec<JvmMethodMetadata>,
 }
 
@@ -236,8 +244,10 @@ pub struct JvmFieldMetadata {
 }
 
 /// Frontend evidence about class initialization for whole-class emission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmClassInitializationPlan {
+    /// Validated source constructor metadata only; does not authorize emission.
+    PrimaryConstructor(JvmPrimaryConstructorPlan),
     /// The frontend proved that an empty `Object.<init>()V` constructor is
     /// equivalent to the source class: no constructor parameters or body,
     /// superclass arguments, fields, or template initializers are present.
@@ -393,6 +403,11 @@ impl JvmMethodPlan {
 /// A plan failed validation against its caller-owned semantic input.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmCodegenError {
+    /// A primary constructor plan or its source evidence is inconsistent.
+    InvalidPrimaryConstructor {
+        constructor: SymbolId,
+        issue: JvmConstructorIssue,
+    },
     /// The class ID is outside the supplied symbol table.
     UnknownClass { class: SymbolId },
     /// The method ID is outside the supplied symbol table.
@@ -616,6 +631,20 @@ pub enum JvmCodegenError {
         initializer: TreeId<Typed>,
         expected: JvmType,
         found: Option<JvmType>,
+    },
+    /// Constructor initializer lowering requires a validated primary constructor plan.
+    ConstructorInitializerContextUnavailable { class: SymbolId },
+    /// A field initializer reads a field before its source-ordered store.
+    FieldInitializerReadsUninitializedField {
+        field: SymbolId,
+        tree: TreeId<Typed>,
+        referenced_field: SymbolId,
+    },
+    /// A typed initializer tree is outside the supported literal/reference/intrinsic subset.
+    UnsupportedConstructorFieldInitializer {
+        field: SymbolId,
+        tree: TreeId<Typed>,
+        node: &'static str,
     },
     /// The source field modifier has no supported JVM field mapping.
     UnsupportedJvmFieldFlag {
@@ -986,6 +1015,7 @@ pub enum JvmCodegenError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolRole {
     Class,
+    Constructor,
     Field,
     Method,
     Parameter,
@@ -1159,6 +1189,10 @@ impl JvmClassPlan {
 }
 
 impl JvmClassMetadata {
+    /// Explicit primary constructor metadata, when the frontend supplied a plan.
+    pub fn constructor(&self) -> Option<&JvmConstructorMetadata> {
+        self.constructor.as_ref()
+    }
     /// Class identity, preserving its canonical semantic symbol.
     pub const fn identity(&self) -> &JvmClassIdentity {
         &self.identity
@@ -1506,6 +1540,23 @@ impl JvmCompilationUnit<'_> {
         expression::lower_planned_method_body(self, &metadata, definitions, method_metadata, body)
     }
 
+    /// Lowers planned primitive field initializers into source-ordered
+    /// constructor fragments using the validated primary-constructor slots.
+    ///
+    /// The returned plan excludes the superclass constructor call and final
+    /// `return`; callers must place its instructions after `Object.<init>()V`.
+    /// It supports primitive literals, canonical constructor parameters,
+    /// approved `Int` addition and Boolean negation, and reads of fields that
+    /// were initialized earlier in this plan. Unsupported expressions and
+    /// self/forward field reads return typed errors without modifying the unit.
+    pub fn lower_constructor_field_initializers(
+        &self,
+        class: SymbolId,
+        definitions: &Definitions,
+    ) -> Result<JvmConstructorFieldInitializerPlan, JvmCodegenError> {
+        constructor_initializers::lower(self, class, definitions)
+    }
+
     /// Resolves a typed ordinary call to a planned same-class virtual target.
     ///
     /// `call` must identify the complete typed `Apply` tree so the resolver can
@@ -1604,6 +1655,15 @@ impl JvmCompilationUnit<'_> {
                 });
             }
             self.validate_symbol_type(class_plan.class)?;
+            if let JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+                &class_plan.initialization
+            {
+                constructor.validate_binding(self.store, class_plan.class)?;
+                self.validate_symbol_type(constructor.symbol())?;
+                for parameter in constructor.parameters() {
+                    self.validate_symbol_type(*parameter)?;
+                }
+            }
 
             let mut class_field_symbols = HashSet::new();
             for field_plan in &class_plan.fields {

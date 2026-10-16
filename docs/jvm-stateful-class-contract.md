@@ -18,7 +18,7 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | Source shape | Canonical field identity | Initializer / constructor evidence | Status |
 | --- | --- | --- | --- |
 | `class Plain { private val seed: Int = 42; private val enabled: Boolean = true }` | Each declaration maps to a distinct `SymbolKind::Field`, owned by `Plain`, with `Visibility::Private`; neither has `MUTABLE`. `SymbolInfo` completes to the canonical Int or Boolean type. | Template body order is `seed`, then `enabled`. Each source RHS is typed with `type_expression_expected(rhs, context, completed_field_type)` using `field_initializer_context_for`; its literal `TreeId<Typed>` is read back unchanged through `source_typed_index().get(source, rhs)`. The literal keeps its singleton `Type::Constant` type. The frontend-issued `JvmFieldPlan`s preserve this order and project `I`/`Z`, private access, and immutable `ACC_FINAL`. | Frontend and JVM field metadata characterized; class-file field emission is unsupported. |
-| `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | Source signature and binding characterized. No JVM constructor plan or field emission exists. |
+| `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | Source binding and explicit constructor metadata characterized; constructor and field emission remain unsupported. |
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The parameter order comes from the source constructor clause. | Identity audit only; public accessor ABI is out of scope. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same clause ordering as `val`. | Identity audit only; public getter/setter ABI is out of scope. |
 
@@ -42,31 +42,35 @@ the `TermRef` target identifies the parameter used by the initializer.
 
 ## Constructor order and initialization contract
 
-For the supported future subset, constructor invocation must call
+For the supported subset, constructor invocation must call
 `java/lang/Object.<init>()V` first, then run supported field initializers in
-`Template.body` source order, then return. A plan must pair each field's
-canonical `SymbolId` with its exact typed initializer root. The field type and
-typed expression's widened value type must conform before code is emitted.
-There is no JVM slot for a field initializer itself. Constructor parameters
-retain source clause and parameter order; in the one-clause `Counter(start)`
-case, instance receiver occupies local slot 0 and `start` occupies slot 1.
-That layout is a proposed lowering rule, not an API currently represented in
-`dotty-core` or `dotty-jvm`.
+`Template.body` source order, then return. The
+`JvmCompilationUnit::lower_constructor_field_initializers` method now
+produces checked fragments for primitive literals, constructor parameters,
+approved primitive intrinsics, and reads of earlier initialized fields. A
+plan pairs each field's canonical `SymbolId` with its exact typed initializer
+root.
+The field type and typed expression's widened value type must conform before
+instructions are returned. There is no JVM slot for a field initializer
+itself. Constructor parameters retain source clause and parameter order; in the
+one-clause `Counter(start)` case, instance receiver occupies local slot 0 and
+`start` occupies slot 1. That parameter layout is exposed by
+`JvmConstructorMetadata`. These fragments do not constitute a complete
+constructor or class emitter.
 
-Earlier initialized fields can be read after their initializer has executed.
-The integration characterization also confirms that explicitly typed
-`this.self` and unqualified forward `later` initializers type successfully to
-the canonical field symbols, including the self-reference. The current source
-Typer resolves class members independent of runtime initialization order, and
-`field_initializer_context_for` neither checks initialization order nor
-rejects those explicit references. Inferred self and mutual cycles do fail in Typer with
-`RecursiveInferredFieldType`, and rollback leaves their symbols incomplete;
-the existing regression is
+Earlier initialized fields can be read by the implemented initializer
+lowering. The integration characterization also confirms that explicitly
+typed `this.self` and unqualified forward `later` initializers type
+successfully to the canonical field symbols, including the self-reference.
+The source Typer resolves class members independent of runtime initialization
+order, and `field_initializer_context_for` does not itself enforce runtime
+initialization order. Constructor initializer lowering rejects self and
+forward reads before returning instructions. Inferred self and mutual cycles
+do fail in Typer with `RecursiveInferredFieldType`, and rollback leaves their
+symbols incomplete; the existing regression is
 `inferred_field_recursion_guard_reports_direct_and_indirect_cycles` in
-`crates/dotty-typer/src/typer/mod.rs`. A future constructor plan must reject
-or defer self/forward reads with a contextual diagnostic before bytecode
-publication. It cannot treat successful name or type resolution as proof of
-safe initialization.
+`crates/dotty-typer/src/typer/mod.rs`. Successful name or type resolution is
+not proof that a field read is safe at its runtime initialization point.
 
 ## Scala field and accessor boundary
 
@@ -127,8 +131,11 @@ a valid field plan.
 
 ## Platform-neutral adapter shapes
 
-The field plan is implemented in `dotty-jvm`. The primary-constructor shape
-below remains proposed:
+Field plans and explicit primary-constructor metadata are implemented in
+`dotty-jvm`; constructor emission remains unsupported. The constructor plan
+retains private source evidence checked by `JvmPrimaryConstructorPlan::from_source`
+against the shared AST/index. Its inputs include the exact constructor and
+ordered derived parameter IDs. The field shape below remains unchanged:
 
 ```rust
 enum JvmFieldSourceVisibility {
@@ -141,11 +148,6 @@ struct JvmFieldPlan {
     source_visibility: JvmFieldSourceVisibility,
     initializer: Option<TreeId<Typed>>,
 }
-
-struct JvmPrimaryConstructorPlan {
-    symbol: SymbolId,
-    ordered_parameters: Vec<SymbolId>,
-}
 ```
 
 The frontend adapter owns plan construction because it has the parser, namer,
@@ -157,7 +159,14 @@ initializer conformance, source-order initialization, and the supported class
 and constructor shape. The class artifact must only be returned after every
 field, method, constructor, and class-file structure validates successfully.
 
-The current `JvmClassInitializationPlan::ImplicitNoArg` remains the only
-implemented initialization proof. It is valid only for the already documented
+`JvmClassInitializationPlan::PrimaryConstructor` now projects explicit metadata
+without permitting emission. `ImplicitNoArg` remains the only implemented
+proof authorizing constructor bytecode. It is valid only for the already documented
 empty no-argument class subset and must not be upgraded based on an empty
 method list when source fields or constructor parameters exist.
+
+The constructor metadata regressions in `jvm_stateful_class_contract.rs` cover
+`()V`, `(I)V`, `(ZI)V`, private access, canonical identity order, and the
+254-parameter instance limit. Unsupported source shapes are rejected before
+projection; malformed semantic information is also checked independently.
+See [the backend contract](jvm-backend.md#explicit-primary-constructor-metadata).

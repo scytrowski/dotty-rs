@@ -2182,7 +2182,7 @@ fn is_nothing_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions)
     }
 }
 
-fn validate_tree_type(
+pub(super) fn validate_tree_type(
     store: &SemanticStore,
     tree: TreeId<Typed>,
     ty: TypeId,
