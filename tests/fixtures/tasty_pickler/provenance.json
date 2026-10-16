@@ -23,6 +23,7 @@
     "Answer.scala": "a6dc526f51dfce838872242246750e833ce10b77ffdb2620745503d66bfd7b22",
     "Declarations.scala": "66777dae06c9fccebde35e7cf2515e5b07fe288397af07efcf759df8d845cba0",
     "Empty.scala": "ae39954e680796910cc182c92768ec8da29b98a0819a5decc468a2f2f845877a",
+    "Operations.scala": "5884f839f49e58683af06c26d8d1f54e7d686a6d8ca39f5b7b534eee7d8827d4",
     "Parameters.scala": "caa5b61881953e96f63f4ad2b44a74674cefe6c7805d13fcee0de082b3baa9e0",
     "References.scala": "e2e7e02c0a424c2dec7dcc4b9d4de9c7752b4d2568c1639bbcf40dfda7455365"
   },
@@ -30,6 +31,7 @@
     "Empty.tasty": "bfacda2b842f4dcfbefe8d4dafe697847e505a2380df0a1eb0a2abdad3155eef",
     "example/Answer.tasty": "1cf021c302e2bf64fabed58cf7ea1c80689726ad3b198d01d9facb6b2776a4c4",
     "example/Declarations.tasty": "06af714d14c013aa926110768a0dc3f429361d0645b4e638094f6499138179c6",
+    "example/Operations.tasty": "e582316003537e8a0f266e14f7909af679cca46f1061f15dfecb4e20993fb59e",
     "example/Parameters.tasty": "f87e10ad2e0b25a3b32de14b7c9eb03b78c3d0fb29c3c9bc537f4634987477d5",
     "example/References.tasty": "26c79a5c953316f6c98a29c32e4386e71217deeb8c0432ae00db0f51be2a647f"
   },

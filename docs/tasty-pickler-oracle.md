@@ -30,6 +30,7 @@ Fixtures are under [`tests/fixtures/tasty_pickler/`](../tests/fixtures/tasty_pic
 | `Parameters.scala` / `example/Parameters.tasty` | `pick(first: Int, second: Int): Int = second`: ordered PARAM definitions owned by `pick`; RHS `TERMREFdirect` targets **second**; `zero()` retains EMPTYCLAUSE |
 | `Declarations.scala` / `example/Declarations.tasty` | ABSTRACT class; `missing: Int` and `explicit(): Int` have **no RHS**; absent clause versus empty clause remains observable |
 | `References.scala` / `example/References.tasty` | A source reference to a later method is a **named SELECT**, not an AST-address forward reference; its qualified `this` has a `TYPEREFsymbol` targeting this exact class definition |
+| `Operations.scala` / `example/Operations.tasty` | Multiple methods; `use = identity(42)` is `APPLY(SELECTin(QUALTHIS(...), signed identity), INTconst 42)`; `identity(x)` has an ordered `PARAM` and `TERMREFdirect` to that parameter; `first = second` is a named forward `SELECT` from `this`; `zero()` has `EMPTYCLAUSE` |
 
 Each source produces exactly one top-level `.tasty`. Adjacent `.class` files are
 generated in temporary compiler output but are not checked in or supplied to the
@@ -162,12 +163,12 @@ the Rust inspector with `cargo build --locked`; `CARGO_TARGET_DIR` is honored.
 already-built inspector. Temporary files use Python's standard TMPDIR setting.
 
 `check` checks fixture provenance, recompiles sources into a fresh temporary
-directory and compares all five normalized snapshots; independently decompiles
+directory and compares all six normalized snapshots; independently decompiles
 and compiles each checked-in standalone fixture and reduced Answer; and requires
 Rust/Scala rejection of invalid magic and Scala rejection of a deliberately
 misplaced package file. A JSON result records each successful reader/compiler
 stage, fresh class and absence of adjacent input classfiles. On 2026-10-16 all
-five full fixtures plus reduced Answer passed with the pinned inputs above.
+six full fixtures plus reduced Answer passed with the pinned inputs above.
 
 Use the same executable harness for a future producer's candidate:
 

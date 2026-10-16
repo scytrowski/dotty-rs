@@ -690,3 +690,57 @@ and independent deterministic sessions. **These checks do not establish Scala
 compiler interoperability**; compilation of this Rust producer's output remains
 #1195. The earlier audit and sequencing sections describe historical decisions,
 not a requirement to keep the complete producer unimplemented.
+
+## Sprint 2 method, clause, parameter and reference contract (#1238)
+
+The following contract is pinned by `Operations.scala` compiled with Scala
+3.9.0 and by `tests/tasty_source_contract.rs`, which runs the same source
+through Lexer, Parser, Namer and SourceTyper. The integration test is audit-only:
+it neither constructs a pickler plan nor changes production crates. Canonical
+declaration identity comes from `SourceSemanticIndex::symbol_at(source, tree)`.
+Names locate fixture rows, then relationships are asserted by `SymbolId`,
+`TypeId`, owner, typed-tree edge or oracle snapshot node identity.
+
+| Source shape | Canonical model and source-frontend evidence | Scala 3.9 TASTy form and reference edge |
+| --- | --- | --- |
+| `def f: Int = ...` | `DefDef.value_param_clauses` is empty. Completed method info is the declared result `TypeId` (`Definitions.int`) directly; no `Type::Method` wrapper is synthesized. The RHS has an exact source-to-typed mapping in `SourceTypedIndex`. | `DEFDEF` has no parameter header/`EMPTYCLAUSE`, then result type tree and RHS. No extra `METHODtype` node. |
+| `def f(): Int = ...` | One present empty `value_param_clauses` entry distinguishes this from no clause. Completed type is `Type::Method` with zero params and Int result (`MethodKind::Plain`). | `DEFDEF` carries `EMPTYCLAUSE`, result type tree and RHS. |
+| `def f(x: Int): Int = x` | One ordered source clause. Its parameter tree resolves through `symbol_at` to a canonical ID owned by `f`, entered in `SourceSemanticIndex::scope_of(f)`, with completed Int info; `MethodType.params` preserves name/type/order but does not store that parameter ID. The RHS root is a typed `Ident` whose `Tree::ty` is `TermRef(Symbol(parameter_id))`. | `DEFDEF` → `PARAM x` → declared Int type; body root `TERMREFdirect` points to the `PARAM` definition address, not a name match. |
+| `def use: Int = identity(42)` | Typed RHS root is `TreeKind::Apply`; its function is an `Ident` with `Tree::ty = TermRef(Symbol(identity))`. The term-ref prefix is `ThisType { class: Operations }`. The ordered argument vector has one typed Int literal. | `APPLY` children are function then argument. Function is `SELECTin` with signed `identity(Int): Int`, qualified by `QUALTHIS` whose type reference targets the enclosing `Operations` class; argument is `INTconst 42`. |
+| `def first: Int = second` with later `def second` | Typed RHS reference has `TermRefTarget::Symbol` equal to the later method ID. Both methods are owned by the same class and have direct Int result types. | `SELECT second` with `QUALTHIS` for the canonical class. It is a **named selection**, not a forward AST-address reference; the snapshot's class-type edge is backward. |
+
+The default constructor retains its existing source-to-wire special case:
+the parser's synthetic constructor clause and normalized empty semantic clause
+produce `DEFDEF <init>` with `EMPTYCLAUSE`, Unit wire result, no RHS and
+`STABLE`. Ordinary source declarations do not inherit this constructor rule.
+
+The audit proves that tested declaration/parameter identities, owners,
+completed signatures, source clause order and typed body roots are available
+without a new Typer API. Missing `symbol_at(source, tree)` is a naming boundary
+failure; absent `Complete(TypeId)` after completion is a typer semantic failure;
+missing `SourceTypedIndex::get(source, rhs)` is specifically a source-to-typed
+mapping gap; and an unexpected typed root/reference target is a SourceTyper
+typing failure. The production pickler must report incomplete binding/semantic
+information or an unsupported form; it must not guess by spelling.
+
+### Sprint 2 v1 boundary
+
+The characterized v1 input is one named package, one ordinary public class
+with its default constructor, zero or more ordinary public monomorphic methods,
+and zero or one ordinary Int value-parameter clause per method. A clause may be
+absent, explicitly empty, or contain ordinary Int parameters. Accepted method
+bodies are an Int literal, a parameter reference, a same-class method
+reference (including a forward declaration reference), or a positional call to
+a same-class method. Preserve method and parameter declaration order.
+
+| Supported form | Emission/reference constraint | Scoped rejection outside v1 |
+| --- | --- | --- |
+| Absent / empty / one plain Int clause | `[]` vs `[[]]` vs `[[p...]]` stay distinct; emit no marker / `EMPTYCLAUSE` / ordered `PARAM`s respectively. | Multiple value clauses, `using`/implicit, erased/varargs or polymorphic parameters: `UnsupportedConstruct` at the method/parameter tree. |
+| Int literal or parameter body | Literal value/type agree with `Definitions.int`; parameter target is live, method-owned and belongs to its source clause. | Unsupported body or missing/foreign parameter identity: `UnsupportedConstruct`, `InvalidOwner` or `InvalidBinding` with method/tree IDs. |
+| Same-class reference or call | Require resolved `TermRefTarget::Symbol`, same-class owner, supported completed signature and canonical `this` prefix; positional arguments match clause arity/order. The observed forward `SELECT second` stays a named `this`-qualified edge. | Overload ambiguity, external/name-designed/unresolved target, unsupported signature or argument mismatch: scoped `UnsupportedConstruct`, `UnsupportedTypeReference` or `InvalidBinding`. |
+| Ordinary declarations | Public named package/class/method, no type params; result and accepted parameter types are canonical Int. | Other types, modifiers, annotations, visibility, polymorphism, fields, extra classes/objects/traits or nested packages: `UnsupportedConstruct` with offending symbol/tree. |
+
+Named arguments and external calls remain deferred, as do multiple clauses,
+contextual clauses and non-Int types even where Scala accepts them. This audit
+freezes the inputs for implementation issues; it does not authorize a serializer
+implementation or production API changes.
