@@ -178,7 +178,8 @@ typed representation in the format API is still required for later work.
 
 `tests/fixtures/jvm-reference-cfg/ReferenceFlow.java` is compiled with
 `javac --release 21`; `javap -v` records major version 65, `StackMapTable`
-entries, the `Counter` class reference, reference-bearing loop/local joins,
+entries including a local frame entry `locals = [ class Counter ]`, the
+corresponding `CONSTANT_Class`, reference-bearing loop/local joins,
 current-instance and field/call instructions, and object construction in
 branches. The integration test runs it under `java -Xverify:all` and checks
 the observable values. This is a JDK 21 positive verifier oracle; it does not

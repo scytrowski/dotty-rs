@@ -3326,6 +3326,7 @@ fn jdk21_reference_cfg_oracle_records_frames_without_enabling_backend_support() 
     for expected in [
         "major version: 65",
         "StackMapTable: number_of_entries",
+        "locals = [ class Counter ]",
         "class Counter",
         "Counter.increment",
         "Counter.get",
