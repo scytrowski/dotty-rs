@@ -52,6 +52,16 @@ impl JmodClassPath {
             package_prefixes,
         })
     }
+
+    pub(crate) fn origin(&self) -> ClassOrigin {
+        ClassOrigin::Jmod(self.path.clone())
+    }
+
+    pub(crate) fn read_module_info(&self) -> Result<Option<Vec<u8>>, ClassPathError> {
+        self.archive
+            .read_entry("classes/module-info.class")
+            .map_err(ClassPathError::from)
+    }
 }
 
 impl ClassPathEntry for JmodClassPath {
