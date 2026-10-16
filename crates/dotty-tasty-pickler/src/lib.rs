@@ -13,9 +13,13 @@
 
 mod error;
 mod plan;
+mod projection;
 
-pub use error::{Builtin, LimitKind, PickleError, SourceRole, TypeRole, UnsupportedFeature};
+pub use error::{
+    Builtin, LimitKind, PickleError, ReferenceError, SourceRole, TypeRole, UnsupportedFeature,
+};
 pub use plan::{
     DefaultConstructorPlan, MethodPicklePlan, PicklePlan, SourceMetadata, SourceTypedBindings,
     ValidatedPicklePlan, ValidationLimits,
 };
+pub use projection::{EncodingContext, ProjectedFragment, ProjectionLimits};
