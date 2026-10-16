@@ -1768,9 +1768,11 @@ struct ModuleAuditPath {
 
 struct PrefixOnlyPackagePath;
 
+type PackageLookupObservations = Rc<RefCell<Vec<(Vec<String>, bool)>>>;
+
 struct SharedResolverHandle<E: ClassPathEntry> {
     resolver: Rc<RefCell<Option<ClasspathSymbolResolver<E>>>>,
-    package_results: Rc<RefCell<Vec<(Vec<String>, bool)>>>,
+    package_results: PackageLookupObservations,
 }
 
 impl<E: ClassPathEntry> SymbolResolver for SharedResolverHandle<E> {
