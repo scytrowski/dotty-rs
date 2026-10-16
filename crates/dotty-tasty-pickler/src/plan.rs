@@ -549,14 +549,7 @@ impl<'a> Validator<'_, 'a> {
             return Err(self.unsupported(UnsupportedFeature::SelfType, Some(p.class)));
         }
         let class_scope = self.scope(p.class)?;
-        if self
-            .scope(package)?
-            .lookup_all(&class_name)
-            .iter()
-            .filter(|&&s| s == p.class)
-            .count()
-            != 1
-        {
+        if self.scope(package)?.lookup_all(&class_name) != [p.class] {
             return Err(PickleError::ScopeMembers { owner: package });
         }
         let TreeKind::Template(template) = &self.source_tree(class.rhs)?.kind else {

@@ -641,3 +641,16 @@ fn a_consistent_typed_literal_cannot_change_the_original_source_literal_value() 
         })
     );
 }
+
+#[test]
+fn the_package_must_bind_the_root_class_name_unambiguously() {
+    let mut f = Fixture::new();
+    let duplicate = f.store.symbols.alloc(f.store.symbols.get(f.class).clone());
+    let name = f.store.symbols.get(f.class).name;
+    let scope = f.index.scope_of(f.package).unwrap();
+    f.store.scopes.get_mut(scope).enter(name, duplicate);
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::ScopeMembers { owner: f.package })
+    );
+}
