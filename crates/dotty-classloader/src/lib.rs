@@ -16,6 +16,7 @@ mod field_symbol;
 mod inflate;
 mod jar_class_path;
 mod jdk_class_path;
+mod jdk_module_catalog;
 mod jmod_class_path;
 mod loader;
 mod manifest;
@@ -43,6 +44,10 @@ pub mod classloader {
     pub use crate::field_symbol::FieldSymbol;
     pub use crate::jar_class_path::JarClassPath;
     pub use crate::jdk_class_path::JdkClassPath;
+    pub use crate::jdk_module_catalog::{
+        JdkModuleCatalog, JdkModuleCatalogError, JdkModuleDescriptor, JdkModuleExport,
+        JdkModuleOpen, JdkModuleProvide, JdkModuleRequire,
+    };
     pub use crate::jmod_class_path::JmodClassPath;
     pub use crate::loader::{ClassLoadProfile, ClassLoader, ModuleIdentity};
     pub use crate::method_symbol::MethodSymbol;
