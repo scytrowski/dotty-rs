@@ -2410,7 +2410,7 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
 
 #[test]
 fn source_expression_failure_rolls_back_module_before_successful_member_retry() {
-    let text = "object Audit { def use: Int = { scala.io.Source.stdin; true } }";
+    let text = "package app { object Audit { def use: Int = { scala.io.Source.stdin; true } } }";
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -2458,7 +2458,7 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         ..ResolverMetrics::default()
     }));
     let typer_packages = namer_packages.snapshot();
-    let resolver = AuditResolver {
+    let mut resolver = AuditResolver {
         inner: ClasspathSymbolResolver::new(
             ScalaSourceAuditPath,
             definitions,
@@ -2469,6 +2469,39 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         metrics: Rc::clone(&metrics),
         class_path_probe: None,
     };
+    let scala_io = resolver
+        .inner
+        .resolve_package(&mut store, &["scala", "io"])
+        .unwrap()
+        .expect("Scala 3.9 fixture contains scala.io");
+    let scala_io_prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, scala_io));
+    let source_name = dotty_core::Name::new(store.names.intern("Source"), Namespace::Term);
+    let source_object = resolver
+        .inner
+        .resolve_member(
+            &mut store,
+            &MemberRequest {
+                prefix: scala_io_prefix,
+                name: source_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .expect("Scala 3.9 fixture contains scala.io.Source");
+    let source_module_class = resolver
+        .inner
+        .module_class_of_object(&store, source_object)
+        .unwrap()
+        .expect("Source has a canonical ModuleClass identity");
+    assert!(matches!(
+        store.symbols.get(source_module_class).info,
+        dotty_core::SymbolInfo::Missing
+    ));
+    let source_object_before = store.symbols.get(source_object).clone();
+    let source_module_before = store.symbols.get(source_module_class).clone();
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -2481,6 +2514,15 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
     let context = typer.expression_context_for(method).unwrap();
     let store_before = typer.store().checkpoint();
     let typed_before = typer.typed_ast().checkpoint();
+    let app_package = typer_packages.symbol(&["app"]).unwrap();
+    let app_scope = typer_packages.scope_of(app_package).unwrap();
+    let mut app_entries_before = typer
+        .store()
+        .scopes
+        .get(app_scope)
+        .entered_symbols()
+        .collect::<Vec<_>>();
+    app_entries_before.sort_by_key(|symbol| symbol.index());
 
     let error = typer
         .type_expression_expected(rhs, context, definitions.int)
@@ -2504,6 +2546,23 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         typer.source_typed_index().get(source, stdin_selection),
         None
     );
+    assert_eq!(
+        typer.store().symbols.get(source_object),
+        &source_object_before
+    );
+    assert_eq!(
+        typer.store().symbols.get(source_module_class),
+        &source_module_before,
+        "outer failure restores the pre-existing incomplete module shell"
+    );
+    let mut app_entries_after = typer
+        .store()
+        .scopes
+        .get(app_scope)
+        .entered_symbols()
+        .collect::<Vec<_>>();
+    app_entries_after.sort_by_key(|symbol| symbol.index());
+    assert_eq!(app_entries_after, app_entries_before);
 
     let typed_stdin = typer
         .type_expression(stdin_selection, context)
