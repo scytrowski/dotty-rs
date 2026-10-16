@@ -106,9 +106,11 @@ impl ClassPathEntry for DottyCoreClassPath {
     }
 }
 
+type PackageRequestTrace = std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, Option<SymbolId>)>>>;
+
 struct TracedResolver<E: ClassPathEntry> {
     inner: ClasspathSymbolResolver<E>,
-    package_requests: std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, Option<SymbolId>)>>>,
+    package_requests: PackageRequestTrace,
 }
 
 impl<E: ClassPathEntry> SymbolResolver for TracedResolver<E> {
@@ -619,7 +621,8 @@ fn dotty_core_import_resolves_to_its_package_before_a_later_lookup_blocker() {
             _ => None,
         })
         .unwrap();
-    let package_requests = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let package_requests: PackageRequestTrace =
+        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let resolver = TracedResolver {
         inner: ClasspathSymbolResolver::new(
             DottyCoreClassPath,
