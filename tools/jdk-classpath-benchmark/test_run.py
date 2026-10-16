@@ -220,6 +220,12 @@ class MetadataTests(unittest.TestCase):
             self.assertTrue((root / "docs/jdk-module-metadata-performance-raw.json").is_file())
             self.assertIn("10 per cohort (30 processes)", stdout.getvalue())
 
+    def test_observed_peak_uses_all_checkpoints(self):
+        row = self.sample()
+        row["after_calls"]["peak_rss_kib"] = 500
+        # Preserve/report the kernel values even if a later reading is lower.
+        self.assertEqual(benchmark.summarize_metadata([row])["observed_peak_rss_kib"], {"median": 500, "p95": 500})
+
     def test_child_failure_is_reported(self):
         with mock.patch.object(benchmark.subprocess, "run", return_value=SimpleNamespace(returncode=2, stdout="", stderr="bad descriptor")):
             with self.assertRaisesRegex(RuntimeError, "bad descriptor"):

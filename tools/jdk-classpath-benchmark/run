@@ -343,6 +343,7 @@ def summarize_metadata(samples):
         return quantiles([getter(row) / scale for row in samples])
 
     return {
+        "observed_peak_rss_kib": metric(lambda row: max(row[phase]["peak_rss_kib"] for phase in RESOURCE_PHASES)),
         "init_ms": metric(lambda row: row["init_ns"], 1_000_000),
         "first_catalog_ms_per_session": metric(lambda row: sum(row["first_catalog_per_session_ns"]) / row["sessions"], 1_000_000),
         "first_catalog_session_0_ms": metric(lambda row: row["first_catalog_per_session_ns"][0], 1_000_000),
@@ -412,6 +413,8 @@ def main():
             raise RuntimeError("--samples must be at least 10 for a baseline run")
         path, modules = jdk_path(args)
         environment_info = environment(path, modules, bool(args.jmods))
+        if args.metadata:
+            environment_info["rss_method"] = "Linux /proc/self/status VmRSS and VmHWM in KiB at resource checkpoints; observed peak is the maximum checkpoint VmHWM"
         if not PROC_STATUS.is_file():
             raise RuntimeError("Linux /proc/self/status with VmHWM is required to measure peak RSS")
         binary = Path(args.binary).expanduser().resolve() if args.binary else build_driver()
