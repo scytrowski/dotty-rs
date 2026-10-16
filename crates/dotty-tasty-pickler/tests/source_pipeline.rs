@@ -8,7 +8,10 @@ use dotty_typer::SourceTyper;
 
 const ANSWER: &str = include_str!("../../../tests/fixtures/tasty_pickler/Answer.scala");
 
-fn source_plan(text: &str, edit: impl FnOnce(&mut PicklePlan<'_>)) -> Result<(), PickleError> {
+fn source_plan(
+    text: &str,
+    edit: impl FnOnce(&mut PicklePlan<'_>),
+) -> Result<DeclarationSkeleton, PickleError> {
     let source = SourceId::from_index(7);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -161,18 +164,80 @@ fn source_plan(text: &str, edit: impl FnOnce(&mut PicklePlan<'_>)) -> Result<(),
             value: Constant::Int(42)
         })
     ));
-    Ok(())
+    let skeleton = checked.declaration_skeleton()?;
+    let file =
+        dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(skeleton.provisional_bytes())
+            .unwrap();
+    assert_eq!(file.source_file().unwrap(), Some("Answer.scala"));
+    assert_eq!(
+        skeleton.omitted_bodies(),
+        &[OmittedMethodBody {
+            method: methods[0].symbol,
+            typed_root: body
+        }]
+    );
+    assert_eq!(typer.store().checkpoint(), mark);
+    assert_eq!(
+        format!(
+            "{:?}{:?}{:?}{:?}",
+            typer.store(),
+            typer.typed_ast(),
+            index,
+            parsed.ast
+        ),
+        before
+    );
+    Ok(skeleton)
 }
 
 #[test]
 fn actual_answer_source_hands_off_exact_canonical_symbols_and_typed_rhs() {
-    source_plan(ANSWER, |_| {}).unwrap();
+    let skeleton = source_plan(ANSWER, |_| {}).unwrap();
+    assert_eq!(skeleton.intended_tasty_path(), "example/Answer.tasty");
+}
+
+#[test]
+fn backquoted_class_and_package_components_use_encoded_artifact_paths_only() {
+    use dotty_tasty::tasty::*;
+
+    for (package, class, expected) in [
+        ("example", "A-B", "example/A$minusB.tasty"),
+        ("p-q", "Answer", "p$minusq/Answer.tasty"),
+        ("p+q", "A B", "p$plusq/A$u0020B.tasty"),
+        ("example", "😀", "example/$uD83D$uDE00.tasty"),
+    ] {
+        let text = format!("package `{package}`; class `{class}` {{ def value: Int = 42 }}");
+        let skeleton = source_plan(&text, |_| {}).unwrap();
+        assert_eq!(skeleton.intended_tasty_path(), expected);
+        let file = TastyFile::parse_and_validate_scala_3_9(skeleton.provisional_bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let definition = index
+            .get(skeleton.declarations()[0].address)
+            .unwrap()
+            .decode_definition()
+            .unwrap();
+        assert_eq!(file.render_name(definition.name()).unwrap(), class);
+        let roots = file.asts().unwrap();
+        let wire_package = roots.get(0).unwrap().decode_package().unwrap();
+        let RawTree::Leaf(path) = wire_package.path else {
+            panic!()
+        };
+        assert_eq!(file.render_name(path.name_ref().unwrap()).unwrap(), package);
+    }
 }
 
 #[test]
 fn a_second_independent_source_session_validates_without_cross_session_identity_assumptions() {
     source_plan(ANSWER, |_| {}).unwrap();
     source_plan(ANSWER, |_| {}).unwrap();
+}
+
+#[test]
+fn real_source_default_constructor_clauses_normalize_without_fabricating_method_parens() {
+    let implicit = source_plan(ANSWER, |_| {}).unwrap();
+    let explicit =
+        source_plan(&ANSWER.replace("class Answer:", "class Answer():"), |_| {}).unwrap();
+    assert_eq!(implicit.provisional_bytes(), explicit.provisional_bytes());
 }
 
 #[test]

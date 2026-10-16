@@ -307,6 +307,10 @@ impl<'a> EncodingContext<'a> {
     pub fn intern_name(&mut self, name: Name) -> Result<NameRef, PickleError> {
         self.run(|c| c.utf8(c.text(name.text())?))
     }
+    /// Bounded wire metadata, which is not an ordinary semantic identifier.
+    pub(crate) fn intern_wire_text(&mut self, text: &str) -> Result<NameRef, PickleError> {
+        self.run(|c| c.utf8(text))
+    }
     fn package_name(&mut self, package: SymbolId) -> Result<NameRef, PickleError> {
         let mut path = vec![];
         let mut seen = HashSet::new();

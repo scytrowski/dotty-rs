@@ -92,7 +92,8 @@ impl Default for ValidationLimits {
 }
 
 /// Immutable checked view tied to the plan and its borrowed compilation session.
-/// This type proves the minimal input contract only; no bytes are emitted yet.
+/// Validation emits no bytes. Consumers may explicitly build an incomplete
+/// declaration skeleton from this checked input.
 pub struct ValidatedPicklePlan<'p, 'a> {
     plan: &'p PicklePlan<'a>,
     package: SymbolId,
