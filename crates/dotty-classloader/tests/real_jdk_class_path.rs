@@ -27,30 +27,90 @@ fn jmods_directory() -> PathBuf {
     .join("jmods")
 }
 
-fn jmod_executable(jmods: &Path) -> PathBuf {
-    if let Some(home) = std::env::var_os("JAVA_HOME") {
-        return PathBuf::from(home).join("bin/jmod");
-    }
-    let candidate = jmods.parent().unwrap_or(jmods).join("bin/jmod");
+fn jmod_executable(jmods: &Path, java_home: Option<&Path>) -> Result<PathBuf, String> {
+    let executable = if cfg!(windows) { "jmod.exe" } else { "jmod" };
+    let candidate = jmods.parent().unwrap_or(jmods).join("bin").join(executable);
     if candidate.is_file() {
-        candidate
-    } else {
-        PathBuf::from("jmod")
+        return Ok(candidate);
     }
+
+    if let Some(home) = java_home
+        && let (Ok(selected_jmods), Ok(home_jmods)) =
+            (jmods.canonicalize(), home.join("jmods").canonicalize())
+        && selected_jmods == home_jmods
+    {
+        let candidate = home.join("bin").join(executable);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!(
+        "matching JDK jmod tool was not found beside {}; JAVA_HOME/PATH fallbacks are ignored because they may belong to a different JDK",
+        jmods.display()
+    ))
 }
 
-fn run_jmod(jmod: &Path, args: &[&str]) -> String {
-    let output = Command::new(jmod)
+#[test]
+fn jmod_cli_stays_with_the_selected_jmods_despite_a_different_or_invalid_java_home() {
+    let scratch = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../target/jmod-tool-selection-{}",
+        std::process::id()
+    ));
+    let selected_home = scratch.join("selected-jdk");
+    let selected_jmods = selected_home.join("jmods");
+    let selected_tool =
+        selected_home
+            .join("bin")
+            .join(if cfg!(windows) { "jmod.exe" } else { "jmod" });
+    let other_home = scratch.join("other-jdk");
+    let other_tool = other_home
+        .join("bin")
+        .join(if cfg!(windows) { "jmod.exe" } else { "jmod" });
+    let missing_home = scratch.join("missing-jdk");
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&selected_jmods).unwrap();
+    std::fs::create_dir_all(selected_tool.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(other_tool.parent().unwrap()).unwrap();
+    std::fs::write(&selected_tool, b"selected JDK tool").unwrap();
+    std::fs::write(&other_tool, b"unrelated JDK tool").unwrap();
+
+    assert_eq!(
+        jmod_executable(&selected_jmods, Some(&other_home)).unwrap(),
+        selected_tool,
+        "an unrelated JAVA_HOME must not override an explicit JMOD path"
+    );
+    assert_eq!(
+        jmod_executable(&selected_jmods, Some(&missing_home)).unwrap(),
+        selected_tool,
+        "a stale JAVA_HOME must not override an explicit JMOD path"
+    );
+
+    let detached_jmods = scratch.join("detached/jmods");
+    std::fs::create_dir_all(&detached_jmods).unwrap();
+    assert!(
+        jmod_executable(&detached_jmods, Some(&other_home)).is_err(),
+        "without the matching tool, do not silently fall back to an unrelated JAVA_HOME"
+    );
+    let _ = std::fs::remove_dir_all(scratch);
+}
+
+fn run_tool(executable: &Path, args: &[&str]) -> String {
+    let output = Command::new(executable)
         .args(args)
         .output()
-        .unwrap_or_else(|error| panic!("could not run {} {args:?}: {error}", jmod.display()));
+        .unwrap_or_else(|error| panic!("could not run {} {args:?}: {error}", executable.display()));
     assert!(
         output.status.success(),
         "{} {args:?} failed: {}",
-        jmod.display(),
+        executable.display(),
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("jmod output is UTF-8")
+}
+
+fn run_jmod(jmod: &Path, args: &[&str]) -> String {
+    run_tool(jmod, args)
 }
 
 fn jmod_observable_lines(module: &JdkModuleDescriptor) -> Vec<String> {
@@ -97,6 +157,9 @@ fn jmod_observable_lines(module: &JdkModuleDescriptor) -> Vec<String> {
         providers.sort();
         format!("provides {} with {}", row.service, providers.join(" "))
     }));
+    if let Some(main_class) = &module.main_class {
+        rows.push(format!("main-class {main_class}"));
+    }
     rows.sort();
     rows
 }
@@ -376,7 +439,9 @@ fn checks_typed_jdk21_descriptors_against_jmod_describe() {
     let jmods = jmods_directory()
         .canonicalize()
         .expect("the supplied JDK jmods directory must exist");
-    let jmod = jmod_executable(&jmods);
+    let java_home = std::env::var_os("JAVA_HOME").map(PathBuf::from);
+    let jmod =
+        jmod_executable(&jmods, java_home.as_deref()).unwrap_or_else(|error| panic!("{error}"));
     let class_path = JdkClassPath::new(&jmods).expect("the supplied JMOD directory must open");
     let catalog = class_path
         .module_catalog()
@@ -429,7 +494,7 @@ fn checks_typed_jdk21_descriptors_against_jmod_describe() {
                 let words = line.split_whitespace().collect::<Vec<_>>();
                 matches!(
                     words.first().copied(),
-                    Some("exports" | "opens" | "requires" | "uses" | "provides")
+                    Some("exports" | "opens" | "requires" | "uses" | "provides" | "main-class")
                 ) || words.starts_with(&["qualified", "exports"])
                     || words.starts_with(&["qualified", "opens"])
                     || line.starts_with(&format!("{name}@"))
@@ -495,6 +560,67 @@ fn checks_typed_jdk21_descriptors_against_jmod_describe() {
             .iter()
             .all(|module| module.main_class.is_none()),
         "these JDK 21 descriptors omit ModuleMainClass"
+    );
+
+    let source = scratch.join("main-source");
+    let classes = scratch.join("main-classes");
+    let main_jmods = scratch.join("main-jmods");
+    std::fs::create_dir_all(source.join("compat")).unwrap();
+    std::fs::create_dir_all(&classes).unwrap();
+    std::fs::create_dir_all(&main_jmods).unwrap();
+    std::fs::write(
+        source.join("module-info.java"),
+        "module compat.main { exports compat; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("compat/Main.java"),
+        "package compat; public final class Main {}\n",
+    )
+    .unwrap();
+    let javac = jmod
+        .parent()
+        .unwrap()
+        .join(if cfg!(windows) { "javac.exe" } else { "javac" });
+    run_tool(
+        &javac,
+        &[
+            "-d",
+            classes.to_str().unwrap(),
+            source.join("module-info.java").to_str().unwrap(),
+            source.join("compat/Main.java").to_str().unwrap(),
+        ],
+    );
+    let main_jmod = main_jmods.join("compat.main.jmod");
+    run_jmod(
+        &jmod,
+        &[
+            "create",
+            "--class-path",
+            classes.to_str().unwrap(),
+            "--main-class",
+            "compat.Main",
+            main_jmod.to_str().unwrap(),
+        ],
+    );
+    let main_catalog = JdkClassPath::new(&main_jmods)
+        .unwrap()
+        .module_catalog()
+        .unwrap();
+    assert_eq!(
+        main_catalog
+            .get("compat.main")
+            .unwrap()
+            .main_class
+            .as_deref(),
+        Some("compat.Main")
+    );
+    let main_description = run_jmod(&jmod, &["describe", main_jmod.to_str().unwrap()]);
+    assert!(
+        main_description
+            .lines()
+            .any(|line| line == "main-class compat.Main"),
+        "jmod describe prints ModuleMainClass as a main-class row"
     );
     let _ = std::fs::remove_dir_all(&scratch);
 }

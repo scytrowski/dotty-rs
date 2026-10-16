@@ -37,7 +37,9 @@ cargo test -p dotty-classloader --test real_jdk_class_path --locked -- --ignored
 The `checks_typed_jdk21_descriptors_against_jmod_describe` test invokes the
 matching `jmod` CLI, extracts each exact module descriptor, and fails if the
 JDK tools, modules, typed fields, or CLI observations are unavailable or do
-not agree. Existing catalog and class lookup tests run in the same command.
+not agree. The CLI is selected from the JDK home beside the chosen `jmods`
+directory, so an unrelated or stale `JAVA_HOME` cannot replace it; there is no
+PATH fallback. Existing catalog and class lookup tests run in the same command.
 
 ## What the independent CLI establishes
 
@@ -50,12 +52,15 @@ example, JDK 21.0.8 `java.base` contains `jdk.internal.jrtfs` in the archive
 although it is not listed in that descriptor attribute.
 
 The command does not print raw `ModulePackages` membership as a separate
-attribute, `ModuleMainClass`, all encoded flag bits, or constant-pool indices.
-Those are checked against the decoded raw descriptor and JVMS-shaped fixtures,
-not inferred from CLI text. JDK-specific `ModuleTarget` and `ModuleHashes`
-remain preserved opaque attributes. The current JDK descriptors tested here
-have no main class; a present `ModuleMainClass` is covered by the pinned
-`fixture.main` classfile oracle.
+attribute, all encoded flag bits, or constant-pool indices. It does print a
+present `ModuleMainClass` as `main-class <binary-name>`; the three selected JDK
+modules omit that optional attribute. The gate also compiles a small module
+with a main class, creates its JMOD, and checks that `jmod describe` prints the
+`main-class` row and the catalog preserves it. Raw `ModulePackages` membership
+and constant-pool indices are checked against the decoded descriptor and
+JVMS-shaped fixtures, not inferred from CLI text. JDK-specific `ModuleTarget`
+and `ModuleHashes` remain preserved opaque attributes. The pinned
+`fixture.main` classfile oracle covers the typed attribute round trip.
 
 ## Regression gates and boundaries
 
