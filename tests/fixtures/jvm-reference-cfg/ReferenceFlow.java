@@ -15,6 +15,8 @@ final class Counter {
 }
 
 public final class ReferenceFlow {
+    private int value;
+
     static int loop(Counter counter, int remaining) {
         while (remaining > 0) {
             counter.increment();
@@ -25,7 +27,7 @@ public final class ReferenceFlow {
 
     int branchOnThis(boolean increment) {
         if (increment) {
-            return loop(new Counter(get()), 1);
+            return loop(new Counter(value), 1);
         }
         return 0;
     }
