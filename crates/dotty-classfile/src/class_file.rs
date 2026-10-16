@@ -689,9 +689,9 @@ fn validate_module_metadata(
                 reason: "java.base requires row has forbidden static-phase flag",
             });
         }
-        // Java 26 (major 70) permits ACC_TRANSITIVE on java.base; earlier
-        // supported releases retain the prohibition from JVMS 21.
-        if (54..70).contains(&class_file.version.major)
+        // Java 25 (major 69) permits ACC_TRANSITIVE on java.base; earlier
+        // supported releases retain the prohibition from JVMS 24.
+        if (54..69).contains(&class_file.version.major)
             && row.requires_flags & MODULE_ACC_TRANSITIVE != 0
         {
             return Err(ModuleDescriptorError::InvalidDirective {

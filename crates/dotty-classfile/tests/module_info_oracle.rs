@@ -435,7 +435,7 @@ fn java_base_requires_flags_follow_each_supported_release_rule() {
         );
     }
 
-    for major in [65, 66, 69] {
+    for major in [65, 66] {
         let mut reader = Reader::new(fixture.bytes);
         let mut class_file = ClassFile::decode(&mut reader).unwrap();
         class_file.version.major = major;
@@ -455,15 +455,33 @@ fn java_base_requires_flags_follow_each_supported_release_rule() {
         );
     }
 
-    let mut reader = Reader::new(fixture.bytes);
-    let mut java_26 = ClassFile::decode(&mut reader).unwrap();
-    java_26.version.major = 70;
-    for attribute in &mut java_26.attributes {
-        if let Attribute::Module(module) = attribute {
-            module.requires[0].requires_flags |= MODULE_ACC_TRANSITIVE;
+    for major in [69, 70] {
+        let mut reader = Reader::new(fixture.bytes);
+        let mut java_25_or_later = ClassFile::decode(&mut reader).unwrap();
+        java_25_or_later.version.major = major;
+        for attribute in &mut java_25_or_later.attributes {
+            if let Attribute::Module(module) = attribute {
+                module.requires[0].requires_flags |= MODULE_ACC_TRANSITIVE;
+            }
         }
+        assert_eq!(
+            java_25_or_later.validate_module_descriptor(),
+            Ok(()),
+            "ACC_TRANSITIVE is permitted on java.base at major {major}"
+        );
     }
-    assert_eq!(java_26.validate_module_descriptor(), Ok(()));
+}
+
+#[test]
+fn java_25_javac_allows_transitive_java_base_requirement() {
+    // Compiled from jdk25/fixture.transitive/module-info.java with Amazon Corretto 25.0.4.
+    let bytes =
+        include_bytes!("fixtures/jdk_module_info/jdk25/transitive-java-base-module-info.class");
+    let mut reader = Reader::new(bytes);
+    let class_file = ClassFile::decode(&mut reader).unwrap();
+
+    assert_eq!(class_file.version.major, 69);
+    assert_eq!(class_file.validate_module_descriptor(), Ok(()));
 }
 
 #[test]
