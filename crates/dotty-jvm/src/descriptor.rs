@@ -231,14 +231,29 @@ pub(super) fn descriptor_for(
         }
     };
 
-    let descriptor_text = format!(
-        "({}){}",
-        parameters
-            .iter()
-            .map(|ty| ty.descriptor_char())
-            .collect::<String>(),
-        result.descriptor_suffix()
-    );
+    let parameter_descriptor = parameters
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            ty.descriptor_char()
+                .ok_or(JvmCodegenError::ReferenceMethodDescriptorUnsupported {
+                    symbol: plan.parameters[index],
+                    ty: *ty,
+                })
+        })
+        .collect::<Result<String, _>>()?;
+    let result_descriptor = match result {
+        JvmReturnType::Value(ty @ JvmType::Reference(_)) => {
+            return Err(JvmCodegenError::ReferenceMethodDescriptorUnsupported {
+                symbol: plan.method,
+                ty,
+            });
+        }
+        JvmReturnType::Value(JvmType::Int) => "I",
+        JvmReturnType::Value(JvmType::Boolean) => "Z",
+        JvmReturnType::Void => "V",
+    };
+    let descriptor_text = format!("({parameter_descriptor}){result_descriptor}");
     let parsed = MethodDescriptor::parse(&descriptor_text).map_err(|error| {
         JvmCodegenError::InvalidGeneratedDescriptor {
             method: plan.method,
@@ -449,18 +464,22 @@ fn unsupported_type_error(store: &SemanticStore, symbol: SymbolId, ty: TypeId) -
 }
 
 impl JvmType {
-    /// Primitive JVM descriptor letter (`I` or `Z`).
-    pub const fn descriptor_char(self) -> char {
+    /// Primitive JVM descriptor letter (`I` or `Z`), if this is primitive.
+    pub const fn descriptor_char(self) -> Option<char> {
         match self {
-            Self::Int => 'I',
-            Self::Boolean => 'Z',
+            Self::Int => Some('I'),
+            Self::Boolean => Some('Z'),
+            Self::Reference(_) => None,
         }
     }
 
     /// JVM operand-stack category. Both supported primitives use an
     /// int-like, category-one slot while retaining distinct descriptors.
     pub const fn category(self) -> JvmValueCategory {
-        JvmValueCategory::IntLike
+        match self {
+            Self::Int | Self::Boolean => JvmValueCategory::IntLike,
+            Self::Reference(_) => JvmValueCategory::Reference,
+        }
     }
 
     /// Number of JVM local-variable slots occupied by this value.
@@ -468,23 +487,16 @@ impl JvmType {
         1
     }
 
-    const fn field_type(self) -> FieldType {
+    const fn field_type(self) -> Option<FieldType> {
         match self {
-            Self::Int => FieldType::Int,
-            Self::Boolean => FieldType::Boolean,
+            Self::Int => Some(FieldType::Int),
+            Self::Boolean => Some(FieldType::Boolean),
+            Self::Reference(_) => None,
         }
     }
 }
 
 impl JvmReturnType {
-    const fn descriptor_suffix(self) -> &'static str {
-        match self {
-            Self::Value(JvmType::Int) => "I",
-            Self::Value(JvmType::Boolean) => "Z",
-            Self::Void => "V",
-        }
-    }
-
     /// Return operand category, or `None` for the result-only JVM `void`.
     pub const fn category(self) -> Option<JvmValueCategory> {
         match self {
@@ -516,8 +528,10 @@ impl JvmMethodDescriptor {
     }
 }
 
-impl From<JvmType> for FieldType {
-    fn from(value: JvmType) -> Self {
-        value.field_type()
+impl TryFrom<JvmType> for FieldType {
+    type Error = JvmType;
+
+    fn try_from(value: JvmType) -> Result<Self, Self::Error> {
+        value.field_type().ok_or(value)
     }
 }

@@ -400,6 +400,11 @@ fn lower_leaf(
                         symbol,
                     });
                 }
+                if matches!(local.ty(), JvmType::Reference(_)) {
+                    return Err(JvmCodegenError::ReferenceLocalInstructionUnsupported {
+                        tree: tree_id,
+                    });
+                }
                 code.iload(usize::from(local.slot())).map_err(|error| {
                     JvmCodegenError::CodeBuilder {
                         tree: tree_id,
@@ -497,13 +502,19 @@ fn local_reference_slot(
         }
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol }),
     };
-    let found = crate::descriptor::primitive_semantic_value_type(
-        context.store,
-        context.definitions,
-        symbol,
-        semantic_type,
-    )?;
+    let found = match context.call_context {
+        Some((unit, _)) => unit.local_value_type(symbol, semantic_type, context.definitions)?,
+        None => crate::descriptor::primitive_semantic_value_type(
+            context.store,
+            context.definitions,
+            symbol,
+            semantic_type,
+        )?,
+    };
     if found != local.ty() {
+        if let Some(error) = reference_type_mismatch(local.ty(), found) {
+            return Err(error);
+        }
         return Err(JvmCodegenError::LocalReferenceTypeMismatch {
             tree,
             symbol,
@@ -812,9 +823,19 @@ fn emit_assignment(
     }
 
     let flow = emit_expression(context, rhs, code, depth + 1)?;
+    if let Flow::Value(found) = flow
+        && let Some(error) = reference_type_mismatch(local.ty(), found)
+    {
+        return Err(error);
+    }
     match flow {
         Flow::Diverges => Ok(Flow::Diverges),
         Flow::Value(found) if found == local.ty() => {
+            if matches!(found, JvmType::Reference(_)) {
+                return Err(JvmCodegenError::ReferenceLocalInstructionUnsupported {
+                    tree: tree_id,
+                });
+            }
             code.istore(usize::from(local.slot())).map_err(|error| {
                 JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -1146,6 +1167,11 @@ fn emit_local_declaration(
     })?;
 
     let flow = emit_expression(context, rhs, code, depth + 1)?;
+    if let Flow::Value(found) = flow
+        && let Some(error) = reference_type_mismatch(local.ty(), found)
+    {
+        return Err(error);
+    }
     if flow != Flow::Value(local.ty()) {
         return Err(JvmCodegenError::LocalInitializerFlowMismatch {
             method,
@@ -1154,6 +1180,10 @@ fn emit_local_declaration(
             expected: local.ty(),
             found: public_flow(flow),
         });
+    }
+
+    if matches!(local.ty(), JvmType::Reference(_)) {
+        return Err(JvmCodegenError::ReferenceLocalInstructionUnsupported { tree: declaration });
     }
 
     code.istore(usize::from(local.slot()))
@@ -2058,6 +2088,9 @@ fn merge_if_flows(
     let merged = match (then_flow, else_flow) {
         (Flow::Value(left), Flow::Value(right)) => {
             if left != right {
+                if let Some(error) = reference_type_mismatch(left, right) {
+                    return Err(error);
+                }
                 return Err(JvmCodegenError::IfBranchTypeMismatch {
                     tree,
                     branch: else_tree,
@@ -2207,6 +2240,15 @@ fn public_flow(flow: Flow) -> JvmExpressionFlow {
         },
         Flow::Unit => JvmExpressionFlow::Unit,
         Flow::Diverges => JvmExpressionFlow::Diverges,
+    }
+}
+
+fn reference_type_mismatch(expected: JvmType, found: JvmType) -> Option<JvmCodegenError> {
+    match (expected, found) {
+        (JvmType::Reference(expected), JvmType::Reference(found)) if expected != found => {
+            Some(JvmCodegenError::ReferenceTypeMismatch { expected, found })
+        }
+        _ => None,
     }
 }
 
@@ -2364,6 +2406,9 @@ mod tests {
                 let param_type = match ty {
                     JvmType::Int => definitions.int,
                     JvmType::Boolean => definitions.boolean,
+                    JvmType::Reference(_) => {
+                        panic!("test method descriptors do not accept references")
+                    }
                 };
                 let parameter = symbol(
                     &mut store,
@@ -2386,6 +2431,9 @@ mod tests {
                     .map(|ty| match ty {
                         JvmType::Int => 'I',
                         JvmType::Boolean => 'Z',
+                        JvmType::Reference(_) => {
+                            panic!("test method descriptors do not accept references")
+                        }
                     })
                     .collect::<String>()
             );
@@ -2485,11 +2533,17 @@ mod tests {
                 .map(|ty| match ty {
                     JvmType::Int => 'I',
                     JvmType::Boolean => 'Z',
+                    JvmType::Reference(_) => {
+                        panic!("test method descriptors do not accept references")
+                    }
                 })
                 .collect::<String>();
             let suffix = match result {
                 JvmReturnType::Value(JvmType::Int) => "I",
                 JvmReturnType::Value(JvmType::Boolean) => "Z",
+                JvmReturnType::Value(JvmType::Reference(_)) => {
+                    panic!("test method descriptors do not accept references")
+                }
                 JvmReturnType::Void => "V",
             };
             self.method.descriptor.descriptor_text = format!("({parameters}){suffix}");
@@ -3931,5 +3985,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(method_body_bytes(&fixture, code), vec![0xb1]);
+    }
+
+    #[test]
+    fn reference_flow_mismatch_reports_both_canonical_class_symbols() {
+        let mut fixture = Fixture::new(&[]);
+        let first = symbol(
+            &mut fixture.store,
+            SymbolKind::Class,
+            None,
+            fixture.definitions.int,
+        );
+        let second = symbol(
+            &mut fixture.store,
+            SymbolKind::Class,
+            None,
+            fixture.definitions.int,
+        );
+
+        assert_eq!(
+            reference_type_mismatch(JvmType::Reference(first), JvmType::Reference(second)),
+            Some(JvmCodegenError::ReferenceTypeMismatch {
+                expected: first,
+                found: second,
+            })
+        );
+        assert_eq!(
+            reference_type_mismatch(JvmType::Reference(first), JvmType::Reference(first)),
+            None
+        );
+        assert_eq!(
+            reference_type_mismatch(JvmType::Int, JvmType::Boolean),
+            None
+        );
     }
 }

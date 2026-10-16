@@ -338,10 +338,19 @@ fn field_metadata(
         ));
     }
 
+    let descriptor = field_type
+        .descriptor_char()
+        .ok_or(JvmCodegenError::UnsupportedJvmType {
+            symbol: plan.field,
+            ty: field_type_id,
+            kind: crate::UnsupportedJvmTypeKind::ReferenceClass,
+        })?
+        .to_string();
+
     Ok(JvmFieldMetadata {
         symbol: plan.field,
         name: name.to_owned(),
-        descriptor: field_type.descriptor_char().to_string(),
+        descriptor,
         access_flags: FieldAccessFlags(
             ACC_PRIVATE
                 | if field.flags.contains(SymbolFlags::MUTABLE) {

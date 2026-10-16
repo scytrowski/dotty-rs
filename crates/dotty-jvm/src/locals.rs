@@ -8,7 +8,7 @@ use dotty_core::symbols::SymbolInfo;
 
 use crate::{
     JvmCodegenError, JvmCompilationUnit, JvmLocalBinding, JvmLocalLayout, JvmLocalSlot,
-    JvmMethodMetadata, descriptor,
+    JvmMethodMetadata,
 };
 
 /// `max_locals` is a u16 count, so valid indexes are `0..u16::MAX`.
@@ -124,6 +124,7 @@ pub(super) fn method_local_layout_for(
     definitions: &Definitions,
 ) -> Result<JvmLocalLayout, JvmCodegenError> {
     unit.validate()?;
+    let all_metadata = unit.metadata(definitions)?;
     let method_symbol = method.symbol();
     let Some((class_plan, method_plan)) = unit.classes.iter().find_map(|class_plan| {
         class_plan
@@ -141,8 +142,12 @@ pub(super) fn method_local_layout_for(
             method: method_symbol,
         });
     }
-    let class_metadata =
-        class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
+    let class_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == class_plan.class)
+        .ok_or(JvmCodegenError::MissingClassPlan {
+            class: class_plan.class,
+        })?;
     let fresh_metadata = class_metadata
         .methods()
         .iter()
@@ -173,9 +178,14 @@ pub(super) fn method_local_layout_for(
                 });
             }
         };
-        let primitive =
-            descriptor::primitive_semantic_value_type(unit.store, definitions, binding.symbol, ty)?;
-        allocator.reserve(*binding, primitive)?;
+        let value_type = crate::reference::project_local_type_with_metadata(
+            unit,
+            binding.symbol,
+            ty,
+            definitions,
+            Some(&all_metadata),
+        )?;
+        allocator.reserve(*binding, value_type)?;
     }
     allocator.finish()
 }
