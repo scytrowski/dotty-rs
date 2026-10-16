@@ -308,6 +308,166 @@ fn compile_source(
     Ok(EmittedArtifact { class, path })
 }
 
+fn compile_two_class_constructor_source(
+    source_text: &str,
+    output_directory: &Path,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    let source_id = SourceId::from_index(1218);
+    let source = SourceText::new(source_text)
+        .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
+    let scanner = ContextualScanner::new(source_text)
+        .map_err(|error| PipelineFailure::Lexer(format!("{error:?}")))?;
+    if !scanner.diagnostics().is_empty() {
+        return Err(PipelineFailure::LexerDiagnostics(
+            scanner.diagnostics().to_vec(),
+        ));
+    }
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
+    if !parsed.diagnostics.is_empty() {
+        return Err(PipelineFailure::Parser(parsed.diagnostics));
+    }
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "ConstructorSmoke.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .map_err(PipelineFailure::NamerStructural)?
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        NamingOutcome::Named { diagnostics, .. } | NamingOutcome::Rejected { diagnostics } => {
+            return Err(PipelineFailure::NamerDiagnostics(diagnostics));
+        }
+    };
+
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        return Err(PipelineFailure::UnexpectedSourceShape("package root"));
+    };
+    let mut classes = Vec::new();
+    for tree in &package.stats {
+        let TreeKind::TypeDef(definition) = &parsed.ast.get(*tree).kind else {
+            continue;
+        };
+        let Some(class) = index.symbol_at(source_id, *tree) else {
+            return Err(PipelineFailure::MissingSourceIdentity("class declaration"));
+        };
+        if store.symbols.get(class).kind != SymbolKind::Class {
+            continue;
+        }
+        let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+            return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+        };
+        let initialization =
+            source_initialization_plan(class, &parsed.ast, template, source_id, &index, &store)
+                .map_err(PipelineFailure::Codegen)?;
+        if template
+            .body
+            .iter()
+            .any(|tree| matches!(parsed.ast.get(*tree).kind, TreeKind::ValDef(_)))
+        {
+            return Err(PipelineFailure::UnexpectedSourceShape(
+                "constructor smoke classes without fields",
+            ));
+        }
+        classes.push((
+            class,
+            definition.rhs,
+            template.constructor,
+            initialization,
+            collect_source_methods(&parsed.ast, &template.body, source_id, &index, &store)?,
+        ));
+    }
+    if classes.len() != 2 {
+        return Err(PipelineFailure::UnexpectedSourceShape(
+            "two planned constructor smoke classes",
+        ));
+    }
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (class, _, constructor_tree, initialization, _) in &classes {
+        typer
+            .complete_symbol(*class)
+            .map_err(PipelineFailure::Typer)?;
+        let constructor = index.symbol_at(source_id, *constructor_tree).ok_or(
+            PipelineFailure::MissingSourceIdentity("primary constructor"),
+        )?;
+        if matches!(
+            initialization,
+            JvmClassInitializationPlan::PrimaryConstructor(_)
+        ) {
+            typer
+                .complete_symbol(constructor)
+                .map_err(PipelineFailure::Typer)?;
+        }
+    }
+
+    let mut plans = Vec::with_capacity(classes.len());
+    for (class, _, _, initialization, source_methods) in classes {
+        let mut methods = Vec::with_capacity(source_methods.len());
+        for source_method in source_methods {
+            typer
+                .complete_symbol(source_method.symbol)
+                .map_err(PipelineFailure::Typer)?;
+            let body = match source_method.rhs {
+                Some(rhs) => {
+                    let context = typer
+                        .expression_context_for(source_method.symbol)
+                        .map_err(PipelineFailure::Typer)?;
+                    Some(
+                        typer
+                            .type_expression(rhs, context)
+                            .map_err(PipelineFailure::Typer)?,
+                    )
+                }
+                None => None,
+            };
+            methods.push(JvmMethodPlan {
+                method: source_method.symbol,
+                parameters: source_method.parameters,
+                locals: Vec::new(),
+                body,
+            });
+        }
+        plans.push(JvmClassPlan {
+            class,
+            fields: Vec::new(),
+            methods,
+            initialization,
+        });
+    }
+
+    let unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: plans,
+    };
+    let mut emitted = Vec::with_capacity(unit.classes.len());
+    for plan in &unit.classes {
+        let class =
+            emit_class(&unit, plan.class, &definitions).map_err(PipelineFailure::Codegen)?;
+        let path = output_directory.join(format!("{}.class", class.internal_name()));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(PipelineFailure::Io)?;
+        }
+        fs::write(&path, class.bytes()).map_err(PipelineFailure::Io)?;
+        emitted.push(EmittedArtifact { class, path });
+    }
+    Ok(emitted)
+}
+
 fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, PipelineFailure> {
     let source_id = SourceId::from_index(91);
     let source = SourceText::new(source_text)
@@ -2055,6 +2215,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0x3b..=0x3e
             | 0x4b..=0x4e
             | 0x57
+            | 0x59
             | 0x60
             | 0x64
             | 0x68
@@ -2066,7 +2227,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0xac
             | 0xb1 => 1,
             0x10 | 0x15 | 0x36 => 2,
-            0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb4..=0xb8 => 3,
+            0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };
         assert!(
@@ -3085,6 +3246,105 @@ fn verify_with_jdk(output_directory: &Path) {
         String::from_utf8_lossy(&java.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42\n10\n20");
+}
+
+#[test]
+fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
+    let output = TestOutputDirectory::new("two-class-constructor");
+    let artifacts = compile_two_class_constructor_source(
+        "class Counter(seed: Int)\nclass Client:\n  def build(seed: Int): Int =\n    new Counter(seed + 1)\n    42\n",
+        output.path(),
+    )
+    .unwrap();
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Counter", "Client"]
+    );
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .unwrap();
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode planned Client class");
+    class
+        .validate_references()
+        .expect("validate Client constant pool references");
+    let code = emitted_method_code(&class, "build");
+    assert_opcode_sequence(
+        code,
+        &[0xbb, 0x59, 0x1b, 0x04, 0x60, 0xb7, 0x57, 0x10, 0xac],
+    );
+    assert!(code[code.len() - 2] == 42);
+    let allocation_index = u16::from_be_bytes([code[1], code[2]]);
+    let ConstantPoolEntry::Class { name_index } = class
+        .constant_pool
+        .get(ConstantPoolIndex(allocation_index))
+        .unwrap()
+    else {
+        panic!("new must reference the planned Counter class")
+    };
+    assert_eq!(class.constant_pool.utf8(*name_index), Ok("Counter"));
+    let (invoke_offset, _) = decode_subset_instructions(code)
+        .into_iter()
+        .find(|(_, opcode)| *opcode == 0xb7)
+        .expect("constructor expression contains invokespecial");
+    let invoke_index = u16::from_be_bytes([code[invoke_offset + 1], code[invoke_offset + 2]]);
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = class
+        .constant_pool
+        .get(ConstantPoolIndex(invoke_index))
+        .unwrap()
+    else {
+        panic!("invokespecial must reference the planned constructor")
+    };
+    assert_eq!(class.constant_pool.class_name(*class_index), Ok("Counter"));
+    assert_eq!(
+        class.constant_pool.name_and_type(*name_and_type_index),
+        Ok(("<init>", "(I)V"))
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("ConstructorHarness.java");
+        fs::write(
+            &harness,
+            "public class ConstructorHarness { public static void main(String[] args) { System.out.println(new Client().build(10)); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .unwrap();
+        assert!(
+            javac.status.success(),
+            "javac rejected two-class smoke harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "ConstructorHarness",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected two planned classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42");
+    }
 }
 
 #[test]
