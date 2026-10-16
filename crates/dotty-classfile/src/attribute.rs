@@ -4135,6 +4135,10 @@ mod module_companion_attribute_tests {
             Some(ConstantPoolEntry::Class {
                 name_index: ConstantPoolIndex(5),
             }), // #6
+            Some(ConstantPoolEntry::Utf8("q".to_owned())),              // #7
+            Some(ConstantPoolEntry::Package {
+                name_index: ConstantPoolIndex(7),
+            }), // #8
         ])
     }
 
@@ -4149,7 +4153,7 @@ mod module_companion_attribute_tests {
     #[test]
     fn module_packages_roundtrips_ordered_indices_and_empty_presence() {
         let pool = pool();
-        for package_indices in [vec![], vec![ConstantPoolIndex(3), ConstantPoolIndex(3)]] {
+        for package_indices in [vec![], vec![ConstantPoolIndex(3), ConstantPoolIndex(8)]] {
             let attribute = Attribute::ModulePackages(ModulePackagesAttribute { package_indices });
             let encoded = attribute.encode(&pool).unwrap();
             let mut reader = Reader::new(&encoded);
