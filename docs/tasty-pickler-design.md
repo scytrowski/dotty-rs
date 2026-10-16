@@ -233,11 +233,12 @@ observed parent, constructor STABLE marker, Int `IDENTtpt` wrapper and RHS stay
 in the first contract. Do not add general annotation support or synthetic core
 symbols merely to reproduce incidental upstream bytes.
 
-## 6. Proposed immutable input contract
+## 6. Immutable input contract
 
-The following is an interface sketch for #1191, **not an API added by this audit**.
-It deliberately includes source evidence: an arbitrary in-range typed-body ID is
-not an authoritative method/body association.
+[#1191](https://github.com/scytrowski/dotty-rs/issues/1191) implements the validation
+boundary in [`dotty-tasty-pickler`](../crates/dotty-tasty-pickler/src/lib.rs).
+The following abbreviated interface includes source evidence: an arbitrary
+in-range typed-body ID is not an authoritative method/body association.
 
 ```rust,ignore
 // All semantic IDs below belong to these exact borrowed stores/arenas.
@@ -248,8 +249,8 @@ struct PicklePlan<'a> {
     source_ast: &'a AstArena<Untyped>,
     source_index: &'a SourceSemanticIndex,
     typed_bindings: &'a dyn SourceTypedBindings,
-    source: SourceId,
-    source_name: &'a str,                 // normalized, source-relative
+    source: SourceMetadata,              // owned SourceId + normalized String name
+    source_root: TreeId<Untyped>,         // explicit one-class PackageDef boundary
     class: SymbolId,
     class_tree: TreeId<Untyped>,
     constructor: DefaultConstructorPlan,
@@ -268,16 +269,32 @@ struct MethodPicklePlan {
 struct DefaultConstructorPlan {
     symbol: SymbolId,
     source_tree: TreeId<Untyped>,          // exact Template.constructor edge
+    parameter_clauses: Vec<Vec<SymbolId>>, // source clauses before normalization
 }
 ```
 
-Names of the structs/port are provisional; the ownership and evidence are not.
-Owning small ordered ID vectors does not clone semantic records. `validate(&self,
-limits) -> Result<ValidatedPicklePlan<'_>, PickleError>` returns a borrowed checked
-view; `encode(validated) -> Result<GeneratedTasty, PickleError>` eventually returns
-owned bytes, root class ID, normalized relative artifact path and header UUID.
-Neither operation mutates input stores, arenas, indices or symbols, invokes Typer,
-or publishes files. The caller stages/publishes only a complete successful result.
+Owning small ordered ID vectors does not clone semantic records. The current
+`PicklePlan::validate()` / `validate_with_limits(ValidationLimits)` entry points
+return a `ValidatedPicklePlan` borrowing the plan and its underlying session.
+`ValidatedPicklePlan::plan()` preserves those exact borrowed stores/arenas and
+`package()` exposes the canonical package reached through the class owner chain.
+The source root is required so extra top-level forms cannot be silently omitted.
+Constructor parameter IDs describe the **source** clauses; the semantic default
+constructor still has a normalized empty value clause and class-instance result.
+
+The current accepted boundary is one ordinary public class in one explicit named
+package, implicit Object parent, default constructor and one public parameterless
+method with a declared Int result and an actual typed Int literal. Other valid
+forms remain explicitly unsupported. Validation does not re-type source, mutate
+stores/arenas/indices/symbols, or publish files. No encoding API or root-facade
+export exists yet. Future encoding consumes the checked plan and returns owned
+bytes before a caller stages/publishes an artifact.
+
+The crate's only normal dependencies are `dotty-core` and `dotty-tasty`. A test-only
+closure implements the binding port with `SourceTyper::source_typed_index().get`;
+the production crate neither imports nor depends on Typer, Namer, Parser or JVM.
+The source integration test consumes the unchanged #1190 Answer fixture and
+asserts exact canonical class/constructor/method identities and typed RHS root.
 
 The source filename is supplied by the integration layer: `SymbolOrigin::Source`
 contains a SourceId, not a path, so the store cannot authenticate that filename.
@@ -340,7 +357,13 @@ separate; messages are presentation, not machine-readable discriminants.
 | `LimitExceeded` / `CyclicInput` | Owner/type/tree cycle, depth/fuel/name/node/byte budget, checked-address overflow; include budget and location. |
 | `Encoding` | Preserve the typed `NameTableError`, `WriteError`, `TermEncodeError`, or `TastyFileError` cause as applicable, plus emission context. Never parse error strings. |
 
-Initial proposed defaults: maximum semantic/tree/owner depth 256, total visited
+Current `ValidationLimits` defaults bound owner depth to 256, inspected items to
+1,000,000 and each name/source filename to 4,096 bytes. The validator follows only
+the bounded minimal declaration/type/body shape; recursive general tree/type
+encoding is not implemented. Limits are checked before traversing supplied
+collections, and owner cycles have explicit identity-based detection.
+
+For the future encoder, initial proposed defaults are maximum semantic/tree/owner depth 256, total visited
 nodes/edges 1,000,000, name entries 100,000, and complete encoded output 16 MiB.
 Expose limits explicitly; check additions/conversions and reserve sizes before
 allocation. Wire `u32` address/nat bounds still apply even with a larger caller
