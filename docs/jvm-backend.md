@@ -142,14 +142,33 @@ Object-construction typing, canonical constructor and receiver identity,
 uninitialized-reference verifier constraints, and the multi-class planning
 boundary are recorded separately in
 [`jvm-object-creation-contract.md`](jvm-object-creation-contract.md). That
-contract is an audit only: the current backend does not emit object creation
-or reference-local bytecode, and direct method selection from `new C(...)` is
-currently rejected by the Typer as an unstable selection prefix.
+contract records the verifier constraints that bound the emitted subset.
+
+## Planned virtual instance calls
+
+`JvmCompilationUnit::resolve_planned_instance_call` resolves a typed regular
+`Apply(Select(receiver, method), args)` to the exact method symbol in the
+receiver class's plan and declaration scope. Receivers are current `this`, a
+validated direct `new C(args)`, or an immutable local whose checked class is
+the same planned class `C`. Public methods may be called across emitted
+classes; plain private methods are callable only from their owning class.
+Qualified access, protected/package access, static and extension methods,
+bridges, traits, external classes, and name-only fallback are rejected.
+
+Method parameters and results use the existing primitive `Int`/`Boolean`
+subset, with `Unit` represented as JVM `void`. Lowering evaluates the receiver
+once, then each argument once in source order, checks their stack flows against
+the selected descriptor, and emits one symbolic `invokevirtual` with the exact
+owner, name, and descriptor. The result leaves its primitive value on the
+stack or no value for `Unit`. The source typer accepts direct-new selection
+for ordinary method application. Reference receivers and object creation stay
+outside methods with symbolic branches until reference-aware frame analysis
+exists.
 
 ## Canonical `Int` arithmetic
 
 Method bodies resolve typed regular applications against the canonical
-`scala.Int` operator `SymbolId`s before applying the ordinary same-class-call
+`scala.Int` operator `SymbolId`s before applying the ordinary instance-call
 restrictions. `+`, `-`, `*`, `/`, and `%` lower their selected receiver first,
 then their sole argument, exactly once each, and emit `iadd`, `isub`, `imul`,
 `idiv`, or `irem`. Both operands and the application result must have the
@@ -159,10 +178,10 @@ local initializers and assignments, and arithmetic in the existing integer
 
 These intrinsic calls do not emit `invokevirtual` or a method reference for the
 Scala operator. Calls whose symbol is not in the canonical registry continue
-through ordinary same-class call resolution and retain its receiver and
+through planned instance-call resolution and retain its receiver and
 control-flow restrictions. Standalone expression lowering can emit canonical
 Int and Boolean intrinsics without a compilation-unit call context; ordinary
-applications still require a validated same-class target. Canonical relational
+applications still require a validated planned target. Canonical relational
 operators `<`, `<=`, `>`, and `>=`
 emit their signed `if_icmp*` branch to a true label, materialize `0` on the
 false path and `1` on the true path, then join. The classfile builder computes
@@ -307,14 +326,14 @@ errors. This API emits neither arguments nor the invocation and does not
 introduce general JVM reference-value lowering.
 
 Planned method-body lowering in `emit_class` accepts a regular `Apply` whose
-target passes `resolve_same_class_call`. It emits one current receiver, then
-lowers each argument once in source order and checks its primitive stack value
-against the selected descriptor. It finally emits symbolic `invokevirtual`
-with the target's exact owner, name, and descriptor. Int/Boolean results leave
-one int-like value; Unit leaves no value. Arity, argument-flow, target, and
-typed-result mismatches return structured errors, and a failed method does not
-produce a class artifact. Standalone expression/body lowering has no emission
-plan, so it cannot resolve `Apply` targets.
+target passes `resolve_planned_instance_call`. It evaluates the selected
+receiver once before lowering each argument once in source order, checks their
+stack values against the exact descriptor, and emits one symbolic
+`invokevirtual`. Int/Boolean results leave one int-like value; Unit leaves no
+value. Arity, receiver-flow, argument-flow, target, and typed-result mismatches
+return structured errors, and a failed method does not produce a class
+artifact. Standalone expression/body lowering has no emission plan, so it
+cannot resolve ordinary `Apply` targets.
 
 Planned method-body lowering allows initialized primitive local references in
 the final expression or other value positions, and immutable planned-class
@@ -429,6 +448,11 @@ locals. The test asserts method descriptors, slot-specific loads and stores,
 `max_stack`, `max_locals`, branch targets, sorted decoded `StackMapTable` frame
 PCs, class-file version 65, full class-file decoding, and reference validity.
 Java harnesses check all local-state results under `java -Xverify:all`.
+`Counter`, `Other`, and `Client` cover direct-new and immutable-local receivers,
+same-named methods owned by different classes, ordered primitive arguments,
+Boolean and Unit results, and private calls from the owning class. Negative
+source cases reject cross-class private access and reference calls inside
+symbolic branches without publishing class files.
 `BooleanControlFlow` exercises canonical short-circuit intrinsics through the
 source frontend in `if` and `while` conditions, nested eager/short-circuit
 expressions, Boolean local initialization and assignment, and side-effecting
@@ -463,7 +487,7 @@ Scala public accessor, bridge, or TASTy compatibility.
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
 Negative source tests verify that field initialization, mutable reference
 locals, reference locals in branch-bearing methods, invalid while
-conditions, same-class calls inside loop control flow, private
+conditions, virtual calls inside branch control flow, private
 construction, immutable-local assignment, missing local references, mismatched
 local initializers and assignments, Unit locals, deferred reference locals,
 pattern locals, and parser diagnostics fail at their actual pipeline stage

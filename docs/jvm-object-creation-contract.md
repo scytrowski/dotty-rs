@@ -1,8 +1,7 @@
 # JVM object creation source contract
 
 This document records the current source and semantic boundary for object
-creation. Issue #1215 is a characterization audit. It adds no JVM object
-allocation, reference-local, or cross-class call lowering.
+creation, immutable reference locals, and bounded virtual calls.
 
 ## Typed source evidence
 
@@ -172,10 +171,10 @@ aload <counter-slot>
 pop
 ```
 
-This sequence is covered by a real-source classfile regression and a mandatory
-JDK `-Xverify:all` CI gate. `Counter.get()` remains a separate call-lowering
-increment; the direct-new receiver sequence is blocked by the Typer's
-selection-prefix rule.
+This sequence is covered by real-source classfile regressions and a mandatory
+JDK `-Xverify:all` CI gate. A completed direct `new C(args)` and an initialized
+immutable local of `C` can each serve as the receiver of one planned
+`invokevirtual` call with primitive arguments and primitive/Unit results.
 
 Before the matching constructor returns normally, the fresh reference must
 not be stored, returned, passed to another method, used as an ordinary
@@ -198,20 +197,20 @@ must run under JDK 21+ `java -Xverify:all`.
 
 ## Bounded support matrix
 
-| Form | Characterization or future contract |
+| Form | Current status |
 | --- | --- |
 | Top-level ordinary class in the same validated emission unit | Candidate for the bounded subset |
 | Plain primary constructor with primitive `Int`/`Boolean` arguments | Required future constructor target |
 | Explicit or syntactic zero-argument primary constructor | Canonical class-owned constructor symbol required |
 | `val c = new C(args)`; discard or read `c` in a straight-line method | Supported with exact class identity, `astore`/`aload`, definite initialization, and category-one `pop` |
-| `val c = new C(args)` and later `c.method()` | Local storage is supported; non-`this` virtual call lowering remains a separate increment |
-| Method parameter/local receiver with same-spelled methods on different classes | Resolve by selected method and receiver `SymbolId`/`TypeId` |
-| Direct `new C(args).method()` | Currently blocked by `UnstableSelectionPrefix` in Typer |
+| `val c = new C(args)` and later `c.method()` | Supported for an exact planned class and bounded primitive/Unit method signature |
+| Method receiver when classes declare same-spelled methods | Resolve by selected method and receiver `SymbolId`/`TypeId` |
+| Direct `new C(args).method()` | Supported after constructor initialization for the bounded method subset |
 | `var` reference local, reference method parameter/result, arbitrary classpath receiver | Unsupported; no descriptor fallback |
 | Generic, abstract, trait, external, secondary, or unplanned constructor | Unsupported for JVM emission |
 | Nested allocation or allocation/reference inside branch or short-circuit CFG | Unsupported until verifier-aware reference CFG exists |
 | Duplicate emitted internal class name | `JvmCompilationUnit` validation error |
 
-Reference-aware CFG merging, non-`this` virtual calls, and reference-valued
-method descriptors remain future work. Reference-local methods containing
-symbolic branches fail with a typed unsupported-control-flow error.
+Reference-aware CFG merging and reference-valued method descriptors remain
+future work. Methods using reference creation or receivers with symbolic
+branches fail with a typed unsupported-control-flow error.
