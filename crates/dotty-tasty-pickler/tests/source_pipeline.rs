@@ -5,11 +5,22 @@ use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_d
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::*;
 use dotty_typer::SourceTyper;
+use std::path::PathBuf;
+use std::process::Command;
 
 const ANSWER: &str = include_str!("../../../tests/fixtures/tasty_pickler/Answer.scala");
+const MULTI: &str = include_str!("../../../tests/fixtures/tasty_pickler/Multi.scala");
 
 fn source_outputs(
     text: &str,
+    edit: impl FnOnce(&mut PicklePlan<'_>),
+) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
+    source_outputs_named(text, "Answer.scala", edit)
+}
+
+fn source_outputs_named(
+    text: &str,
+    source_name: &str,
     edit: impl FnOnce(&mut PicklePlan<'_>),
 ) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
     let source = SourceId::from_index(7);
@@ -29,7 +40,7 @@ fn source_outputs(
         &parsed.ast,
         parsed.root,
         source,
-        "Answer.scala",
+        source_name,
         SourceParseStatus::Clean,
         &mut store,
         &mut packages,
@@ -112,7 +123,7 @@ fn source_outputs(
         typed_bindings: &bindings,
         source: SourceMetadata {
             id: source,
-            name: "Answer.scala".into(),
+            name: source_name.into(),
         },
         source_root: parsed.root,
         class,
@@ -157,6 +168,15 @@ fn source_outputs(
         checked.plan().methods[0].symbol,
         index.symbol_at(source, template.body[0]).unwrap()
     );
+    for method in checked.plan().methods {
+        let body = method.body.expect("concrete source method body");
+        assert!(matches!(
+            typer.typed_ast().get(body).kind,
+            TreeKind::Literal(Literal {
+                value: Constant::Int(_)
+            })
+        ));
+    }
     let body = checked.plan().methods[0].body.unwrap();
     let TreeKind::Literal(Literal {
         value: Constant::Int(value),
@@ -165,7 +185,9 @@ fn source_outputs(
         panic!()
     };
     let output = checked.pickle()?;
-    assert_eq!(output.body(methods[0].symbol), Some(body));
+    for method in &methods {
+        assert_eq!(output.body(method.symbol), method.body);
+    }
     assert_eq!(output.source(), &plan.source);
     let complete =
         dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
@@ -185,13 +207,16 @@ fn source_outputs(
     let file =
         dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(skeleton.provisional_bytes())
             .unwrap();
-    assert_eq!(file.source_file().unwrap(), Some("Answer.scala"));
+    assert_eq!(file.source_file().unwrap(), Some(source_name));
     assert_eq!(
         skeleton.omitted_bodies(),
-        &[OmittedMethodBody {
-            method: methods[0].symbol,
-            typed_root: body
-        }]
+        methods
+            .iter()
+            .map(|method| OmittedMethodBody {
+                method: method.symbol,
+                typed_root: method.body.unwrap(),
+            })
+            .collect::<Vec<_>>()
     );
     assert_eq!(typer.store().checkpoint(), mark);
     assert_eq!(
@@ -218,6 +243,104 @@ fn source_plan(
 fn actual_answer_source_hands_off_exact_canonical_symbols_and_typed_rhs() {
     let skeleton = source_plan(ANSWER, |_| {}).unwrap();
     assert_eq!(skeleton.intended_tasty_path(), "example/Answer.tasty");
+}
+
+#[test]
+fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
+    use dotty_tasty::tasty::*;
+
+    let (skeleton, first) = source_outputs_named(MULTI, "Multi.scala", |_| {}).unwrap();
+    let (_, second) = source_outputs_named(MULTI, "Multi.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    assert_eq!(first.intended_tasty_path(), "example/Multi.tasty");
+    let class = first.declarations()[0].symbol;
+    let declaration_ids = first
+        .declarations()
+        .iter()
+        .map(|declaration| declaration.symbol)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(declaration_ids.len(), 5);
+    assert_eq!(
+        first.declarations()[1..]
+            .iter()
+            .map(|declaration| declaration.owner)
+            .collect::<Vec<_>>(),
+        [class; 4]
+    );
+    assert_eq!(first.declarations().len(), 5);
+    assert_eq!(skeleton.declarations().len(), 5);
+    assert_eq!(skeleton.omitted_bodies().len(), 3);
+    let body_roots = first.declarations()[2..]
+        .iter()
+        .map(|declaration| first.body(declaration.symbol).unwrap())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(body_roots.len(), 3);
+    assert!(
+        first.declarations()[2..]
+            .windows(2)
+            .all(|pair| pair[0].address < pair[1].address)
+    );
+
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let observed = first.declarations()[2..]
+        .iter()
+        .map(|declaration| {
+            let method = addresses
+                .get(declaration.address)
+                .unwrap()
+                .decode_defdef_body()
+                .unwrap();
+            let name = file.render_name(method.name).unwrap();
+            let rhs = match method.rhs.unwrap() {
+                RawTree::Leaf(leaf) if leaf.tag == INTCONST_TAG => match leaf.value {
+                    TermValue::Int(value) => value,
+                    other => panic!("unexpected Int constant payload: {other:?}"),
+                },
+                other => panic!("unexpected literal body: {other:?}"),
+            };
+            (name.to_owned(), method.clauses, rhs)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed,
+        [
+            ("one".to_owned(), vec![], 1),
+            ("two".to_owned(), vec![], 2),
+            ("zero".to_owned(), vec![EMPTYCLAUSE_TAG], 0),
+        ]
+    );
+    assert_eq!(
+        first.declarations()[2..]
+            .iter()
+            .map(|declaration| first.body(declaration.symbol).unwrap())
+            .collect::<Vec<_>>(),
+        skeleton
+            .omitted_bodies()
+            .iter()
+            .map(|body| body.typed_root)
+            .collect::<Vec<_>>()
+    );
+
+    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1239/generated/example/Multi.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, first.bytes()).unwrap();
+        let temporary = root.join("target/issue-1239/tmp");
+        std::fs::create_dir_all(&temporary).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .env("TMPDIR", temporary)
+            .status()
+            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
+        assert!(
+            result.success(),
+            "requested Multi Scala interoperability gate failed"
+        );
+    }
 }
 
 #[test]
@@ -266,9 +389,37 @@ fn real_source_default_constructor_clauses_normalize_without_fabricating_method_
 
 #[test]
 fn valid_scala_empty_parens_and_parameters_are_explicitly_unsupported() {
+    for (text, feature) in [
+        (
+            "package example; class Answer { def value(x: Int): Int = x }",
+            UnsupportedFeature::ParameterClauses,
+        ),
+        (
+            "package example; class Answer { def value(using x: Int): Int = x }",
+            UnsupportedFeature::SymbolMetadata,
+        ),
+        (
+            "package example; class Answer { def value[A]: Int = 42 }",
+            UnsupportedFeature::TypeParameters,
+        ),
+    ] {
+        let result = source_plan(text, |_| {});
+        assert!(
+            matches!(
+                &result,
+                Err(PickleError::Unsupported { feature: actual, .. }) if *actual == feature
+            ),
+            "{text}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_clause_shapes_and_empty_class_fail_explicitly() {
     for text in [
-        "package example; class Answer { def value(): Int = 42 }",
-        "package example; class Answer { def value(x: Int): Int = x }",
+        "package example; class Answer { def value()(): Int = 42 }",
+        "package example; class Answer { def value()(x: Int): Int = x }",
+        "package example; class Answer { def value(): Int = 42; def other(x: Int): Int = x }",
     ] {
         assert!(matches!(
             source_plan(text, |_| {}),
@@ -278,6 +429,13 @@ fn valid_scala_empty_parens_and_parameters_are_explicitly_unsupported() {
             })
         ));
     }
+    assert!(matches!(
+        source_plan("package example; class Answer {}", |_| {}),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::MethodCount,
+            ..
+        })
+    ));
 }
 
 #[test]
