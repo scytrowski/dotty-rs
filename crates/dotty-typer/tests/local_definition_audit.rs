@@ -6657,8 +6657,27 @@ fn pinned_scala39_import_prefix_typing_probe() {
         .filter(|row| row.current_outcome.starts_with("ImportQualifierNotFound::"))
         .count();
     let advanced_baseline_rows = reconciliation.len() - unresolved_baseline_rows;
-    assert_eq!(unresolved_baseline_rows, 2_326);
-    assert_eq!(advanced_baseline_rows, 68);
+    eprintln!(
+        "import-prefix reconciliation checkpoint: rows={}, unresolved={}, advanced_or_unmatched={}",
+        reconciliation.len(),
+        unresolved_baseline_rows,
+        advanced_baseline_rows
+    );
+    eprintln!(
+        "IMPORT_PREFIX_TIMING classpath_setup_ms={} package_inventory_ms={} selected_sources_parse_name_type_ms={} reconciliation_ms={} total_ms={}",
+        classpath_setup.as_millis(),
+        package_inventory.as_millis(),
+        source_profile.as_millis(),
+        reconciliation_time.as_millis(),
+        audit_started.elapsed().as_millis()
+    );
+    if unresolved_baseline_rows != 721 || advanced_baseline_rows != 1_673 {
+        println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
+        print_import_prefix_reconciliation(&reconciliation);
+        println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
+    }
+    assert_eq!(unresolved_baseline_rows, 721);
+    assert_eq!(advanced_baseline_rows, 1_673);
     assert!(reconciliation.iter().all(|row| {
         row.current_method_typed == (row.current_method_blocker == "typed")
             && row.final_import_identity.starts_with("outcomes::")
@@ -6730,10 +6749,10 @@ fn pinned_scala39_import_prefix_typing_probe() {
         term_object_gaps,
         unmatched_traces
     );
-    assert_eq!(all_observations.len(), 2_332);
-    assert_eq!(first_segment_observations.len(), 2_332);
-    assert_eq!(files.len(), 193);
-    assert_eq!(targets.len(), 29);
+    assert_eq!(all_observations.len(), 727);
+    assert_eq!(first_segment_observations.len(), 727);
+    assert_eq!(files.len(), 64);
+    assert_eq!(targets.len(), 24);
     assert_eq!(term_object_gaps, 0);
     assert_eq!(unmatched_traces, 0);
     assert!(
@@ -6776,17 +6795,6 @@ fn pinned_scala39_import_prefix_typing_probe() {
             .count()
     );
     println!("AUDIT_IMPORT_PREFIX_END");
-    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
-    print_import_prefix_reconciliation(&reconciliation);
-    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
-    eprintln!(
-        "IMPORT_PREFIX_TIMING classpath_setup_ms={} package_inventory_ms={} selected_sources_parse_name_type_ms={} reconciliation_ms={} total_ms={}",
-        classpath_setup.as_millis(),
-        package_inventory.as_millis(),
-        source_profile.as_millis(),
-        reconciliation_time.as_millis(),
-        audit_started.elapsed().as_millis()
-    );
 }
 
 fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
