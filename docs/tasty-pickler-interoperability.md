@@ -21,10 +21,12 @@ Lexer → Parser → Namer → Typer, gets its exact `TreeId<Typed>` from the
 bytes. It separately checks determinism in another source session, Rust 28.9.0
 validation/round-trip, owner-qualified class/method identities, declared Int
 syntax and the actual decoded Int RHS. The semantic unpickler confirms the
-entered class/method identities and owner relation and decodes the literal's
-constant type. Its current classpath-free inverse cannot resolve the `scala.Int`
-return IDENTtpt or reconstruct a typed AST body; the test checks the return tree
-wire name and the source Typer's canonical method result instead.
+entered package/class/method identities and owner relations, and decodes both
+the canonical Int result and literal constant type. A small test-only resolver
+answers only the exact builtin Int symbol from `Definitions` when the
+requested name/namespace match and the prefix is the Scala package reference;
+it does not infer a classpath symbol from spelling. The unpickler does not
+reconstruct a typed AST body.
 
 ## Pinned inputs
 

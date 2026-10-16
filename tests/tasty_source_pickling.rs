@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use dotty_core::ast::*;
+use dotty_core::resolution::{MemberRequest, ResolutionError, ResolverCheckpoint, SymbolResolver};
 use dotty_core::*;
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -14,6 +15,42 @@ use dotty_typer::SourceTyper;
 
 const ANSWER: &str = include_str!("fixtures/tasty_pickler/Answer.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
+
+struct CanonicalIntResolver {
+    symbol: SymbolId,
+}
+
+impl SymbolResolver for CanonicalIntResolver {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        ResolverCheckpoint::new(0)
+    }
+    fn rollback_to(&mut self, _store: &mut SemanticStore, _checkpoint: ResolverCheckpoint) {}
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let candidate = store.symbols.get(self.symbol);
+        let owner = candidate.owner;
+        let exact_name = candidate.name == request.name;
+        let exact_builtin = candidate.origin == SymbolOrigin::Builtin
+            && owner.is_none()
+            && matches!(store.types.get(request.prefix),
+                Type::TermRef { target: TermRefTarget::Symbol(prefix), .. }
+                    if store.symbols.contains(*prefix)
+                        && store.symbols.get(*prefix).kind == SymbolKind::Package
+                        && store.symbols.get(*prefix).name.namespace() == Namespace::Term
+                        && store.names.try_resolve(store.symbols.get(*prefix).name.text()) == Some("scala"));
+        Ok((exact_name && exact_builtin).then_some(self.symbol))
+    }
+    fn resolve_package(
+        &mut self,
+        _store: &mut SemanticStore,
+        _path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        Ok(None)
+    }
+}
 
 struct Product {
     bytes: Vec<u8>,
@@ -209,7 +246,13 @@ fn semantic_and_wire_projection(product: &Product) {
     // typed AST body. Compare owner-qualified symbols and those semantic types.
     let mut semantic_store = SemanticStore::new();
     let semantic_definitions = Definitions::bootstrap(&mut semantic_store);
-    let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions);
+    let int_symbol = semantic_store
+        .types
+        .get(semantic_definitions.int)
+        .reference_symbol()
+        .unwrap();
+    let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
+        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }));
     let unpickled_index = unpickler.enter_symbols().unwrap().clone();
     let package_address = addresses
         .iter_nodes()
@@ -242,20 +285,17 @@ fn semantic_and_wire_projection(product: &Product) {
         .filter(|edge| edge.parent.offset == method_address as usize)
         .map(|edge| edge.child)
         .collect::<Vec<_>>();
-    assert!(
-        method_children
-            .iter()
-            .any(|child| child.tag == IDENTTPT_TAG)
-    );
+    let result_address = method_children
+        .iter()
+        .find(|child| child.tag == IDENTTPT_TAG)
+        .expect("method has an Int IDENTtpt")
+        .offset as u32;
     let rhs_address = method_children
         .iter()
         .find(|child| child.tag == INTCONST_TAG)
         .expect("method has an Int constant RHS")
         .offset as u32;
-    // The unpickler can decode this literal type directly. Resolving the Int
-    // return IDENTtpt requires a classpath resolver for scala.Int, which this
-    // minimal source session intentionally does not provide; wire spelling and
-    // source Typer's canonical result are asserted above.
+    let return_ty = unpickler.unpickle_type_tree_type(result_address).unwrap();
     let value_ty = unpickler.unpickle_type(rhs_address).unwrap();
     drop(unpickler);
     assert_eq!(semantic_store.symbols.get(class_id).owner, Some(package_id));
@@ -266,6 +306,23 @@ fn semantic_and_wire_projection(product: &Product) {
             .resolve(semantic_store.symbols.get(method_id).name.text()),
         "value"
     );
+    let canonical_int = semantic_store
+        .types
+        .get(semantic_definitions.int)
+        .reference_symbol()
+        .unwrap();
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(return_symbol),
+        prefix,
+    } = semantic_store.types.get(return_ty)
+    else {
+        panic!("expected semantic Int type reference")
+    };
+    assert_eq!(*return_symbol, canonical_int);
+    assert!(matches!(semantic_store.types.get(*prefix),
+        Type::TermRef { target: TermRefTarget::Symbol(package), .. }
+            if semantic_store.symbols.get(*package).kind == SymbolKind::Package
+                && semantic_store.names.try_resolve(semantic_store.symbols.get(*package).name.text()) == Some("scala")));
     assert_eq!(
         semantic_store.types.get(value_ty),
         &Type::Constant(Constant::Int(product.source_value))
