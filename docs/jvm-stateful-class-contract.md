@@ -42,31 +42,35 @@ the `TermRef` target identifies the parameter used by the initializer.
 
 ## Constructor order and initialization contract
 
-For the supported future subset, constructor invocation must call
+For the supported subset, constructor invocation must call
 `java/lang/Object.<init>()V` first, then run supported field initializers in
-`Template.body` source order, then return. A plan must pair each field's
-canonical `SymbolId` with its exact typed initializer root. The field type and
-typed expression's widened value type must conform before code is emitted.
-There is no JVM slot for a field initializer itself. Constructor parameters
-retain source clause and parameter order; in the one-clause `Counter(start)`
-case, instance receiver occupies local slot 0 and `start` occupies slot 1.
-That parameter layout is now exposed by `JvmConstructorMetadata`; field
-initializer lowering remains a proposed rule and is not implemented.
+`Template.body` source order, then return. The
+`JvmCompilationUnit::lower_constructor_field_initializers` method now
+produces checked fragments for primitive literals, constructor parameters,
+approved primitive intrinsics, and reads of earlier initialized fields. A
+plan pairs each field's canonical `SymbolId` with its exact typed initializer
+root.
+The field type and typed expression's widened value type must conform before
+instructions are returned. There is no JVM slot for a field initializer
+itself. Constructor parameters retain source clause and parameter order; in the
+one-clause `Counter(start)` case, instance receiver occupies local slot 0 and
+`start` occupies slot 1. That parameter layout is exposed by
+`JvmConstructorMetadata`. These fragments do not constitute a complete
+constructor or class emitter.
 
-Earlier initialized fields can be read after their initializer has executed.
-The integration characterization also confirms that explicitly typed
-`this.self` and unqualified forward `later` initializers type successfully to
-the canonical field symbols, including the self-reference. The current source
-Typer resolves class members independent of runtime initialization order, and
-`field_initializer_context_for` neither checks initialization order nor
-rejects those explicit references. Inferred self and mutual cycles do fail in Typer with
-`RecursiveInferredFieldType`, and rollback leaves their symbols incomplete;
-the existing regression is
+Earlier initialized fields can be read by the implemented initializer
+lowering. The integration characterization also confirms that explicitly
+typed `this.self` and unqualified forward `later` initializers type
+successfully to the canonical field symbols, including the self-reference.
+The source Typer resolves class members independent of runtime initialization
+order, and `field_initializer_context_for` does not itself enforce runtime
+initialization order. Constructor initializer lowering rejects self and
+forward reads before returning instructions. Inferred self and mutual cycles
+do fail in Typer with `RecursiveInferredFieldType`, and rollback leaves their
+symbols incomplete; the existing regression is
 `inferred_field_recursion_guard_reports_direct_and_indirect_cycles` in
-`crates/dotty-typer/src/typer/mod.rs`. A future constructor plan must reject
-or defer self/forward reads with a contextual diagnostic before bytecode
-publication. It cannot treat successful name or type resolution as proof of
-safe initialization.
+`crates/dotty-typer/src/typer/mod.rs`. Successful name or type resolution is
+not proof that a field read is safe at its runtime initialization point.
 
 ## Scala field and accessor boundary
 
