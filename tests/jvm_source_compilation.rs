@@ -40,6 +40,7 @@ enum PipelineFailure {
     MissingSourceIdentity(&'static str),
     UnexpectedSourceShape(&'static str),
     Io(std::io::Error),
+    OutputPathCollision(PathBuf),
 }
 
 #[derive(Debug)]
@@ -120,7 +121,76 @@ fn compile_source(
     source_file_name: &str,
     output_directory: &Path,
 ) -> Result<EmittedArtifact, PipelineFailure> {
-    let source_id = SourceId::from_index(1);
+    let mut artifacts = compile_source_batch(
+        source_text,
+        source_file_name,
+        output_directory,
+        SourceId::from_index(1),
+        SourceUnitCardinality::ExactlyOne,
+    )?;
+    artifacts
+        .pop()
+        .ok_or(PipelineFailure::UnexpectedSourceShape(
+            "exactly one ordinary top-level class",
+        ))
+}
+
+fn compile_source_classes(
+    source_text: &str,
+    source_file_name: &str,
+    output_directory: &Path,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    compile_source_batch(
+        source_text,
+        source_file_name,
+        output_directory,
+        SourceId::from_index(1221),
+        SourceUnitCardinality::OneOrMore,
+    )
+}
+
+fn compile_planned_constructor_source(
+    source_text: &str,
+    output_directory: &Path,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    compile_source_batch(
+        source_text,
+        "ConstructorSmoke.scala",
+        output_directory,
+        SourceId::from_index(1218),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum SourceUnitCardinality {
+    ExactlyOne,
+    OneOrMore,
+    AtLeastTwo,
+}
+
+struct PlannedSourceClass {
+    class: SymbolId,
+    template_tree: TreeId<Untyped>,
+    constructor_tree: TreeId<Untyped>,
+    initialization: JvmClassInitializationPlan,
+    methods: Vec<SourceMethod>,
+}
+
+struct PendingArtifact {
+    class: GeneratedClass,
+    path: PathBuf,
+    staged_path: PathBuf,
+    backup_path: PathBuf,
+}
+
+fn compile_source_batch(
+    source_text: &str,
+    source_file_name: &str,
+    output_directory: &Path,
+    source_id: SourceId,
+    cardinality: SourceUnitCardinality,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
     let source = SourceText::new(source_text)
         .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
     let scanner = ContextualScanner::new(source_text)
@@ -129,14 +199,12 @@ fn compile_source(
     if !lexer_diagnostics.is_empty() {
         return Err(PipelineFailure::LexerDiagnostics(lexer_diagnostics));
     }
-
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
     let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
     if !parsed.diagnostics.is_empty() {
         return Err(PipelineFailure::Parser(parsed.diagnostics));
     }
-
     let mut packages = Packages::new();
     let index = match name_compilation_unit_with_diagnostics(
         &parsed.ast,
@@ -154,198 +222,6 @@ fn compile_source(
             return Err(PipelineFailure::NamerDiagnostics(diagnostics));
         }
     };
-
-    let (class_symbol, template_tree) =
-        find_single_source_class(&parsed.ast, parsed.root, source_id, &index, &store)?;
-    let template = match &parsed.ast.get(template_tree).kind {
-        TreeKind::Template(template) => template,
-        _ => return Err(PipelineFailure::UnexpectedSourceShape("class template")),
-    };
-    let source_methods =
-        collect_source_methods(&parsed.ast, &template.body, source_id, &index, &store)?;
-    let initialization = source_initialization_plan(
-        class_symbol,
-        &parsed.ast,
-        template,
-        source_id,
-        &index,
-        &store,
-    )
-    .map_err(PipelineFailure::Codegen)?;
-
-    let mut typer = SourceTyper::new(
-        &parsed.ast,
-        source_id,
-        &index,
-        &mut store,
-        definitions,
-        &packages,
-    );
-    typer
-        .complete_symbol(class_symbol)
-        .map_err(PipelineFailure::Typer)?;
-    let constructor_symbol = index.symbol_at(source_id, template.constructor).ok_or(
-        PipelineFailure::MissingSourceIdentity("primary constructor"),
-    )?;
-    let mut fields = Vec::new();
-    if matches!(
-        initialization,
-        JvmClassInitializationPlan::PrimaryConstructor(_)
-    ) {
-        typer
-            .complete_symbol(constructor_symbol)
-            .map_err(PipelineFailure::Typer)?;
-        for tree in &template.body {
-            let TreeKind::ValDef(definition) = &parsed.ast.get(*tree).kind else {
-                continue;
-            };
-            let Some(field) = index.symbol_at(source_id, *tree) else {
-                continue;
-            };
-            if typer.store().symbols.get(field).kind != SymbolKind::Field {
-                continue;
-            }
-            typer
-                .complete_symbol(field)
-                .map_err(PipelineFailure::Typer)?;
-            let initializer = match definition.rhs {
-                Some(rhs) => {
-                    let ty = match typer.store().symbols.get(field).info {
-                        dotty_core::SymbolInfo::Complete(ty) => ty,
-                        _ => return Err(PipelineFailure::UnexpectedSourceShape("field type")),
-                    };
-                    let context = typer
-                        .field_initializer_context_for(field)
-                        .map_err(PipelineFailure::Typer)?;
-                    Some(
-                        typer
-                            .type_expression_expected(rhs, context, ty)
-                            .map_err(PipelineFailure::Typer)?,
-                    )
-                }
-                None => None,
-            };
-            let source_visibility = match &definition.metadata.visibility {
-                Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
-                    JvmFieldSourceVisibility::PrivateThis
-                }
-                _ => JvmFieldSourceVisibility::PlainPrivate,
-            };
-            fields.push(JvmFieldPlan {
-                field,
-                source_visibility,
-                initializer,
-            });
-        }
-    }
-
-    let mut methods = Vec::with_capacity(source_methods.len());
-    for source_method in source_methods {
-        typer
-            .complete_symbol(source_method.symbol)
-            .map_err(PipelineFailure::Typer)?;
-        let body = match source_method.rhs {
-            Some(rhs) => {
-                let context = typer
-                    .expression_context_for(source_method.symbol)
-                    .map_err(PipelineFailure::Typer)?;
-                Some(
-                    typer
-                        .type_expression(rhs, context)
-                        .map_err(PipelineFailure::Typer)?,
-                )
-            }
-            None => None,
-        };
-        let mut locals = parsed
-            .ast
-            .iter()
-            .filter_map(|(source_tree, node)| {
-                if !matches!(node.kind, TreeKind::ValDef(_)) {
-                    return None;
-                }
-                let binding = typer.typed_local_binding_at(source_id, source_tree)?;
-                (typer.store().symbols.get(binding.symbol()).owner == Some(source_method.symbol))
-                    .then_some(JvmLocalBinding {
-                        declaration: binding.declaration(),
-                        symbol: binding.symbol(),
-                        mutable: typer
-                            .store()
-                            .symbols
-                            .get(binding.symbol())
-                            .flags
-                            .contains(SymbolFlags::MUTABLE),
-                    })
-            })
-            .collect::<Vec<_>>();
-        locals.sort_by_key(|binding| binding.declaration.index());
-        methods.push(JvmMethodPlan {
-            method: source_method.symbol,
-            parameters: source_method.parameters,
-            locals,
-            body,
-        });
-    }
-
-    let unit = JvmCompilationUnit {
-        store: typer.store(),
-        typed_ast: typer.typed_ast(),
-        classes: vec![JvmClassPlan {
-            class: class_symbol,
-            fields,
-            methods,
-            initialization,
-        }],
-    };
-    let class = emit_class(&unit, class_symbol, &definitions).map_err(PipelineFailure::Codegen)?;
-    let path = output_directory.join(format!("{}.class", class.internal_name()));
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(PipelineFailure::Io)?;
-    }
-    let staged_path = path.with_extension("class.tmp");
-    fs::write(&staged_path, class.bytes()).map_err(PipelineFailure::Io)?;
-    fs::rename(&staged_path, &path).map_err(PipelineFailure::Io)?;
-    Ok(EmittedArtifact { class, path })
-}
-
-fn compile_planned_constructor_source(
-    source_text: &str,
-    output_directory: &Path,
-) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
-    let source_id = SourceId::from_index(1218);
-    let source = SourceText::new(source_text)
-        .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
-    let scanner = ContextualScanner::new(source_text)
-        .map_err(|error| PipelineFailure::Lexer(format!("{error:?}")))?;
-    if !scanner.diagnostics().is_empty() {
-        return Err(PipelineFailure::LexerDiagnostics(
-            scanner.diagnostics().to_vec(),
-        ));
-    }
-    let mut store = SemanticStore::new();
-    let definitions = Definitions::bootstrap(&mut store);
-    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
-    if !parsed.diagnostics.is_empty() {
-        return Err(PipelineFailure::Parser(parsed.diagnostics));
-    }
-    let mut packages = Packages::new();
-    let index = match name_compilation_unit_with_diagnostics(
-        &parsed.ast,
-        parsed.root,
-        source_id,
-        "ConstructorSmoke.scala",
-        SourceParseStatus::Clean,
-        &mut store,
-        &mut packages,
-    )
-    .map_err(PipelineFailure::NamerStructural)?
-    {
-        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
-        NamingOutcome::Named { diagnostics, .. } | NamingOutcome::Rejected { diagnostics } => {
-            return Err(PipelineFailure::NamerDiagnostics(diagnostics));
-        }
-    };
-
     let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
         return Err(PipelineFailure::UnexpectedSourceShape("package root"));
     };
@@ -354,9 +230,9 @@ fn compile_planned_constructor_source(
         let TreeKind::TypeDef(definition) = &parsed.ast.get(*tree).kind else {
             continue;
         };
-        let Some(class) = index.symbol_at(source_id, *tree) else {
-            return Err(PipelineFailure::MissingSourceIdentity("class declaration"));
-        };
+        let class = index
+            .symbol_at(source_id, *tree)
+            .ok_or(PipelineFailure::MissingSourceIdentity("class declaration"))?;
         if store.symbols.get(class).kind != SymbolKind::Class {
             continue;
         }
@@ -366,27 +242,31 @@ fn compile_planned_constructor_source(
         let initialization =
             source_initialization_plan(class, &parsed.ast, template, source_id, &index, &store)
                 .map_err(PipelineFailure::Codegen)?;
-        if template
-            .body
-            .iter()
-            .any(|tree| matches!(parsed.ast.get(*tree).kind, TreeKind::ValDef(_)))
-        {
-            return Err(PipelineFailure::UnexpectedSourceShape(
-                "constructor smoke classes without fields",
-            ));
-        }
-        classes.push((
+        classes.push(PlannedSourceClass {
             class,
-            definition.rhs,
-            template.constructor,
+            template_tree: definition.rhs,
+            constructor_tree: template.constructor,
             initialization,
-            collect_source_methods(&parsed.ast, &template.body, source_id, &index, &store)?,
-        ));
+            methods: collect_source_methods(
+                &parsed.ast,
+                &template.body,
+                source_id,
+                &index,
+                &store,
+            )?,
+        });
     }
-    if classes.len() < 2 {
-        return Err(PipelineFailure::UnexpectedSourceShape(
-            "at least two planned constructor smoke classes",
-        ));
+    let valid_cardinality = match cardinality {
+        SourceUnitCardinality::ExactlyOne => classes.len() == 1,
+        SourceUnitCardinality::OneOrMore => !classes.is_empty(),
+        SourceUnitCardinality::AtLeastTwo => classes.len() >= 2,
+    };
+    if !valid_cardinality {
+        return Err(PipelineFailure::UnexpectedSourceShape(match cardinality {
+            SourceUnitCardinality::ExactlyOne => "exactly one ordinary top-level class",
+            SourceUnitCardinality::OneOrMore => "at least one ordinary top-level class",
+            SourceUnitCardinality::AtLeastTwo => "at least two ordinary top-level classes",
+        }));
     }
 
     let mut typer = SourceTyper::new(
@@ -397,15 +277,17 @@ fn compile_planned_constructor_source(
         definitions,
         &packages,
     );
-    for (class, _, constructor_tree, initialization, _) in &classes {
+    for class in &classes {
         typer
-            .complete_symbol(*class)
+            .complete_symbol(class.class)
             .map_err(PipelineFailure::Typer)?;
-        let constructor = index.symbol_at(source_id, *constructor_tree).ok_or(
+    }
+    for class in &classes {
+        let constructor = index.symbol_at(source_id, class.constructor_tree).ok_or(
             PipelineFailure::MissingSourceIdentity("primary constructor"),
         )?;
         if matches!(
-            initialization,
+            class.initialization,
             JvmClassInitializationPlan::PrimaryConstructor(_)
         ) {
             typer
@@ -413,14 +295,94 @@ fn compile_planned_constructor_source(
                 .map_err(PipelineFailure::Typer)?;
         }
     }
+    for class in &classes {
+        if !matches!(
+            class.initialization,
+            JvmClassInitializationPlan::PrimaryConstructor(_)
+        ) {
+            continue;
+        }
+        let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
+            return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+        };
+        for tree in &template.body {
+            if !matches!(parsed.ast.get(*tree).kind, TreeKind::ValDef(_)) {
+                continue;
+            }
+            if let Some(field) = index.symbol_at(source_id, *tree)
+                && typer.store().symbols.get(field).kind == SymbolKind::Field
+            {
+                typer
+                    .complete_symbol(field)
+                    .map_err(PipelineFailure::Typer)?;
+            }
+        }
+    }
+    for class in &classes {
+        for method in &class.methods {
+            typer
+                .complete_symbol(method.symbol)
+                .map_err(PipelineFailure::Typer)?;
+        }
+    }
+
+    let mut fields_by_class = Vec::with_capacity(classes.len());
+    for class in &classes {
+        let mut fields = Vec::new();
+        if matches!(
+            class.initialization,
+            JvmClassInitializationPlan::PrimaryConstructor(_)
+        ) {
+            let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
+                return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+            };
+            for tree in &template.body {
+                let TreeKind::ValDef(definition) = &parsed.ast.get(*tree).kind else {
+                    continue;
+                };
+                let Some(field) = index.symbol_at(source_id, *tree) else {
+                    continue;
+                };
+                if typer.store().symbols.get(field).kind != SymbolKind::Field {
+                    continue;
+                }
+                let initializer = match definition.rhs {
+                    Some(rhs) => {
+                        let ty = match typer.store().symbols.get(field).info {
+                            dotty_core::SymbolInfo::Complete(ty) => ty,
+                            _ => return Err(PipelineFailure::UnexpectedSourceShape("field type")),
+                        };
+                        let context = typer
+                            .field_initializer_context_for(field)
+                            .map_err(PipelineFailure::Typer)?;
+                        Some(
+                            typer
+                                .type_expression_expected(rhs, context, ty)
+                                .map_err(PipelineFailure::Typer)?,
+                        )
+                    }
+                    None => None,
+                };
+                let source_visibility = match &definition.metadata.visibility {
+                    Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
+                        JvmFieldSourceVisibility::PrivateThis
+                    }
+                    _ => JvmFieldSourceVisibility::PlainPrivate,
+                };
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility,
+                    initializer,
+                });
+            }
+        }
+        fields_by_class.push(fields);
+    }
 
     let mut plans = Vec::with_capacity(classes.len());
-    for (class, _, _, initialization, source_methods) in classes {
-        let mut methods = Vec::with_capacity(source_methods.len());
-        for source_method in source_methods {
-            typer
-                .complete_symbol(source_method.symbol)
-                .map_err(PipelineFailure::Typer)?;
+    for (class, fields) in classes.into_iter().zip(fields_by_class) {
+        let mut methods = Vec::with_capacity(class.methods.len());
+        for source_method in class.methods {
             let body = match source_method.rhs {
                 Some(rhs) => {
                     let context = typer
@@ -465,10 +427,10 @@ fn compile_planned_constructor_source(
             });
         }
         plans.push(JvmClassPlan {
-            class,
-            fields: Vec::new(),
+            class: class.class,
+            fields,
             methods,
-            initialization,
+            initialization: class.initialization,
         });
     }
 
@@ -477,24 +439,131 @@ fn compile_planned_constructor_source(
         typed_ast: typer.typed_ast(),
         classes: plans,
     };
-    let mut classes = Vec::with_capacity(unit.classes.len());
+    let mut generated = Vec::with_capacity(unit.classes.len());
     for plan in &unit.classes {
-        let class =
-            emit_class(&unit, plan.class, &definitions).map_err(PipelineFailure::Codegen)?;
-        classes.push(class);
+        generated
+            .push(emit_class(&unit, plan.class, &definitions).map_err(PipelineFailure::Codegen)?);
     }
-    let mut emitted = Vec::with_capacity(classes.len());
-    for class in classes {
-        let path = output_directory.join(format!("{}.class", class.internal_name()));
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(PipelineFailure::Io)?;
-        }
-        fs::write(&path, class.bytes()).map_err(PipelineFailure::Io)?;
-        emitted.push(EmittedArtifact { class, path });
-    }
-    Ok(emitted)
+    publish_class_batch(output_directory, generated)
 }
 
+fn publish_class_batch(
+    output_directory: &Path,
+    classes: Vec<GeneratedClass>,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT_STAGING_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fs::create_dir_all(output_directory).map_err(PipelineFailure::Io)?;
+    let staging_root = loop {
+        let id = NEXT_STAGING_ID.fetch_add(1, Ordering::Relaxed);
+        let candidate =
+            output_directory.join(format!(".dotty-jvm-batch-{}-{id}", std::process::id()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => break candidate,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(PipelineFailure::Io(error)),
+        }
+    };
+    let mut paths = std::collections::HashSet::new();
+    let mut pending = Vec::with_capacity(classes.len());
+    let stage_result = (|| {
+        for (index, class) in classes.into_iter().enumerate() {
+            let relative = PathBuf::from(format!("{}.class", class.internal_name()));
+            if relative.as_os_str().is_empty()
+                || !relative
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(PipelineFailure::UnexpectedSourceShape(
+                    "validated JVM output path",
+                ));
+            }
+            let path = output_directory.join(&relative);
+            if !paths.insert(path.clone()) {
+                return Err(PipelineFailure::OutputPathCollision(path));
+            }
+            let staged_path = staging_root.join("new").join(&relative);
+            let backup_path = staging_root.join("backups").join(format!("{index}.bak"));
+            if let Some(parent) = staged_path.parent() {
+                fs::create_dir_all(parent).map_err(PipelineFailure::Io)?;
+            }
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(PipelineFailure::Io)?;
+            }
+            fs::write(&staged_path, class.bytes()).map_err(PipelineFailure::Io)?;
+            pending.push(PendingArtifact {
+                class,
+                path,
+                staged_path,
+                backup_path,
+            });
+        }
+        Ok(())
+    })();
+    if let Err(error) = stage_result {
+        let _ = fs::remove_dir_all(&staging_root);
+        return Err(error);
+    }
+
+    let mut published = Vec::<(PathBuf, Option<PathBuf>)>::new();
+    for artifact in &pending {
+        let backup = match fs::symlink_metadata(&artifact.path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                if let Some(parent) = artifact.backup_path.parent()
+                    && let Err(error) = fs::create_dir_all(parent)
+                {
+                    rollback_published(&published);
+                    let _ = fs::remove_dir_all(&staging_root);
+                    return Err(PipelineFailure::Io(error));
+                }
+                if let Err(error) = fs::rename(&artifact.path, &artifact.backup_path) {
+                    rollback_published(&published);
+                    let _ = fs::remove_dir_all(&staging_root);
+                    return Err(PipelineFailure::Io(error));
+                }
+                Some(artifact.backup_path.clone())
+            }
+            Ok(_) => {
+                rollback_published(&published);
+                let _ = fs::remove_dir_all(&staging_root);
+                return Err(PipelineFailure::OutputPathCollision(artifact.path.clone()));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                rollback_published(&published);
+                let _ = fs::remove_dir_all(&staging_root);
+                return Err(PipelineFailure::Io(error));
+            }
+        };
+        if let Err(error) = fs::rename(&artifact.staged_path, &artifact.path) {
+            if let Some(backup) = &backup {
+                let _ = fs::rename(backup, &artifact.path);
+            }
+            rollback_published(&published);
+            let _ = fs::remove_dir_all(&staging_root);
+            return Err(PipelineFailure::Io(error));
+        }
+        published.push((artifact.path.clone(), backup));
+    }
+    let _ = fs::remove_dir_all(&staging_root);
+    Ok(pending
+        .into_iter()
+        .map(|artifact| EmittedArtifact {
+            class: artifact.class,
+            path: artifact.path,
+        })
+        .collect())
+}
+
+fn rollback_published(published: &[(PathBuf, Option<PathBuf>)]) {
+    for (path, backup) in published.iter().rev() {
+        let _ = fs::remove_file(path);
+        if let Some(backup) = backup {
+            let _ = fs::rename(backup, path);
+        }
+    }
+}
 fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, PipelineFailure> {
     let source_id = SourceId::from_index(91);
     let source = SourceText::new(source_text)
@@ -3273,6 +3342,191 @@ fn verify_with_jdk(output_directory: &Path) {
         String::from_utf8_lossy(&java.stderr)
     );
     assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "42\n10\n20");
+}
+
+#[test]
+fn multi_class_source_compilation_emits_deterministic_classes_in_source_order() {
+    let source = "class Alpha { def id(): Int = 1; def fromBeta(): Int = new Beta().id() }\nclass Beta { def id(): Int = 2 }\n";
+    let first_output = TestOutputDirectory::new("multi-class-source-first");
+    let first = compile_source_classes(source, "Multi.scala", first_output.path())
+        .expect("both top-level classes should compile in one frontend session");
+
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Alpha", "Beta"]
+    );
+    assert_eq!(
+        first_output.class_files(),
+        [
+            first_output.path().join("Alpha.class"),
+            first_output.path().join("Beta.class")
+        ]
+    );
+    for artifact in &first {
+        assert!(artifact.path.is_file());
+    }
+
+    let decode_id = |artifact: &EmittedArtifact, expected: u8| {
+        let mut reader = Reader::new(artifact.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("decode emitted class");
+        assert!(reader.is_at_end());
+        class.validate_references().expect("valid class references");
+        assert_eq!(class.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+        assert_eq!(class.fields.len(), 0);
+        assert_opcode_sequence(emitted_method_code(&class, "id"), &[expected, 0xac]);
+    };
+    decode_id(&first[0], 0x04);
+    decode_id(&first[1], 0x05);
+    let mut alpha_reader = Reader::new(first[0].class.bytes());
+    let alpha = ClassFile::decode(&mut alpha_reader).expect("decode Alpha");
+    assert_opcode_sequence(
+        emitted_method_code(&alpha, "fromBeta"),
+        &[0xbb, 0x59, 0xb7, 0xb6, 0xac],
+    );
+
+    let second_output = TestOutputDirectory::new("multi-class-source-second");
+    let second = compile_source_classes(source, "Multi.scala", second_output.path())
+        .expect("a fresh frontend session should produce the same class batch");
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+
+    let reversed_output = TestOutputDirectory::new("multi-class-source-reversed");
+    let reversed = compile_source_classes(
+        "class Beta { def id(): Int = 2 }\nclass Alpha { def id(): Int = 1 }\n",
+        "Reversed.scala",
+        reversed_output.path(),
+    )
+    .expect("reversed source declaration order should be preserved");
+    assert_eq!(
+        reversed
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Beta", "Alpha"]
+    );
+
+    if require_jdk_or_skip() {
+        let harness = first_output.path().join("MultiClassHarness.java");
+        fs::write(
+            &harness,
+            "public final class MultiClassHarness { public static void main(String[] args) { if (new Alpha().id() != 1 || new Alpha().fromBeta() != 2 || new Beta().id() != 2) throw new AssertionError(); System.out.println(\"multi-class ok\"); } }\n",
+        )
+        .expect("write Java multi-class caller");
+        let output_path = first_output.path().to_str().expect("UTF-8 output path");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected multi-class caller\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "MultiClassHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected multi-class outputs\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "multi-class ok"
+        );
+    }
+}
+
+#[test]
+fn single_class_source_wrapper_rejects_multi_class_units_without_output() {
+    let output = TestOutputDirectory::new("single-class-wrapper-rejects-batch");
+    let error = compile_source(
+        "class Alpha { def id(): Int = 1 }\nclass Beta { def id(): Int = 2 }\n",
+        "Multi.scala",
+        output.path(),
+    )
+    .expect_err("the single-artifact wrapper must retain its one-class contract");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::UnexpectedSourceShape("exactly one ordinary top-level class")
+        ),
+        "unexpected single-class wrapper result: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn multi_class_output_paths_use_validated_package_internal_names() {
+    let output = TestOutputDirectory::new("multi-class-source-package");
+    let artifacts = compile_source_classes(
+        "package example\nclass Alpha { def id(): Int = 1 }\nclass Beta { def id(): Int = 2 }\n",
+        "PackagedMulti.scala",
+        output.path(),
+    )
+    .expect("packaged classes should preserve their internal-name paths");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["example/Alpha", "example/Beta"]
+    );
+    assert_eq!(
+        output.class_files(),
+        [
+            output.path().join("example/Alpha.class"),
+            output.path().join("example/Beta.class")
+        ]
+    );
+}
+
+#[test]
+fn multi_class_source_backend_failure_publishes_no_classes() {
+    let output = TestOutputDirectory::new("multi-class-source-failure");
+    let result = compile_source_classes(
+        "class Alpha { def id(): Int = 1 }\nclass Beta { def id(): Int = 2 }\nclass Broken { def +(): Int = 3 }\n",
+        "BrokenBatch.scala",
+        output.path(),
+    );
+    assert!(
+        matches!(result, Err(PipelineFailure::Codegen(_))),
+        "an unsupported third class must fail during codegen, got {result:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "a later class failure must not publish the earlier valid class"
+    );
 }
 
 #[test]

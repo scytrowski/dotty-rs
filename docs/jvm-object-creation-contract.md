@@ -115,15 +115,17 @@ source class set or reconstruct source declaration order. The source
 orchestrator must keep a deterministic source-order list and finish every
 class plan before emitting any class.
 
-The current `tests/jvm_source_compilation.rs` harness deliberately accepts one
-top-level class and publishes one `GeneratedClass`; it is not a multi-class
-source compiler. Multi-class object emission needs a root-level orchestration
-step: build and validate all canonical plans from one frontend session, emit
-all class bytes in memory, and only then stage/publish the complete batch. A
-semantic, lowering, or encoder failure must publish no class. Filesystem
-renames across multiple outputs are not atomic; if staging or a later rename
-fails, remove staged and already-published outputs before reporting failure.
-This work is outside #1215.
+`tests/jvm_source_compilation.rs` now has a multi-class source adapter and
+retains `compile_source` as the one-class/one-artifact wrapper used by existing
+fixtures. The batch adapter lexes, parses, and names once, keeps source-order
+class plans in one `JvmCompilationUnit`, and completes class, constructor,
+field, and method signatures before typing dependent bodies. It emits every
+class into memory before staging any output, then publishes under validated
+internal-name paths in source order. A semantic, typing, lowering, or encoder
+failure publishes no class. Filesystem renames across multiple outputs are
+not atomic; on a staging or later rename error, the adapter makes a best-effort
+rollback of staged and already-published outputs. This is the bounded test
+orchestration increment in #1221, not a production multi-file compiler.
 
 The future backend value type must carry the exact planned class `SymbolId`,
 for example `Reference(Counter)`. It may not collapse references to
