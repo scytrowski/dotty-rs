@@ -177,6 +177,12 @@ pub enum PickleError {
         tree: TreeId<Typed>,
         ty: TypeId,
     },
+    BodySourceValue {
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+        expected: i32,
+        actual: i32,
+    },
     BodySpan {
         tree: TreeId<Typed>,
     },

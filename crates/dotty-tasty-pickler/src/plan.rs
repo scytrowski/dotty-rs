@@ -811,6 +811,18 @@ impl<'a> Validator<'_, 'a> {
                 ty: node.ty,
             });
         }
+        if let TreeKind::Literal(source_literal) = &source_rhs.kind
+            && let (Constant::Int(expected), Constant::Int(actual)) =
+                (&source_literal.value, &literal.value)
+            && expected != actual
+        {
+            return Err(PickleError::BodySourceValue {
+                source_tree: rhs,
+                typed_tree: body,
+                expected: *expected,
+                actual: *actual,
+            });
+        }
         Ok(())
     }
 }

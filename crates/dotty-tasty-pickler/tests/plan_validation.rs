@@ -622,3 +622,22 @@ fn owner_depth_and_name_size_have_explicit_limits() {
         })
     );
 }
+
+#[test]
+fn a_consistent_typed_literal_cannot_change_the_original_source_literal_value() {
+    let mut f = Fixture::new();
+    let ty = f.typed_ast.get(f.body).ty;
+    *f.store.types.get_mut(ty) = Type::Constant(Constant::Int(43));
+    f.typed_ast.get_mut(f.body).kind = TreeKind::Literal(Literal {
+        value: Constant::Int(43),
+    });
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::BodySourceValue {
+            source_tree: f.rhs,
+            typed_tree: f.body,
+            expected: 42,
+            actual: 43
+        })
+    );
+}
