@@ -5533,6 +5533,7 @@ struct ConstructorCallFixture {
     definitions: Definitions,
     class: SymbolId,
     caller: SymbolId,
+    caller_parameters: Vec<SymbolId>,
     constructor: SymbolId,
     apply: TreeId<dotty_core::ast::Typed>,
     initialization: JvmClassInitializationPlan,
@@ -5798,10 +5799,364 @@ fn constructor_call_fixture(parameter_types: &[JvmType]) -> ConstructorCallFixtu
         definitions,
         class,
         caller,
+        caller_parameters: Vec::new(),
         constructor,
         apply,
         initialization,
     }
+}
+
+fn constructor_fixture_body(
+    fixture: &mut ConstructorCallFixture,
+) -> TreeId<dotty_core::ast::Typed> {
+    let zero = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(0),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    fixture.ast.alloc(Tree {
+        kind: TreeKind::Block(Block {
+            stats: vec![fixture.apply],
+            expr: zero,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    })
+}
+
+fn constructor_fixture_unit(
+    fixture: &ConstructorCallFixture,
+    body: TreeId<dotty_core::ast::Typed>,
+) -> JvmCompilationUnit<'_> {
+    JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: fixture.caller_parameters.clone(),
+                locals: Vec::new(),
+                body: Some(body),
+            }],
+            fields: Vec::new(),
+            initialization: fixture.initialization.clone(),
+        }],
+    }
+}
+
+fn assert_special_method_ref(
+    class: &ClassFile,
+    code: &[u8],
+    opcode_offset: usize,
+    owner: &str,
+    method: &str,
+    descriptor: &str,
+) {
+    assert_eq!(code[opcode_offset], 0xb7);
+    let index = u16::from_be_bytes([code[opcode_offset + 1], code[opcode_offset + 2]]);
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = class.constant_pool.get(ConstantPoolIndex(index)).unwrap()
+    else {
+        panic!("invokespecial must reference a Methodref constant")
+    };
+    assert_eq!(class.constant_pool.class_name(*class_index), Ok(owner));
+    assert_eq!(
+        class.constant_pool.name_and_type(*name_and_type_index),
+        Ok((method, descriptor))
+    );
+}
+
+fn assert_new_class_ref(class: &ClassFile, code: &[u8], owner: &str) {
+    assert_eq!(code[0], 0xbb);
+    let index = u16::from_be_bytes([code[1], code[2]]);
+    let ConstantPoolEntry::Class {
+        name_index: class_index,
+    } = class.constant_pool.get(ConstantPoolIndex(index)).unwrap()
+    else {
+        panic!("new must reference a Class constant")
+    };
+    assert_eq!(class.constant_pool.utf8(*class_index), Ok(owner));
+}
+
+#[test]
+fn emits_initialized_object_expression_after_exact_constructor_sequence() {
+    let mut fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
+    let body = constructor_fixture_body(&mut fixture);
+    let unit = constructor_fixture_unit(&fixture, body);
+    let flow_unit = constructor_fixture_unit(&fixture, fixture.apply);
+    assert!(matches!(
+        flow_unit.lower_method_body(fixture.class, fixture.caller, &fixture.definitions),
+        Err(JvmCodegenError::MethodBodyTypeMismatch {
+            found: Some(JvmType::Reference(class)),
+            ..
+        }) if class == fixture.class
+    ));
+    let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    class.validate_references().unwrap();
+    let code = emitted_method_code(&class, "caller");
+    assert_new_class_ref(&class, code, "CtorTarget");
+    assert_eq!(&code[3..8], &[0x59, 0x04, 0x10, 10, 0xb7]);
+    assert_special_method_ref(&class, code, 7, "CtorTarget", "<init>", "(ZI)V");
+    assert_eq!(&code[10..], &[0x57, 0x03, 0xac]);
+    if require_jdk_or_skip() {
+        verify_constructor_class_with_jdk(generated.bytes());
+    }
+}
+
+#[test]
+fn emits_a_proven_no_argument_constructor_without_fabricating_a_target() {
+    let mut fixture = constructor_call_fixture(&[]);
+    let body = constructor_fixture_body(&mut fixture);
+    let unit = constructor_fixture_unit(&fixture, body);
+    let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "caller");
+    assert_new_class_ref(&class, code, "CtorTarget");
+    assert_eq!(&code[3..4], &[0x59]);
+    assert_special_method_ref(&class, code, 4, "CtorTarget", "<init>", "()V");
+    assert_eq!(&code[7..], &[0x57, 0x03, 0xac]);
+}
+
+#[test]
+fn emits_parameter_arithmetic_once_before_the_approved_constructor_call() {
+    let mut fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
+    let parameter_name = fixture.store.names.intern("seed");
+    let parameter = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(parameter_name, Namespace::Term),
+        owner: Some(fixture.caller),
+        kind: SymbolKind::Parameter,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(fixture.definitions.int),
+        origin: SymbolOrigin::Source(dotty_core::SourceId::from_index(81)),
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    fixture.caller_parameters.push(parameter);
+    let signature = fixture.store.types.alloc(Type::Method(MethodType {
+        params: vec![MethodParam {
+            name: TermName::new(parameter_name),
+            ty: fixture.definitions.int,
+            erased: false,
+            varargs: false,
+        }],
+        result: fixture.definitions.int,
+        kind: MethodKind::Plain,
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(fixture.caller, SymbolInfo::Complete(signature));
+
+    let parameter_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(parameter),
+    });
+    let seed = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: Name::new(parameter_name, Namespace::Term),
+            backquoted: false,
+        }),
+        position: None,
+        ty: parameter_type,
+    });
+    let operator = fixture
+        .definitions
+        .int_primitive_operator_symbols(&fixture.store)
+        .unwrap()
+        .plus;
+    let function_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: parameter_type,
+        target: TermRefTarget::Symbol(operator),
+    });
+    let function = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(dotty_core::ast::Select {
+            qualifier: seed,
+            name: fixture.store.symbols.get(operator).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: function_type,
+    });
+    let one_type = fixture.store.types.alloc(Type::Constant(Constant::Int(1)));
+    let one = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: one_type,
+    });
+    let sum = fixture.ast.alloc(Tree {
+        kind: TreeKind::Apply(Apply {
+            function,
+            args: vec![one],
+            kind: ApplyKind::Regular,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let application = fixture.ast.get(fixture.apply).clone();
+    let TreeKind::Apply(mut application) = application.kind else {
+        unreachable!()
+    };
+    application.args[1] = sum;
+    fixture.ast.get_mut(fixture.apply).kind = TreeKind::Apply(application);
+
+    let body = constructor_fixture_body(&mut fixture);
+    let unit = constructor_fixture_unit(&fixture, body);
+    let generated = emit_class(&unit, fixture.class, &fixture.definitions).unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "caller");
+    assert_new_class_ref(&class, code, "CtorTarget");
+    assert_eq!(&code[3..9], &[0x59, 0x04, 0x1b, 0x04, 0x60, 0xb7]);
+    assert_special_method_ref(&class, code, 8, "CtorTarget", "<init>", "(ZI)V");
+    assert_eq!(&code[11..], &[0x57, 0x03, 0xac]);
+}
+
+#[test]
+fn rejects_branching_constructor_arguments_before_allocating() {
+    let mut fixture = constructor_call_fixture(&[JvmType::Int]);
+    let boolean = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        }),
+        position: None,
+        ty: fixture.definitions.boolean,
+    });
+    let one = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let two = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(2),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let conditional = fixture.ast.alloc(Tree {
+        kind: TreeKind::If(dotty_core::ast::If {
+            cond: boolean,
+            then_branch: one,
+            else_branch: two,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let application = fixture.ast.get(fixture.apply).clone();
+    let TreeKind::Apply(mut application) = application.kind else {
+        unreachable!()
+    };
+    application.args[0] = conditional;
+    fixture.ast.get_mut(fixture.apply).kind = TreeKind::Apply(application);
+    let unit = constructor_fixture_unit(&fixture, fixture.apply);
+    assert!(matches!(
+        unit.lower_method_body(fixture.class, fixture.caller, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmConstructorArgument { argument, .. })
+            if argument == conditional
+    ));
+}
+
+#[test]
+fn rejects_any_branch_in_a_method_that_allocates_before_returning_code() {
+    for allocation_after_branch in [false, true] {
+        let mut fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
+        let condition = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Boolean(true),
+            }),
+            position: None,
+            ty: fixture.definitions.boolean,
+        });
+        let one = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(1),
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        let two = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Int(2),
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        let branch = fixture.ast.alloc(Tree {
+            kind: TreeKind::If(dotty_core::ast::If {
+                cond: condition,
+                then_branch: one,
+                else_branch: two,
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        let body = fixture.ast.alloc(Tree {
+            kind: TreeKind::Block(Block {
+                stats: if allocation_after_branch {
+                    vec![branch, fixture.apply]
+                } else {
+                    vec![fixture.apply, branch]
+                },
+                expr: one,
+            }),
+            position: None,
+            ty: fixture.definitions.int,
+        });
+        let unit = constructor_fixture_unit(&fixture, body);
+        assert!(matches!(
+            emit_class(&unit, fixture.class, &fixture.definitions),
+            Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
+                tree,
+                method,
+            }) if tree == fixture.apply && method == fixture.caller
+        ));
+    }
+}
+
+#[test]
+fn rejects_object_creation_inside_an_if_branch_before_emitting_it() {
+    let mut fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
+    let condition = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Boolean(true),
+        }),
+        position: None,
+        ty: fixture.definitions.boolean,
+    });
+    let conditional = fixture.ast.alloc(Tree {
+        kind: TreeKind::If(dotty_core::ast::If {
+            cond: condition,
+            then_branch: fixture.apply,
+            else_branch: fixture.apply,
+        }),
+        position: None,
+        ty: fixture.store.types.alloc(Type::TypeRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(fixture.class),
+        }),
+    });
+    let unit = constructor_fixture_unit(&fixture, conditional);
+    assert!(matches!(
+        emit_class(&unit, fixture.class, &fixture.definitions),
+        Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
+            tree,
+            method,
+        }) if tree == fixture.apply && method == fixture.caller
+    ));
 }
 
 #[test]
@@ -7381,6 +7736,47 @@ fn verify_emitted_call_class_with_jdk(bytes: &[u8], harness_source: &str, expect
         String::from_utf8_lossy(&java.stdout).trim(),
         expected_output
     );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+fn verify_constructor_class_with_jdk(bytes: &[u8]) {
+    let directory = jdk_test_directory("constructor-emission");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("CtorTarget.class"), bytes).unwrap();
+    let harness = directory.join("ConstructorHarness.java");
+    fs::write(
+        &harness,
+        "public class ConstructorHarness { public static void main(String[] args) { System.out.println(new CtorTarget(true, 10).caller()); } }\n",
+    )
+    .unwrap();
+    let classpath = directory.to_str().unwrap();
+    let javac = Command::new("javac")
+        .args(["-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .unwrap();
+    assert!(
+        javac.status.success(),
+        "javac rejected constructor harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "ConstructorHarness",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected allocated class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "0");
     fs::remove_dir_all(directory).unwrap();
 }
 
