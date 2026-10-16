@@ -3288,6 +3288,99 @@ fn tool_major_version(tool: &str) -> Option<u32> {
         .find_map(|component| component.parse::<u32>().ok())
 }
 
+#[test]
+fn jdk21_reference_cfg_oracle_records_frames_without_enabling_backend_support() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+
+    let output = TestOutputDirectory::new("reference-cfg-oracle");
+    let fixture = Path::new("tests/fixtures/jvm-reference-cfg/ReferenceFlow.java");
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-g", "-d"])
+        .arg(output.path())
+        .arg(fixture)
+        .output()
+        .expect("start javac for reference CFG oracle");
+    assert!(
+        javac.status.success(),
+        "javac rejected ReferenceFlow.java\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    assert!(output.path().join("ReferenceFlow.class").is_file());
+    assert!(output.path().join("Counter.class").is_file());
+
+    let classpath = output.path().to_str().expect("UTF-8 output path");
+    let javap = Command::new("javap")
+        .args(["-v", "-classpath", classpath, "ReferenceFlow", "Counter"])
+        .output()
+        .expect("start javap for reference CFG oracle");
+    assert!(
+        javap.status.success(),
+        "javap rejected ReferenceFlow classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "StackMapTable: number_of_entries",
+        "class Counter",
+        "Counter.increment",
+        "Counter.get",
+        "newInBranch",
+        "sameClassJoin",
+        "invokevirtual",
+        "invokespecial",
+        "getfield",
+        "putfield",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap -v output omitted {expected:?}:\n{javap_output}"
+        );
+    }
+
+    let harness = output.path().join("ReferenceFlowHarness.java");
+    fs::write(
+        &harness,
+        "public final class ReferenceFlowHarness {\n  public static void main(String[] args) {\n    ReferenceFlow flow = new ReferenceFlow();\n    if (ReferenceFlow.loop(new Counter(0), 10) != 10) throw new AssertionError(\"loop\");\n    if (flow.branchOnThis(true) != 1 || flow.branchOnThis(false) != 0) throw new AssertionError(\"receiver\");\n    if (ReferenceFlow.sameClassJoin(true).get() != 3 || ReferenceFlow.sameClassJoin(false).get() != 4) throw new AssertionError(\"join\");\n    if (ReferenceFlow.newInBranch(true).get() != 5 || ReferenceFlow.newInBranch(false).get() != 6) throw new AssertionError(\"branch allocation\");\n    System.out.println(\"reference CFG oracle ok\");\n  }\n}\n",
+    )
+    .expect("write Java reference CFG harness");
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for reference CFG harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected ReferenceFlowHarness.java\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "ReferenceFlowHarness",
+        ])
+        .output()
+        .expect("start Java 21 verifier for reference CFG oracle");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected the Java 21 reference CFG oracle\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "reference CFG oracle ok"
+    );
+}
+
 fn verify_with_jdk(output_directory: &Path) {
     let output_path = output_directory.to_str().expect("UTF-8 temporary path");
     let javap = Command::new("javap")
