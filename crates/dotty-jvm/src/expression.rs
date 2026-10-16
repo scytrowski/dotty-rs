@@ -1302,6 +1302,17 @@ fn block_value_type(
     if let Some(value_type) = primitive_type(context.store, ty, context.definitions) {
         return Ok(Some(value_type));
     }
+    if matches!(context.store.types.try_get(ty), Some(Type::TypeRef { .. })) {
+        let Some((unit, _, _)) = context.call_context else {
+            return Ok(None);
+        };
+        let projected = crate::reference::project_type(unit, ty, context.definitions)
+            .or_else(|_| crate::reference::project_constructor_type(unit, ty, context.definitions));
+        return Ok(match projected {
+            Ok(JvmType::Reference(class)) => Some(JvmType::Reference(class)),
+            Ok(_) | Err(_) => None,
+        });
+    }
     let Some(Type::TermRef {
         target: TermRefTarget::Symbol(symbol),
         ..

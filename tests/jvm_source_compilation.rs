@@ -3460,6 +3460,32 @@ fn immutable_reference_locals_use_canonical_slots_and_verify_on_the_jvm() {
 }
 
 #[test]
+fn reference_local_accepts_a_straight_line_block_initializer() {
+    let output = TestOutputDirectory::new("reference-local-block-initializer");
+    let artifacts = compile_planned_constructor_source(
+        "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    val counter = { val x = seed + 1; new Counter(x) }\n    counter\n    42\n",
+        output.path(),
+    )
+    .unwrap();
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client source class is emitted");
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Client class");
+    class
+        .validate_references()
+        .expect("valid Client references");
+    let code = emitted_method_code(&class, "run");
+    assert_opcode_sequence(
+        code,
+        &[
+            0x1b, 0x04, 0x60, 0x3d, 0xbb, 0x59, 0x1c, 0xb7, 0x4e, 0x2d, 0x57, 0x10, 0xac,
+        ],
+    );
+}
+
+#[test]
 fn locals_keep_distinct_planned_class_identities_in_one_method() {
     let output = TestOutputDirectory::new("distinct-reference-local-types");
     let artifacts = compile_planned_constructor_source(
