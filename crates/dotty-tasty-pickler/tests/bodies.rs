@@ -260,8 +260,9 @@ fn bad_method_owner_and_result_type_are_specific_errors() {
     f.store.symbols.get_mut(method).info = SymbolInfo::Complete(f.definitions.unit);
     assert_eq!(
         emit(&f).unwrap_err(),
-        PickleError::UnsupportedTypeReference {
-            ty: f.definitions.unit
+        PickleError::MalformedType {
+            ty: f.definitions.unit,
+            role: TypeRole::MethodResult
         }
     );
 }
