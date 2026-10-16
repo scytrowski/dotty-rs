@@ -98,6 +98,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotty-tasty-pickler"
+version = "0.1.0"
+dependencies = [
+ "dotty-core",
+ "dotty-lexer",
+ "dotty-namer",
+ "dotty-parser",
+ "dotty-tasty",
+ "dotty-typer",
+]
+
+[[package]]
 name = "dotty-tasty-unpickler"
 version = "0.1.0"
 dependencies = [
