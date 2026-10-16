@@ -31,6 +31,7 @@ fn independent_fixtures_match_normalized_snapshots() {
         "example/Parameters",
         "example/Declarations",
         "example/References",
+        "example/Operations",
     ] {
         let expected: Value = serde_json::from_slice(
             &fs::read(
@@ -146,6 +147,87 @@ fn source_forward_method_selection_is_named_but_class_reference_has_identity() {
         named(&snapshot, "References")["id"]
     );
     assert_eq!(class_ref["reference"]["direction"], "backward");
+}
+
+#[test]
+fn operations_pins_calls_parameter_refs_forward_refs_and_clause_shapes() {
+    let snapshot = inspect(&fixture("example/Operations"), false).unwrap();
+    let method = |name: &str| {
+        let found = nodes(&snapshot)
+            .iter()
+            .find(|node| node["tag"] == "DEFDEF" && node["name"] == json!({"utf8":name}))
+            .unwrap();
+        assert_eq!(found["owner"], named(&snapshot, "Operations")["id"]);
+        found
+    };
+    assert_eq!(method("use")["header"], json!([]));
+    assert_eq!(method("first")["header"], json!([]));
+    assert_eq!(method("second")["header"], json!([]));
+    assert_eq!(
+        method("identity")["header"],
+        json!([{"parameter":{"utf8":"x"}}])
+    );
+    assert_eq!(method("zero")["header"], json!([{"clause":"EMPTYCLAUSE"}]));
+
+    let parameter = nodes(&snapshot)
+        .iter()
+        .find(|node| node["tag"] == "PARAM" && node["name"] == json!({"utf8":"x"}))
+        .unwrap();
+    assert_eq!(parameter["owner"], method("identity")["id"]);
+    let parameter_ref = nodes(&snapshot)
+        .iter()
+        .find(|node| node["tag"] == "TERMREFdirect")
+        .unwrap();
+    assert_eq!(parameter_ref["reference"]["target"], parameter["id"]);
+
+    let call = nodes(&snapshot)
+        .iter()
+        .find(|node| node["tag"] == "APPLY" && node["parent"] == method("use")["id"])
+        .unwrap();
+    let children = call["children"].as_array().unwrap();
+    assert_eq!(children.len(), 2);
+    let function = nodes(&snapshot)
+        .iter()
+        .find(|node| node["id"] == children[0])
+        .unwrap();
+    assert_eq!(function["tag"], "SELECTin");
+    assert_eq!(function["name"]["signed"], json!({"utf8":"identity"}));
+    let qualifier = nodes(&snapshot)
+        .iter()
+        .find(|node| node["id"] == function["children"][0])
+        .unwrap();
+    assert_eq!(qualifier["tag"], "QUALTHIS");
+    assert_eq!(
+        named(&snapshot, "Operations")["id"],
+        nodes(&snapshot)
+            .iter()
+            .find(|node| {
+                node["tag"] == "TYPEREFsymbol" && node["parent"] == qualifier["children"][0]
+            })
+            .unwrap()["reference"]["target"]
+    );
+    let argument = nodes(&snapshot)
+        .iter()
+        .find(|node| node["id"] == children[1])
+        .unwrap();
+    assert_eq!(
+        (argument["tag"].as_str(), argument["value"].as_i64()),
+        (Some("INTconst"), Some(42))
+    );
+
+    // The forward source method reference is emitted as a named SELECT whose
+    // qualifier is the canonical class `this`; it is not a forward AST address.
+    let forward = nodes(&snapshot)
+        .iter()
+        .find(|node| node["tag"] == "SELECT" && node["name"] == json!({"utf8":"second"}))
+        .unwrap();
+    assert_eq!(forward["parent"], method("first")["id"]);
+    let forward_qualifier = nodes(&snapshot)
+        .iter()
+        .find(|node| node["id"] == forward["children"][0])
+        .unwrap();
+    assert_eq!(forward_qualifier["tag"], "QUALTHIS");
+    assert_eq!(method("second")["parent"], method("first")["parent"]);
 }
 
 #[test]
