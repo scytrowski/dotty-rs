@@ -1,7 +1,8 @@
 # Source semantic TASTy pickler: minimal Scala 3.9 contract
 
-This is the readiness audit for [#1189](https://github.com/scytrowski/dotty-rs/issues/1189),
-not a pickler implementation. It audits repository revision `3882dbb50` and Scala
+This document began as the readiness audit for
+[#1189](https://github.com/scytrowski/dotty-rs/issues/1189), auditing repository
+revision `3882dbb50` and Scala
 3.9.0 revision `777528f19a58e794c9954a42f433373472ec57f8`, targeting TASTy
 **28.9.0**. The proposed first complete output is:
 
@@ -644,3 +645,48 @@ Each implementation increment runs focused crate/boundary regressions and all
 AGENTS.md checks. This audit changes documentation only; it does not regenerate
 baselines, introduce production dependencies, implement the pickler, or add
 modules/objects/generics/inline/macros/full source positions to the sprint.
+
+## Implemented complete literal-body producer (#1194)
+
+`ValidatedPicklePlan::pickle()` now returns an owned `PickledTasty` for the frozen
+one-package/class/default-constructor/parameterless-Int-method slice.
+`pickle_with_limits(PickleLimits)` adds a whole-file size budget (16 MiB by
+default) to the existing semantic/name/type/wire budgets. It measures header,
+name-table and section framing plus payloads before the full-file encoder runs.
+Wire depth failures remain `PickleError::Construction`; whole-file size failures
+are `PickleError::LimitExceeded { kind: FileBytes, .. }`. No partial output is
+published on failure, and no compiler arena or source index is mutated.
+
+The small expression lowerer borrows the same `SemanticStore` and `TypedAst` and
+reads the exact validated method-plan `TreeId<Typed>`. The sole supported kind is
+`Literal(Int(n))`; its actual `Tree::ty` must be `Type::Constant(Int(n))`.
+The method's declared result remains canonical `Definitions.int`. In the pinned
+`TreePickler.pickleConstant` contract this becomes a single `INTconst n` after
+the method's Int return `IDENTtpt`. No expression type ascription, recursive
+wrapper, fake method tree or extra `METHODtype` is required. Other expression
+kinds fail explicitly without traversal or simplification, even cyclic malformed
+unsupported nodes. Existing source/typed root identity and span checks apply.
+
+Complete and incomplete output share declaration/owner/reference assembly but
+remain distinct public results: `DeclarationSkeleton` still records omitted
+bodies, whereas `PickledTasty::body(method_symbol)` records the exact serialized
+root. Complete `bytes()` are assembled with `TastyFileBuilder`, validated against
+28.9.0 and owned independently of the input session. Source provenance,
+Scala-encoded output paths and canonical declaration/owner/address bindings are
+retained. No disk publication or production frontend/JVM dependency is added.
+
+The complete header uses `dotty-rs minimal semantic pickler`, with the pinned
+`TastyHash.pjwHash64` algorithm and `TastyPickler.assembleParts` UUID layout:
+`hash(names payload) XOR hash(ASTs payload)`, then `hash(Attributes payload)`,
+each as an uncompressed big-endian 64-bit value. The existing fixed diagnostic
+UUID is retained only by the explicitly incomplete skeleton. Positions, Comments
+and compiler SourceFile annotation remain omitted per the reduced oracle.
+
+Tests inspect the actual method RHS, compare it to the unchanged Scala oracle,
+verify UUID hashing against that fixture, exercise signed Int boundaries and
+re-encode/decode the generated file byte-for-byte. Real Lexer/Parser/Namer/Typer
+sessions pass existing `SourceTypedIndex` roots directly, including non-42 values
+and independent deterministic sessions. **These checks do not establish Scala
+compiler interoperability**; compilation of this Rust producer's output remains
+#1195. The earlier audit and sequencing sections describe historical decisions,
+not a requirement to keep the complete producer unimplemented.

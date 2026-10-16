@@ -8,10 +8,10 @@ use dotty_typer::SourceTyper;
 
 const ANSWER: &str = include_str!("../../../tests/fixtures/tasty_pickler/Answer.scala");
 
-fn source_plan(
+fn source_outputs(
     text: &str,
     edit: impl FnOnce(&mut PicklePlan<'_>),
-) -> Result<DeclarationSkeleton, PickleError> {
+) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
     let source = SourceId::from_index(7);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -158,12 +158,29 @@ fn source_plan(
         index.symbol_at(source, template.body[0]).unwrap()
     );
     let body = checked.plan().methods[0].body.unwrap();
-    assert!(matches!(
-        &typer.typed_ast().get(body).kind,
-        TreeKind::Literal(Literal {
-            value: Constant::Int(42)
-        })
-    ));
+    let TreeKind::Literal(Literal {
+        value: Constant::Int(value),
+    }) = typer.typed_ast().get(body).kind
+    else {
+        panic!()
+    };
+    let output = checked.pickle()?;
+    assert_eq!(output.body(methods[0].symbol), Some(body));
+    assert_eq!(output.source(), &plan.source);
+    let complete =
+        dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = complete.ast_address_index().unwrap();
+    let wire_method = addresses
+        .get(output.declarations()[2].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let Some(dotty_tasty::tasty::RawTree::Leaf(rhs)) = wire_method.rhs else {
+        panic!()
+    };
+    assert_eq!(rhs.tag, dotty_tasty::tasty::INTCONST_TAG);
+    assert_eq!(rhs.value, dotty_tasty::tasty::TermValue::Int(value));
+    assert_eq!(complete.encode_validated().unwrap(), output.bytes());
     let skeleton = checked.declaration_skeleton()?;
     let file =
         dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(skeleton.provisional_bytes())
@@ -187,7 +204,14 @@ fn source_plan(
         ),
         before
     );
-    Ok(skeleton)
+    Ok((skeleton, output))
+}
+
+fn source_plan(
+    text: &str,
+    edit: impl FnOnce(&mut PicklePlan<'_>),
+) -> Result<DeclarationSkeleton, PickleError> {
+    source_outputs(text, edit).map(|(skeleton, _)| skeleton)
 }
 
 #[test]
@@ -293,4 +317,25 @@ fn valid_source_traits_are_unsupported_rather_than_invalid_class_identities() {
             ..
         })
     ));
+}
+
+#[test]
+fn real_typed_rhs_values_are_serialized_without_a_synthetic_method_tree() {
+    for spelling in [
+        "0",
+        "7",
+        "2147483647",
+        "0x80000000",
+        "0xffffffff",
+        "0b101010",
+    ] {
+        source_outputs(&ANSWER.replace("42", spelling), |_| {}).unwrap();
+    }
+}
+
+#[test]
+fn complete_source_output_is_deterministic_across_actual_frontend_sessions() {
+    let (_, first) = source_outputs(ANSWER, |_| {}).unwrap();
+    let (_, second) = source_outputs(ANSWER, |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
 }
