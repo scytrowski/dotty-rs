@@ -23,7 +23,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ResolverMetrics {
@@ -5753,6 +5753,7 @@ fn merge_counts<K: Ord>(target: &mut BTreeMap<K, usize>, source: BTreeMap<K, usi
 #[test]
 #[ignore = "run tools/typer-classpath-corpus-audit/run with the pinned Scala checkout and explicit JAVA_HOME"]
 fn pinned_scala39_local_definition_audit() {
+    let audit_started = Instant::now();
     let root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required"));
     let revision = git_revision(&root);
     assert_eq!(
@@ -5762,7 +5763,18 @@ fn pinned_scala39_local_definition_audit() {
     let classpath = audit_classpath_from_environment();
     let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
     let files = scala_files(&[root.join("library/src"), root.join("compiler/src")]);
+    let profile_files = std::env::var("DOTTY_AUDIT_PROFILE_FILES")
+        .ok()
+        .map(|files| files.split(',').map(str::to_owned).collect::<BTreeSet<_>>());
+    let expected_files = profile_files.as_ref().map_or(files.len(), BTreeSet::len);
+    if let Some(profile_files) = &profile_files {
+        assert!(
+            !profile_files.is_empty(),
+            "profile file list must not be empty"
+        );
+    }
     let mut audit = Audit::default();
+    let mut processed_files = 0;
     for (index, file) in files.iter().enumerate() {
         if index % 25 == 0 {
             eprintln!("audited {index}/{} Scala files", files.len());
@@ -5772,6 +5784,13 @@ fn pinned_scala39_local_definition_audit() {
             .unwrap_or(file)
             .to_string_lossy()
             .replace('\\', "/");
+        if profile_files
+            .as_ref()
+            .is_some_and(|profile_files| !profile_files.contains(&relative))
+        {
+            continue;
+        }
+        processed_files += 1;
         let source = match fs::read_to_string(file) {
             Ok(source) => source,
             Err(_) => {
@@ -5787,6 +5806,20 @@ fn pinned_scala39_local_definition_audit() {
             classpath.clone(),
             Rc::clone(&resolver_metrics),
         ));
+    }
+
+    if let Some(profile_files) = profile_files {
+        assert_eq!(
+            processed_files,
+            profile_files.len(),
+            "every requested profile path must match a Scala source file"
+        );
+        eprintln!(
+            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} wall_ms={}",
+            audit_started.elapsed().as_millis()
+        );
+        print_resolver_metrics(&resolver_metrics.borrow());
+        return;
     }
 
     assert_eq!(
@@ -9573,15 +9606,31 @@ fn audit_source_inner_filtered(
     method_tree_filter: Option<&BTreeSet<u32>>,
     source_package_inventory: Option<&BTreeSet<String>>,
 ) -> Audit {
+    let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
+    let file_started = Instant::now();
+    let mut parse_time = Duration::ZERO;
+    let mut inventory_time = Duration::ZERO;
+    let mut namer_time = Duration::ZERO;
+    let mut typer_setup_time = Duration::ZERO;
+    let mut typing_time = Duration::ZERO;
     if let Some((_, metrics)) = &classpath {
         metrics.borrow_mut().current_file = path.to_owned();
     }
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
+    let stage_started = Instant::now();
     let scanner = match ContextualScanner::new(text) {
         Ok(scanner) => scanner,
         Err(_) => {
+            if profile_timing {
+                parse_time = stage_started.elapsed();
+                eprintln!(
+                    "AUDIT_FILE_TIMING file={path} outcome=scanner_error parse_ms={} inventory_ms=0 namer_ms=0 typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                    parse_time.as_millis(),
+                    file_started.elapsed().as_millis()
+                );
+            }
             return Audit {
                 files_attempted: 1,
                 parser_failed_files: 1,
@@ -9595,6 +9644,14 @@ fn audit_source_inner_filtered(
         scanner,
         &mut store.names,
     );
+    if profile_timing {
+        parse_time = stage_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=parse ms={}",
+            parse_time.as_millis()
+        );
+    }
+    let stage_started = Instant::now();
     let mut audit = collect_local_nodes(&parsed.ast);
     if import_prefix_only {
         for (tree, node) in parsed.ast.iter() {
@@ -9643,7 +9700,15 @@ fn audit_source_inner_filtered(
         let failure = classify_parse_diagnostic(diagnostic.issue().code());
         *audit.parser_diagnostics.entry(failure.bucket).or_default() += 1;
     }
+    if profile_timing {
+        inventory_time = stage_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=ast_inventory ms={}",
+            inventory_time.as_millis()
+        );
+    }
     let mut packages = Packages::new();
+    let stage_started = Instant::now();
     let index = match name_compilation_unit(
         &parsed.ast,
         parsed.root,
@@ -9654,6 +9719,9 @@ fn audit_source_inner_filtered(
     ) {
         Ok(index) => index,
         Err(error) => {
+            if profile_timing {
+                namer_time = stage_started.elapsed();
+            }
             audit.namer_failed_files = 1;
             if audit.local_defdefs != 0 {
                 let failure = classify_namer_error(&error);
@@ -9661,12 +9729,40 @@ fn audit_source_inner_filtered(
                     record_failure(&mut audit, failure.clone(), path);
                 }
             }
+            if profile_timing {
+                eprintln!(
+                    "AUDIT_FILE_TIMING file={path} outcome=namer_error parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                    parse_time.as_millis(),
+                    inventory_time.as_millis(),
+                    namer_time.as_millis(),
+                    file_started.elapsed().as_millis()
+                );
+            }
             return audit;
         }
     };
+    if profile_timing {
+        namer_time = stage_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=namer ms={} local_definitions={} patdefs={}",
+            namer_time.as_millis(),
+            audit.local_defdefs,
+            audit.patdef_profile.total
+        );
+    }
     if !import_prefix_only && audit.local_defdefs == 0 && audit.patdef_profile.total == 0 {
+        if profile_timing {
+            eprintln!(
+                "AUDIT_FILE_TIMING file={path} outcome=no_local_definitions parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                parse_time.as_millis(),
+                inventory_time.as_millis(),
+                namer_time.as_millis(),
+                file_started.elapsed().as_millis()
+            );
+        }
         return audit;
     }
+    let typer_setup_started = Instant::now();
     let probe_classpath = classpath.as_ref().map(|(classpath, _)| classpath.clone());
 
     let root_methods = parsed
@@ -9682,12 +9778,19 @@ fn audit_source_inner_filtered(
             Some((method, tree, rhs, range))
         })
         .collect::<Vec<_>>();
-    let root_methods = method_tree_filter.map_or(root_methods.clone(), |allowed| {
+    let mut root_methods = method_tree_filter.map_or(root_methods.clone(), |allowed| {
         root_methods
             .into_iter()
             .filter(|(_, tree, _, _)| allowed.contains(&tree.index()))
             .collect()
     });
+    if profile_timing
+        && let Some(limit) = std::env::var("DOTTY_AUDIT_PROFILE_METHOD_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+    {
+        root_methods.truncate(limit);
+    }
 
     let local_method_trees = local_method_trees(&parsed.ast);
     let match_pattern_shapes = parsed
@@ -9735,6 +9838,14 @@ fn audit_source_inner_filtered(
             class_path_probe: Some(classpath),
         }));
     }
+    if profile_timing {
+        typer_setup_time = typer_setup_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=typer_setup ms={} root_methods={}",
+            typer_setup_time.as_millis(),
+            root_methods.len()
+        );
+    }
     let mut impure_projection_cache = BTreeMap::new();
     let mut root_failures = Vec::new();
     let mut method_ranges = root_methods
@@ -9746,7 +9857,16 @@ fn audit_source_inner_filtered(
             .then(|| node.position.map(|position| position.span().range()))
             .flatten()
     }));
+    let typing_started = Instant::now();
     for (method, method_tree, rhs, range) in root_methods {
+        let method_started = Instant::now();
+        let method_label = profile_timing.then(|| audit_symbol_path(typer.store(), method));
+        if let Some(method_label) = &method_label {
+            eprintln!(
+                "AUDIT_METHOD_START file={path} tree={} method={method_label}",
+                method_tree.index()
+            );
+        }
         if let Some(metrics) = &request_metrics {
             metrics.borrow_mut().current_method = format!(
                 "{}#tree={}::{}",
@@ -9758,6 +9878,14 @@ fn audit_source_inner_filtered(
         let outcome = typer
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
+        if profile_timing {
+            eprintln!(
+                "AUDIT_METHOD_TIMING file={path} tree={} method={} elapsed_ms={}",
+                method_tree.index(),
+                method_label.as_deref().unwrap_or("<unknown>"),
+                method_started.elapsed().as_millis()
+            );
+        }
         if let Some(metrics) = &request_metrics {
             let mut metrics = metrics.borrow_mut();
             metrics.current_method.clear();
@@ -9883,6 +10011,14 @@ fn audit_source_inner_filtered(
         }
     }
 
+    if profile_timing {
+        typing_time = typing_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=typing ms={}",
+            typing_time.as_millis()
+        );
+    }
+    let postprocess_started = Instant::now();
     for (tree, node) in parsed.ast.iter() {
         let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind else {
             continue;
@@ -10322,6 +10458,19 @@ fn audit_source_inner_filtered(
         }
     }
     if import_prefix_only {
+        if profile_timing {
+            let postprocess_time = postprocess_started.elapsed();
+            eprintln!(
+                "AUDIT_FILE_TIMING file={path} outcome=import_prefix parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} total_ms={}",
+                parse_time.as_millis(),
+                inventory_time.as_millis(),
+                namer_time.as_millis(),
+                typer_setup_time.as_millis(),
+                typing_time.as_millis(),
+                postprocess_time.as_millis(),
+                file_started.elapsed().as_millis()
+            );
+        }
         return audit;
     }
     collect_source_function_method_outcomes(
@@ -10342,6 +10491,19 @@ fn audit_source_inner_filtered(
         let successes =
             probe_supported_match_cases(text, path, classpath, &mut audit.match_profile);
         audit.match_profile.typed_case_successes = successes;
+    }
+    if profile_timing {
+        let postprocess_time = postprocess_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_TIMING file={path} outcome=complete parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} total_ms={}",
+            parse_time.as_millis(),
+            inventory_time.as_millis(),
+            namer_time.as_millis(),
+            typer_setup_time.as_millis(),
+            typing_time.as_millis(),
+            postprocess_time.as_millis(),
+            file_started.elapsed().as_millis()
+        );
     }
     audit
 }
