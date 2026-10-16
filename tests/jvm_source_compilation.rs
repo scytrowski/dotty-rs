@@ -3270,7 +3270,7 @@ fn assert_javap_instruction_sequence(output: &str, method_header: &str, expected
 fn verify_counter_with_jdk(output_directory: &Path) {
     let output_path = output_directory.to_str().expect("UTF-8 temporary path");
     let javap = Command::new("javap")
-        .args(["-c", "-v", "-classpath", output_path, "Counter"])
+        .args(["-p", "-c", "-v", "-classpath", output_path, "Counter"])
         .output()
         .expect("start javap for Counter");
     assert!(
@@ -3356,7 +3356,7 @@ fn verify_counter_with_jdk(output_directory: &Path) {
 fn verify_private_fields_with_jdk(output_directory: &Path) {
     let output_path = output_directory.to_str().expect("UTF-8 temporary path");
     let javap = Command::new("javap")
-        .args(["-c", "-v", "-classpath", output_path, "PrivateFields"])
+        .args(["-p", "-c", "-v", "-classpath", output_path, "PrivateFields"])
         .output()
         .expect("start javap for PrivateFields");
     assert!(
