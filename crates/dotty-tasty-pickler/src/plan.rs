@@ -402,6 +402,10 @@ impl<'a> Validator<'_, 'a> {
         if clauses.len() != definition.value_param_clauses.len() {
             return Err(PickleError::ParameterOrder { method, clause: 0 });
         }
+        if clauses.iter().any(|clause| !clause.is_empty()) {
+            self.scope(method)?;
+        }
+        let int = self.builtin(Builtin::Int, self.plan.definitions.int, "Int")?;
         let mut seen = HashSet::new();
         for (clause, (symbols, trees)) in clauses
             .iter()
@@ -422,6 +426,22 @@ impl<'a> Validator<'_, 'a> {
                         expected: SourceRole::Parameter,
                     });
                 };
+                self.metadata(&parameter.metadata, symbol)?;
+                if parameter.rhs.is_some() {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
+                    );
+                }
+                let TreeKind::Ident(parameter_type) = &self.source_tree(parameter.tpt)?.kind else {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
+                    );
+                };
+                if parameter_type.name != self.symbol(int)?.name {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
+                    );
+                }
                 self.source_symbol(
                     symbol,
                     tree,
@@ -432,6 +452,9 @@ impl<'a> Validator<'_, 'a> {
                 let ty = self.complete(symbol)?;
                 if ty != self.plan.definitions.int {
                     return Err(PickleError::UnsupportedTypeReference { ty });
+                }
+                if self.scope(method)?.lookup_all(parameter.name.as_name()) != [symbol] {
+                    return Err(PickleError::ScopeMembers { owner: method });
                 }
             }
         }
@@ -754,10 +777,6 @@ impl<'a> Validator<'_, 'a> {
         }
         self.parameters(method.symbol, definition, &method.parameter_clauses)?;
         if definition.value_param_clauses.len() > 1
-            || definition
-                .value_param_clauses
-                .iter()
-                .any(|clause| !clause.is_empty())
             || definition.source_param_clause_order.is_some()
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
@@ -777,22 +796,59 @@ impl<'a> Validator<'_, 'a> {
         if result.name != self.symbol(int)?.name {
             return Err(PickleError::UnsupportedTypeReference { ty });
         }
-        let signature_matches = match definition.value_param_clauses.as_slice() {
-            [] => ty == p.definitions.int,
-            [clause] if clause.is_empty() => matches!(
-                self.ty(ty)?,
-                Type::Method(signature)
-                    if signature.params.is_empty()
-                        && signature.kind == MethodKind::Plain
-                        && signature.result == p.definitions.int
-            ),
-            _ => false,
-        };
-        if !signature_matches {
-            return Err(PickleError::MalformedType {
-                ty,
-                role: TypeRole::MethodResult,
-            });
+        match definition.value_param_clauses.as_slice() {
+            [] if ty == p.definitions.int => {}
+            [] => {
+                return Err(PickleError::MalformedType {
+                    ty,
+                    role: TypeRole::MethodResult,
+                });
+            }
+            [clause] => {
+                let Type::Method(signature) = self.ty(ty)? else {
+                    return Err(PickleError::MalformedType {
+                        ty,
+                        role: if clause.is_empty() {
+                            TypeRole::MethodResult
+                        } else {
+                            TypeRole::Parameter
+                        },
+                    });
+                };
+                if signature.kind != MethodKind::Plain
+                    || signature.params.len() != method.parameter_clauses[0].len()
+                {
+                    return Err(PickleError::MalformedType {
+                        ty,
+                        role: TypeRole::Parameter,
+                    });
+                }
+                if signature.result != p.definitions.int {
+                    return Err(PickleError::MalformedType {
+                        ty,
+                        role: TypeRole::MethodResult,
+                    });
+                }
+                for (formal, &parameter) in
+                    signature.params.iter().zip(&method.parameter_clauses[0])
+                {
+                    if formal.name.as_name() != &self.symbol(parameter)?.name
+                        || formal.ty != p.definitions.int
+                        || formal.erased
+                        || formal.varargs
+                    {
+                        return Err(PickleError::MalformedType {
+                            ty,
+                            role: TypeRole::Parameter,
+                        });
+                    }
+                }
+            }
+            _ => {
+                return Err(
+                    self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol))
+                );
+            }
         }
         let Some(rhs) = definition.rhs else {
             return Err(self.unsupported(UnsupportedFeature::AbstractMethod, Some(method.symbol)));

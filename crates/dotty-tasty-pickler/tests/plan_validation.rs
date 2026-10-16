@@ -39,12 +39,91 @@ fn add_parameters(f: &mut Fixture) -> [SymbolId; 2] {
         symbols.push(symbol);
         trees.push(parameter);
     }
+    let parameter_scope = f.store.scopes.alloc(Scope::new(Some(method)));
+    for &symbol in &symbols {
+        let name = f.store.symbols.get(symbol).name;
+        f.store.scopes.get_mut(parameter_scope).enter(name, symbol);
+    }
+    f.index.record_scope(method, parameter_scope).unwrap();
     let TreeKind::DefDef(definition) = &mut f.source_ast.get_mut(tree).kind else {
         panic!()
     };
     definition.value_param_clauses = vec![trees];
     f.methods[0].parameter_clauses = vec![symbols.clone()];
+    let signature = f.store.types.alloc(Type::Method(MethodType {
+        params: symbols
+            .iter()
+            .map(|&symbol| MethodParam {
+                name: TermName::new(f.store.symbols.get(symbol).name.text()),
+                ty: f.definitions.int,
+                erased: false,
+                varargs: false,
+            })
+            .collect(),
+        result: f.definitions.int,
+        kind: MethodKind::Plain,
+    }));
+    f.store
+        .symbols
+        .set_info(method, SymbolInfo::Complete(signature));
     [symbols[0], symbols[1]]
+}
+
+#[test]
+fn one_plain_int_clause_validates_against_canonical_source_and_signature_order() {
+    let mut f = Fixture::new();
+    let [first, second] = add_parameters(&mut f);
+    let before = f.snapshot();
+    let plan = f.plan();
+    let validation = plan.validate();
+    assert!(validation.is_ok(), "{:?}", validation.err());
+    assert_eq!(f.snapshot(), before);
+
+    let signature = f.store.symbols.get(f.methods[0].symbol).info;
+    let SymbolInfo::Complete(signature) = signature else {
+        panic!()
+    };
+    let Type::Method(mut signature) = f.store.types.get(signature).clone() else {
+        panic!()
+    };
+    signature.params.swap(0, 1);
+    let wrong_order = f.store.types.alloc(Type::Method(signature));
+    f.store
+        .symbols
+        .set_info(f.methods[0].symbol, SymbolInfo::Complete(wrong_order));
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::MalformedType {
+            ty: wrong_order,
+            role: TypeRole::Parameter,
+        })
+    );
+    assert_ne!(first, second);
+}
+
+#[test]
+fn parameter_scope_and_declared_int_type_are_required() {
+    let mut f = Fixture::new();
+    let [first, _] = add_parameters(&mut f);
+    let method = f.methods[0].symbol;
+    let parameter_scope = f.index.scope_of(method).unwrap();
+    f.store.scopes.get_mut(parameter_scope).remove(first);
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::ScopeMembers { owner: method })
+    );
+
+    let mut f = Fixture::new();
+    let [first, _] = add_parameters(&mut f);
+    f.store
+        .symbols
+        .set_info(first, SymbolInfo::Complete(f.definitions.unit));
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::UnsupportedTypeReference {
+            ty: f.definitions.unit
+        })
+    );
 }
 
 #[test]
@@ -483,7 +562,7 @@ fn explicit_empty_value_clause_requires_the_matching_plain_zero_arity_method_typ
         f.plan().validate().err(),
         Some(PickleError::MalformedType {
             ty: contextual,
-            role: TypeRole::MethodResult,
+            role: TypeRole::Parameter,
         })
     );
 }
