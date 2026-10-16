@@ -1766,6 +1766,61 @@ struct ModuleAuditPath {
     include_object_class: bool,
 }
 
+struct PrefixOnlyPackagePath;
+
+struct SharedResolverHandle<E: ClassPathEntry> {
+    resolver: Rc<RefCell<Option<ClasspathSymbolResolver<E>>>>,
+    package_results: Rc<RefCell<Vec<(Vec<String>, bool)>>>,
+}
+
+impl<E: ClassPathEntry> SymbolResolver for SharedResolverHandle<E> {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        self.resolver
+            .borrow()
+            .as_ref()
+            .expect("shared resolver is present")
+            .checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.resolver
+            .borrow_mut()
+            .as_mut()
+            .expect("shared resolver is present")
+            .rollback_to(store, checkpoint);
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.resolver
+            .borrow_mut()
+            .as_mut()
+            .expect("shared resolver is present")
+            .resolve_member(store, request)
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let result = self
+            .resolver
+            .borrow_mut()
+            .as_mut()
+            .expect("shared resolver is present")
+            .resolve_package(store, path)?;
+        self.package_results.borrow_mut().push((
+            path.iter().map(|segment| (*segment).to_owned()).collect(),
+            result.is_some(),
+        ));
+        Ok(result)
+    }
+}
+
 // Source.tasty and scala/package.tasty are the checked-in Scala 3.9.0 bytes
 // pinned by the fixture manifest. The few Java/collection dependencies below
 // are intentionally class stubs, matching the classloader fixture setup; the
@@ -1803,6 +1858,16 @@ impl ClassPathEntry for ModuleAuditPath {
 
     fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
         Ok(package == ["me", "cytrowski", "tastyfixtures", "semantic"])
+    }
+}
+
+impl ClassPathEntry for PrefixOnlyPackagePath {
+    fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        Ok(None)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(matches!(package, ["external"] | ["external", "pkg"]))
     }
 }
 
@@ -3074,6 +3139,99 @@ fn existing_module_member_rollback_snapshot(
         entry.kind,
         audit_symbol_path(store, entry.owner.unwrap())
     )
+}
+
+#[test]
+fn missing_external_import_member_rolls_back_temporary_package_materialization() {
+    let text = "import external.pkg.Missing\nval value: Missing = 1";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let mut namer_packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "missing-external-import.scala",
+        &mut store,
+        &mut namer_packages,
+    )
+    .unwrap();
+    let (value, type_tree) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::ValDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "value" =>
+            {
+                Some((index.symbol_at(source, tree).unwrap(), definition.tpt))
+            }
+            _ => None,
+        })
+        .expect("fixture contains the requested type projection");
+    let context = index.declaration_context_of(value).unwrap();
+    let packages = namer_packages.snapshot();
+    let resolver = ClasspathSymbolResolver::new(
+        PrefixOnlyPackagePath,
+        definitions,
+        LoadingSession::with_packages(namer_packages),
+    );
+    let resolver = Rc::new(RefCell::new(Some(resolver)));
+    let package_results = Rc::new(RefCell::new(Vec::new()));
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(SharedResolverHandle {
+        resolver: Rc::clone(&resolver),
+        package_results: Rc::clone(&package_results),
+    }));
+    let store_checkpoint = typer.store().checkpoint();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            typer.type_of_tpt(type_tree, context),
+            Err(TyperError::TypeNameNotFound { name, tree_index, .. })
+                if typer.store().names.resolve(name.text()) == "Missing"
+                    && tree_index == type_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
+    }
+    assert!(package_results.borrow().iter().any(|(path, resolved)| {
+        path == &["external".to_owned(), "pkg".to_owned()] && *resolved
+    }));
+    assert!(
+        package_results
+            .borrow()
+            .iter()
+            .any(|(path, resolved)| { path == &["external".to_owned()] && *resolved })
+    );
+
+    drop(typer);
+    let resolver = resolver
+        .borrow_mut()
+        .take()
+        .expect("shared classpath resolver remains available after rollback");
+    let packages = resolver.into_session().into_packages();
+    assert!(
+        packages.symbol::<&str>(&[]).is_some(),
+        "source root survives"
+    );
+    assert!(packages.symbol(&["external"]).is_none());
+    assert!(packages.symbol(&["external", "pkg"]).is_none());
 }
 
 #[test]

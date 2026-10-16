@@ -8020,15 +8020,19 @@ mod tests {
                 store_checkpoint,
                 "candidate enumeration must not materialize symbols, types, or scopes"
             );
-            assert!(package_scope_snapshots.iter().all(|(package, scope, entries)| {
-                typer.packages.scope_of(*package) == Some(*scope)
-                    && typer
-                        .store()
-                        .scopes
-                        .get(*scope)
-                        .entered_symbols()
-                        .eq(entries.iter().copied())
-            }));
+            assert!(
+                package_scope_snapshots
+                    .iter()
+                    .all(|(package, scope, entries)| {
+                        typer.packages.scope_of(*package) == Some(*scope)
+                            && typer
+                                .store()
+                                .scopes
+                                .get(*scope)
+                                .entered_symbols()
+                                .eq(entries.iter().copied())
+                    })
+            );
         }
     }
 
