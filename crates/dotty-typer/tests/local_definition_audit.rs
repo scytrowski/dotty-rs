@@ -9418,6 +9418,10 @@ fn probe_supported_match_cases(
         .collect::<Vec<_>>();
 
     let packages = Packages::new();
+    let probe_metrics = Rc::new(RefCell::new(ResolverMetrics {
+        timing_enabled: std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some(),
+        ..ResolverMetrics::default()
+    }));
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -9433,7 +9437,7 @@ fn probe_supported_match_cases(
             LoadingSession::with_packages(Packages::new()),
         )
         .with_load_profile_collection(),
-        metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
+        metrics: Rc::clone(&probe_metrics),
         class_path_probe: Some(classpath),
     }));
 
@@ -9455,10 +9459,101 @@ fn probe_supported_match_cases(
     .into_iter()
     .map(|family| (family.to_owned(), 0))
     .collect::<BTreeMap<_, _>>();
+    let profile_probe_limit = std::env::var("DOTTY_AUDIT_PROFILE_MATCH_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    let probes = probes
+        .into_iter()
+        .take(if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+            profile_probe_limit.unwrap_or(usize::MAX)
+        } else {
+            usize::MAX
+        })
+        .collect::<Vec<_>>();
+    let mut method_contexts = HashMap::<SymbolId, dotty_typer::ExpressionContext>::new();
+    let mut selector_outcomes = HashMap::new();
+    let mut selector_keys = HashSet::new();
+    for (method, match_tree, _, _, _) in &probes {
+        let TreeKind::Match(matched) = &parsed.ast.get(*match_tree).kind else {
+            continue;
+        };
+        let key = (*method, matched.selector);
+        if !selector_keys.insert(key) {
+            continue;
+        }
+        let context = match method_contexts.get(method).copied() {
+            Some(context) => context,
+            None => match typer.expression_context_for(*method) {
+                Ok(context) => {
+                    method_contexts.insert(*method, context);
+                    context
+                }
+                Err(_) => continue,
+            },
+        };
+        let selector_started = Instant::now();
+        let resolver_calls_before = probe_metrics.borrow().module_identity_resolver_calls;
+        if let Err(error) = typer.type_expression(matched.selector, context) {
+            let error_name = typed_case_failure_label(
+                &error,
+                &parsed.ast,
+                &type_operator_spellings,
+                &typer.store().names,
+            );
+            let boundary = match &error {
+                TyperError::TypedPatternRuntimeTestDeferred { .. } => {
+                    Some("generic/erased or unsupported runtime test")
+                }
+                TyperError::TypedPatternRelationDeferred { .. } => {
+                    Some("unsupported typed-pattern relation")
+                }
+                TyperError::TypedPatternTypeMismatch { .. } => Some("typed-pattern type mismatch"),
+                TyperError::UnsupportedTypeTree { .. } => Some("unsupported type-tree projection"),
+                _ => None,
+            };
+            selector_outcomes.insert(key, (error_name, boundary));
+        }
+        if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+            let metrics = probe_metrics.borrow();
+            eprintln!(
+                "AUDIT_MATCH_SELECTOR file={path} elapsed_ms={} module_identity_calls={}",
+                selector_started.elapsed().as_millis(),
+                metrics
+                    .module_identity_resolver_calls
+                    .saturating_sub(resolver_calls_before)
+            );
+        }
+    }
     for (method, match_tree, family, guarded, protocol) in probes {
-        let outcome = typer
-            .expression_context_for(method)
-            .and_then(|context| typer.type_expression(match_tree, context));
+        let probe_started = Instant::now();
+        let resolver_calls_before = probe_metrics.borrow().module_identity_resolver_calls;
+        let TreeKind::Match(matched) = &parsed.ast.get(match_tree).kind else {
+            continue;
+        };
+        let selector_key = (method, matched.selector);
+        if let Some((error_name, boundary)) = selector_outcomes.get(&selector_key) {
+            record_typed_match_case_failure(profile, path, &family, error_name, *boundary);
+            continue;
+        }
+        // A method context owns a typer-local scope frame. Reusing the context
+        // avoids pushing the same method scope once for every match case (and
+        // growing the lookup chain throughout the audit).
+        let outcome = match method_contexts.get(&method).copied() {
+            Some(context) => typer.type_expression(match_tree, context),
+            None => typer
+                .expression_context_for(method)
+                .and_then(|context| typer.type_expression(match_tree, context)),
+        };
+        if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+            let metrics = probe_metrics.borrow();
+            eprintln!(
+                "AUDIT_MATCH_PROBE file={path} family={family} elapsed_ms={} module_identity_calls={}",
+                probe_started.elapsed().as_millis(),
+                metrics
+                    .module_identity_resolver_calls
+                    .saturating_sub(resolver_calls_before)
+            );
+        }
         match outcome {
             Ok(_) => {
                 let bucket = family_success_bucket(&family).to_owned();
@@ -9487,15 +9582,6 @@ fn probe_supported_match_cases(
                     &type_operator_spellings,
                     &typer.store().names,
                 );
-                *profile
-                    .typed_case_failures
-                    .entry(error_name.clone())
-                    .or_default() += 1;
-                profile
-                    .typed_case_failure_files
-                    .entry(error_name)
-                    .or_default()
-                    .insert(path.to_owned());
                 let boundary = match &error {
                     TyperError::TypedPatternRuntimeTestDeferred { .. } => {
                         Some("generic/erased or unsupported runtime test")
@@ -9511,18 +9597,61 @@ fn probe_supported_match_cases(
                     }
                     _ => None,
                 };
-                if family.starts_with("typed")
-                    && let Some(boundary) = boundary
-                {
-                    *profile
-                        .typed_pattern_boundaries
-                        .entry(boundary.to_owned())
-                        .or_default() += 1;
-                }
+                record_typed_match_case_failure(profile, path, &family, &error_name, boundary);
             }
         }
     }
     successes
+}
+
+fn record_typed_match_case_failure(
+    profile: &mut MatchProfile,
+    path: &str,
+    family: &str,
+    error_name: &str,
+    boundary: Option<&'static str>,
+) {
+    *profile
+        .typed_case_failures
+        .entry(error_name.to_owned())
+        .or_default() += 1;
+    profile
+        .typed_case_failure_files
+        .entry(error_name.to_owned())
+        .or_default()
+        .insert(path.to_owned());
+    if family.starts_with("typed")
+        && let Some(boundary) = boundary
+    {
+        *profile
+            .typed_pattern_boundaries
+            .entry(boundary.to_owned())
+            .or_default() += 1;
+    }
+}
+
+#[test]
+fn match_case_audit_reuses_selector_failure_for_every_case() {
+    let classpath = SharedClassPath::new(CompositeClassPath::new(vec![Box::new(
+        PrefixOnlyAuditEntry,
+    )]));
+    let mut profile = MatchProfile::default();
+    let successes = probe_supported_match_cases(
+        "object C { def f: Int = missing match { case 1 => 1; case _ => 2 } }",
+        "MatchSelectorFailure.scala",
+        classpath,
+        &mut profile,
+    );
+
+    assert_eq!(successes["literal"], 0);
+    assert_eq!(successes["wildcard"], 0);
+    assert_eq!(profile.typed_case_failures.values().sum::<usize>(), 2);
+    assert!(
+        profile
+            .typed_case_failure_files
+            .values()
+            .all(|files| files == &BTreeSet::from(["MatchSelectorFailure.scala".to_owned()]))
+    );
 }
 
 fn is_supported_case_family(family: &str) -> bool {
