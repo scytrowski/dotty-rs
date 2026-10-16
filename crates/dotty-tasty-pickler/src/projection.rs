@@ -777,7 +777,14 @@ impl<'a> EncodingContext<'a> {
                 let mut fields = vec![AstField::Tree(result)];
                 let mut seen = HashSet::new();
                 for parameter in &method.params {
-                    if parameter.erased || parameter.varargs || !seen.insert(parameter.name) {
+                    if self.active.contains(&parameter.ty) {
+                        return Err(PickleError::CyclicType { ty: parameter.ty });
+                    }
+                    if parameter.erased
+                        || parameter.varargs
+                        || !seen.insert(parameter.name)
+                        || matches!(self.ty(parameter.ty)?, Type::Method(_))
+                    {
                         return Err(PickleError::UnsupportedTypeReference { ty });
                     }
                     let label = self.lower(parameter.ty, depth + 1)?;

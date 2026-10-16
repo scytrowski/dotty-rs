@@ -752,6 +752,20 @@ fn unsupported_method_kinds_and_parameter_metadata_are_not_silently_dropped() {
             Some(PickleError::UnsupportedTypeReference { ty })
         );
     }
+    let ty = f.store.types.alloc(Type::Method(MethodType {
+        params: vec![MethodParam {
+            name,
+            ty: nested,
+            erased: false,
+            varargs: false,
+        }],
+        result: f.definitions.int,
+        kind: MethodKind::Plain,
+    }));
+    assert_eq!(
+        context(&f).lower_type(ty).err(),
+        Some(PickleError::UnsupportedTypeReference { ty })
+    );
 }
 
 #[test]
