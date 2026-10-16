@@ -330,6 +330,10 @@ Validation must cover:
 5. For a source method with RHS, require a body and exact equality with
    `typed_bindings.typed_at(source, source_definition.rhs)`. Require the live
    literal node and constant type to agree, with canonical widened result Int.
+   Compare source Int literals and raw `Number(Whole)` nodes with that value;
+   bound and decode decimal/binary/hexadecimal spellings, including signed
+   32-bit nondecimal patterns. Reject malformed whole numbers and unsupported
+   noninteger numbers instead of accepting an arbitrary typed Int value.
    A source declaration without RHS is distinct from an untyped concrete RHS;
    the first complete slice rejects abstract declarations as unsupported.
 6. Supported public visibility, source flags and annotation set; checked builtin

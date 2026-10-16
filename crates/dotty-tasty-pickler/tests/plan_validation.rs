@@ -1,6 +1,8 @@
 mod support;
 
-use dotty_core::ast::{Ident, Literal, Modifier, Modifiers, ValDef};
+use dotty_core::ast::{
+    Ident, Literal, Modifier, Modifiers, NumberKind, NumberLiteral, UntypedNode, ValDef,
+};
 use dotty_core::*;
 use dotty_tasty_pickler::*;
 use support::Fixture;
@@ -640,6 +642,192 @@ fn a_consistent_typed_literal_cannot_change_the_original_source_literal_value() 
             actual: 43
         })
     );
+}
+
+#[test]
+fn a_bound_typed_literal_must_match_the_parsers_raw_number_value() {
+    use dotty_lexer::ContextualScanner;
+    use dotty_parser::parse_compilation_unit;
+
+    let mut f = Fixture::new();
+    let text = include_str!("../../../tests/fixtures/tasty_pickler/Answer.scala");
+    let parsed = parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        f.source,
+        ContextualScanner::new(text).unwrap(),
+        &mut f.store.names,
+    );
+    assert!(parsed.diagnostics.is_empty());
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!()
+    };
+    let TreeKind::TypeDef(class) = &parsed.ast.get(package.stats[0]).kind else {
+        panic!()
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class.rhs).kind else {
+        panic!()
+    };
+    let TreeKind::DefDef(method) = &parsed.ast.get(template.body[0]).kind else {
+        panic!()
+    };
+    let kind = &parsed.ast.get(method.rhs.unwrap()).kind;
+    let TreeKind::PhaseSpecific(UntypedNode::Number(number)) = kind else {
+        panic!("expected the parser's raw number, got {kind:?}")
+    };
+    assert_eq!(number.kind, NumberKind::Whole(10));
+    assert_eq!(f.store.names.resolve(number.text), "42");
+    f.source_ast.get_mut(f.rhs).kind = kind.clone();
+    // Keep the original body ID and its binding, but change both typed values.
+    let ty = f.typed_ast.get(f.body).ty;
+    *f.store.types.get_mut(ty) = Type::Constant(Constant::Int(43));
+    f.typed_ast.get_mut(f.body).kind = TreeKind::Literal(Literal {
+        value: Constant::Int(43),
+    });
+    let before = f.snapshot();
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::BodySourceValue {
+            source_tree: f.rhs,
+            typed_tree: f.body,
+            expected: 42,
+            actual: 43
+        })
+    );
+    assert_eq!(f.snapshot(), before);
+}
+
+#[test]
+fn raw_whole_numbers_check_decimal_and_signed_bit_pattern_values() {
+    for (text, radix, expected) in [
+        ("0", 10, 0),
+        ("4_2", 10, 42),
+        ("-42", 10, -42),
+        ("2147483647", 10, i32::MAX),
+        ("-2147483648", 10, i32::MIN),
+        ("0x2a", 16, 42),
+        ("0X2_A", 16, 42),
+        ("0xffffffff", 16, -1),
+        ("0x80000000", 16, i32::MIN),
+        ("0b101010", 2, 42),
+        ("0B10_1010", 2, 42),
+        ("0b11111111111111111111111111111111", 2, -1),
+    ] {
+        let mut f = Fixture::new();
+        f.source_ast.get_mut(f.rhs).kind =
+            TreeKind::PhaseSpecific(UntypedNode::Number(NumberLiteral {
+                text: f.store.names.intern(text),
+                kind: NumberKind::Whole(radix),
+            }));
+        let ty = f.typed_ast.get(f.body).ty;
+        *f.store.types.get_mut(ty) = Type::Constant(Constant::Int(expected));
+        f.typed_ast.get_mut(f.body).kind = TreeKind::Literal(Literal {
+            value: Constant::Int(expected),
+        });
+        let before = f.snapshot();
+        assert_eq!(f.plan().validate().err(), None, "{text}");
+        assert_eq!(f.snapshot(), before);
+
+        let actual = expected.wrapping_add(1);
+        *f.store.types.get_mut(ty) = Type::Constant(Constant::Int(actual));
+        f.typed_ast.get_mut(f.body).kind = TreeKind::Literal(Literal {
+            value: Constant::Int(actual),
+        });
+        assert_eq!(
+            f.plan().validate().err(),
+            Some(PickleError::BodySourceValue {
+                source_tree: f.rhs,
+                typed_tree: f.body,
+                expected,
+                actual,
+            }),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn malformed_raw_whole_numbers_do_not_accept_an_arbitrary_typed_value() {
+    for (text, radix) in [
+        ("2147483648", 10),
+        ("-2147483649", 10),
+        ("0x100000000", 16),
+        ("0b100000000000000000000000000000000", 2),
+        ("0b2", 2),
+        ("42", 16),
+        ("0x2a", 2),
+        ("", 10),
+        ("42", 0),
+        ("42", 37),
+    ] {
+        let mut f = Fixture::new();
+        f.source_ast.get_mut(f.rhs).kind =
+            TreeKind::PhaseSpecific(UntypedNode::Number(NumberLiteral {
+                text: f.store.names.intern(text),
+                kind: NumberKind::Whole(radix),
+            }));
+        let before = f.snapshot();
+        assert_eq!(
+            f.plan().validate().err(),
+            Some(PickleError::SourceShape {
+                tree: f.rhs,
+                expected: SourceRole::Body,
+            }),
+            "{text}, radix {radix}"
+        );
+        assert_eq!(f.snapshot(), before);
+    }
+}
+
+#[test]
+fn raw_noninteger_numbers_are_unsupported_for_an_int_body() {
+    for (text, kind) in [
+        ("42.0", NumberKind::Decimal),
+        ("42e0", NumberKind::Floating),
+    ] {
+        let mut f = Fixture::new();
+        f.source_ast.get_mut(f.rhs).kind =
+            TreeKind::PhaseSpecific(UntypedNode::Number(NumberLiteral {
+                text: f.store.names.intern(text),
+                kind,
+            }));
+        assert_eq!(
+            f.plan().validate().err(),
+            Some(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(f.methods[0].symbol),
+            })
+        );
+    }
+}
+
+#[test]
+fn raw_number_names_must_be_live_and_bounded_before_decoding() {
+    let mut f = Fixture::new();
+    let mut names = NameInterner::new();
+    let missing = (0..1000)
+        .map(|n| names.intern(&format!("foreign{n}")))
+        .last()
+        .unwrap();
+    let oversized = f.store.names.intern(&"0".repeat(4097));
+    for (text, error) in [
+        (missing, PickleError::InvalidName { name: missing }),
+        (
+            oversized,
+            PickleError::LimitExceeded {
+                kind: LimitKind::NameBytes,
+                limit: 4096,
+            },
+        ),
+    ] {
+        f.source_ast.get_mut(f.rhs).kind =
+            TreeKind::PhaseSpecific(UntypedNode::Number(NumberLiteral {
+                text,
+                kind: NumberKind::Whole(10),
+            }));
+        let before = f.snapshot();
+        assert_eq!(f.plan().validate().err(), Some(error));
+        assert_eq!(f.snapshot(), before);
+    }
 }
 
 #[test]

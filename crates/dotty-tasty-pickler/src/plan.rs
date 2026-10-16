@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use dotty_core::ast::{AstArena, DefDef, Modifiers, Tree, TreeKind};
+use dotty_core::ast::{AstArena, DefDef, Modifiers, NumberKind, Tree, TreeKind, UntypedNode};
 use dotty_core::{
-    Constant, Definitions, MethodKind, Name, Namespace, SemanticStore, SourceDefinition, SourceId,
-    SourceSemanticIndex, SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo, SymbolKind,
-    SymbolOrigin, TreeId, Type, TypeId, Typed, Untyped, Visibility,
+    Constant, Definitions, MethodKind, Name, NameId, Namespace, SemanticStore, SourceDefinition,
+    SourceId, SourceSemanticIndex, SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo,
+    SymbolKind, SymbolOrigin, TreeId, Type, TypeId, Typed, Untyped, Visibility,
 };
 
 use crate::{Builtin, LimitKind, PickleError, SourceRole, TypeRole, UnsupportedFeature};
@@ -155,12 +155,16 @@ impl<'a> Validator<'_, 'a> {
     }
 
     fn name(&self, name: Name) -> Result<&'a str, PickleError> {
+        self.name_text(name.text())
+    }
+
+    fn name_text(&self, name: NameId) -> Result<&'a str, PickleError> {
         let text = self
             .plan
             .store
             .names
-            .try_resolve(name.text())
-            .ok_or(PickleError::InvalidName { name: name.text() })?;
+            .try_resolve(name)
+            .ok_or(PickleError::InvalidName { name })?;
         if text.len() > self.limits.max_name_bytes {
             return Err(PickleError::LimitExceeded {
                 kind: LimitKind::NameBytes,
@@ -811,15 +815,53 @@ impl<'a> Validator<'_, 'a> {
                 ty: node.ty,
             });
         }
-        if let TreeKind::Literal(source_literal) = &source_rhs.kind
-            && let (Constant::Int(expected), Constant::Int(actual)) =
-                (&source_literal.value, &literal.value)
-            && expected != actual
+        let expected = match &source_rhs.kind {
+            TreeKind::Literal(source_literal) => match source_literal.value {
+                Constant::Int(value) => Some(value),
+                _ => None,
+            },
+            TreeKind::PhaseSpecific(UntypedNode::Number(number)) => {
+                // Expression parsing retains unsuffixed integers as raw numbers.
+                // Bound the interned spelling before normalizing or decoding it.
+                let digits = self.name_text(number.text)?.replace('_', "");
+                let value = match number.kind {
+                    NumberKind::Whole(10) => digits.parse::<i32>().ok(),
+                    NumberKind::Whole(radix @ (2 | 16)) => {
+                        let digits = if radix == 16 {
+                            digits
+                                .strip_prefix("0x")
+                                .or_else(|| digits.strip_prefix("0X"))
+                        } else {
+                            digits
+                                .strip_prefix("0b")
+                                .or_else(|| digits.strip_prefix("0B"))
+                        };
+                        // Nondecimal Int literals retain their signed 32-bit pattern,
+                        // matching the source typer (e.g. 0xffffffff is -1).
+                        digits
+                            .and_then(|digits| u32::from_str_radix(digits, radix).ok())
+                            .map(|bits| bits as i32)
+                    }
+                    NumberKind::Whole(_) => None,
+                    NumberKind::Decimal | NumberKind::Floating => {
+                        return Err(self
+                            .unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
+                    }
+                };
+                Some(value.ok_or(PickleError::SourceShape {
+                    tree: rhs,
+                    expected: SourceRole::Body,
+                })?)
+            }
+            _ => None,
+        };
+        if let (Some(expected), Constant::Int(actual)) = (expected, &literal.value)
+            && expected != *actual
         {
             return Err(PickleError::BodySourceValue {
                 source_tree: rhs,
                 typed_tree: body,
-                expected: *expected,
+                expected,
                 actual: *actual,
             });
         }

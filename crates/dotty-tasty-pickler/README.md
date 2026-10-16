@@ -13,6 +13,10 @@ The first accepted shape is the oracle's ordinary public class in one explicit
 named package, implicit Object parent, default constructor and one parameterless
 method with a declared Int result and a typed Int literal. Clause boundaries are
 preserved in the input even though nonempty/empty-parens methods remain deferred.
+Source Int literals, including the parser's raw decimal, hexadecimal and binary
+whole-number nodes, must agree with the typed value. Raw spellings are checked
+against the name-byte limit before decoding; malformed whole numbers and
+unsupported noninteger numbers yield typed errors.
 The wire constructor's Unit return syntax is distinct from the semantic
 constructor's class-instance result.
 
