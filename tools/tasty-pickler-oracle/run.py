@@ -71,8 +71,19 @@ class Toolchain:
             raise RuntimeError(f"Scala source revision {actual}; expected {REVISION}")
         java_home = Path(os.environ["JAVA_HOME"])
         self.java = java_home / "bin/java"
-        if not self.java.is_file():
-            raise RuntimeError(f"missing compiler Java executable: {self.java}")
+        self.javac = java_home / "bin/javac"
+        self.javap = java_home / "bin/javap"
+        for executable, label in ((self.java, "Java"), (self.javac, "javac"),
+                                  (self.javap, "javap")):
+            if not executable.is_file():
+                raise RuntimeError(f"missing JDK {label} executable: {executable}")
+        release = dict(re.findall(r'^([A-Z_]+)="(.*)"$',
+                                  (java_home / "release").read_text(), re.MULTILINE))
+        self.jdk_release = {key: release[key] for key in
+                            ("JAVA_VERSION", "IMPLEMENTOR", "IMPLEMENTOR_VERSION", "OS_ARCH")}
+        java_version = re.match(r"(\d+)", self.jdk_release["JAVA_VERSION"])
+        if java_version is None or int(java_version.group(1)) < 21:
+            raise RuntimeError(f"JDK 21 or newer is required, got {self.jdk_release['JAVA_VERSION']}")
         base = Path(os.environ["COURSIER_MAVEN_ROOT"])
         jars = [base / group / artifact / version / f"{artifact}-{version}.jar"
                 for group, artifact, version in ARTIFACTS]
@@ -84,10 +95,6 @@ class Toolchain:
         pinned = json.loads((FIXTURES / "provenance.json").read_text())
         if self.artifacts != pinned["compiler_artifacts_sha256"]:
             raise RuntimeError("compiler artifacts differ from pinned SHA-256 provenance")
-        release = dict(re.findall(r'^([A-Z_]+)="(.*)"$',
-                                  (java_home / "release").read_text(), re.MULTILINE))
-        self.jdk_release = {key: release[key] for key in
-                            ("JAVA_VERSION", "IMPLEMENTOR", "IMPLEMENTOR_VERSION", "OS_ARCH")}
         version = self.compiler(["-version"])
         if not re.search(r"Scala compiler version 3\.9\.0 --", version):
             raise RuntimeError(f"expected Scala 3.9.0 compiler, got: {version}")
@@ -181,7 +188,8 @@ def artifact_path(structure: dict) -> Path:
 
 
 def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
-                     directory: Path, structure: dict | None = None) -> dict:
+                     directory: Path, structure: dict | None = None,
+                     runtime: bool = False) -> dict:
     # Rust wire validation always precedes candidate use by an independent reader.
     structure = snapshot(binary, candidate) if structure is None else structure
     relative = artifact_path(structure)
@@ -201,9 +209,40 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         raise RuntimeError(f"compiler produced no fresh class: {relative}")
     if list((directory / "candidate").rglob("*.class")):
         raise RuntimeError("candidate root unexpectedly contains a class file")
-    return {"artifact": str(relative), "candidate_sha256": digest(candidate),
-            "rust_wire": True, "scala_decompile": True, "scala_from_tasty": True,
-            "fresh_class": True, "adjacent_input_classfiles": False}
+    result = {"artifact": str(relative), "candidate_sha256": digest(candidate),
+              "rust_wire": True, "scala_decompile": True, "scala_from_tasty": True,
+              "fresh_class": True, "adjacent_input_classfiles": False}
+    if runtime:
+        if relative.as_posix() != "example/Answer.tasty":
+            raise RuntimeError("--runtime requires package example class Answer")
+        javap = execute([toolchain.javap, "-classpath", compiled, "example.Answer"])
+        if not re.search(r"public int value\(\)", javap):
+            raise RuntimeError(f"fresh class has no public int value() method: {javap}")
+        harness = directory / "AnswerRuntime.java"
+        harness.write_text("""public final class AnswerRuntime {
+  public static void main(String[] args) {
+    int actual = new example.Answer().value();
+    if (actual != 42) throw new AssertionError("Answer.value() = " + actual);
+    System.out.println("Answer.value() = " + actual);
+  }
+}
+""")
+        execute([toolchain.javac, "-classpath", compiled, "-d", compiled, harness])
+        run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath", compiled, "AnswerRuntime"])
+        if "Answer.value() = 42" not in run:
+            raise RuntimeError(f"runtime harness did not confirm value 42: {run}")
+        bad = directory / "corrupt.tasty"
+        corrupt = bytearray(candidate.read_bytes())
+        corrupt[0] ^= 1
+        bad.write_bytes(corrupt)
+        expect_failure(lambda: snapshot(binary, bad), "Rust rejects corrupted producer output")
+        rejected = directory / "corrupt-output"
+        rejected.mkdir()
+        expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", rejected, bad]),
+                       "Scala rejects corrupted producer output")
+        result.update({"javap": True, "runtime_value": 42,
+                       "rust_corrupt_rejection": True, "scala_corrupt_rejection": True})
+    return result
 
 
 def expect_failure(action, label: str) -> None:
@@ -258,6 +297,8 @@ def main() -> None:
     generation.add_argument("--check", action="store_true", help="compare regenerated structure without writing fixtures")
     verify = subcommands.add_parser("verify", help="validate and independently compile a candidate")
     verify.add_argument("candidate", type=Path)
+    verify.add_argument("--runtime", action="store_true",
+                        help="inspect and execute the fresh Answer class; requires example/Answer")
     subcommands.add_parser("check", help="regenerate/check fixtures, compile originals/reduced Answer, run negative controls")
     args = parser.parse_args()
     binary = inspector()
@@ -269,7 +310,7 @@ def main() -> None:
             generate(toolchain, binary, output, args.check)
         elif args.command == "verify":
             print(json.dumps(verify_candidate(toolchain, binary, args.candidate,
-                                             output, structure), indent=2, sort_keys=True))
+                                             output, structure, runtime=args.runtime), indent=2, sort_keys=True))
         else:
             print(json.dumps(check_oracle(toolchain, binary, output), indent=2, sort_keys=True))
 

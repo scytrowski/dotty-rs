@@ -14,6 +14,7 @@ dependencies = [
  "dotty-namer",
  "dotty-parser",
  "dotty-tasty",
+ "dotty-tasty-pickler",
  "dotty-tasty-unpickler",
  "dotty-typer",
 ]

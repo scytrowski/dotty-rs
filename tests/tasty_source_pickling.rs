@@ -1,0 +1,360 @@
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+use dotty_core::ast::*;
+use dotty_core::resolution::{MemberRequest, ResolutionError, ResolverCheckpoint, SymbolResolver};
+use dotty_core::*;
+use dotty_lexer::ContextualScanner;
+use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
+use dotty_parser::parse_compilation_unit;
+use dotty_tasty::tasty::*;
+use dotty_tasty_pickler::*;
+use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
+use dotty_typer::SourceTyper;
+
+const ANSWER: &str = include_str!("fixtures/tasty_pickler/Answer.scala");
+const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
+
+struct CanonicalIntResolver {
+    symbol: SymbolId,
+}
+
+impl SymbolResolver for CanonicalIntResolver {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        ResolverCheckpoint::new(0)
+    }
+    fn rollback_to(&mut self, _store: &mut SemanticStore, _checkpoint: ResolverCheckpoint) {}
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let candidate = store.symbols.get(self.symbol);
+        let owner = candidate.owner;
+        let exact_name = candidate.name == request.name;
+        let exact_builtin = candidate.origin == SymbolOrigin::Builtin
+            && owner.is_none()
+            && matches!(store.types.get(request.prefix),
+                Type::TermRef { target: TermRefTarget::Symbol(prefix), .. }
+                    if store.symbols.contains(*prefix)
+                        && store.symbols.get(*prefix).kind == SymbolKind::Package
+                        && store.symbols.get(*prefix).name.namespace() == Namespace::Term
+                        && store.names.try_resolve(store.symbols.get(*prefix).name.text()) == Some("scala"));
+        Ok((exact_name && exact_builtin).then_some(self.symbol))
+    }
+    fn resolve_package(
+        &mut self,
+        _store: &mut SemanticStore,
+        _path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        Ok(None)
+    }
+}
+
+struct Product {
+    bytes: Vec<u8>,
+    output: PickledTasty,
+    source_value: i32,
+}
+
+fn compile_source() -> Product {
+    let source = SourceId::from_index(11);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(ANSWER).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let parsed = parse_compilation_unit(
+        SourceText::new(ANSWER).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Answer.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("namer rejected canonical fixture: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!()
+    };
+    let [class_tree] = package.stats.as_slice() else {
+        panic!("expected one source class")
+    };
+    let class = index.symbol_at(source, *class_tree).unwrap();
+    let TreeKind::TypeDef(class_def) = &parsed.ast.get(*class_tree).kind else {
+        panic!()
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+        panic!()
+    };
+    let constructor_tree = template.constructor;
+    let constructor = index.symbol_at(source, constructor_tree).unwrap();
+    let TreeKind::DefDef(ctor) = &parsed.ast.get(constructor_tree).kind else {
+        panic!()
+    };
+    let clauses = |definition: &DefDef<Untyped>| {
+        definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|tree| index.symbol_at(source, *tree).unwrap())
+                    .collect()
+            })
+            .collect::<Vec<Vec<SymbolId>>>()
+    };
+    let ctor_clauses = clauses(ctor);
+    let methods = template
+        .body
+        .iter()
+        .filter_map(|tree| {
+            let TreeKind::DefDef(definition) = &parsed.ast.get(*tree).kind else {
+                return None;
+            };
+            Some((*tree, definition))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 1);
+    let (method_tree, method_def) = methods[0];
+    let method = index.symbol_at(source, method_tree).unwrap();
+    let source_rhs = method_def.rhs.expect("concrete fixture RHS");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(class).unwrap();
+    typer.complete_symbol(constructor).unwrap();
+    typer.complete_symbol(method).unwrap();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed_body = typer.type_expression(source_rhs, context).unwrap();
+    assert_eq!(
+        typer.source_typed_index().get(source, source_rhs),
+        Some(typed_body)
+    );
+    let TreeKind::Literal(Literal {
+        value: Constant::Int(source_value),
+    }) = typer.typed_ast().get(typed_body).kind
+    else {
+        panic!("expected actual typed Int literal")
+    };
+    let bindings = |source, tree| typer.source_typed_index().get(source, tree);
+    let plan = PicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        typed_ast: typer.typed_ast(),
+        source_ast: &parsed.ast,
+        source_index: &index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source,
+            name: "Answer.scala".into(),
+        },
+        source_root: parsed.root,
+        class,
+        class_tree: *class_tree,
+        constructor: DefaultConstructorPlan {
+            symbol: constructor,
+            source_tree: constructor_tree,
+            parameter_clauses: ctor_clauses,
+        },
+        methods: &[MethodPicklePlan {
+            symbol: method,
+            source_tree: method_tree,
+            parameter_clauses: clauses(method_def),
+            body: Some(typed_body),
+        }],
+    };
+    let checked = plan.validate().unwrap();
+    let output = checked.pickle().unwrap();
+    assert_eq!(output.body(method), Some(typed_body));
+    Product {
+        bytes: output.bytes().to_vec(),
+        output,
+        source_value,
+    }
+}
+
+fn semantic_and_wire_projection(product: &Product) {
+    let file = TastyFile::parse_and_validate_scala_3_9(&product.bytes).unwrap();
+    assert_eq!(
+        (
+            file.header().major_version,
+            file.header().minor_version,
+            file.header().experimental_version
+        ),
+        (28, 9, 0)
+    );
+    assert_eq!(file.source_file().unwrap(), Some("Answer.scala"));
+    let addresses = file.ast_address_index().unwrap();
+    let declarations = product.output.declarations();
+    assert_eq!(declarations.len(), 3);
+    assert_eq!(declarations[1].owner, declarations[0].symbol);
+    assert_eq!(declarations[2].owner, declarations[0].symbol);
+    let class_node = addresses
+        .get(declarations[0].address)
+        .unwrap()
+        .decode_definition()
+        .unwrap();
+    let method_node = addresses
+        .get(declarations[2].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    assert_eq!(file.render_name(class_node.name()).unwrap(), "Answer");
+    assert_eq!(file.render_name(method_node.name).unwrap(), "value");
+    let Some(RawTree::Leaf(rhs)) = method_node.rhs else {
+        panic!("missing actual method RHS")
+    };
+    assert_eq!(
+        (rhs.tag, rhs.value),
+        (INTCONST_TAG, TermValue::Int(product.source_value))
+    );
+    let shape = addresses
+        .iter_nodes()
+        .map(|node| node.tag)
+        .collect::<Vec<_>>();
+    for tag in [
+        PACKAGE_TAG,
+        TYPEDEF_TAG,
+        TEMPLATE_TAG,
+        DEFDEF_TAG,
+        INTCONST_TAG,
+    ] {
+        assert!(shape.contains(&tag), "wire tree lacks tag {tag}");
+    }
+    assert_eq!(file.encode_validated().unwrap(), product.bytes);
+
+    // The semantic inverse supports entering declaration identity and decoding
+    // type trees/literal type nodes for this subset, but it does not rebuild a
+    // typed AST body. Compare owner-qualified symbols and those semantic types.
+    let mut semantic_store = SemanticStore::new();
+    let semantic_definitions = Definitions::bootstrap(&mut semantic_store);
+    let int_symbol = semantic_store
+        .types
+        .get(semantic_definitions.int)
+        .reference_symbol()
+        .unwrap();
+    let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
+        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }));
+    let unpickled_index = unpickler.enter_symbols().unwrap().clone();
+    let package_address = addresses
+        .iter_nodes()
+        .find(|node| node.tag == PACKAGE_TAG)
+        .expect("package root")
+        .offset as u32;
+    let package_id = unpickled_index
+        .symbol_at(package_address)
+        .expect("semantic package symbol");
+    let class_id = unpickled_index.symbol_at(declarations[0].address).unwrap();
+    let method_id = unpickled_index.symbol_at(declarations[2].address).unwrap();
+    assert_eq!(
+        unpickler
+            .symbol_state_at(declarations[0].address)
+            .unwrap()
+            .0,
+        SymbolKind::Class
+    );
+    assert_ne!(method_id, class_id);
+    assert_eq!(
+        unpickler
+            .symbol_state_at(declarations[2].address)
+            .unwrap()
+            .0,
+        SymbolKind::Method
+    );
+    let method_address = declarations[2].address;
+    let method_children = addresses
+        .iter_tree_edges()
+        .filter(|edge| edge.parent.offset == method_address as usize)
+        .map(|edge| edge.child)
+        .collect::<Vec<_>>();
+    let result_address = method_children
+        .iter()
+        .find(|child| child.tag == IDENTTPT_TAG)
+        .expect("method has an Int IDENTtpt")
+        .offset as u32;
+    let rhs_address = method_children
+        .iter()
+        .find(|child| child.tag == INTCONST_TAG)
+        .expect("method has an Int constant RHS")
+        .offset as u32;
+    let return_ty = unpickler.unpickle_type_tree_type(result_address).unwrap();
+    let value_ty = unpickler.unpickle_type(rhs_address).unwrap();
+    drop(unpickler);
+    assert_eq!(semantic_store.symbols.get(class_id).owner, Some(package_id));
+    assert_eq!(semantic_store.symbols.get(method_id).owner, Some(class_id));
+    assert_eq!(
+        semantic_store
+            .names
+            .resolve(semantic_store.symbols.get(method_id).name.text()),
+        "value"
+    );
+    let canonical_int = semantic_store
+        .types
+        .get(semantic_definitions.int)
+        .reference_symbol()
+        .unwrap();
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(return_symbol),
+        prefix,
+    } = semantic_store.types.get(return_ty)
+    else {
+        panic!("expected semantic Int type reference")
+    };
+    assert_eq!(*return_symbol, canonical_int);
+    assert!(matches!(semantic_store.types.get(*prefix),
+        Type::TermRef { target: TermRefTarget::Symbol(package), .. }
+            if semantic_store.symbols.get(*package).kind == SymbolKind::Package
+                && semantic_store.names.try_resolve(semantic_store.symbols.get(*package).name.text()) == Some("scala")));
+    assert_eq!(
+        semantic_store.types.get(value_ty),
+        &Type::Constant(Constant::Int(product.source_value))
+    );
+}
+
+#[test]
+fn real_scala_source_produces_deterministic_semantic_tasty_and_roundtrips() {
+    let first = compile_source();
+    let second = compile_source();
+    assert_eq!(first.bytes, second.bytes);
+    semantic_and_wire_projection(&first);
+    semantic_and_wire_projection(&second);
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let candidate = root.join("target/issue-1195/generated/example/Answer.tasty");
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::write(&candidate, &first.bytes).unwrap();
+        let temporary = root.join("target/issue-1195/tmp");
+        fs::create_dir_all(&temporary).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg("--runtime")
+            .arg(&candidate)
+            .env("TMPDIR", temporary)
+            .status()
+            .expect("start explicitly requested Scala 3.9 oracle");
+        assert!(
+            result.success(),
+            "requested Scala interop/runtime gate failed"
+        );
+    }
+}
