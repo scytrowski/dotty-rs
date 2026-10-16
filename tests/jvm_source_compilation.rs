@@ -3348,6 +3348,49 @@ fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
 }
 
 #[test]
+fn constructor_arguments_lower_strict_and_unary_boolean_intrinsics_from_source() {
+    let output = TestOutputDirectory::new("boolean-constructor-arguments");
+    let artifacts = compile_two_class_constructor_source(
+        "class Counter(seed: Boolean)\nclass Client:\n  def buildAnd(flag: Boolean): Int =\n    new Counter(flag & true)\n    42\n  def buildOr(flag: Boolean): Int =\n    new Counter(flag | true)\n    42\n  def buildXor(flag: Boolean): Int =\n    new Counter(flag ^ true)\n    42\n  def buildNot(flag: Boolean): Int =\n    new Counter(!flag)\n    42\n",
+        output.path(),
+    )
+    .unwrap();
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client source class is emitted");
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Client class");
+    class
+        .validate_references()
+        .expect("valid Client references");
+
+    for (method, operator) in [("buildAnd", 0x7e), ("buildOr", 0x80), ("buildXor", 0x82)] {
+        let code = emitted_method_code(&class, method);
+        assert!(
+            code.windows(3)
+                .any(|sequence| sequence == [0x1b, 0x04, operator]),
+            "{method} should lower its strict Boolean operator before construction: {code:?}"
+        );
+        assert!(
+            code.contains(&0xb7),
+            "{method} should invoke the constructor"
+        );
+    }
+    let not_code = emitted_method_code(&class, "buildNot");
+    assert!(
+        not_code
+            .windows(3)
+            .any(|sequence| sequence == [0x1b, 0x04, 0x82]),
+        "buildNot should lower canonical ! as iconst_1; ixor: {not_code:?}"
+    );
+    assert!(
+        not_code.contains(&0xb7),
+        "buildNot should invoke the constructor"
+    );
+}
+
+#[test]
 fn field_initializer_emits_a_complete_verified_class() {
     let output = TestOutputDirectory::new("field-initializer");
     let artifact = compile_fixture("FieldInitializer.scala", output.path()).unwrap();

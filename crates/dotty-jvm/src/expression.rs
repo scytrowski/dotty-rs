@@ -1730,16 +1730,6 @@ fn validate_constructor_argument(
             )
         }
         TreeKind::Apply(application) => {
-            let int_intrinsic = resolve_int_intrinsic(
-                context.store,
-                context.typed_ast,
-                tree_id,
-                context.definitions,
-            )
-            .map_err(|error| JvmCodegenError::IntIntrinsicResolution {
-                tree: tree_id,
-                error,
-            })?;
             let boolean_intrinsic = crate::resolve_boolean_intrinsic(
                 context.store,
                 context.typed_ast,
@@ -1750,20 +1740,34 @@ fn validate_constructor_argument(
                 tree: tree_id,
                 error,
             })?;
-            let safe_int = matches!(
-                int_intrinsic,
-                Some(
-                    JvmIntIntrinsic::IntAdd
-                        | JvmIntIntrinsic::IntSubtract
-                        | JvmIntIntrinsic::IntMultiply
-                        | JvmIntIntrinsic::IntDivide
-                        | JvmIntIntrinsic::IntRemainder
-                )
-            );
             let safe_boolean = matches!(
                 boolean_intrinsic,
                 Some(JvmBooleanIntrinsic::And | JvmBooleanIntrinsic::Or | JvmBooleanIntrinsic::Xor)
             );
+            let safe_int = if boolean_intrinsic.is_none() {
+                let int_intrinsic = resolve_int_intrinsic(
+                    context.store,
+                    context.typed_ast,
+                    tree_id,
+                    context.definitions,
+                )
+                .map_err(|error| JvmCodegenError::IntIntrinsicResolution {
+                    tree: tree_id,
+                    error,
+                })?;
+                matches!(
+                    int_intrinsic,
+                    Some(
+                        JvmIntIntrinsic::IntAdd
+                            | JvmIntIntrinsic::IntSubtract
+                            | JvmIntIntrinsic::IntMultiply
+                            | JvmIntIntrinsic::IntDivide
+                            | JvmIntIntrinsic::IntRemainder
+                    )
+                )
+            } else {
+                false
+            };
             if !safe_int && !safe_boolean {
                 return Err(unsupported());
             }

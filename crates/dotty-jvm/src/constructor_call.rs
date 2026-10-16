@@ -197,6 +197,7 @@ pub(super) fn resolve(
             unit,
             caller_class,
             caller_method_plan,
+            argument,
             argument_tree,
             definitions,
         );
@@ -346,10 +347,17 @@ fn primitive_argument_type(
     unit: &JvmCompilationUnit<'_>,
     caller_class: SymbolId,
     caller_method: &JvmMethodPlan,
+    argument: TreeId<Typed>,
     argument_tree: &Tree<Typed>,
     definitions: &Definitions,
 ) -> Option<JvmType> {
     let store = unit.store;
+    if matches!(argument_tree.kind, TreeKind::Select(_))
+        && crate::resolve_boolean_intrinsic(store, unit.typed_ast, argument, definitions).ok()
+            == Some(Some(crate::JvmBooleanIntrinsic::Not))
+    {
+        return Some(JvmType::Boolean);
+    }
     match store.types.try_get(argument_tree.ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmType::Int),
         Type::Constant(Constant::Boolean(_)) => Some(JvmType::Boolean),
