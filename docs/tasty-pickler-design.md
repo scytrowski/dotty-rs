@@ -286,9 +286,9 @@ The current accepted boundary is one ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one public parameterless
 method with a declared Int result and an actual typed Int literal. Other valid
 forms remain explicitly unsupported. Validation does not re-type source, mutate
-stores/arenas/indices/symbols, or publish files. No encoding API or root-facade
-export exists yet. Future encoding consumes the checked plan and returns owned
-bytes before a caller stages/publishes an artifact.
+stores/arenas/indices/symbols, or publish files. A separate `EncodingContext` now
+projects names/types/references into owned AST fragments; no class/definition
+tree assembly, full-file encoding API or root-facade export exists yet.
 
 The crate's only normal dependencies are `dotty-core` and `dotty-tasty`. A test-only
 closure implements the binding port with `SourceTyper::source_typed_index().get`;
@@ -400,13 +400,59 @@ refs. Never patch a compact variable-length reference assuming width cannot
 change. Forward-reference tests must cross a nat-width boundary, not just target
 a preceding definition.
 
-There is an implementation seam to verify in #1192: current
+The fresh-construction seam identified for #1192 is resolved by
+`dotty-tasty::construction::AstBuilder`, a flat wire-only labelled node builder.
+The existing
 `EncodedSection::structured_asts_relocated` relocates **existing** raw/structured
 node offsets; its relocation checks preserve the original visible node sequence.
-It is not a semantic `SymbolId`/fresh-label allocator. Prove fresh construction
-and fixups through the public codec, or add a narrow wire-only construction API
-with isolated relocation/overflow tests. Do not put semantic IDs in the wire crate
-or duplicate primitive TASTy writing in the semantic adapter.
+It is not a fresh-label allocator. `AstBuilder` reserves labels independently of
+addresses and sizes new nodes with the existing Writer until layout stabilizes,
+including changes to reference Nat and enclosing length widths. It rejects
+unbound/duplicate/unreachable labels, child cycles, wrong declaration-target
+namespaces, forward sharing and resource/size overflow. It contains no semantic
+IDs. Tests cover nested length growth and a forward target above address 127.
+
+`dotty-tasty-pickler::EncodingContext` now provides the #1192 bounded standalone
+projection. `for_plan` reserves exact class/constructor/method identities from a
+validated plan; `new` accepts same-session store/Definitions/source index for
+standalone projections, validating each supplied symbol/type. Local reservations
+and references key SymbolIds; memoized semantic types key exact TypeIds. Wire
+names intern dependency-first in caller traversal order and follow upstream's
+term/type spelling sharing while reference tags keep the namespace.
+
+Supported projection forms are canonical local/package references, validated
+public package-owned dependency classes, the audited Int/Object builtins, local
+or package `this`, and one plain monomorphic method clause. Unit is exposed only
+for constructor wire results. Explicit Int/Unit result syntax is separate from
+semantic type lowering. The Object constructor has an oracle-specific empty
+SIGNED name; no dependency constructor symbol is synthesized. External methods,
+private/shadowed refs, non-plain clauses, nested method-valued parameter/result
+types, erased/varargs parameters and other semantic types stay unsupported.
+
+Dependency registration checks an exact owner-scope bucket, public metadata,
+ClassInfo identity and the canonical package chain. As package symbols do not
+store their scope, the supplied dependency scope's provenance remains an adapter
+precondition; no name-based symbol discovery occurs. Local scope checks use the
+source semantic index and canonical ClassInfo declaration scopes.
+
+`ProjectedFragment` owns names and label-resolved AST bytes only. Bind reserved
+definitions through `bind_declaration` using downstream-supplied wire nodes of
+the correct declaration kind; this increment does not construct those trees.
+Every label must be bound and emitted once. Caller root/child order must preserve
+type projection order so SHAREDtype links point backward. Addresses are relative
+to fragment byte zero, so compose one whole intended AST in its context before
+finishing. Definition payload grammar, sections and full-file validation belong
+to #1193. A mutating-call error poisons the context, and no failed operation can
+publish a partial fragment or mutate compiler state.
+
+Projection defaults bound semantic work to 1,000,000 items, 100,000 names,
+4,096 bytes/name, and owner/type depth 256. Recursive type lowering has a hard
+256-depth ceiling even with larger caller limits. Wire defaults independently
+bound labels/fields to 1,000,000, depth to 256, bytes to 16 MiB and layout passes
+to 64. Type cycles, incomplete/unsupported types, invalid IDs/owners/namespaces
+and nested codec causes remain structured typed errors. The oracle comparison
+asserts reference/name meaning; it claims neither byte identity nor independent
+Scala acceptance of newly generated full files (none are generated here).
 
 Use `NameTableBuilder`, `EncodedSection` and `TastyFileBuilder`; section order is
 `ASTs`, then optional `Positions`, optional `Comments`, then `Attributes`. Target

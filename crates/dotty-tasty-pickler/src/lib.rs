@@ -1,8 +1,10 @@
-//! Read-only source semantic input for the minimal Scala 3.9.0 TASTy pickler.
+//! Source semantic validation and type projection for Scala 3.9.0 TASTy.
 //!
 //! This increment validates a public, ordinary top-level class in one explicit
 //! package, its default constructor and one parameterless Int-literal method.
-//! It does not encode trees, return TASTy bytes, load dependencies or type source.
+//! [`EncodingContext`] projects names, types and canonical references into owned
+//! wire fragments. It does not assemble class/definition trees or complete TASTy
+//! files, load dependencies or type source.
 //! See `docs/tasty-pickler-design.md` and `docs/tasty-pickler-oracle.md`.
 //!
 //! All IDs, indices and arenas must originate in one compilation session. Core

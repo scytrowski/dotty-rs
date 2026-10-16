@@ -39,6 +39,7 @@ pub mod writer;
 pub mod tasty {
     pub use super::ast;
     pub use super::ast::*;
+    pub use super::construction;
     pub use super::construction::*;
     pub use super::file;
     pub use super::file::*;
