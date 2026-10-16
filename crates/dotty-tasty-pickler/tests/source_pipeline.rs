@@ -79,7 +79,7 @@ fn source_plan(text: &str, edit: impl FnOnce(&mut PicklePlan<'_>)) -> Result<(),
     let mut methods = Vec::new();
     for &tree in &template.body {
         let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
-            panic!()
+            continue;
         };
         let method = index.symbol_at(source, tree).unwrap();
         typer.complete_symbol(method).unwrap();
@@ -199,5 +199,33 @@ fn missing_real_frontend_binding_is_an_error_without_mutating_the_pipeline() {
     assert!(matches!(
         source_plan(ANSWER, |plan| plan.typed_bindings = &missing),
         Err(PickleError::BodyBinding { actual: None, .. })
+    ));
+}
+
+#[test]
+fn valid_source_fields_are_unsupported_rather_than_malformed_method_order() {
+    assert!(matches!(
+        source_plan(
+            "package example; class Answer { val field: Int = 0; def value: Int = 42 }",
+            |_| {}
+        ),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::ClassMembers,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn valid_source_traits_are_unsupported_rather_than_invalid_class_identities() {
+    assert!(matches!(
+        source_plan(
+            "package example; trait Answer { def value: Int = 42 }",
+            |_| {}
+        ),
+        Err(PickleError::Unsupported {
+            feature: UnsupportedFeature::SourceMetadata,
+            ..
+        })
     ));
 }

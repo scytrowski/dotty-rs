@@ -511,13 +511,13 @@ impl<'a> Validator<'_, 'a> {
                 expected: SourceRole::Class,
             });
         };
+        self.metadata(&class.metadata, p.class)?;
         self.source_symbol(
             p.class,
             p.class_tree,
             SymbolKind::Class,
             *class.name.as_name(),
         )?;
-        self.metadata(&class.metadata, p.class)?;
         if class.variance.is_some() {
             return Err(self.unsupported(UnsupportedFeature::TypeParameters, Some(p.class)));
         }
@@ -567,6 +567,12 @@ impl<'a> Validator<'_, 'a> {
         if !template.metadata.derives.is_empty() || !template.metadata.uses.is_empty() {
             return Err(self.unsupported(UnsupportedFeature::TemplateMetadata, Some(p.class)));
         }
+        self.charge(template.body.len())?;
+        for &tree in &template.body {
+            if !matches!(self.source_tree(tree)?.kind, TreeKind::DefDef(_)) {
+                return Err(self.unsupported(UnsupportedFeature::ClassMembers, Some(p.class)));
+            }
+        }
         self.charge(p.methods.len())?;
         let mut expected = HashSet::new();
         expected.insert(p.constructor.symbol);
@@ -578,7 +584,6 @@ impl<'a> Validator<'_, 'a> {
                 });
             }
         }
-        self.charge(template.body.len())?;
         if template.body.len() != p.methods.len()
             || !template
                 .body

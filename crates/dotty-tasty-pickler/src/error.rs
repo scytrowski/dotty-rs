@@ -48,6 +48,7 @@ pub enum UnsupportedFeature {
     SourceMetadata,
     SymbolMetadata,
     TemplateMetadata,
+    ClassMembers,
     Parents,
     SelfType,
     TypeParameters,
