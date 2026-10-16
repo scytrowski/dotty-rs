@@ -3,8 +3,10 @@
 //! This increment validates a public, ordinary top-level class in one explicit
 //! package, its default constructor and one parameterless Int-literal method.
 //! [`EncodingContext`] projects names, types and canonical references into owned
-//! wire fragments. It does not assemble class/definition trees or complete TASTy
-//! files, load dependencies or type source.
+//! wire fragments. [`ValidatedPicklePlan::declaration_skeleton`] assembles a
+//! structurally validated, explicitly incomplete declaration document. Concrete
+//! method bodies, completed artifacts, loading and source typing remain outside
+//! this increment.
 //! See `docs/tasty-pickler-design.md` and `docs/tasty-pickler-oracle.md`.
 //!
 //! All IDs, indices and arenas must originate in one compilation session. Core
@@ -16,6 +18,7 @@
 mod error;
 mod plan;
 mod projection;
+mod skeleton;
 
 pub use error::{
     Builtin, LimitKind, PickleError, ReferenceError, SourceRole, TypeRole, UnsupportedFeature,
@@ -25,3 +28,4 @@ pub use plan::{
     ValidatedPicklePlan, ValidationLimits,
 };
 pub use projection::{EncodingContext, ProjectedFragment, ProjectionLimits};
+pub use skeleton::{DeclarationSkeleton, OmittedMethodBody, SkeletonDeclaration};
