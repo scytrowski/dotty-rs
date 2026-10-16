@@ -18,6 +18,7 @@ members = [
     "crates/dotty-jvm",
     "tools/parser-smoke-dump",
     "tools/parser-corpus-report",
+    "tools/tasty-pickler-oracle",
 ]
 resolver = "3"
 
