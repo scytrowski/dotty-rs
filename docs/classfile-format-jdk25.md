@@ -268,8 +268,9 @@ Rules: `ACC_INTERFACE` implies `ACC_ABSTRACT` and excludes `ACC_FINAL`,
 `ACC_SUPER`, `ACC_ENUM`, `ACC_MODULE`. A non-interface class must not set
 `ACC_ANNOTATION` or `ACC_MODULE`, and must not set both `ACC_FINAL` and
 `ACC_ABSTRACT`. If `ACC_MODULE` is set, no other flag may be set and the
-class body must take the constrained `module-info` shape (§9) — out of scope
-for this loader for now.
+class body must take the constrained `module-info` shape (§9). The class-file
+crate checks this through its explicit `ClassFile::validate_module_descriptor`
+API; ordinary class-file decoding remains structural.
 
 `ACC_ENUM` and `ACC_ANNOTATION`/`ACC_INTERFACE` are the structural signals a
 semantic loader needs to reconstruct a class's Java-level *kind* (class,
@@ -485,11 +486,11 @@ preserving unknown structures losslessly (see `docs/tasty-format-3.9.0.md`
 `(name, bytes)` pair rather than dropped, so re-encoding is possible.
 
 The subsections below cover the attributes relevant to symbol-level semantic
-analysis. The class-file crate also has a typed, lossless wire codec for the
-JVMS `Module` attribute (§4.7.25); it does not resolve module graphs or check
-whole-`module-info` class shape. Other module metadata (`ModulePackages`,
-`ModuleMainClass`, and JDK-specific attributes), along with
-`StackMapTable`, `LineNumberTable`, `LocalVariableTable`,
+analysis. The class-file crate has typed, lossless wire codecs for the JVMS
+`Module`, `ModulePackages`, and `ModuleMainClass` attributes (§4.7.25–§4.7.27).
+`ClassFile::validate_module_descriptor` checks the explicit `ACC_MODULE`
+shape and descriptor constraints without resolving module graphs. JDK-specific
+attributes, along with `StackMapTable`, `LineNumberTable`, `LocalVariableTable`,
 `LocalVariableTypeTable`, `SourceDebugExtension`, `AnnotationDefault`, etc.,
 remains opaque and is preserved raw.
 
@@ -794,14 +795,16 @@ parseable structure (member names themselves may legally contain `$`).
 
 `CONSTANT_Module_info` and `CONSTANT_Package_info` names are `Utf8` values
 using the module/package name grammar from JVMS §4.2.3, not class internal
-names. The typed `Module` codec checks their constant-pool kinds and UTF-8
-references; name-grammar validation and module resolution remain out of scope.
+names. Typed JPMS attributes check their constant-pool kinds and UTF-8
+references; `ClassFile::validate_module_descriptor` also checks module and
+package name validity, directive uniqueness, and descriptor shape. It does
+not resolve module dependencies or confirm the existence of referenced types.
 
 ## 9. Out of scope for the initial loader
 
-- `module-info` class-shape validation (`ACC_MODULE`), `ModulePackages`, and
-  `ModuleMainClass`; the `Module` payload itself has a typed wire codec, but
-  this does not enable descriptor validation or module resolution.
+- Module graph construction and resolution. The class-file crate decodes
+  `Module`, `ModulePackages`, and `ModuleMainClass` and validates a descriptor's
+  local shape, but does not resolve module dependencies.
 - Bytecode verification and the `StackMapTable` attribute's type-checking
   semantics (the attribute itself is just skipped/preserved raw).
 - Resolving `invokedynamic`/`CONSTANT_Dynamic` call sites (structural parsing

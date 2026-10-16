@@ -195,8 +195,9 @@ pub const DEFAULT_MAX_ATTRIBUTE_DEPTH: usize = 128;
 /// annotation payloads are represented structurally; unmodeled nested
 /// attributes such as `StackMapTable` and `LineNumberTable` fall through to
 /// [`Attribute::Other`] so their bytes can be preserved. The JPMS `Module`
-/// payload is also represented structurally, without validating the enclosing
-/// `module-info` class shape or resolving the module graph.
+/// payload and its `ModulePackages` / `ModuleMainClass` companions are also
+/// represented structurally. Enclosing class shape is checked separately by
+/// [`crate::class_file::ClassFile::validate_module_descriptor`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attribute<'a> {
     ConstantValue(ConstantPoolIndex),
