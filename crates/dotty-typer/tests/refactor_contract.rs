@@ -691,6 +691,452 @@ fn primary_constructor_application_preserves_constructor_identity() {
 }
 
 #[test]
+fn source_constructor_and_reference_local_keep_canonical_identities() {
+    let mut fixture = Fixture::new(
+        "class Counter(start: Int, enabled: Boolean) { def get(): Int = 1 }; class Client { def make(): Counter = new Counter(42, true); def direct(): Int = new Counter(42, true).get(); def run(seed: Int): Int = { val counter = new Counter(seed, true); counter.get() } }",
+    );
+    let counter = fixture.symbol_named("Counter", SymbolKind::Class);
+    let client = fixture.symbol_named("Client", SymbolKind::Class);
+    let constructors = constructors_of(&mut fixture, counter);
+    assert_eq!(constructors.len(), 1);
+    let constructor = constructors[0];
+    assert_eq!(fixture.store.symbols.get(constructor).owner, Some(counter));
+
+    let method_in = |fixture: &Fixture, owner: SymbolId, name: &str| {
+        fixture
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                if fixture
+                    .store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    != name
+                {
+                    return None;
+                }
+                let symbol = fixture.index.symbol_at(SOURCE, tree)?;
+                (fixture.store.symbols.get(symbol).owner == Some(owner)).then_some((
+                    tree,
+                    symbol,
+                    definition.rhs?,
+                ))
+            })
+            .unwrap_or_else(|| panic!("expected {name} in class {owner:?}"))
+    };
+
+    let (_, make_method, make_rhs) = method_in(&fixture, client, "make");
+    let (_, direct_method, direct_rhs) = method_in(&fixture, client, "direct");
+    let (_, run_method, run_rhs) = method_in(&fixture, client, "run");
+    let local_tree = fixture
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::ValDef(definition) = &node.kind else {
+                return None;
+            };
+            (fixture
+                .store
+                .names
+                .resolve(definition.name.as_name().text())
+                == "counter")
+                .then_some(tree)
+        })
+        .expect("expected source local counter");
+    let run_tree = method_in(&fixture, client, "run").0;
+    let seed_tree = match &fixture.ast.get(run_tree).kind {
+        TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        _ => unreachable!(),
+    };
+    let seed = fixture.index.symbol_at(SOURCE, seed_tree).unwrap();
+
+    let mut typer = fixture.typer();
+    let make_context = typer.expression_context_for(make_method).unwrap();
+    let make = typer.type_expression(make_rhs, make_context).unwrap();
+    let TreeKind::Apply(constructor_call) = &typer.typed_ast().get(make).kind else {
+        panic!("new Counter(args) should be a constructor Apply")
+    };
+    assert_eq!(constructor_call.args.len(), 2);
+    assert_eq!(call_target(&typer, make), Some(constructor));
+    let TreeKind::Select(constructor_selection) =
+        &typer.typed_ast().get(constructor_call.function).kind
+    else {
+        panic!("constructor callee should be Select")
+    };
+    let receiver = constructor_selection.qualifier;
+    assert!(matches!(
+        typer.typed_ast().get(constructor_selection.qualifier).kind,
+        TreeKind::New(_)
+    ));
+    assert!(matches!(
+        typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(constructor_call.args[0]).ty),
+        Type::Constant(dotty_core::Constant::Int(42))
+    ));
+    assert!(matches!(
+        typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(constructor_call.args[1]).ty),
+        Type::Constant(dotty_core::Constant::Boolean(true))
+    ));
+    assert_eq!(
+        typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(constructor_call.function).ty),
+        &Type::TermRef {
+            prefix: typer.typed_ast().get(constructor_selection.qualifier).ty,
+            target: TermRefTarget::Symbol(constructor),
+        }
+    );
+    assert_eq!(typer.store().symbols.get(constructor).owner, Some(counter));
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(receiver).ty),
+        "TypeRef(Class:Counter)"
+    );
+    for ty in [
+        typer.typed_ast().get(make).ty,
+        typer.typed_ast().get(receiver).ty,
+    ] {
+        assert!(matches!(
+            typer.store().types.get(ty),
+            Type::TypeRef {
+                target: TypeRefTarget::Symbol(symbol),
+                ..
+            } if *symbol == counter
+        ));
+    }
+    let direct_context = typer.expression_context_for(direct_method).unwrap();
+    assert!(matches!(
+        typer.type_expression(direct_rhs, direct_context),
+        Err(TyperError::UnstableSelectionPrefix { .. })
+    ));
+
+    let run_context = typer.expression_context_for(run_method).unwrap();
+    let run = typer.type_expression(run_rhs, run_context).unwrap();
+    let local_binding = typer.typed_local_binding_at(SOURCE, local_tree).unwrap();
+    assert_eq!(
+        typer.local_symbol_at(SOURCE, local_tree),
+        Some(local_binding.symbol())
+    );
+    assert_eq!(
+        typer.store().symbols.get(local_binding.symbol()).owner,
+        Some(run_method)
+    );
+    assert_eq!(
+        typer.source_typed_index().get(SOURCE, local_tree),
+        Some(local_binding.declaration())
+    );
+    let TreeKind::ValDef(local_declaration) =
+        &typer.typed_ast().get(local_binding.declaration()).kind
+    else {
+        panic!("local binding must point at its typed ValDef")
+    };
+    let local_initializer = local_declaration.rhs.expect("local initializer");
+    let TreeKind::Apply(local_constructor_call) = &typer.typed_ast().get(local_initializer).kind
+    else {
+        panic!("local initializer should be a constructor Apply")
+    };
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(actual_seed),
+        ..
+    } = typer
+        .store()
+        .types
+        .get(typer.typed_ast().get(local_constructor_call.args[0]).ty)
+    else {
+        panic!("constructor parameter argument should keep its parameter identity")
+    };
+    assert_eq!(*actual_seed, seed);
+
+    let (block_expr, local_qualifier) = {
+        let TreeKind::Block(block) = &typer.typed_ast().get(run).kind else {
+            panic!("run body should retain its local block")
+        };
+        let TreeKind::Apply(local_call) = &typer.typed_ast().get(block.expr).kind else {
+            panic!("local receiver call should remain an Apply")
+        };
+        let TreeKind::Select(local_selection) = &typer.typed_ast().get(local_call.function).kind
+        else {
+            panic!("local receiver call should select its method")
+        };
+        assert!(matches!(
+            typer.typed_ast().get(local_selection.qualifier).kind,
+            TreeKind::Ident(_)
+        ));
+        (block.expr, local_selection.qualifier)
+    };
+    assert_eq!(
+        term_ref_symbol(&typer, local_qualifier),
+        Some(local_binding.symbol())
+    );
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(local_qualifier).ty),
+        "TermRef(Local:Client.run.counter)"
+    );
+    let local_qualifier_type = typer.typed_ast().get(local_qualifier).ty;
+    assert_eq!(
+        typer.widen_expression_type(local_qualifier_type).unwrap(),
+        typer.typed_ast().get(local_initializer).ty
+    );
+    assert_eq!(
+        call_target(&typer, block_expr).map(|symbol| typer.store().symbols.get(symbol).owner),
+        Some(Some(counter))
+    );
+}
+
+#[test]
+fn same_spelled_methods_keep_selected_owner_and_runtime_receiver_class() {
+    let mut fixture = Fixture::new(
+        "class IntReader { def read(): Int = 1 }; class BooleanReader { def read(): Boolean = true }; class UnitWriter { def write(): Unit = () }; class Client { def intValue(reader: IntReader): Int = reader.read(); def booleanValue(reader: BooleanReader): Boolean = reader.read(); def unitValue(writer: UnitWriter): Unit = writer.write() }",
+    );
+    let int_reader = fixture.symbol_named("IntReader", SymbolKind::Class);
+    let boolean_reader = fixture.symbol_named("BooleanReader", SymbolKind::Class);
+    let unit_writer = fixture.symbol_named("UnitWriter", SymbolKind::Class);
+    let client = fixture.symbol_named("Client", SymbolKind::Class);
+    let int_type = fixture.definitions.int;
+    let boolean_type = fixture.definitions.boolean;
+    let unit_type = fixture.definitions.unit;
+    let find_method = |name| {
+        fixture
+            .methods_named(name)
+            .into_iter()
+            .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(client))
+            .unwrap()
+    };
+    let int_method = find_method("intValue");
+    let boolean_method = find_method("booleanValue");
+    let unit_method = find_method("unitValue");
+    let first_parameter = |method_tree| match &fixture.ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => fixture
+            .index
+            .symbol_at(SOURCE, definition.value_param_clauses[0][0])
+            .unwrap(),
+        _ => unreachable!(),
+    };
+    let int_reader_parameter = first_parameter(int_method.0);
+    let boolean_reader_parameter = first_parameter(boolean_method.0);
+    let unit_writer_parameter = first_parameter(unit_method.0);
+    let mut typer = fixture.typer();
+
+    for ((_, method, rhs), receiver_class, expected_type, receiver_name, receiver_symbol) in [
+        (
+            boolean_method,
+            boolean_reader,
+            boolean_type,
+            "BooleanReader",
+            boolean_reader_parameter,
+        ),
+        (
+            int_method,
+            int_reader,
+            int_type,
+            "IntReader",
+            int_reader_parameter,
+        ),
+        (
+            unit_method,
+            unit_writer,
+            unit_type,
+            "UnitWriter",
+            unit_writer_parameter,
+        ),
+    ] {
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("receiver call should remain Apply")
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("selected method should retain its receiver")
+        };
+        let receiver = selection.qualifier;
+        let receiver_type = typer.typed_ast().get(receiver).ty;
+        assert_eq!(
+            call_target(&typer, typed).map(|symbol| typer.store().symbols.get(symbol).owner),
+            Some(Some(receiver_class))
+        );
+        let widened_receiver = typer.widen_expression_type(receiver_type).unwrap();
+        assert_eq!(
+            type_snapshot(&typer, widened_receiver),
+            format!("TypeRef(Class:{receiver_name})")
+        );
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(receiver).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(actual),
+                ..
+            } if *actual == receiver_symbol
+        ));
+        assert_eq!(typer.typed_ast().get(typed).ty, expected_type);
+    }
+}
+
+#[test]
+fn explicit_this_receiver_keeps_its_class_and_selected_method_identity() {
+    let mut fixture =
+        Fixture::new("class Counter { def get(): Int = 1; def current(): Int = this.get() }");
+    let counter = fixture.symbol_named("Counter", SymbolKind::Class);
+    let (_, get_method, _) = fixture
+        .methods_named("get")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(counter))
+        .unwrap();
+    let (_, current_method, rhs) = fixture
+        .methods_named("current")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(counter))
+        .unwrap();
+    let int_type = fixture.definitions.int;
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(current_method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+        panic!("explicit-this call should remain an Apply")
+    };
+    let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+        panic!("explicit-this call should keep its selected receiver")
+    };
+    assert!(matches!(
+        typer.typed_ast().get(selection.qualifier).kind,
+        TreeKind::This(_)
+    ));
+    assert_eq!(call_target(&typer, typed), Some(get_method));
+    assert_eq!(typer.store().symbols.get(get_method).owner, Some(counter));
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(selection.qualifier).ty),
+        "ThisType(Class:Counter)"
+    );
+    assert_eq!(typer.typed_ast().get(typed).ty, int_type);
+}
+
+#[test]
+fn no_argument_constructor_application_selects_its_class_owned_constructor() {
+    let mut fixture = Fixture::new(
+        "class Empty; class Client { def fresh(): Empty = new Empty(); def bare(): Empty = new Empty }",
+    );
+    let empty = fixture.symbol_named("Empty", SymbolKind::Class);
+    let client = fixture.symbol_named("Client", SymbolKind::Class);
+    let constructors = constructors_of(&mut fixture, empty);
+    assert_eq!(constructors.len(), 1);
+    let constructor = constructors[0];
+    let (_, method, rhs) = fixture
+        .methods_named("fresh")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(client))
+        .unwrap();
+    let (_, bare_method, bare_rhs) = fixture
+        .methods_named("bare")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(client))
+        .unwrap();
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    let TreeKind::Apply(constructor_call) = &typer.typed_ast().get(typed).kind else {
+        panic!("empty constructor call should be represented explicitly as Apply")
+    };
+    assert!(constructor_call.args.is_empty());
+    assert_eq!(call_target(&typer, typed), Some(constructor));
+    let TreeKind::Select(selection) = &typer.typed_ast().get(constructor_call.function).kind else {
+        panic!("constructor application should retain its selected class qualifier")
+    };
+    assert!(matches!(
+        typer.typed_ast().get(selection.qualifier).kind,
+        TreeKind::New(_)
+    ));
+    assert_eq!(typer.store().symbols.get(constructor).owner, Some(empty));
+    let constructor_type = typer.complete_symbol(constructor).unwrap();
+    let Type::Method(signature) = typer.store().types.get(constructor_type) else {
+        panic!("no-argument constructor should have a completed method type")
+    };
+    assert!(signature.params.is_empty());
+    assert_eq!(
+        type_snapshot(&typer, signature.result),
+        "TypeRef(Class:Empty)"
+    );
+
+    let bare_context = typer.expression_context_for(bare_method).unwrap();
+    let bare = typer.type_expression(bare_rhs, bare_context).unwrap();
+    let TreeKind::Apply(bare_call) = &typer.typed_ast().get(bare).kind else {
+        panic!("bare new should normalize to a zero-argument constructor Apply")
+    };
+    assert!(bare_call.args.is_empty());
+    assert_eq!(call_target(&typer, bare), Some(constructor));
+    assert_eq!(
+        type_snapshot(&typer, typer.typed_ast().get(bare).ty),
+        "TypeRef(Class:Empty)"
+    );
+}
+
+#[test]
+fn wrong_constructor_argument_arity_and_type_fail_during_typing() {
+    for (source, wrong_arity) in [
+        (
+            "class C(value: Int); class Use { def make(): C = new C() }",
+            true,
+        ),
+        (
+            "class C(value: Int); class Use { def make(): C = new C(true) }",
+            false,
+        ),
+    ] {
+        let mut fixture = Fixture::new(source);
+        let (_, method, rhs) = fixture.method("make");
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+
+        let error = typer.type_expression(rhs, context).unwrap_err();
+        match (wrong_arity, error) {
+            (
+                true,
+                TyperError::ApplicationArityMismatch {
+                    expected: 1,
+                    actual: 0,
+                    ..
+                },
+            ) => {}
+            (false, TyperError::ApplicationArgumentTypeMismatch { .. }) => {}
+            (wrong_arity, error) => {
+                panic!("unexpected Typer error for wrong_arity={wrong_arity}: {error:?}")
+            }
+        }
+        assert!(typer.source_typed_index().get(SOURCE, rhs).is_none());
+    }
+}
+
+#[test]
+fn private_constructor_candidate_is_not_filtered_by_typer_access_checks() {
+    let mut fixture = Fixture::new(
+        "class Hidden private (value: Int); class Client { def make(): Hidden = new Hidden(1) }",
+    );
+    let hidden = fixture.symbol_named("Hidden", SymbolKind::Class);
+    let client = fixture.symbol_named("Client", SymbolKind::Class);
+    let constructor = constructors_of(&mut fixture, hidden)[0];
+    let (_, method, rhs) = fixture
+        .methods_named("make")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(client))
+        .unwrap();
+    assert_eq!(
+        fixture.store.symbols.get(constructor).visibility,
+        dotty_core::Visibility::Private
+    );
+
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+
+    assert_eq!(call_target(&typer, typed), Some(constructor));
+}
+
+#[test]
 fn generic_constructor_inference_finalizes_the_new_instance_type() {
     let mut fixture = Fixture::new("class Box[A](value: A); class Use { def make = new Box(1) }");
     let box_class = fixture.symbol_named("Box", SymbolKind::Class);
