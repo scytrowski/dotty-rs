@@ -100,7 +100,7 @@ need not have been typed by that operation.
 | `ClassInfo.parents` stores types, not typed superclass constructor trees (`types/class_info.rs`); the parser's implicit parent list is empty. | The pickler must explicitly lower the supported implicit Object parent to the oracle's constructor-call shape, as a serialization rule for this exact class form. Require the canonical Object parent; no arbitrary-parent inference. |
 | Source constructor semantic result is the owning class (`completion/constructors.rs`), but the wire return tree is `scala.Unit` (also documented by [`unpickler/constructor.rs`](../crates/dotty-tasty-unpickler/src/constructor.rs)). | Lower constructor return syntax separately from effective result. The canonical source constructor remains authoritative. Restrict to the validated default constructor; do not copy JVM constructor bytecode generation. |
 | A source default constructor need not have a typed RHS, and the upstream template uses a synthetic local template owner (`TreePickler`, `registerDef(tree.symbol)`). | Plan must identify default-constructor provenance explicitly. The observed default constructor has **no RHS**, an `EMPTYCLAUSE`, a Unit return tree and a `STABLE` tail. Emit precisely that bounded form; template bookkeeping stays local, without fake source `SymbolId`s or a claimed typed constructor body. |
-| `SymbolFlags` (`symbols/flags.rs`) does not model Scala's constructor `STABLE` marker. The independently printed class also has a compiler-injected `SourceFile` annotation. | Treat default-constructor `STABLE` as a narrowly derived wire fact after checking constructor kind/provenance, not a new guessed semantic flag. General annotations remain unsupported. #1190 must test whether compiler provenance annotation/position omission is interoperable; do not promise omission compatibility from an unchanged fixture. |
+| `SymbolFlags` (`symbols/flags.rs`) does not model Scala's constructor `STABLE` marker. The independently printed class also has a compiler-injected `SourceFile` annotation. | Treat default-constructor `STABLE` as a narrowly derived wire fact after checking constructor kind/provenance, not a new guessed semantic flag. General annotations remain unsupported. The [#1190 oracle](tasty-pickler-oracle.md) confirms the minimal file can omit the injected provenance annotation and Positions/Comments while retaining SOURCEFILEattr. |
 | [`unpickler`](../crates/dotty-tasty-unpickler/src/unpickler.rs) enters/completes symbols and types, not a typed AST/body. | Semantic parity checks compare normalized owners/signatures/parents; separately inspect the RHS structurally and compile it independently. |
 | Core IDs are arena-relative numeric identities (`ids.rs`), without store-generation tokens. An in-range ID from another arena can alias a live slot. | Validate bounds/relationships and require one compilation session's borrowed arenas and binding provider. Do not promise detection of every same-slot foreign/stale ID. A generational-ID redesign is outside this sprint. |
 
@@ -225,13 +225,13 @@ end-to-end acceptance test. #1193 may expose a clearly marked partial declaratio
 skeleton for structural tests; it must not present a missing concrete RHS as a
 complete or interoperable file.
 
-Compiler provenance is a specific oracle question: the first candidate may omit
-`Positions`, comments, and Scala's injected `SourceFile` annotation while retaining
-`SOURCEFILEattr`. #1190 must independently compile that reduced candidate (or
-require the minimal additional provenance encoding). This decision must be frozen
-before #1191 begins; successful compilation of the unchanged Scala fixture does
-not settle it. Do not add general annotation support or synthetic core symbols
-merely to reproduce incidental upstream bytes.
+The [#1190 oracle](tasty-pickler-oracle.md) independently compiled reduced Answer
+without `Positions`, `Comments`, or Scala's injected `SourceFile` annotation,
+while retaining `SOURCEFILEattr`. This freezes the omission decision for #1191:
+the minimal producer may omit those sections/that compiler annotation. The
+observed parent, constructor STABLE marker, Int `IDENTtpt` wrapper and RHS stay
+in the first contract. Do not add general annotation support or synthetic core
+symbols merely to reproduce incidental upstream bytes.
 
 ## 6. Proposed immutable input contract
 
