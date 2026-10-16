@@ -816,9 +816,15 @@ pub enum JvmCodegenError {
     ReferenceClassNotInJvmPlan { class: SymbolId },
     /// Two reference values identify different canonical classes.
     ReferenceTypeMismatch { expected: SymbolId, found: SymbolId },
-    /// Reference values can be represented, but this slice does not emit their
-    /// loads/stores or return instructions yet.
+    /// This reference-local operation is not in the supported immutable-val subset.
     ReferenceLocalInstructionUnsupported { tree: TreeId<Typed> },
+    /// Mutable local reference storage is not part of this compiler increment.
+    UnsupportedMutableReferenceLocal { symbol: SymbolId },
+    /// Reference local operations require reference-aware CFG analysis.
+    ReferenceLocalInUnsupportedControlFlow {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+    },
     /// Reference method descriptors are deliberately outside this subset.
     ReferenceMethodDescriptorUnsupported { symbol: SymbolId, ty: JvmType },
     /// The typed node is not yet part of the expression-lowering subset.
