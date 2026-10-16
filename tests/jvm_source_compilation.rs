@@ -3375,6 +3375,176 @@ fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
 }
 
 #[test]
+fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
+    let output = TestOutputDirectory::new("planned-virtual-calls");
+    let artifacts = compile_planned_constructor_source(
+        "class Counter(seed: Int):\n  def add(value: Int): Int = value + 1\n  def combine(left: Int, right: Int): Int = left * 10 + right\n  def get(): Int = 42\n  def enabled(): Boolean = true\n  def touch(): Unit = ()\n  private def hidden(): Int = 9\n  def privateCall(): Int = this.hidden()\n  def privateReceiver(seed: Int): Int = new Counter(seed).hidden()\nclass Other(seed: Int):\n  def get(): Int = 7\nclass Client:\n  def directGet(seed: Int): Int = new Counter(seed).get()\n  def fromNew(seed: Int): Int = new Counter(seed + 1).add(seed)\n  def ordered(seed: Int): Int = new Counter(seed).combine(seed + 1, seed + 2)\n  def booleanResult(seed: Int): Boolean = new Counter(seed).enabled()\n  def unitCall(seed: Int): Unit = new Counter(seed).touch()\n  def fromLocal(seed: Int): Int =\n    val counter = new Counter(seed)\n    counter.add(seed)\n  def fromOther(seed: Int): Int = new Other(seed).get()\n",
+        output.path(),
+    )
+    .unwrap();
+    let decode_class = |name: &str| {
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("{name} class is emitted"));
+        let mut reader = Reader::new(artifact.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("decode emitted class");
+        class.validate_references().expect("valid class references");
+        class
+    };
+    let client = decode_class("Client");
+    let direct_get = emitted_method_code(&client, "directGet");
+    assert_opcode_sequence(direct_get, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xac]);
+    let from_new = emitted_method_code(&client, "fromNew");
+    assert_opcode_sequence(
+        from_new,
+        &[0xbb, 0x59, 0x1b, 0x04, 0x60, 0xb7, 0x1b, 0xb6, 0xac],
+    );
+    let ordered = emitted_method_code(&client, "ordered");
+    assert_opcode_sequence(
+        ordered,
+        &[
+            0xbb, 0x59, 0x1b, 0xb7, 0x1b, 0x04, 0x60, 0x1b, 0x05, 0x60, 0xb6, 0xac,
+        ],
+    );
+    let boolean_result = emitted_method_code(&client, "booleanResult");
+    assert_opcode_sequence(boolean_result, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xac]);
+    let unit_call = emitted_method_code(&client, "unitCall");
+    assert_opcode_sequence(unit_call, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xb1]);
+    let from_local = emitted_method_code(&client, "fromLocal");
+    assert_opcode_sequence(
+        from_local,
+        &[0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0x1b, 0xb6, 0xac],
+    );
+    let from_other = emitted_method_code(&client, "fromOther");
+    assert_opcode_sequence(from_other, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xac]);
+
+    let invocation_owner = |class: &ClassFile<'_>, code: &[u8]| {
+        let offset = decode_subset_instructions(code)
+            .into_iter()
+            .find_map(|(offset, opcode)| (opcode == 0xb6).then_some(offset))
+            .expect("one invokevirtual instruction");
+        let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+        let ConstantPoolEntry::Methodref { class_index, .. } = class
+            .constant_pool
+            .get(ConstantPoolIndex(index))
+            .expect("invokevirtual Methodref")
+        else {
+            panic!("invokevirtual references a Methodref")
+        };
+        class
+            .constant_pool
+            .class_name(*class_index)
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(invocation_owner(&client, from_new), "Counter");
+    assert_eq!(invocation_owner(&client, ordered), "Counter");
+    assert_eq!(invocation_owner(&client, boolean_result), "Counter");
+    assert_eq!(invocation_owner(&client, unit_call), "Counter");
+    assert_eq!(invocation_owner(&client, direct_get), "Counter");
+    assert_eq!(invocation_owner(&client, from_local), "Counter");
+    assert_eq!(invocation_owner(&client, from_other), "Other");
+
+    let counter = decode_class("Counter");
+    let [hidden] = counter
+        .methods
+        .iter()
+        .filter(|method| counter.constant_pool.utf8(method.name_index) == Ok("hidden"))
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("Counter.hidden is emitted")
+    };
+    assert!(hidden.access_flags.is_private());
+    assert_opcode_sequence(
+        emitted_method_code(&counter, "privateCall"),
+        &[0x2a, 0xb6, 0xac],
+    );
+    let private_receiver = emitted_method_code(&counter, "privateReceiver");
+    assert_opcode_sequence(private_receiver, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xac]);
+    assert_eq!(invocation_owner(&counter, private_receiver), "Counter");
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("VirtualCallHarness.java");
+        fs::write(
+            &harness,
+            "public final class VirtualCallHarness { public static void main(String[] args) { Client c = new Client(); if (c.directGet(1) != 42 || c.fromNew(3) != 4 || c.ordered(3) != 45 || !c.booleanResult(3) || c.fromLocal(3) != 4 || c.fromOther(3) != 7 || new Counter(1).privateCall() != 9 || new Counter(1).privateReceiver(2) != 9) throw new AssertionError(); c.unitCall(1); System.out.println(\"virtual calls ok\"); } }\n",
+        )
+        .expect("write Java verification harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected virtual-call harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "VirtualCallHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected virtual-call classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "virtual calls ok"
+        );
+    }
+}
+
+#[test]
+fn reference_receiver_calls_reject_private_access_and_symbolic_branches() {
+    let private_output = TestOutputDirectory::new("private-cross-class-virtual-call");
+    let private_result = compile_planned_constructor_source(
+        "class Counter(seed: Int):\n  private def hidden(): Int = 9\nclass Client:\n  def run(seed: Int): Int = new Counter(seed).hidden()\n",
+        private_output.path(),
+    );
+    assert!(
+        matches!(
+            private_result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::UnsupportedJvmVisibility {
+                    visibility: dotty_core::Visibility::Private,
+                    ..
+                }
+            ))
+        ),
+        "backend must reject private cross-class calls, got {private_result:?}"
+    );
+    assert!(private_output.class_files().is_empty());
+
+    let branch_output = TestOutputDirectory::new("reference-call-branch");
+    let branch_result = compile_planned_constructor_source(
+        "class Counter(seed: Int):\n  def get(): Int = 42\nclass Client:\n  def run(flag: Boolean, seed: Int): Int =\n    val counter = new Counter(seed)\n    if flag then counter.get() else 0\n",
+        branch_output.path(),
+    );
+    assert!(
+        matches!(
+            branch_result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::JvmCallInUnsupportedControlFlow { .. }
+                    | JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. }
+            ))
+        ),
+        "reference calls inside symbolic branches must fail closed, got {branch_result:?}"
+    );
+    assert!(branch_output.class_files().is_empty());
+}
+
+#[test]
 fn immutable_reference_locals_use_canonical_slots_and_verify_on_the_jvm() {
     let output = TestOutputDirectory::new("reference-local");
     let artifacts = compile_planned_constructor_source(

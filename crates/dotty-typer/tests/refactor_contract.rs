@@ -813,10 +813,22 @@ fn source_constructor_and_reference_local_keep_canonical_identities() {
         ));
     }
     let direct_context = typer.expression_context_for(direct_method).unwrap();
+    let direct = typer.type_expression(direct_rhs, direct_context).unwrap();
+    let TreeKind::Apply(direct_call) = &typer.typed_ast().get(direct).kind else {
+        panic!("direct constructor receiver call should remain an Apply")
+    };
+    let TreeKind::Select(direct_selection) = &typer.typed_ast().get(direct_call.function).kind
+    else {
+        panic!("direct constructor receiver call should select its method")
+    };
     assert!(matches!(
-        typer.type_expression(direct_rhs, direct_context),
-        Err(TyperError::UnstableSelectionPrefix { .. })
+        typer.typed_ast().get(direct_selection.qualifier).kind,
+        TreeKind::Apply(_)
     ));
+    assert_eq!(
+        call_target(&typer, direct).map(|symbol| typer.store().symbols.get(symbol).owner),
+        Some(Some(counter))
+    );
 
     let run_context = typer.expression_context_for(run_method).unwrap();
     let run = typer.type_expression(run_rhs, run_context).unwrap();

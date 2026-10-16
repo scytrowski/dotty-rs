@@ -464,7 +464,8 @@ For the tested subset, source Typer completion currently supports:
 - primary constructor signature normalization for a plain constructor.
 
 Expression typing currently includes typed identifiers, stable term selections,
-literal expressions, plain method applications, `New` nodes, and blocks with
+ordinary method application on a direct constructor result, literal expressions,
+plain method applications, `New` nodes, and blocks with
 expressions, local `val`/`var` definitions with or without explicit types, and
 local methods with explicit result types.
 Ordinary left-associative term infix calls lower through selected-member

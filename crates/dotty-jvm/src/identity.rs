@@ -469,13 +469,13 @@ fn method_metadata(
     // type correspondence before any output layout is constructed.
     let descriptor = plan.descriptor(store, owner, definitions)?;
     let method = store.symbols.get(plan.method);
-    if method.visibility != Visibility::Public {
+    if !matches!(method.visibility, Visibility::Public | Visibility::Private) {
         return Err(JvmCodegenError::UnsupportedJvmVisibility {
             symbol: plan.method,
             visibility: method.visibility,
         });
     }
-    let access_flags = method_access_flags(plan.method, method.flags)?;
+    let access_flags = method_access_flags(plan.method, method.visibility, method.flags)?;
     let name = store
         .names
         .try_resolve(method.name.text())
@@ -512,6 +512,7 @@ fn method_metadata(
 
 fn method_access_flags(
     method: dotty_core::SymbolId,
+    visibility: Visibility,
     flags: SymbolFlags,
 ) -> Result<MethodAccessFlags, JvmCodegenError> {
     if flags.contains(SymbolFlags::ABSTRACT) {
@@ -552,8 +553,18 @@ fn method_access_flags(
         }
     }
     // `override` has no JVM access bit. It does not alter method identity.
+    let access = match visibility {
+        Visibility::Public => ACC_PUBLIC,
+        Visibility::Private => ACC_PRIVATE,
+        visibility => {
+            return Err(JvmCodegenError::UnsupportedJvmVisibility {
+                symbol: method,
+                visibility,
+            });
+        }
+    };
     Ok(MethodAccessFlags(
-        ACC_PUBLIC
+        access
             | if flags.contains(SymbolFlags::FINAL) {
                 ACC_FINAL
             } else {

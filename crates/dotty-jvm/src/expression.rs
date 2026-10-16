@@ -1526,8 +1526,12 @@ fn emit_apply(
     }
     let caller_class = class.identity().symbol();
     let caller_method = context.method.symbol();
-    let target =
-        unit.resolve_same_class_call(caller_class, caller_method, tree_id, context.definitions)?;
+    let target = unit.resolve_planned_instance_call(
+        caller_class,
+        caller_method,
+        tree_id,
+        context.definitions,
+    )?;
     let parameters = target.descriptor().parameters().to_vec();
     if arguments.len() != parameters.len() {
         return Err(JvmCodegenError::JvmCallArityMismatch {
@@ -1539,17 +1543,39 @@ fn emit_apply(
     }
 
     context.visit(function, depth + 1)?;
-    if let TreeKind::Select(select) = &context.tree(function)?.kind {
-        context.visit(select.qualifier, depth + 2)?;
+    match target.receiver_tree() {
+        Some(receiver) if matches!(context.tree(receiver)?.kind, TreeKind::This(_)) => {
+            context.visit(receiver, depth + 2)?;
+            append_current_receiver(
+                context.typed_ast,
+                class,
+                context.method,
+                tree_id,
+                &target,
+                code,
+            )?;
+        }
+        Some(receiver) => {
+            let flow = emit_expression(context, receiver, code, depth + 2)?;
+            let expected = JvmType::Reference(target.receiver_class());
+            if flow != Flow::Value(expected) {
+                return Err(JvmCodegenError::JvmCallReceiverFlowMismatch {
+                    tree: receiver,
+                    method: target.method_symbol(),
+                    expected: target.receiver_class(),
+                    found: public_flow(flow),
+                });
+            }
+        }
+        None => append_current_receiver(
+            context.typed_ast,
+            class,
+            context.method,
+            tree_id,
+            &target,
+            code,
+        )?,
     }
-    append_current_receiver(
-        context.typed_ast,
-        class,
-        context.method,
-        tree_id,
-        &target,
-        code,
-    )?;
 
     for (index, (argument, expected)) in arguments.into_iter().zip(parameters).enumerate() {
         let flow = emit_expression(context, argument, code, depth + 1)?;

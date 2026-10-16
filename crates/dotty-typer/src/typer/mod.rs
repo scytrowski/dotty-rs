@@ -22212,6 +22212,18 @@ mod tests {
     }
 
     #[test]
+    fn direct_constructor_result_can_select_and_apply_an_ordinary_method() {
+        let (kind, _, _, widened_type, _) = type_method_rhs(
+            "class C { def get(): Int = 1; def use: Int = new C().get() }",
+            "use",
+        )
+        .unwrap();
+
+        assert!(matches!(kind, TreeKind::Apply(_)));
+        assert!(matches!(widened_type, Type::TypeRef { .. }));
+    }
+
+    #[test]
     fn generic_method_selection_widens_to_receiver_adapted_signature() {
         let source_text = "class Box[A] { def get(): A = null }; class Text; class Use { def use(box: Box[Text]): Text = box.get }";
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
