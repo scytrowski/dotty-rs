@@ -744,6 +744,11 @@ exact error variants asserted rather than `is_err()`.
   `DOTTY_JDK_JMODS`/`JAVA_HOME` setting and validates the catalog from real
   `java.base` and `java.net.http` JMODs, including deterministic names,
   dependencies, exports, JMOD origins, and unchanged regular class lookup.
+- The opt-in JPMS compatibility gate
+  `checks_typed_jdk21_descriptors_against_jmod_describe` also requires the
+  matching JDK `jmod` command. It checks raw descriptor fields and CLI-visible
+  observations for `java.base`, `java.net.http`, and `jdk.jshell`; see
+  `docs/jdk-module-metadata-compatibility.md` for its coverage and limitations.
 - Differential testing against `javap -p -v` on real fixtures is used
   throughout to confirm exact attribute/descriptor/signature shapes
   before writing an assertion against them (e.g. confirming
