@@ -313,6 +313,23 @@ impl<'a> Validator<'_, 'a> {
         Ok(())
     }
 
+    fn parameter_metadata(
+        &self,
+        metadata: &Modifiers,
+        symbol: SymbolId,
+    ) -> Result<(), PickleError> {
+        if metadata.visibility.is_some()
+            || !metadata.annotations.is_empty()
+            || metadata
+                .modifiers
+                .iter()
+                .any(|modifier| *modifier != dotty_core::ast::Modifier::Param)
+        {
+            return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol)));
+        }
+        Ok(())
+    }
+
     fn builtin(&self, builtin: Builtin, ty: TypeId, text: &str) -> Result<SymbolId, PickleError> {
         let Type::TypeRef {
             prefix,
@@ -426,7 +443,7 @@ impl<'a> Validator<'_, 'a> {
                         expected: SourceRole::Parameter,
                     });
                 };
-                self.metadata(&parameter.metadata, symbol)?;
+                self.parameter_metadata(&parameter.metadata, symbol)?;
                 if parameter.rhs.is_some() {
                     return Err(
                         self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))

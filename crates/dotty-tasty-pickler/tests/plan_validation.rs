@@ -87,7 +87,7 @@ fn one_plain_int_clause_validates_against_canonical_source_and_signature_order()
         panic!()
     };
     signature.params.swap(0, 1);
-    let wrong_order = f.store.types.alloc(Type::Method(signature));
+    let wrong_order = f.store.types.alloc(Type::Method(signature.clone()));
     f.store
         .symbols
         .set_info(f.methods[0].symbol, SymbolInfo::Complete(wrong_order));
@@ -95,6 +95,19 @@ fn one_plain_int_clause_validates_against_canonical_source_and_signature_order()
         f.plan().validate().err(),
         Some(PickleError::MalformedType {
             ty: wrong_order,
+            role: TypeRole::Parameter,
+        })
+    );
+    signature.params.swap(0, 1);
+    signature.params[0].erased = true;
+    let erased = f.store.types.alloc(Type::Method(signature));
+    f.store
+        .symbols
+        .set_info(f.methods[0].symbol, SymbolInfo::Complete(erased));
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::MalformedType {
+            ty: erased,
             role: TypeRole::Parameter,
         })
     );
@@ -122,6 +135,36 @@ fn parameter_scope_and_declared_int_type_are_required() {
         f.plan().validate().err(),
         Some(PickleError::UnsupportedTypeReference {
             ty: f.definitions.unit
+        })
+    );
+
+    let mut f = Fixture::new();
+    let [first, _] = add_parameters(&mut f);
+    f.store.symbols.set_info(first, SymbolInfo::Missing);
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::IncompleteSymbol {
+            symbol: first,
+            info: SymbolInfo::Missing,
+        })
+    );
+
+    let mut f = Fixture::new();
+    let [first, _] = add_parameters(&mut f);
+    let method_tree = f.methods[0].source_tree;
+    let parameter_tree = match &f.source_ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        _ => panic!(),
+    };
+    let TreeKind::ValDef(parameter) = &mut f.source_ast.get_mut(parameter_tree).kind else {
+        panic!()
+    };
+    parameter.metadata.modifiers.push(Modifier::Erased);
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::Unsupported {
+            feature: UnsupportedFeature::SourceMetadata,
+            symbol: Some(first),
         })
     );
 }
