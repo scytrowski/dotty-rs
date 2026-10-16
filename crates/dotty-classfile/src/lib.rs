@@ -11,8 +11,10 @@
 //! constant pool, member flags and indices, raw code bytes, and attribute
 //! ordering. [`constant_pool::ConstantPool::encode`] serializes constant-pool entries,
 //! and [`attribute::Attribute::encode`] plus [`attribute::encode_attributes`]
-//! serialize modeled scalar, list-based, code, record, annotation, and opaque
-//! attribute forms. Bytecode remains byte-for-byte opaque, and recursive
+//! serialize modeled scalar, list-based, code, record, annotation, JPMS
+//! `Module`, and opaque attribute forms. `ModulePackages` and
+//! `ModuleMainClass` remain opaque; no module graph or descriptor-shape
+//! validation is performed. Bytecode remains byte-for-byte opaque, and recursive
 //! annotation values and nested Code/Record attributes are bounded by
 //! explicit depth limits.
 //! [`constant_pool_builder::ConstantPoolBuilder`] constructs a new basic
