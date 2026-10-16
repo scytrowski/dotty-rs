@@ -355,7 +355,7 @@ fn field_metadata(
     })
 }
 
-fn typed_expression_primitive_type(
+pub(super) fn typed_expression_primitive_type(
     store: &SemanticStore,
     definitions: &Definitions,
     symbol: dotty_core::SymbolId,

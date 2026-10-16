@@ -1,0 +1,609 @@
+//! Constructor-local lowering for canonical primitive field initializers.
+
+use std::collections::HashSet;
+
+use dotty_classfile::bytecode::CodeBuilder;
+use dotty_core::ast::{TreeKind, Typed, TypedAst};
+use dotty_core::definitions::Definitions;
+use dotty_core::ids::{SymbolId, TreeId};
+use dotty_core::store::SemanticStore;
+use dotty_core::symbols::{SymbolInfo, SymbolKind};
+use dotty_core::types::{Constant, TermRefTarget, Type};
+
+use crate::{
+    JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmClassInitializationPlan,
+    JvmCodegenError, JvmCompilationUnit, JvmConstructorMetadata, JvmFieldMetadata, JvmIntIntrinsic,
+    JvmType, resolve_boolean_intrinsic, resolve_int_intrinsic,
+};
+
+/// A verified source-ordered list of constructor-local field initializer fragments.
+///
+/// This plan does not contain the superclass constructor call or a return and is
+/// not a complete JVM constructor. A future constructor emitter must call
+/// `Object.<init>()V` before appending these instructions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmConstructorFieldInitializerPlan {
+    class: SymbolId,
+    constructor: JvmConstructorMetadata,
+    owner_internal_name: String,
+    fields: Vec<JvmConstructorFieldInitializer>,
+}
+
+/// One field initializer and its checked instruction sequence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmConstructorFieldInitializer {
+    field: SymbolId,
+    initializer: TreeId<Typed>,
+    instructions: Vec<JvmConstructorInitializerInstruction>,
+}
+
+/// Typed instruction plan for the currently supported constructor initializer subset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JvmConstructorInitializerInstruction {
+    /// Push the current instance (`aload_0`).
+    LoadThis,
+    /// Push an int-like constant using the class-file builder's compact encoding.
+    Constant(i32),
+    /// Load an exact constructor-owned primitive parameter.
+    LoadParameter {
+        /// Canonical constructor-owned parameter identity.
+        symbol: SymbolId,
+        /// Validated JVM local slot, after receiver slot zero.
+        slot: u16,
+        /// Semantic primitive type of the parameter.
+        value_type: JvmType,
+    },
+    /// Add two primitive Int operands.
+    IntAdd,
+    /// Invert a canonical Boolean value.
+    BooleanNot,
+    /// Read a previously initialized current-class field.
+    GetField {
+        /// Canonical field identity.
+        field: SymbolId,
+        /// Validated field name and descriptor from class metadata.
+        name: String,
+        descriptor: String,
+    },
+    /// Store the completed initializer result to its canonical field.
+    PutField {
+        /// Canonical field identity.
+        field: SymbolId,
+        /// Validated field name and descriptor from class metadata.
+        name: String,
+        descriptor: String,
+    },
+}
+
+impl JvmConstructorFieldInitializerPlan {
+    /// Canonical class whose fields and constructor were validated.
+    pub const fn class(&self) -> SymbolId {
+        self.class
+    }
+
+    /// Validated constructor metadata, including ordered parameter slots.
+    pub const fn constructor(&self) -> &JvmConstructorMetadata {
+        &self.constructor
+    }
+
+    /// Field initializers in the frontend's source declaration order.
+    pub fn fields(&self) -> &[JvmConstructorFieldInitializer] {
+        &self.fields
+    }
+
+    /// Appends only the planned field initializer instructions to `code`.
+    ///
+    /// The caller is responsible for placing this sequence after the
+    /// `Object.<init>()V` call and for adding a constructor return afterward.
+    /// This method does not emit either instruction.
+    pub fn append_to(&self, code: &mut CodeBuilder) -> Result<(), JvmCodegenError> {
+        for field in &self.fields {
+            for instruction in &field.instructions {
+                let result = match instruction {
+                    JvmConstructorInitializerInstruction::LoadThis => code.aload(0),
+                    JvmConstructorInitializerInstruction::Constant(value) => code.iconst(*value),
+                    JvmConstructorInitializerInstruction::LoadParameter { slot, .. } => {
+                        code.iload(usize::from(*slot))
+                    }
+                    JvmConstructorInitializerInstruction::IntAdd => code.iadd(),
+                    JvmConstructorInitializerInstruction::BooleanNot => {
+                        code.iconst(1).and_then(|code| code.ixor())
+                    }
+                    JvmConstructorInitializerInstruction::GetField {
+                        name, descriptor, ..
+                    } => code.aload(0).and_then(|code| {
+                        code.getfield(
+                            self.owner_internal_name.clone(),
+                            name.clone(),
+                            descriptor.clone(),
+                        )
+                    }),
+                    JvmConstructorInitializerInstruction::PutField {
+                        name, descriptor, ..
+                    } => code.putfield(
+                        self.owner_internal_name.clone(),
+                        name.clone(),
+                        descriptor.clone(),
+                    ),
+                };
+                result.map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: field.initializer,
+                    error,
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl JvmConstructorFieldInitializer {
+    /// Canonical field receiving this initializer.
+    pub const fn field(&self) -> SymbolId {
+        self.field
+    }
+
+    /// Exact typed initializer root associated with the field plan.
+    pub const fn initializer(&self) -> TreeId<Typed> {
+        self.initializer
+    }
+
+    /// Checked instruction sequence, beginning with `LoadThis` and ending with `PutField`.
+    pub fn instructions(&self) -> &[JvmConstructorInitializerInstruction] {
+        &self.instructions
+    }
+}
+
+struct ConstructorInitializerContext<'a> {
+    store: &'a SemanticStore,
+    typed_ast: &'a TypedAst,
+    definitions: &'a Definitions,
+    class: SymbolId,
+    constructor: &'a JvmConstructorMetadata,
+    fields: &'a [JvmFieldMetadata],
+    initialized_fields: HashSet<SymbolId>,
+    current_field: SymbolId,
+    node_visits: usize,
+}
+
+pub(super) fn lower(
+    unit: &JvmCompilationUnit<'_>,
+    class: SymbolId,
+    definitions: &Definitions,
+) -> Result<JvmConstructorFieldInitializerPlan, JvmCodegenError> {
+    unit.validate()?;
+    let class_plan = unit
+        .classes
+        .iter()
+        .find(|plan| plan.class == class)
+        .ok_or(JvmCodegenError::MissingClassPlan { class })?;
+    if !matches!(
+        class_plan.initialization,
+        JvmClassInitializationPlan::PrimaryConstructor(_)
+    ) {
+        return Err(JvmCodegenError::ConstructorInitializerContextUnavailable { class });
+    }
+    let metadata = class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
+    let constructor = metadata
+        .constructor()
+        .cloned()
+        .ok_or(JvmCodegenError::ConstructorInitializerContextUnavailable { class })?;
+    let mut context = ConstructorInitializerContext {
+        store: unit.store,
+        typed_ast: unit.typed_ast,
+        definitions,
+        class,
+        constructor: &constructor,
+        fields: metadata.fields(),
+        initialized_fields: HashSet::new(),
+        current_field: class,
+        node_visits: 0,
+    };
+    let mut lowered_fields = Vec::with_capacity(metadata.fields().len());
+    for field in metadata.fields() {
+        let initializer = field.initializer();
+        context.current_field = field.symbol();
+        context.node_visits = 0;
+        let expected = field_value_type(field, initializer)?;
+        let mut instructions = vec![JvmConstructorInitializerInstruction::LoadThis];
+        let found = context.lower_expression(initializer, &mut instructions, 0)?;
+        if found != expected {
+            return Err(JvmCodegenError::FieldInitializerTypeMismatch {
+                field: field.symbol(),
+                initializer,
+                expected,
+                found: Some(found),
+            });
+        }
+        instructions.push(JvmConstructorInitializerInstruction::PutField {
+            field: field.symbol(),
+            name: field.name().to_owned(),
+            descriptor: field.descriptor().to_owned(),
+        });
+        lowered_fields.push(JvmConstructorFieldInitializer {
+            field: field.symbol(),
+            initializer,
+            instructions,
+        });
+        context.initialized_fields.insert(field.symbol());
+    }
+
+    Ok(JvmConstructorFieldInitializerPlan {
+        class,
+        constructor,
+        owner_internal_name: metadata.identity().internal_name().to_owned(),
+        fields: lowered_fields,
+    })
+}
+
+impl ConstructorInitializerContext<'_> {
+    fn lower_expression(
+        &mut self,
+        tree_id: TreeId<Typed>,
+        instructions: &mut Vec<JvmConstructorInitializerInstruction>,
+        depth: usize,
+    ) -> Result<JvmType, JvmCodegenError> {
+        let tree =
+            self.typed_ast
+                .try_get(tree_id)
+                .ok_or(JvmCodegenError::UnknownFieldInitializer {
+                    field: self.current_field,
+                    initializer: tree_id,
+                })?;
+        if depth >= JVM_EXPRESSION_DEPTH_LIMIT {
+            return Err(JvmCodegenError::ExpressionDepthExceeded {
+                tree: tree_id,
+                position: tree.position,
+                limit: JVM_EXPRESSION_DEPTH_LIMIT,
+            });
+        }
+        if self.node_visits >= JVM_EXPRESSION_NODE_BUDGET {
+            return Err(JvmCodegenError::ExpressionNodeBudgetExceeded {
+                tree: tree_id,
+                limit: JVM_EXPRESSION_NODE_BUDGET,
+            });
+        }
+        self.node_visits += 1;
+        crate::expression::validate_tree_type(self.store, tree_id, tree.ty)?;
+
+        match &tree.kind {
+            TreeKind::Literal(literal) => {
+                let (value, value_type) = match literal.value {
+                    Constant::Int(value) => (value, JvmType::Int),
+                    Constant::Boolean(value) => (i32::from(value), JvmType::Boolean),
+                    _ => return self.unsupported(tree_id, "non-Int/Boolean literal"),
+                };
+                let found = self.tree_value_type(tree_id, tree.ty)?;
+                let constant_matches = match self.store.types.try_get(tree.ty) {
+                    Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                    _ => found == value_type,
+                };
+                if !constant_matches || found != value_type {
+                    return Err(JvmCodegenError::LiteralTypeMismatch {
+                        tree: tree_id,
+                        value: value_type,
+                        typed: Some(found),
+                    });
+                }
+                instructions.push(JvmConstructorInitializerInstruction::Constant(value));
+                Ok(value_type)
+            }
+            TreeKind::Ident(_) => {
+                let symbol = self.term_ref_symbol(tree_id, tree.ty)?;
+                self.lower_reference(tree_id, symbol, None, instructions)
+            }
+            TreeKind::Select(select) => {
+                let boolean_intrinsic = resolve_boolean_intrinsic(
+                    self.store,
+                    self.typed_ast,
+                    tree_id,
+                    self.definitions,
+                )
+                .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
+                    tree: tree_id,
+                    error,
+                })?;
+                if boolean_intrinsic == Some(crate::JvmBooleanIntrinsic::Not) {
+                    let found = self.lower_expression(select.qualifier, instructions, depth + 1)?;
+                    if found != JvmType::Boolean {
+                        return self.type_mismatch(tree_id, JvmType::Boolean, found);
+                    }
+                    instructions.push(JvmConstructorInitializerInstruction::BooleanNot);
+                    return Ok(JvmType::Boolean);
+                }
+                let symbol = self.term_ref_symbol(tree_id, tree.ty)?;
+                self.lower_reference(tree_id, symbol, Some(select.qualifier), instructions)
+            }
+            TreeKind::Apply(application) => {
+                let intrinsic =
+                    resolve_int_intrinsic(self.store, self.typed_ast, tree_id, self.definitions)
+                        .map_err(|error| JvmCodegenError::IntIntrinsicResolution {
+                            tree: tree_id,
+                            error,
+                        })?;
+                if intrinsic != Some(JvmIntIntrinsic::IntAdd) {
+                    return self.unsupported(tree_id, "non-approved constructor application");
+                }
+                let function = self.typed_ast.try_get(application.function).ok_or(
+                    JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                        field: self.current_field,
+                        tree: tree_id,
+                        node: "missing intrinsic function tree",
+                    },
+                )?;
+                let TreeKind::Select(select) = &function.kind else {
+                    return self.unsupported(tree_id, "unsupported Int intrinsic function shape");
+                };
+                let [argument] = application.args.as_slice() else {
+                    return self.unsupported(tree_id, "unsupported Int intrinsic arity");
+                };
+                for operand in [select.qualifier, *argument] {
+                    let found = self.lower_expression(operand, instructions, depth + 1)?;
+                    if found != JvmType::Int {
+                        return self.type_mismatch(tree_id, JvmType::Int, found);
+                    }
+                }
+                instructions.push(JvmConstructorInitializerInstruction::IntAdd);
+                Ok(JvmType::Int)
+            }
+            TreeKind::Block(block) if block.stats.is_empty() => {
+                let found = self.lower_expression(block.expr, instructions, depth + 1)?;
+                let declared = self.tree_value_type(tree_id, tree.ty)?;
+                if found != declared {
+                    return self.type_mismatch(tree_id, declared, found);
+                }
+                Ok(found)
+            }
+            _ => self.unsupported(tree_id, typed_node_name(&tree.kind)),
+        }
+    }
+
+    fn lower_reference(
+        &mut self,
+        tree: TreeId<Typed>,
+        symbol: SymbolId,
+        receiver: Option<TreeId<Typed>>,
+        instructions: &mut Vec<JvmConstructorInitializerInstruction>,
+    ) -> Result<JvmType, JvmCodegenError> {
+        if !self.store.symbols.contains(symbol) {
+            return Err(JvmCodegenError::UnknownFieldInitializerSymbol {
+                field: self.current_field,
+                initializer: tree,
+                symbol,
+            });
+        }
+        let symbol_info = self.store.symbols.get(symbol);
+        if let Some(parameter) = self
+            .constructor
+            .parameters()
+            .iter()
+            .find(|parameter| parameter.symbol() == symbol)
+        {
+            if symbol_info.kind != SymbolKind::Parameter
+                || symbol_info.owner != Some(self.constructor.symbol())
+            {
+                return Err(JvmCodegenError::InvalidParameterReference {
+                    tree,
+                    symbol: Some(symbol),
+                });
+            }
+            let semantic_type = match symbol_info.info {
+                SymbolInfo::Complete(ty) => ty,
+                SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                    return Err(JvmCodegenError::MissingSemanticInfo { symbol });
+                }
+                SymbolInfo::Error => {
+                    return Err(JvmCodegenError::ErrorSemanticInfo { symbol });
+                }
+            };
+            let found = crate::descriptor::primitive_semantic_value_type(
+                self.store,
+                self.definitions,
+                symbol,
+                semantic_type,
+            )?;
+            if found != parameter.ty()
+                || self.tree_value_type(tree, self.typed_ast.get(tree).ty)? != found
+            {
+                return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
+                    tree,
+                    parameter: symbol,
+                    expected: parameter.ty(),
+                    found: Some(found),
+                });
+            }
+            instructions.push(JvmConstructorInitializerInstruction::LoadParameter {
+                symbol,
+                slot: parameter.slot(),
+                value_type: parameter.ty(),
+            });
+            return Ok(parameter.ty());
+        }
+
+        if symbol_info.kind != SymbolKind::Field {
+            return Err(JvmCodegenError::InvalidParameterReference {
+                tree,
+                symbol: Some(symbol),
+            });
+        }
+        if symbol_info.owner != Some(self.class) {
+            return Err(JvmCodegenError::WrongOwner {
+                symbol,
+                expected: self.class,
+                actual: symbol_info.owner,
+            });
+        }
+        let field = self
+            .fields
+            .iter()
+            .find(|field| field.symbol() == symbol)
+            .ok_or(JvmCodegenError::FieldNotInJvmPlan {
+                tree,
+                class: self.class,
+                field: symbol,
+            })?;
+        self.validate_field_receiver(tree, field, receiver)?;
+        if !self.initialized_fields.contains(&symbol) {
+            return Err(JvmCodegenError::FieldInitializerReadsUninitializedField {
+                field: self.current_field,
+                tree,
+                referenced_field: symbol,
+            });
+        }
+        let value_type = field_value_type(field, tree)?;
+        let found = self.tree_value_type(tree, self.typed_ast.get(tree).ty)?;
+        if found != value_type {
+            return self.type_mismatch(tree, value_type, found);
+        }
+        instructions.push(JvmConstructorInitializerInstruction::GetField {
+            field: symbol,
+            name: field.name().to_owned(),
+            descriptor: field.descriptor().to_owned(),
+        });
+        Ok(value_type)
+    }
+
+    fn validate_field_receiver(
+        &self,
+        tree: TreeId<Typed>,
+        field: &JvmFieldMetadata,
+        receiver: Option<TreeId<Typed>>,
+    ) -> Result<(), JvmCodegenError> {
+        let reference_prefix = match self.store.types.try_get(self.typed_ast.get(tree).ty) {
+            Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(target),
+            }) if *target == field.symbol() => *prefix,
+            _ => {
+                return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                    tree,
+                    field: field.symbol(),
+                    class: self.class,
+                });
+            }
+        };
+        if let Some(receiver) = receiver {
+            let receiver_tree = self.typed_ast.try_get(receiver).ok_or(
+                JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                    field: self.current_field,
+                    tree: receiver,
+                    node: "missing field receiver tree",
+                },
+            )?;
+            if !matches!(
+                receiver_tree.kind,
+                TreeKind::This(dotty_core::ast::This { qual: None })
+            ) || !is_current_this_type(self.store, receiver_tree.ty, self.class)
+                || receiver_tree.ty != reference_prefix
+            {
+                return Err(JvmCodegenError::UnsupportedJvmFieldReceiver {
+                    tree,
+                    field: field.symbol(),
+                });
+            }
+        } else if !is_current_this_type(self.store, reference_prefix, self.class) {
+            return Err(JvmCodegenError::InvalidJvmFieldReferencePrefix {
+                tree,
+                field: field.symbol(),
+                class: self.class,
+            });
+        }
+        Ok(())
+    }
+
+    fn term_ref_symbol(
+        &self,
+        tree: TreeId<Typed>,
+        ty: dotty_core::TypeId,
+    ) -> Result<SymbolId, JvmCodegenError> {
+        match self.store.types.try_get(ty) {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) => Ok(*symbol),
+            _ => Err(JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                field: self.current_field,
+                tree,
+                node: "typed reference does not target a canonical symbol",
+            }),
+        }
+    }
+
+    fn tree_value_type(
+        &self,
+        tree: TreeId<Typed>,
+        ty: dotty_core::TypeId,
+    ) -> Result<JvmType, JvmCodegenError> {
+        crate::identity::typed_expression_primitive_type(
+            self.store,
+            self.definitions,
+            self.current_field,
+            tree,
+            ty,
+        )
+    }
+
+    fn type_mismatch(
+        &self,
+        tree: TreeId<Typed>,
+        expected: JvmType,
+        found: JvmType,
+    ) -> Result<JvmType, JvmCodegenError> {
+        Err(JvmCodegenError::FieldInitializerTypeMismatch {
+            field: self.current_field,
+            initializer: tree,
+            expected,
+            found: Some(found),
+        })
+    }
+
+    fn unsupported<T>(
+        &self,
+        tree: TreeId<Typed>,
+        node: &'static str,
+    ) -> Result<T, JvmCodegenError> {
+        Err(JvmCodegenError::UnsupportedConstructorFieldInitializer {
+            field: self.current_field,
+            tree,
+            node,
+        })
+    }
+}
+
+fn field_value_type(
+    field: &JvmFieldMetadata,
+    tree: TreeId<Typed>,
+) -> Result<JvmType, JvmCodegenError> {
+    match field.descriptor() {
+        "I" => Ok(JvmType::Int),
+        "Z" => Ok(JvmType::Boolean),
+        _ => Err(JvmCodegenError::UnsupportedConstructorFieldInitializer {
+            field: field.symbol(),
+            tree,
+            node: "invalid primitive field descriptor",
+        }),
+    }
+}
+
+fn is_current_this_type(store: &SemanticStore, ty: dotty_core::TypeId, class: SymbolId) -> bool {
+    matches!(store.types.try_get(ty), Some(Type::ThisType { class: found }) if *found == class)
+}
+
+fn typed_node_name(kind: &TreeKind<Typed>) -> &'static str {
+    match kind {
+        TreeKind::Literal(_) => "Literal",
+        TreeKind::Ident(_) => "Ident",
+        TreeKind::Select(_) => "Select",
+        TreeKind::Apply(_) => "Apply",
+        TreeKind::Block(_) => "Block",
+        TreeKind::This(_) => "This",
+        TreeKind::ValDef(_) => "ValDef",
+        TreeKind::TypeApply(_) => "TypeApply",
+        TreeKind::If(_) => "If",
+        TreeKind::While(_) => "While",
+        TreeKind::Return(_) => "Return",
+        TreeKind::Assign(_) => "Assign",
+        TreeKind::DefDef(_) => "DefDef",
+        TreeKind::TypeDef(_) => "TypeDef",
+        _ => "unsupported typed expression",
+    }
+}
