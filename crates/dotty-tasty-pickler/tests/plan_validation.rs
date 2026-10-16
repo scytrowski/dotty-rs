@@ -452,6 +452,43 @@ fn parents_and_parameterless_signatures_are_not_silently_normalized() {
 }
 
 #[test]
+fn explicit_empty_value_clause_requires_the_matching_plain_zero_arity_method_type() {
+    let mut f = Fixture::new();
+    let method = f.methods[0].symbol;
+    let method_tree = f.methods[0].source_tree;
+    let TreeKind::DefDef(definition) = &mut f.source_ast.get_mut(method_tree).kind else {
+        panic!()
+    };
+    definition.value_param_clauses = vec![vec![]];
+    f.methods[0].parameter_clauses = vec![vec![]];
+    let signature = f.store.types.alloc(Type::Method(MethodType {
+        params: vec![],
+        result: f.definitions.int,
+        kind: MethodKind::Plain,
+    }));
+    f.store
+        .symbols
+        .set_info(method, SymbolInfo::Complete(signature));
+    assert!(f.plan().validate().is_ok());
+
+    let contextual = f.store.types.alloc(Type::Method(MethodType {
+        params: vec![],
+        result: f.definitions.int,
+        kind: MethodKind::Contextual,
+    }));
+    f.store
+        .symbols
+        .set_info(method, SymbolInfo::Complete(contextual));
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::MalformedType {
+            ty: contextual,
+            role: TypeRole::MethodResult,
+        })
+    );
+}
+
+#[test]
 fn parameter_id_order_duplicates_and_ownership_are_validated_before_deferral() {
     let mut f = Fixture::new();
     let [first, second] = add_parameters(&mut f);

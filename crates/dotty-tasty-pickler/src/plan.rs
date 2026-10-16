@@ -110,7 +110,7 @@ impl<'p, 'a> ValidatedPicklePlan<'p, 'a> {
 }
 
 impl<'a> PicklePlan<'a> {
-    /// Check the frozen class/default-constructor/parameterless Int-literal slice.
+    /// Check the frozen class/default-constructor/multiple-Int-literal method slice.
     /// Neither success nor failure changes stores, arenas, indices, or files.
     pub fn validate(&self) -> Result<ValidatedPicklePlan<'_, 'a>, PickleError> {
         self.validate_with_limits(ValidationLimits::default())
@@ -623,7 +623,7 @@ impl<'a> Validator<'_, 'a> {
         for method in p.methods {
             self.method(method)?;
         }
-        if p.methods.len() != 1 {
+        if p.methods.is_empty() {
             return Err(self.unsupported(UnsupportedFeature::MethodCount, Some(p.class)));
         }
         Ok(package)
@@ -753,7 +753,11 @@ impl<'a> Validator<'_, 'a> {
             return Err(self.unsupported(UnsupportedFeature::TypeParameters, Some(method.symbol)));
         }
         self.parameters(method.symbol, definition, &method.parameter_clauses)?;
-        if !definition.value_param_clauses.is_empty()
+        if definition.value_param_clauses.len() > 1
+            || definition
+                .value_param_clauses
+                .iter()
+                .any(|clause| !clause.is_empty())
             || definition.source_param_clause_order.is_some()
         {
             return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(method.symbol)));
@@ -773,7 +777,18 @@ impl<'a> Validator<'_, 'a> {
         if result.name != self.symbol(int)?.name {
             return Err(PickleError::UnsupportedTypeReference { ty });
         }
-        if ty != p.definitions.int {
+        let signature_matches = match definition.value_param_clauses.as_slice() {
+            [] => ty == p.definitions.int,
+            [clause] if clause.is_empty() => matches!(
+                self.ty(ty)?,
+                Type::Method(signature)
+                    if signature.params.is_empty()
+                        && signature.kind == MethodKind::Plain
+                        && signature.result == p.definitions.int
+            ),
+            _ => false,
+        };
+        if !signature_matches {
             return Err(PickleError::MalformedType {
                 ty,
                 role: TypeRole::MethodResult,

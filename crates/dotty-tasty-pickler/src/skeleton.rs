@@ -104,7 +104,7 @@ impl ValidatedPicklePlan<'_, '_> {
     }
 
     /// Uses the existing projection/name/wire budgets. The bounded v0 shape has
-    /// one package, one public class, a default constructor and one method.
+    /// one package, one public class, a default constructor and one or more methods.
     pub fn declaration_skeleton_with_limits(
         &self,
         limits: ProjectionLimits,
@@ -209,9 +209,15 @@ impl ValidatedPicklePlan<'_, '_> {
         for method in p.methods {
             let name = context.intern_name(symbol(self, method.symbol)?.name)?;
             let result = context.int_type_syntax()?;
-            // No EMPTYCLAUSE for a parameterless method, no invented METHODtype
-            // payload, no abstract modifier and no substitute for its real RHS.
-            let mut fields = vec![AstField::Nat(name), AstField::Tree(result)];
+            // Preserve the source distinction: no clause has no marker; one
+            // explicit empty clause has EMPTYCLAUSE before the result type.
+            let mut fields = vec![AstField::Nat(name)];
+            if method.parameter_clauses.len() == 1 {
+                fields.push(AstField::Tree(marker(&mut context, EMPTYCLAUSE_TAG)?));
+            }
+            // No invented METHODtype payload, abstract modifier or substitute
+            // for the method's real RHS.
+            fields.push(AstField::Tree(result));
             if complete.is_some() {
                 let body = method.body.ok_or(PickleError::MissingBody {
                     method: method.symbol,

@@ -92,13 +92,15 @@ silently change encoding when the host Unicode tables change.
 The parent application comes from the validated ClassInfo's canonical Object
 parent and the frozen oracle's `APPLY/SELECTin/NEW` shape. The default constructor
 has EMPTYCLAUSE, direct Unit return syntax, no RHS and its provenance-required
-STABLE marker. Its semantic signature still returns the class. The ordinary
-parameterless method has an Int IDENTtpt and no fabricated empty clause,
-METHODtype payload, abstract flag or substitute RHS. Complete output attaches
-the actual typed Int literal after its declared return syntax. Public visibility and empty
+STABLE marker. Its semantic signature still returns the class. Ordinary methods
+are emitted in exact source order. A parameterless method has an Int IDENTtpt
+and no fabricated empty clause or METHODtype payload; one explicit empty value
+clause has EMPTYCLAUSE and requires a matching plain zero-parameter
+`Type::Method` signature. Complete output attaches each method's actual typed
+Int literal after its declared return syntax. Public visibility and empty
 modifier/annotation tails are checked from symbol records; other metadata is
-unsupported. Parameterized/empty-parens methods and other class forms remain
-outside the validated v0 contract.
+unsupported. Nonempty/multiple/contextual clauses, other bodies, and other
+class forms remain outside the validated v0 contract.
 
 The provisional document uses TastyFileBuilder with exact 28.9.0 version checks,
 ASTs and SOURCEFILEattr, and structural validation before returning bytes. Its
