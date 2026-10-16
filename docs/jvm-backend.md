@@ -42,14 +42,14 @@ remain borrowed and read-only.
 planned method after validating the complete unit. The explicit
 `local_layout_for` entry point accepts that unit's projected
 `JvmMethodMetadata` and exact local binding slice; stale metadata or a binding
-slice that differs from the method plan is rejected. Locals are projected only
-from completed `Int` and `Boolean` semantic types. The instance receiver stays
+slice that differs from the method plan is rejected. Locals are projected from
+completed `Int`, `Boolean`, or exact planned-class reference types. The instance receiver stays
 in slot zero, parameter slots retain their descriptor-derived positions, and
 locals receive one category-one slot each in typed declaration ID order. The
 allocator is monotonic and does not reuse slots for shadowed locals. Its
 `max_locals` count includes the receiver and parameters and is checked against
 the u16 class-file field before each slot is published. The layout carries the
-canonical `SymbolId`, typed declaration ID, primitive type, and mutability;
+canonical `SymbolId`, typed declaration ID, exact value type, and mutability;
 lookup is by `SymbolId` only. Reserving a slot does not establish definite
 initialization. Planned method lowering accepts ordinary local `ValDef`
 statements with an initializer: it lowers the RHS once, checks the resulting
@@ -62,12 +62,14 @@ unsupported types, and locals not initialized on every reachable path are
 rejected.
 Missing bindings, missing initializers, unsupported types and modifiers,
 initializer type mismatches, and detectable reads before the store fail with
-typed errors. `PatDef` remains unsupported. Initialized
+typed errors. `PatDef` remains unsupported. Initialized primitive
 local reads lower through the same canonical `SymbolId` lookup to one `iload`
 from the allocated slot. Local loads require the current method's validated
 layout, a completed supported semantic type, and a preceding store on every
 reachable path. Name-only references, foreign or unplanned locals, and reads before
-initialization return typed errors. The existing bytecode analyzer remains
+initialization return typed errors. Reference slots can currently be reserved
+and inspected through metadata, but reference loads and stores return a typed
+unsupported-operation error. The existing bytecode analyzer remains
 responsible for verifier local state and stack-map frames.
 
 The initial plan subset accepts `SymbolKind::Class`, `SymbolKind::Method`, and
@@ -106,12 +108,39 @@ No general Scala type erasure, reference boxing, Unit operand-stack
 representation, raw bytecode, source pipeline orchestration, TASTy integration,
 or macro support is part of this contract.
 
+## Bounded reference values
+
+`JvmType::Reference(SymbolId)` carries the exact canonical identity of one
+ordinary, top-level, non-generic class in the validated emission unit. The
+checked `JvmCompilationUnit::reference_type` projection accepts only a
+canonical `TypeRef` to a planned class with supported metadata and `Object` as
+its sole direct parent. It rejects `Object` itself, external or unplanned
+classes, anonymous/generic classes, aliases, unions, applied types, `TermRef`s,
+and classes with another superclass. `local_value_type` applies the same rule
+to a completed local symbol type. Both projections are read-only and do not
+allocate semantic symbols or types.
+
+References occupy one category-one slot and remain distinct from `Int`,
+`Boolean`, and `Unit`. Local layout may reserve that slot, but the expression
+lowerer does not load or store reference locals yet. Method and constructor
+parameters/results and field descriptors still accept only the existing
+primitive/`Unit` subset; references never erase to `java/lang/Object`, and
+constructor reference arguments remain rejected. The linear code analyzer and
+control-flow lowering remain reference-unaware.
+
+Future allocation, local-access, and call lowerers must request this checked
+projection from the same validated `JvmCompilationUnit`, carry its class
+`SymbolId` through each `Flow::Value` check, and reject mismatches explicitly.
+This type does not track an uninitialized object: `new`/`dup`/`invokespecial`
+ordering and escape safety require a separate verifier-aware change before
+object creation can be emitted.
+
 Object-construction typing, canonical constructor and receiver identity,
 uninitialized-reference verifier constraints, and the multi-class planning
 boundary are recorded separately in
 [`jvm-object-creation-contract.md`](jvm-object-creation-contract.md). That
 contract is an audit only: the current backend does not emit object creation
-or reference locals, and direct method selection from `new C(...)` is
+or reference-local bytecode, and direct method selection from `new C(...)` is
 currently rejected by the Typer as an unstable selection prefix.
 
 ## Canonical `Int` arithmetic

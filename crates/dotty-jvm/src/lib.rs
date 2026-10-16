@@ -34,6 +34,7 @@ mod expression;
 mod identity;
 mod locals;
 mod primitive_ops;
+mod reference;
 
 pub use boolean_ops::{
     JvmBooleanIntrinsic, JvmBooleanIntrinsicError, JvmBooleanRhsEvaluation,
@@ -60,17 +61,25 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 /// A JVM value representation supported by the current projection slice.
 ///
 /// `Int` and `Boolean` have distinct descriptor letters (`I` and `Z`) but
-/// both use the JVM's int-like category-one operand representation.
+/// both use the JVM's int-like category-one operand representation. References
+/// retain their exact planned class identity and are not descriptor types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmType {
     Int,
     Boolean,
+    /// A category-one reference to one exact class in a validated compilation unit.
+    ///
+    /// This is an expression/local value representation only. Method and field
+    /// descriptors remain primitive-only in this backend slice.
+    Reference(SymbolId),
 }
 
-/// Operand category for the JVM values currently supported here.
+/// Operand category for the JVM values currently represented here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmValueCategory {
     IntLike,
+    /// A JVM object reference; it occupies one operand-stack/local slot.
+    Reference,
 }
 
 /// A JVM method result. `Void` is only valid as a result, never a parameter.
@@ -86,7 +95,7 @@ pub enum JvmReturnType {
 pub enum JvmExpressionFlow {
     /// A value remains on the operand stack at the expression's fallthrough.
     Value {
-        /// Semantic primitive represented by the int-like stack value.
+        /// Exact primitive or planned class identity represented on the stack.
         value_type: JvmType,
         /// JVM operand category exposed to parent lowering.
         category: JvmValueCategory,
@@ -127,7 +136,7 @@ impl JvmLoweredExpression {
 pub struct JvmMethodDescriptor {
     descriptor: dotty_classfile::descriptor::MethodDescriptor,
     descriptor_text: String,
-    /// Primitive parameters in declaration order.
+    /// Primitive parameters in declaration order; references are not accepted.
     parameters: Vec<JvmType>,
     /// Primitive result, or JVM `void` for Scala `Unit`.
     result: JvmReturnType,
@@ -703,6 +712,25 @@ pub enum JvmCodegenError {
         ty: TypeId,
         reason: InvalidTypeReason,
     },
+    /// A reference type is outside the bounded, planned-class subset.
+    UnsupportedJvmReferenceType {
+        ty: TypeId,
+        kind: UnsupportedJvmReferenceTypeKind,
+    },
+    /// A requested reference projection names a missing or sentinel type slot.
+    InvalidReferenceType {
+        ty: TypeId,
+        reason: InvalidTypeReason,
+    },
+    /// A reference target is not one of this compilation unit's class plans.
+    ReferenceClassNotInJvmPlan { class: SymbolId },
+    /// Two reference values identify different canonical classes.
+    ReferenceTypeMismatch { expected: SymbolId, found: SymbolId },
+    /// Reference values can be represented, but this slice does not emit their
+    /// loads/stores or return instructions yet.
+    ReferenceLocalInstructionUnsupported { tree: TreeId<Typed> },
+    /// Reference method descriptors are deliberately outside this subset.
+    ReferenceMethodDescriptorUnsupported { symbol: SymbolId, ty: JvmType },
     /// The typed node is not yet part of the expression-lowering subset.
     UnsupportedTypedExpression {
         tree: TreeId<Typed>,
@@ -1119,6 +1147,20 @@ pub enum UnsupportedJvmTypeKind {
     Other,
 }
 
+/// Why a semantic type cannot be represented as a planned class reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsupportedJvmReferenceTypeKind {
+    NotCanonicalTypeRef,
+    UnsupportedPrefix,
+    UnsupportedSymbolKind,
+    ExternalClass,
+    ObjectClass,
+    AnonymousClass,
+    GenericClass,
+    NotObjectDerived,
+    UnsupportedClassMetadata,
+}
+
 /// Primitive definition identity being read from [`Definitions`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrimitiveBuiltin {
@@ -1406,7 +1448,7 @@ impl JvmLocalSlot {
         self.symbol
     }
 
-    /// Completed primitive type stored in this category-one slot.
+    /// Completed primitive or planned reference type stored in this category-one slot.
     pub const fn ty(self) -> JvmType {
         self.ty
     }
@@ -1469,6 +1511,42 @@ impl JvmMethodPlan {
 }
 
 impl JvmCompilationUnit<'_> {
+    /// Projects a completed canonical type reference to one exact class in
+    /// this validated emission unit.
+    ///
+    /// This does not erase to `java/lang/Object`, follow aliases, or project
+    /// external, generic, anonymous, inherited, or otherwise unsupported class
+    /// shapes. The result can describe expression/local values, but does not
+    /// enable reference method descriptors or bytecode lowering.
+    pub fn reference_type(
+        &self,
+        ty: TypeId,
+        definitions: &Definitions,
+    ) -> Result<JvmType, JvmCodegenError> {
+        reference::project_type(self, ty, definitions)
+    }
+
+    /// Projects a completed local value type to its exact primitive or
+    /// validated planned-class representation.
+    pub(crate) fn local_value_type(
+        &self,
+        symbol: SymbolId,
+        ty: TypeId,
+        definitions: &Definitions,
+        metadata: Option<&[JvmClassMetadata]>,
+    ) -> Result<JvmType, JvmCodegenError> {
+        match metadata {
+            Some(metadata) => reference::project_local_type_with_metadata(
+                self,
+                symbol,
+                ty,
+                definitions,
+                Some(metadata),
+            ),
+            None => reference::project_local_type(self, symbol, ty, definitions),
+        }
+    }
+
     /// Projects all planned class identities and method metadata in plan order.
     ///
     /// Duplicate JVM class names and duplicate `(method name, descriptor)`

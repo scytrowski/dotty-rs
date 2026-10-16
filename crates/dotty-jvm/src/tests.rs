@@ -18,6 +18,7 @@ use dotty_core::symbols::{
 };
 use dotty_core::types::{
     ClassInfo, Constant, MethodKind, MethodParam, MethodType, PolyType, TermRefTarget, Type,
+    TypeRefTarget,
 };
 use std::fs;
 use std::process::Command;
@@ -941,6 +942,440 @@ impl ClassIdentityFixture {
     }
 }
 
+struct ReferenceFixture {
+    store: SemanticStore,
+    ast: TypedAst,
+    definitions: Definitions,
+    classes: Vec<SymbolId>,
+}
+
+impl ReferenceFixture {
+    fn new() -> Self {
+        let mut identity = ClassIdentityFixture::new(&["example"], "Counter");
+        let definitions = Definitions::bootstrap(&mut identity.store);
+        set_object_parent(
+            &mut identity.store,
+            identity.class,
+            definitions.no_prefix,
+            definitions.object_type,
+        );
+        let owner = identity.store.symbols.get(identity.class).owner.unwrap();
+        let other = add_reference_class(
+            &mut identity.store,
+            owner,
+            "Other",
+            definitions.no_prefix,
+            definitions.object_type,
+            SymbolOrigin::Synthetic,
+            SymbolFlags::EMPTY,
+        );
+        Self {
+            store: identity.store,
+            ast: TypedAst::new(),
+            definitions,
+            classes: vec![identity.class, other],
+        }
+    }
+
+    fn unit(&self) -> JvmCompilationUnit<'_> {
+        JvmCompilationUnit {
+            store: &self.store,
+            typed_ast: &self.ast,
+            classes: self
+                .classes
+                .iter()
+                .copied()
+                .map(|class| JvmClassPlan {
+                    class,
+                    fields: Vec::new(),
+                    methods: Vec::new(),
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                })
+                .collect(),
+        }
+    }
+
+    fn type_ref(&mut self, class: SymbolId) -> dotty_core::TypeId {
+        self.store.types.alloc(Type::TypeRef {
+            prefix: self.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(class),
+        })
+    }
+}
+
+fn set_object_parent(
+    store: &mut SemanticStore,
+    class: SymbolId,
+    prefix: dotty_core::TypeId,
+    object_type: dotty_core::TypeId,
+) {
+    let info = match store.symbols.info(class) {
+        SymbolInfo::Complete(ty) => match store.types.get(*ty) {
+            Type::ClassInfo(info) => info.clone(),
+            _ => panic!("class identity fixture should have ClassInfo"),
+        },
+        _ => panic!("class identity fixture should have complete info"),
+    };
+    let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix,
+        parents: vec![object_type],
+        ..info
+    }));
+    store
+        .symbols
+        .set_info(class, SymbolInfo::Complete(class_info));
+}
+
+fn add_reference_class(
+    store: &mut SemanticStore,
+    owner: SymbolId,
+    name: &str,
+    prefix: dotty_core::TypeId,
+    object_type: dotty_core::TypeId,
+    origin: SymbolOrigin,
+    flags: SymbolFlags,
+) -> SymbolId {
+    let name_id = store.names.intern(name);
+    let class = store.symbols.alloc(Symbol {
+        name: Name::new(name_id, Namespace::Type),
+        owner: Some(owner),
+        kind: SymbolKind::Class,
+        flags,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let declarations = store.scopes.alloc(Scope::new(Some(class)));
+    let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix,
+        class,
+        parents: vec![object_type],
+        declarations,
+        self_type: None,
+    }));
+    store
+        .symbols
+        .set_info(class, SymbolInfo::Complete(class_info));
+    class
+}
+
+#[test]
+fn reference_projection_keeps_exact_planned_class_identity() {
+    let mut fixture = ReferenceFixture::new();
+    let counter = fixture.classes[0];
+    let other = fixture.classes[1];
+    let counter_type = fixture.type_ref(counter);
+    let same_counter_type = fixture.type_ref(counter);
+    let other_type = fixture.type_ref(other);
+    let unit = fixture.unit();
+    let store_checkpoint = fixture.store.checkpoint();
+    let ast_checkpoint = fixture.ast.checkpoint();
+
+    assert_eq!(
+        unit.reference_type(counter_type, &fixture.definitions),
+        Ok(JvmType::Reference(counter))
+    );
+    assert_eq!(
+        unit.reference_type(same_counter_type, &fixture.definitions),
+        Ok(JvmType::Reference(counter))
+    );
+    assert_eq!(
+        unit.reference_type(other_type, &fixture.definitions),
+        Ok(JvmType::Reference(other))
+    );
+    assert_ne!(
+        JvmType::Reference(counter),
+        JvmType::Reference(other),
+        "different canonical class identities must remain distinct"
+    );
+    assert_eq!(
+        JvmType::Reference(counter).category(),
+        JvmValueCategory::Reference
+    );
+    assert_eq!(JvmType::Reference(counter).slot_width(), 1);
+    assert_eq!(JvmType::Reference(counter).descriptor_char(), None);
+    assert_ne!(JvmType::Reference(counter), JvmType::Int);
+    assert_ne!(JvmType::Reference(counter), JvmType::Boolean);
+
+    let counter_flow = JvmExpressionFlow::Value {
+        value_type: JvmType::Reference(counter),
+        category: JvmValueCategory::Reference,
+    };
+    let other_flow = JvmExpressionFlow::Value {
+        value_type: JvmType::Reference(other),
+        category: JvmValueCategory::Reference,
+    };
+    assert_ne!(counter_flow, other_flow);
+    assert_eq!(fixture.store.checkpoint(), store_checkpoint);
+    assert_eq!(fixture.ast.checkpoint(), ast_checkpoint);
+}
+
+#[test]
+fn reference_projection_rejects_unplanned_stale_and_noncanonical_targets() {
+    let mut fixture = ReferenceFixture::new();
+    let counter = fixture.classes[0];
+    let owner = fixture.store.symbols.get(counter).owner.unwrap();
+    let unplanned = add_reference_class(
+        &mut fixture.store,
+        owner,
+        "Unplanned",
+        fixture.definitions.no_prefix,
+        fixture.definitions.object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    let unplanned_type = fixture.type_ref(unplanned);
+    let object_type = fixture.definitions.object_type;
+    let non_class = alloc_symbol_named(
+        &mut fixture.store,
+        "notAClass",
+        Namespace::Type,
+        Some(owner),
+        SymbolKind::Value,
+        SymbolFlags::EMPTY,
+    );
+    let non_class_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(non_class),
+    });
+    let term_ref_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(counter),
+    });
+    let mut foreign_session = ReferenceFixture::new();
+    let foreign_owner = foreign_session
+        .store
+        .symbols
+        .get(foreign_session.classes[0])
+        .owner
+        .unwrap();
+    for index in 0..64 {
+        let name = format!("foreign{index}");
+        alloc_symbol_named(
+            &mut foreign_session.store,
+            &name,
+            Namespace::Term,
+            Some(foreign_owner),
+            SymbolKind::Value,
+            SymbolFlags::EMPTY,
+        );
+    }
+    let foreign_class = add_reference_class(
+        &mut foreign_session.store,
+        foreign_owner,
+        "Foreign",
+        foreign_session.definitions.no_prefix,
+        foreign_session.definitions.object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    let foreign_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(foreign_class),
+    });
+    let counter_parent = fixture.type_ref(counter);
+    let other_parent = fixture.type_ref(fixture.classes[1]);
+    let union_type = fixture.store.types.alloc(Type::Or {
+        left: counter_parent,
+        right: other_parent,
+    });
+    let qualified_prefix = fixture.type_ref(counter);
+    let unsupported_prefix_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: qualified_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
+    let prefix_checkpoint = fixture.store.checkpoint();
+    let _reused_prefix_slot = fixture.store.types.alloc(Type::NoPrefix);
+    let missing_prefix = fixture.store.types.alloc(Type::NoPrefix);
+    fixture.store.rollback_to(prefix_checkpoint);
+    let dangling_prefix_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: missing_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
+    let checkpoint = fixture.store.checkpoint();
+    let stale_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
+    fixture.store.rollback_to(checkpoint);
+    let unit = fixture.unit();
+
+    assert_eq!(
+        unit.reference_type(unplanned_type, &fixture.definitions),
+        Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class: unplanned })
+    );
+    assert_eq!(
+        unit.reference_type(stale_type, &fixture.definitions),
+        Err(JvmCodegenError::InvalidReferenceType {
+            ty: stale_type,
+            reason: InvalidTypeReason::MissingOrUnfilled,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(dangling_prefix_type, &fixture.definitions),
+        Err(JvmCodegenError::InvalidReferenceType {
+            ty: missing_prefix,
+            reason: InvalidTypeReason::MissingOrUnfilled,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(unsupported_prefix_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: unsupported_prefix_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(object_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: object_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::ObjectClass,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(non_class_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: non_class_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedSymbolKind,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(term_ref_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: term_ref_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(foreign_type, &fixture.definitions),
+        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+            class: foreign_class,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(union_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: union_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
+        })
+    );
+}
+
+#[test]
+fn reference_projection_rejects_external_anonymous_generic_and_inherited_classes() {
+    let mut fixture = ReferenceFixture::new();
+    let owner = fixture.store.symbols.get(fixture.classes[0]).owner.unwrap();
+    let object_type = fixture.definitions.object_type;
+    let no_prefix = fixture.definitions.no_prefix;
+
+    let classfile_origin = SymbolOrigin::Classfile(fixture.store.origins.register_classfile());
+    let external = add_reference_class(
+        &mut fixture.store,
+        owner,
+        "External",
+        no_prefix,
+        object_type,
+        classfile_origin,
+        SymbolFlags::EMPTY,
+    );
+    let external_type = fixture.type_ref(external);
+    fixture.classes.push(external);
+    let unit = fixture.unit();
+    assert_eq!(
+        unit.reference_type(external_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: external_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::ExternalClass,
+        })
+    );
+    drop(unit);
+
+    let mut fixture = ReferenceFixture::new();
+    let owner = fixture.store.symbols.get(fixture.classes[0]).owner.unwrap();
+    let anonymous = add_reference_class(
+        &mut fixture.store,
+        owner,
+        "Anonymous",
+        no_prefix,
+        object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::SYNTHETIC,
+    );
+    let anonymous_type = fixture.type_ref(anonymous);
+    fixture.classes.push(anonymous);
+    let unit = fixture.unit();
+    assert_eq!(
+        unit.reference_type(anonymous_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: anonymous_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::AnonymousClass,
+        })
+    );
+    drop(unit);
+
+    let mut fixture = ReferenceFixture::new();
+    let generic = fixture.classes[1];
+    let info = match fixture.store.symbols.info(generic) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.clone(),
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let type_parameter = alloc_symbol_named(
+        &mut fixture.store,
+        "T",
+        Namespace::Type,
+        Some(generic),
+        SymbolKind::TypeParameter,
+        SymbolFlags::EMPTY,
+    );
+    fixture.store.scopes.get_mut(info.declarations).enter(
+        fixture.store.symbols.get(type_parameter).name,
+        type_parameter,
+    );
+    let generic_type = fixture.type_ref(generic);
+    let unit = fixture.unit();
+    assert_eq!(
+        unit.reference_type(generic_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: generic_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::GenericClass,
+        })
+    );
+    drop(unit);
+
+    let mut fixture = ReferenceFixture::new();
+    let inherited = fixture.classes[1];
+    let info = match fixture.store.symbols.info(inherited) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.clone(),
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+    let inherited_info = fixture.store.types.alloc(Type::ClassInfo(ClassInfo {
+        parents: vec![fixture.definitions.boolean],
+        ..info
+    }));
+    fixture
+        .store
+        .symbols
+        .set_info(inherited, SymbolInfo::Complete(inherited_info));
+    let inherited_type = fixture.type_ref(inherited);
+    let unit = fixture.unit();
+    assert_eq!(
+        unit.reference_type(inherited_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: inherited_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::NotObjectDerived,
+        })
+    );
+}
+
 fn alloc_symbol_named(
     store: &mut SemanticStore,
     name: &str,
@@ -1485,8 +1920,76 @@ fn local_layout_rejects_unsupported_semantic_types() {
 
     assert!(matches!(
         unit.local_layout(fixture.class, method, &fixture.definitions),
-        Err(JvmCodegenError::UnsupportedJvmType { symbol: found, .. }) if found == symbol
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            kind: crate::UnsupportedJvmReferenceTypeKind::ObjectClass,
+            ..
+        })
     ));
+}
+
+#[test]
+fn local_layout_reserves_exact_category_one_slots_for_planned_references() {
+    let mut fixture = EmissionFixture::new(false);
+    let class = fixture.class;
+    let method = fixture.methods[0];
+    let reference_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(class),
+    });
+    let name = fixture.store.names.intern("other");
+    let symbol = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(name, Namespace::Term),
+        owner: Some(method),
+        kind: SymbolKind::Local,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(reference_type),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let old_body = fixture.bodies[0];
+    let declaration = fixture.ast.alloc(Tree {
+        kind: TreeKind::ValDef(ValDef {
+            name: TermName::new(name),
+            tpt: old_body,
+            rhs: Some(old_body),
+            metadata: (),
+        }),
+        position: None,
+        ty: reference_type,
+    });
+    fixture.bodies[0] = fixture.ast.alloc(Tree {
+        kind: TreeKind::Block(Block {
+            stats: vec![declaration],
+            expr: old_body,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let binding = JvmLocalBinding {
+        declaration,
+        symbol,
+        mutable: false,
+    };
+    let mut unit = fixture.unit();
+    unit.classes[0].methods[0].locals = vec![binding];
+
+    let layout = unit
+        .local_layout(class, method, &fixture.definitions)
+        .unwrap();
+    assert_eq!(layout.max_locals(), 2);
+    assert_eq!(
+        layout.local(symbol).unwrap().ty(),
+        JvmType::Reference(class)
+    );
+    assert_eq!(layout.local(symbol).unwrap().slot(), 1);
+    assert_eq!(layout.local(symbol).unwrap().ty().slot_width(), 1);
+    assert_eq!(
+        unit.local_value_type(symbol, reference_type, &fixture.definitions, None),
+        Ok(JvmType::Reference(class))
+    );
 }
 
 #[test]
@@ -2714,6 +3217,35 @@ fn rejects_alias_class_object_and_type_parameter_values_without_object_fallback(
             })
         );
     }
+
+    let mut reference_result = SignatureFixture::new(0);
+    let class = alloc_symbol(
+        &mut reference_result.store,
+        SymbolKind::Class,
+        None,
+        reference_result.definitions.int,
+    );
+    let reference = reference_result.store.types.alloc(Type::type_ref(
+        reference_result.definitions.no_prefix,
+        class,
+    ));
+    let method_type = reference_result.store.types.alloc(Type::Method(MethodType {
+        params: Vec::new(),
+        result: reference,
+        kind: MethodKind::Plain,
+    }));
+    reference_result
+        .store
+        .symbols
+        .set_info(reference_result.method, SymbolInfo::Complete(method_type));
+    assert_eq!(
+        reference_result.descriptor(),
+        Err(JvmCodegenError::UnsupportedJvmType {
+            symbol: reference_result.method,
+            ty: reference,
+            kind: UnsupportedJvmTypeKind::ReferenceClass,
+        })
+    );
 }
 
 #[test]
