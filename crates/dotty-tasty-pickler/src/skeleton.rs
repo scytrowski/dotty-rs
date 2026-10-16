@@ -1,4 +1,4 @@
-//! Declaration-only output. Concrete method bodies remain explicitly omitted.
+//! Shared declaration assembly and explicitly incomplete skeleton output.
 
 use dotty_core::{Name, Symbol, SymbolId, SymbolInfo, TreeId, Type, Typed};
 use dotty_tasty::tasty::*;
@@ -27,14 +27,23 @@ pub struct OmittedMethodBody {
 ///
 /// The absent concrete RHS is not an abstract source declaration or a fake body.
 /// Do not publish these bytes as a completed compiler artifact or pass them to
-/// Scala expecting interoperability. Body emission belongs to the next increment.
+/// Scala expecting interoperability. Use `ValidatedPicklePlan::pickle` for complete literal-body emission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclarationSkeleton {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) source: SourceMetadata,
-    pub(crate) intended_tasty_path: String,
-    pub(crate) declarations: Vec<SkeletonDeclaration>,
-    pub(crate) omitted_bodies: Vec<OmittedMethodBody>,
+    bytes: Vec<u8>,
+    source: SourceMetadata,
+    intended_tasty_path: String,
+    declarations: Vec<SkeletonDeclaration>,
+    omitted_bodies: Vec<OmittedMethodBody>,
+}
+
+/// Private common assembly result; completeness is selected before emission.
+pub(crate) struct Assembly {
+    pub bytes: Vec<u8>,
+    pub source: SourceMetadata,
+    pub intended_tasty_path: String,
+    pub declarations: Vec<SkeletonDeclaration>,
+    pub bodies: Vec<(SymbolId, TreeId<Typed>)>,
 }
 
 impl DeclarationSkeleton {
@@ -100,14 +109,25 @@ impl ValidatedPicklePlan<'_, '_> {
         &self,
         limits: ProjectionLimits,
     ) -> Result<DeclarationSkeleton, PickleError> {
-        self.assemble(limits, None)
+        let output = self.assemble(limits, None)?;
+        Ok(DeclarationSkeleton {
+            bytes: output.bytes,
+            source: output.source,
+            intended_tasty_path: output.intended_tasty_path,
+            declarations: output.declarations,
+            omitted_bodies: output
+                .bodies
+                .into_iter()
+                .map(|(method, typed_root)| OmittedMethodBody { method, typed_root })
+                .collect(),
+        })
     }
 
     pub(crate) fn assemble(
         &self,
         limits: ProjectionLimits,
         complete: Option<usize>,
-    ) -> Result<DeclarationSkeleton, PickleError> {
+    ) -> Result<Assembly, PickleError> {
         let p = self.plan();
         let mut context = EncodingContext::for_plan(self, limits)?;
         let package_path = context.package_reference(self.package())?;
@@ -185,7 +205,7 @@ impl ValidatedPicklePlan<'_, '_> {
             AstField::Tree(parent_application),
             AstField::Tree(constructor_label),
         ];
-        let mut omitted_bodies = Vec::new();
+        let mut bodies = Vec::new();
         for method in p.methods {
             let name = context.intern_name(symbol(self, method.symbol)?.name)?;
             let result = context.int_type_syntax()?;
@@ -218,12 +238,12 @@ impl ValidatedPicklePlan<'_, '_> {
                     reason: ReferenceError::NotRegistered,
                 })?;
             stats.push(AstField::Tree(label));
-            omitted_bodies.push(OmittedMethodBody {
-                method: method.symbol,
-                typed_root: method.body.ok_or(PickleError::MissingBody {
+            bodies.push((
+                method.symbol,
+                method.body.ok_or(PickleError::MissingBody {
                     method: method.symbol,
                 })?,
-            });
+            ));
         }
         // All supported semantic visibility/flags/annotations are public/empty,
         // as validated from symbol records, not Typed's unit metadata. Unsupported
@@ -312,12 +332,12 @@ impl ValidatedPicklePlan<'_, '_> {
             crate::artifact_name::encode_component(text(self, symbol(self, self.package())?.name)?),
             crate::artifact_name::encode_component(text(self, class_record.name)?)
         );
-        Ok(DeclarationSkeleton {
+        Ok(Assembly {
             bytes,
             source: p.source.clone(),
             intended_tasty_path,
             declarations,
-            omitted_bodies,
+            bodies,
         })
     }
 }

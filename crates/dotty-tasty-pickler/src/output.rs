@@ -4,8 +4,8 @@ use dotty_core::{SymbolId, TreeId, Typed};
 use dotty_tasty::tasty::*;
 
 use crate::{
-    LimitKind, OmittedMethodBody, PickleError, ProjectionLimits, SkeletonDeclaration,
-    SourceMetadata, ValidatedPicklePlan,
+    LimitKind, PickleError, ProjectionLimits, SkeletonDeclaration, SourceMetadata,
+    ValidatedPicklePlan,
 };
 
 /// Whole-file budget in addition to projection and wire depth/size budgets.
@@ -32,7 +32,7 @@ pub struct PickledTasty {
     source: SourceMetadata,
     intended_tasty_path: String,
     declarations: Vec<SkeletonDeclaration>,
-    bodies: Vec<OmittedMethodBody>,
+    bodies: Vec<(SymbolId, TreeId<Typed>)>,
 }
 
 impl PickledTasty {
@@ -53,8 +53,8 @@ impl PickledTasty {
     pub fn body(&self, method: SymbolId) -> Option<TreeId<Typed>> {
         self.bodies
             .iter()
-            .find(|b| b.method == method)
-            .map(|b| b.typed_root)
+            .find(|(id, _)| *id == method)
+            .map(|(_, root)| *root)
     }
 }
 
@@ -73,7 +73,7 @@ impl ValidatedPicklePlan<'_, '_> {
             source: output.source,
             intended_tasty_path: output.intended_tasty_path,
             declarations: output.declarations,
-            bodies: output.omitted_bodies,
+            bodies: output.bodies,
         })
     }
 }
