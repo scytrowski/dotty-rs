@@ -1231,6 +1231,14 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
             _ => None,
         };
+        trace_import_prefix_symbol_resolution(
+            &metrics,
+            "member",
+            &target_key,
+            &outcome,
+            result.as_ref().ok().and_then(|symbol| *symbol),
+            selected_identity.as_deref(),
+        );
         if !method.is_empty() {
             metrics
                 .resolver_requests_by_method
@@ -1486,6 +1494,14 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
             _ => None,
         };
+        trace_import_prefix_symbol_resolution(
+            &metrics,
+            "package",
+            &target,
+            &outcome,
+            result.as_ref().ok().and_then(|symbol| *symbol),
+            selected_identity.as_deref(),
+        );
         if !metrics.current_method.is_empty() {
             let method = metrics.current_method.clone();
             metrics
@@ -1565,6 +1581,34 @@ fn audit_symbol_identity(store: &SemanticStore, symbol: SymbolId) -> String {
         "kind={kind}::origin={origin}::path={}",
         audit_symbol_path(store, symbol)
     )
+}
+
+fn trace_import_prefix_symbol_resolution(
+    metrics: &ResolverMetrics,
+    operation: &str,
+    target: &str,
+    outcome: &str,
+    symbol: Option<SymbolId>,
+    identity: Option<&str>,
+) {
+    if std::env::var_os("SCALA39_IMPORT_PREFIX_TRACE_IDS").is_none() {
+        return;
+    }
+    let order = metrics
+        .resolver_requests_by_method
+        .get(&metrics.current_method)
+        .map_or(0, Vec::len);
+    eprintln!(
+        "IMPORT_PREFIX_RESOLVER_TRACE source={} method={} order={} operation={} target={} outcome={} symbol_id={} identity={}",
+        metrics.current_file,
+        metrics.current_method,
+        order,
+        operation,
+        target,
+        outcome,
+        symbol.map_or_else(|| "-".to_owned(), |symbol| format!("{}", symbol.index())),
+        identity.unwrap_or("-")
+    );
 }
 
 fn symbol_info_label(info: dotty_core::SymbolInfo) -> &'static str {
@@ -6836,7 +6880,8 @@ fn pinned_scala39_import_prefix_typing_probe() {
     );
     let profile = fs::read_to_string(profile).expect("frozen #1128 profile should be readable");
     let baseline_target_categories = frozen_import_target_categories();
-    let baseline_rows = baseline_import_blocker_attempts(&profile, &baseline_target_categories);
+    let mut baseline_rows = baseline_import_blocker_attempts(&profile, &baseline_target_categories);
+    let selected_source_file = std::env::var("SCALA39_IMPORT_PREFIX_SOURCE_FILE").ok();
     assert_eq!(baseline_rows.len(), 2_394);
     assert!(baseline_rows.iter().all(|row| {
         !row.baseline_method.is_empty()
@@ -6897,13 +6942,34 @@ fn pinned_scala39_import_prefix_typing_probe() {
         methods_by_file.values().map(BTreeSet::len).sum::<usize>(),
         904
     );
+    if let Some(selected_file) = selected_source_file.as_deref() {
+        assert!(!Path::new(selected_file).is_absolute());
+        assert!(!selected_file.split('/').any(|part| part == ".."));
+        baseline_rows.retain(|row| row.file == selected_file);
+        assert!(
+            !baseline_rows.is_empty(),
+            "selected source has no frozen import-prefix rows: {selected_file}"
+        );
+        methods_by_file.retain(|file, _| file == selected_file);
+        assert_eq!(methods_by_file.len(), 1);
+        eprintln!(
+            "import-prefix single-source probe: file={selected_file}, frozen_rows={}",
+            baseline_rows.len()
+        );
+    }
     let stage_started = Instant::now();
     let classpath = audit_classpath_from_environment();
     let classpath_setup = stage_started.elapsed();
     let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
     let mut audit = Audit::default();
     let stage_started = Instant::now();
-    let source_package_paths = audit_source_package_inventory_for_roots(&root);
+    let source_package_paths = if let Some(selected_file) = selected_source_file.as_deref() {
+        let text = fs::read_to_string(root.join(selected_file))
+            .unwrap_or_else(|error| panic!("cannot read {selected_file}: {error}"));
+        audit_source_package_inventory(&text, selected_file)
+    } else {
+        audit_source_package_inventory_for_roots(&root)
+    };
     let package_inventory = stage_started.elapsed();
     let stage_started = Instant::now();
     for (index, (relative, method_trees)) in methods_by_file.iter().enumerate() {
@@ -6960,8 +7026,10 @@ fn pinned_scala39_import_prefix_typing_probe() {
     println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
     print_import_prefix_reconciliation(&reconciliation);
     println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
-    assert_eq!(unresolved_baseline_rows, 721);
-    assert_eq!(advanced_baseline_rows, 1_673);
+    if selected_source_file.is_none() {
+        assert_eq!(unresolved_baseline_rows, 721);
+        assert_eq!(advanced_baseline_rows, 1_673);
+    }
     assert!(reconciliation.iter().all(|row| {
         row.current_method_typed == (row.current_method_blocker == "typed")
             && row.final_import_identity.starts_with("outcomes::")
@@ -6992,14 +7060,19 @@ fn pinned_scala39_import_prefix_typing_probe() {
             ))
         })
         .count();
-    assert_eq!(
-        new_current_observations, 342,
-        "newly exposed later blockers must remain distinct from frozen #1128 rows"
-    );
+    if selected_source_file.is_none() {
+        assert_eq!(
+            new_current_observations, 342,
+            "newly exposed later blockers must remain distinct from frozen #1128 rows"
+        );
+    }
     assert!(reconciliation.iter().all(|row| {
         row.current_method_blocker != "not observed"
             && row.current_outcome != "unmatched current outcome"
     }));
+    if selected_source_file.is_some() {
+        return;
+    }
     let first_segment_observations = all_observations
         .iter()
         .filter(|row| {
@@ -7054,10 +7127,31 @@ fn pinned_scala39_import_prefix_typing_probe() {
     print_import_prefix_profile(&ImportPrefixProfile {
         observations: first_segment_observations,
     });
-    println!("baseline_observations=2394");
-    println!("baseline_files=209");
-    println!("baseline_targets=30");
-    println!("baseline_blocker_origins=904");
+    println!("baseline_observations={}", baseline_rows.len());
+    println!(
+        "baseline_files={}",
+        baseline_rows
+            .iter()
+            .map(|row| row.file.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    );
+    println!(
+        "baseline_targets={}",
+        baseline_rows
+            .iter()
+            .map(|row| row.target_key.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    );
+    println!(
+        "baseline_blocker_origins={}",
+        baseline_rows
+            .iter()
+            .map(|row| (row.file.as_str(), row.blocker_origin_tree))
+            .collect::<BTreeSet<_>>()
+            .len()
+    );
     let cache = classpath.cache_metrics();
     println!(
         "classpath_cache: class_lookups={} repeated_missing_class_lookups={} package_lookups={} repeated_package_lookups={}",

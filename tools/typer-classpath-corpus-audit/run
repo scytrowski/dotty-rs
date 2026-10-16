@@ -8,16 +8,20 @@ usage() {
     cat <<'USAGE'
 Usage: tools/typer-classpath-corpus-audit/run [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --import-prefix-profile [--verify-determinism] [OUTPUT_PATH]
+       tools/typer-classpath-corpus-audit/run --import-prefix-profile --source-file RELATIVE_PATH
 
 By default, run the pinned audit once and write its report. Pass
 --verify-determinism to run it twice and compare normalized output. Set
 DOTTY_AUDIT_TMP_ROOT to retain per-run logs and intermediate reports there.
+--source-file runs the import-prefix probe only for frozen observations in one
+Scala source file and prints its resolver trace without generating a cohort report.
 USAGE
 }
 
 verify_determinism=0
 import_prefix_profile=0
 output_path=""
+source_file=""
 while (($#)); do
     case "$1" in
         --verify-determinism)
@@ -25,6 +29,14 @@ while (($#)); do
             ;;
         --import-prefix-profile)
             import_prefix_profile=1
+            ;;
+        --source-file)
+            if (($# < 2)) || [[ -z "$2" ]]; then
+                usage >&2
+                exit 2
+            fi
+            source_file="$2"
+            shift
             ;;
         -h|--help)
             usage
@@ -44,6 +56,15 @@ while (($#)); do
     esac
     shift
 done
+
+if [[ -n "$source_file" && "$import_prefix_profile" != 1 ]]; then
+    printf '%s\n' '--source-file requires --import-prefix-profile' >&2
+    exit 2
+fi
+if [[ -n "$source_file" && "$verify_determinism" == 1 ]]; then
+    printf '%s\n' '--source-file is a one-run diagnostic and cannot be combined with --verify-determinism' >&2
+    exit 2
+fi
 
 scala_root="${SCALA39_ROOT:?set SCALA39_ROOT to the pinned Scala 3.9.0 checkout}"
 java_home="${JAVA_HOME:?set JAVA_HOME to the JDK used for this audit}"
@@ -89,6 +110,10 @@ export SCALA39_ROOT="$scala_root"
 export JAVA_HOME="$java_home"
 export SCALA39_JDK_RELEASE="$jdk_release"
 export SCALA39_CLASSPATH="$(IFS=:; printf '%s' "${scala_jars[*]}")"
+if [[ -n "$source_file" ]]; then
+    export SCALA39_IMPORT_PREFIX_SOURCE_FILE="$source_file"
+    export SCALA39_IMPORT_PREFIX_TRACE_IDS=1
+fi
 
 if [[ -z "$output_path" ]]; then
     if [[ "$import_prefix_profile" == 1 ]]; then
@@ -123,6 +148,10 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         ) >"$tmp_dir/$run.log" 2>&1; then
             cat "$tmp_dir/$run.log" >&2
             exit 1
+        fi
+        if [[ -n "$source_file" ]]; then
+            cat "$tmp_dir/$run.log"
+            exit 0
         fi
         sed -n '/^AUDIT_IMPORT_PREFIX_BEGIN$/,/^AUDIT_IMPORT_PREFIX_END$/p' "$tmp_dir/$run.log" \
             | sed '1d;$d' >"$tmp_dir/$run.profile"
