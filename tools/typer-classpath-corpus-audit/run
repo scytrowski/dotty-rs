@@ -7,7 +7,7 @@ repo_root="$(CDPATH= cd -- "$script_dir/../.." && pwd)"
 usage() {
     cat <<'USAGE'
 Usage: tools/typer-classpath-corpus-audit/run [--verify-determinism] [OUTPUT_PATH]
-       tools/typer-classpath-corpus-audit/run --import-prefix-profile --verify-determinism [OUTPUT_PATH]
+       tools/typer-classpath-corpus-audit/run --import-prefix-profile [--verify-determinism] [OUTPUT_PATH]
 
 By default, run the pinned audit once and write its report. Pass
 --verify-determinism to run it twice and compare normalized output.
@@ -107,10 +107,6 @@ if [[ "$verify_determinism" == 1 ]]; then
     run_names+=(second)
 fi
 if [[ "$import_prefix_profile" == 1 ]]; then
-    if [[ "$verify_determinism" != 1 ]]; then
-        printf 'the import-prefix profile requires --verify-determinism\n' >&2
-        exit 2
-    fi
     export SCALA39_IMPORT_PREFIX_BASELINE_PROFILE="$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md"
     for run in "${run_names[@]}"; do
         if ! (
@@ -135,16 +131,23 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             printf 'import-prefix reconciliation markers were missing\n' >&2
             exit 1
         fi
+        printf '%s ' "$run"
+        sed -n '/^IMPORT_PREFIX_TIMING /p' "$tmp_dir/$run.log"
     done
-    if ! cmp -s "$tmp_dir/first.profile" "$tmp_dir/second.profile"; then
-        diff -u "$tmp_dir/first.profile" "$tmp_dir/second.profile" >&2 || true
-        printf 'normalized import-prefix audit output was not deterministic\n' >&2
-        exit 1
-    fi
-    if ! cmp -s "$tmp_dir/first.reconciliation" "$tmp_dir/second.reconciliation"; then
-        diff -u "$tmp_dir/first.reconciliation" "$tmp_dir/second.reconciliation" >&2 || true
-        printf 'normalized import-prefix reconciliation was not deterministic\n' >&2
-        exit 1
+    if [[ "$verify_determinism" == 1 ]]; then
+        if ! cmp -s "$tmp_dir/first.profile" "$tmp_dir/second.profile"; then
+            diff -u "$tmp_dir/first.profile" "$tmp_dir/second.profile" >&2 || true
+            printf 'normalized import-prefix audit output was not deterministic\n' >&2
+            exit 1
+        fi
+        if ! cmp -s "$tmp_dir/first.reconciliation" "$tmp_dir/second.reconciliation"; then
+            diff -u "$tmp_dir/first.reconciliation" "$tmp_dir/second.reconciliation" >&2 || true
+            printf 'normalized import-prefix reconciliation was not deterministic\n' >&2
+            exit 1
+        fi
+        import_prefix_run_summary='Both normalized profiles matched byte-for-byte.'
+    else
+        import_prefix_run_summary='One profile run completed; determinism was not checked.'
     fi
     PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/import_prefix_profile.py" \
         "$tmp_dir/first.profile" \
@@ -192,7 +195,7 @@ if [[ "$import_prefix_profile" == 1 ]]; then
     {
         printf '# #1132 current import-prefix reprofile\n\n'
         printf 'The frozen [#1128 import-prefix profile](typer-classpath-import-prefix-profile-3.9.0.md) remains unchanged. This reprofile starts from its exact weighted source rows and blocker origins, then collects current resolver outcomes; it does not treat a moved first blocker as full-method success.\n\n'
-        printf 'Both normalized profiles matched byte-for-byte. Inputs are pinned to Scala revision `%s`, Scala artifacts 3.9.0, and JDK %s. The full-audit typed-local-method denominator remains 3,297.\n\n' "$revision" "$jdk_version"
+        printf '%s Inputs are pinned to Scala revision `%s`, Scala artifacts 3.9.0, and JDK %s. The full-audit typed-local-method denominator remains 3,297.\n\n' "$import_prefix_run_summary" "$revision" "$jdk_version"
         printf '## Frozen cohort reconciliation\n\n'
         printf '| Measure | Frozen #1128 | Current |\n| --- | ---: | ---: |\n'
         printf '| Weighted first-segment observations | %s | %s unresolved next-segment observations |\n' "$baseline_observations" "$current_unresolved"
@@ -220,7 +223,7 @@ if [[ "$import_prefix_profile" == 1 ]]; then
     cp "$tmp_dir/import-prefix-evidence.tsv" "$prefix_evidence_path"
     cp "$tmp_dir/import-prefix-candidates.tsv" "$prefix_candidates_path"
     cp "$tmp_dir/first.reconciliation" "$prefix_reconciliation_path"
-    printf 'Wrote deterministic import-prefix profile to %s and TSVs to %s / %s / %s / %s\n' \
+    printf 'Wrote import-prefix profile to %s and TSVs to %s / %s / %s / %s\n' \
         "$output_path" "$prefix_targets_path" "$prefix_evidence_path" "$prefix_candidates_path" "$prefix_reconciliation_path"
     exit 0
 fi

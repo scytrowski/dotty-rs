@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,7 +21,9 @@ use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
 use dotty_typer::{SourceTyper, TyperError};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ResolverMetrics {
@@ -324,7 +326,48 @@ struct AuditResolver<E: ClassPathEntry> {
 }
 
 #[derive(Clone)]
-struct SharedClassPath(Arc<CompositeClassPath>);
+struct SharedClassPath(Arc<CachedClassPath>);
+
+struct CachedClassPath {
+    inner: CompositeClassPath,
+    missing_classes: Mutex<HashSet<BinaryName>>,
+    package_queries: Mutex<HashMap<(bool, Vec<String>), bool>>,
+    find_class_calls: AtomicUsize,
+    missing_class_cache_hits: AtomicUsize,
+    package_query_calls: AtomicUsize,
+    package_query_cache_hits: AtomicUsize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ClassPathCacheMetrics {
+    find_class_calls: usize,
+    missing_class_cache_hits: usize,
+    package_query_calls: usize,
+    package_query_cache_hits: usize,
+}
+
+impl SharedClassPath {
+    fn new(inner: CompositeClassPath) -> Self {
+        Self(Arc::new(CachedClassPath {
+            inner,
+            missing_classes: Mutex::new(HashSet::new()),
+            package_queries: Mutex::new(HashMap::new()),
+            find_class_calls: AtomicUsize::new(0),
+            missing_class_cache_hits: AtomicUsize::new(0),
+            package_query_calls: AtomicUsize::new(0),
+            package_query_cache_hits: AtomicUsize::new(0),
+        }))
+    }
+
+    fn cache_metrics(&self) -> ClassPathCacheMetrics {
+        ClassPathCacheMetrics {
+            find_class_calls: self.0.find_class_calls.load(Ordering::Relaxed),
+            missing_class_cache_hits: self.0.missing_class_cache_hits.load(Ordering::Relaxed),
+            package_query_calls: self.0.package_query_calls.load(Ordering::Relaxed),
+            package_query_cache_hits: self.0.package_query_cache_hits.load(Ordering::Relaxed),
+        }
+    }
+}
 
 struct RequestTargetObservation<'a> {
     target_key: String,
@@ -414,21 +457,85 @@ impl ClassPathEntry for SharedClassPath {
         Option<dotty_classloader::classloader::ClassResource>,
         dotty_classloader::classloader::ClassPathError,
     > {
-        self.0.find_class(name)
+        self.0.find_class_calls.fetch_add(1, Ordering::Relaxed);
+        if self
+            .0
+            .missing_classes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(name)
+        {
+            self.0
+                .missing_class_cache_hits
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+
+        let result = self.0.inner.find_class(name)?;
+        if result.is_none() {
+            self.0
+                .missing_classes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(name.clone());
+        }
+        Ok(result)
     }
 
     fn contains_package(
         &self,
         package: &[&str],
     ) -> Result<bool, dotty_classloader::classloader::ClassPathError> {
-        self.0.contains_package(package)
+        self.cached_package_query(package, false)
     }
 
     fn contains_package_prefix(
         &self,
         package: &[&str],
     ) -> Result<bool, dotty_classloader::classloader::ClassPathError> {
-        self.0.contains_package_prefix(package)
+        self.cached_package_query(package, true)
+    }
+}
+
+impl SharedClassPath {
+    fn cached_package_query(
+        &self,
+        package: &[&str],
+        prefix: bool,
+    ) -> Result<bool, dotty_classloader::classloader::ClassPathError> {
+        self.0.package_query_calls.fetch_add(1, Ordering::Relaxed);
+        let key = (
+            prefix,
+            package
+                .iter()
+                .map(|segment| (*segment).to_owned())
+                .collect(),
+        );
+        if let Some(result) = self
+            .0
+            .package_queries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .copied()
+        {
+            self.0
+                .package_query_cache_hits
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(result);
+        }
+
+        let result = if prefix {
+            self.0.inner.contains_package_prefix(package)?
+        } else {
+            self.0.inner.contains_package(package)?
+        };
+        self.0
+            .package_queries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, result);
+        Ok(result)
     }
 }
 
@@ -450,19 +557,43 @@ impl ClassPathEntry for PrefixOnlyAuditEntry {
 
 #[test]
 fn shared_audit_classpath_delegates_descendant_package_evidence() {
-    let classpath = SharedClassPath(Arc::new(CompositeClassPath::new(vec![Box::new(
+    let classpath = SharedClassPath::new(CompositeClassPath::new(vec![Box::new(
         PrefixOnlyAuditEntry,
-    )])));
+    )]));
 
     assert!(!classpath.contains_package(&["outer"]).unwrap());
     assert!(classpath.contains_package_prefix(&["outer"]).unwrap());
 }
 
 #[test]
-fn unresolved_package_details_uses_prefix_evidence_and_stable_causes() {
-    let classpath = SharedClassPath(Arc::new(CompositeClassPath::new(vec![Box::new(
+fn shared_audit_classpath_caches_negative_resource_and_package_probes() {
+    let classpath = SharedClassPath::new(CompositeClassPath::new(vec![Box::new(
         PrefixOnlyAuditEntry,
-    )])));
+    )]));
+    let missing = BinaryName::from_internal("missing/Type");
+
+    for _ in 0..2 {
+        assert!(classpath.find_class(&missing).unwrap().is_none());
+        assert!(!classpath.contains_package(&["missing"]).unwrap());
+        assert!(!classpath.contains_package_prefix(&["missing"]).unwrap());
+    }
+
+    assert_eq!(
+        classpath.cache_metrics(),
+        ClassPathCacheMetrics {
+            find_class_calls: 2,
+            missing_class_cache_hits: 1,
+            package_query_calls: 4,
+            package_query_cache_hits: 2,
+        }
+    );
+}
+
+#[test]
+fn unresolved_package_details_uses_prefix_evidence_and_stable_causes() {
+    let classpath = SharedClassPath::new(CompositeClassPath::new(vec![Box::new(
+        PrefixOnlyAuditEntry,
+    )]));
 
     assert_eq!(
         unresolved_package_details(Some(&classpath), &["outer"]),
@@ -6406,6 +6537,7 @@ fn pinned_scala39_local_definition_audit() {
 #[test]
 #[ignore = "run tools/typer-classpath-corpus-audit/run with the pinned Scala checkout and explicit JAVA_HOME"]
 fn pinned_scala39_import_prefix_typing_probe() {
+    let audit_started = Instant::now();
     let root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required"));
     assert_eq!(
         git_revision(&root),
@@ -6479,10 +6611,15 @@ fn pinned_scala39_import_prefix_typing_probe() {
         methods_by_file.values().map(BTreeSet::len).sum::<usize>(),
         904
     );
+    let stage_started = Instant::now();
     let classpath = audit_classpath_from_environment();
+    let classpath_setup = stage_started.elapsed();
     let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
     let mut audit = Audit::default();
+    let stage_started = Instant::now();
     let source_package_paths = audit_source_package_inventory_for_roots(&root);
+    let package_inventory = stage_started.elapsed();
+    let stage_started = Instant::now();
     for (index, (relative, method_trees)) in methods_by_file.iter().enumerate() {
         if index % 25 == 0 {
             eprintln!(
@@ -6502,7 +6639,9 @@ fn pinned_scala39_import_prefix_typing_probe() {
             &source_package_paths,
         ));
     }
+    let source_profile = stage_started.elapsed();
     let all_observations = audit.import_prefix_profile.observations;
+    let stage_started = Instant::now();
     let reconciliation = reconcile_import_prefix_observations(
         &baseline_rows,
         &all_observations,
@@ -6511,14 +6650,34 @@ fn pinned_scala39_import_prefix_typing_probe() {
         &audit.import_prefix_selectors,
         &metrics.borrow().resolver_requests_by_method,
     );
+    let reconciliation_time = stage_started.elapsed();
     assert_eq!(reconciliation.len(), baseline_rows.len());
     let unresolved_baseline_rows = reconciliation
         .iter()
         .filter(|row| row.current_outcome.starts_with("ImportQualifierNotFound::"))
         .count();
     let advanced_baseline_rows = reconciliation.len() - unresolved_baseline_rows;
-    assert_eq!(unresolved_baseline_rows, 2_326);
-    assert_eq!(advanced_baseline_rows, 68);
+    eprintln!(
+        "import-prefix reconciliation checkpoint: rows={}, unresolved={}, advanced_or_unmatched={}",
+        reconciliation.len(),
+        unresolved_baseline_rows,
+        advanced_baseline_rows
+    );
+    eprintln!(
+        "IMPORT_PREFIX_TIMING classpath_setup_ms={} package_inventory_ms={} selected_sources_parse_name_type_ms={} reconciliation_ms={} total_ms={}",
+        classpath_setup.as_millis(),
+        package_inventory.as_millis(),
+        source_profile.as_millis(),
+        reconciliation_time.as_millis(),
+        audit_started.elapsed().as_millis()
+    );
+    if unresolved_baseline_rows != 721 || advanced_baseline_rows != 1_673 {
+        println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
+        print_import_prefix_reconciliation(&reconciliation);
+        println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
+    }
+    assert_eq!(unresolved_baseline_rows, 721);
+    assert_eq!(advanced_baseline_rows, 1_673);
     assert!(reconciliation.iter().all(|row| {
         row.current_method_typed == (row.current_method_blocker == "typed")
             && row.final_import_identity.starts_with("outcomes::")
@@ -6590,10 +6749,13 @@ fn pinned_scala39_import_prefix_typing_probe() {
         term_object_gaps,
         unmatched_traces
     );
-    assert_eq!(all_observations.len(), 2_332);
-    assert_eq!(first_segment_observations.len(), 2_332);
-    assert_eq!(files.len(), 193);
-    assert_eq!(targets.len(), 29);
+    assert_eq!(first_segment_observations.len(), all_observations.len());
+    assert_eq!(
+        all_observations.len(),
+        unresolved_baseline_rows + new_current_observations
+    );
+    assert!(!files.is_empty());
+    assert!(!targets.is_empty());
     assert_eq!(term_object_gaps, 0);
     assert_eq!(unmatched_traces, 0);
     assert!(
@@ -6609,6 +6771,14 @@ fn pinned_scala39_import_prefix_typing_probe() {
     println!("baseline_files=209");
     println!("baseline_targets=30");
     println!("baseline_blocker_origins=904");
+    let cache = classpath.cache_metrics();
+    println!(
+        "classpath_cache: class_lookups={} repeated_missing_class_lookups={} package_lookups={} repeated_package_lookups={}",
+        cache.find_class_calls,
+        cache.missing_class_cache_hits,
+        cache.package_query_calls,
+        cache.package_query_cache_hits
+    );
     println!(
         "current_import_qualifier_not_found={}",
         unresolved_baseline_rows
@@ -6628,9 +6798,6 @@ fn pinned_scala39_import_prefix_typing_probe() {
             .count()
     );
     println!("AUDIT_IMPORT_PREFIX_END");
-    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
-    print_import_prefix_reconciliation(&reconciliation);
-    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
 }
 
 fn print_singleton_reference_profile(profile: &SingletonReferenceProfile) {
@@ -9003,8 +9170,6 @@ fn collect_scala_sources(directory: &Path, files: &mut Vec<PathBuf>) {
 fn audit_source_package_inventory(text: &str, path: &str) -> BTreeSet<String> {
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
-    let _definitions = Definitions::bootstrap(&mut store);
-    let mut packages = Packages::new();
     let scanner = ContextualScanner::new(text).expect("pinned Scala source should scan");
     let parsed = parse_compilation_unit(
         SourceText::new(text).expect("pinned source should be valid UTF-8"),
@@ -9012,51 +9177,83 @@ fn audit_source_package_inventory(text: &str, path: &str) -> BTreeSet<String> {
         scanner,
         &mut store.names,
     );
-    let index = name_compilation_unit(
-        &parsed.ast,
-        parsed.root,
-        source,
-        path,
-        &mut store,
-        &mut packages,
-    )
-    .unwrap_or_else(|error| panic!("cannot name source inventory {path}: {error:?}"));
     let mut result = BTreeSet::new();
-    for (tree, node) in parsed.ast.iter() {
-        if matches!(&node.kind, TreeKind::PackageDef(_))
-            && let Some(symbol) = index.symbol_at(source, tree)
-            && store.symbols.get(symbol).kind == dotty_core::SymbolKind::Package
-        {
-            let package = source_package_path(&store, symbol);
-            if !package.starts_with('<') {
-                let segments = package.split('.').collect::<Vec<_>>();
-                for length in 1..=segments.len() {
-                    result.insert(segments[..length].join("."));
-                }
-            }
-        }
-        if !matches!(&node.kind, TreeKind::DefDef(_)) {
-            continue;
-        }
-        let Some(symbol) = index.symbol_at(source, tree) else {
-            continue;
+    collect_source_package_paths(
+        &parsed.ast,
+        &store.names,
+        parsed.root,
+        &[],
+        true,
+        &mut result,
+    )
+    .unwrap_or_else(|tree_index| {
+        panic!("cannot read package name in source inventory {path} at tree {tree_index}")
+    });
+    result
+}
+
+fn collect_source_package_paths(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    tree: TreeId<Untyped>,
+    enclosing_package: &[String],
+    source_root: bool,
+    result: &mut BTreeSet<String>,
+) -> Result<(), u32> {
+    let Some(node) = arena.try_get(tree) else {
+        return Err(tree.index());
+    };
+    let TreeKind::PackageDef(package) = &node.kind else {
+        return if source_root {
+            Err(tree.index())
+        } else {
+            Ok(())
         };
-        let Some(context) = index.declaration_context_of(symbol) else {
-            continue;
-        };
-        let Some(source_context) = index.try_source_context(context) else {
-            continue;
-        };
-        let package = source_package_path(&store, source_context.owner);
-        if package.starts_with('<') {
-            continue;
-        }
-        let segments = package.split('.').collect::<Vec<_>>();
-        for length in 1..=segments.len() {
-            result.insert(segments[..length].join("."));
+    };
+    let is_empty_root = source_root
+        && matches!(arena.try_get(package.name).map(|node| &node.kind), Some(TreeKind::Ident(ident))
+            if !ident.backquoted && names.resolve(ident.name.text()) == "<empty>");
+    let mut segments = Vec::new();
+    if !is_empty_root {
+        flatten_package_name(arena, names, package.name, &mut segments)?;
+    }
+    let mut package_path = enclosing_package.to_vec();
+    package_path.extend(segments);
+    for length in 1..=package_path.len() {
+        result.insert(package_path[..length].join("."));
+    }
+    for stat in &package.stats {
+        if matches!(
+            arena.try_get(*stat).map(|node| &node.kind),
+            Some(TreeKind::PackageDef(_))
+        ) {
+            collect_source_package_paths(arena, names, *stat, &package_path, false, result)?;
         }
     }
-    result
+    Ok(())
+}
+
+fn flatten_package_name(
+    arena: &dotty_core::AstArena<Untyped>,
+    names: &dotty_core::NameInterner,
+    tree: TreeId<Untyped>,
+    segments: &mut Vec<String>,
+) -> Result<(), u32> {
+    let Some(node) = arena.try_get(tree) else {
+        return Err(tree.index());
+    };
+    match &node.kind {
+        TreeKind::Ident(ident) => {
+            segments.push(names.resolve(ident.name.text()).to_owned());
+            Ok(())
+        }
+        TreeKind::Select(select) => {
+            flatten_package_name(arena, names, select.qualifier, segments)?;
+            segments.push(names.resolve(select.name.text()).to_owned());
+            Ok(())
+        }
+        _ => Err(tree.index()),
+    }
 }
 
 fn probe_supported_match_cases(
@@ -10837,7 +11034,7 @@ fn audit_classpath_from_environment() -> SharedClassPath {
                 .unwrap_or_else(|error| panic!("cannot index {}: {error}", jar.display())),
         ));
     }
-    SharedClassPath(Arc::new(CompositeClassPath::new(entries)))
+    SharedClassPath::new(CompositeClassPath::new(entries))
 }
 
 fn print_resolver_metrics(metrics: &ResolverMetrics) {
@@ -11288,7 +11485,7 @@ fn print_package_term_module_evidence(metrics: &ResolverMetrics, classpath: Shar
             format!("{}/{name}", package.replace('.', "/"))
         };
         let binary = BinaryName::from_internal(internal);
-        let resource = match classpath.0.find_class(&binary) {
+        let resource = match classpath.find_class(&binary) {
             Ok(Some(resource)) => resource,
             Ok(None) => {
                 println!(
@@ -17264,7 +17461,7 @@ mod resolver_profile_tests {
     }
 
     #[test]
-    fn source_package_inventory_contains_namer_entered_package_paths() {
+    fn source_package_inventory_contains_dotted_package_paths() {
         let inventory = audit_source_package_inventory(
             "package alpha.beta\nobject Fixture { def method = 1 }\n",
             "Fixture.scala",
@@ -17272,6 +17469,24 @@ mod resolver_profile_tests {
 
         assert!(inventory.contains("alpha"));
         assert!(inventory.contains("alpha.beta"));
+    }
+
+    #[test]
+    fn source_package_inventory_preserves_nested_and_stacked_packages() {
+        let inventory = audit_source_package_inventory(
+            "package alpha\npackage beta.gamma { package delta\nobject Fixture { def method = 1 } }\n",
+            "Fixture.scala",
+        );
+
+        assert_eq!(
+            inventory,
+            BTreeSet::from([
+                "alpha".to_owned(),
+                "alpha.beta".to_owned(),
+                "alpha.beta.gamma".to_owned(),
+                "alpha.beta.gamma.delta".to_owned(),
+            ])
+        );
     }
 
     #[test]

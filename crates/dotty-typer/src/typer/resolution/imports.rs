@@ -705,9 +705,13 @@ impl SourceTyper<'_> {
                     found_locally |= !candidates.is_empty();
                     matches.extend_from_slice(candidates);
                 } else {
-                    let candidates = self.scoped_symbols(*scope, name);
+                    // Import selectors carry a namespace. Falling back to a
+                    // same-spelled declaration in the other namespace can
+                    // turn a class-only import into a term reference (or an
+                    // Object import into a type reference).
+                    let candidates = self.store.scopes.get(*scope).lookup_all(&name);
                     found_locally |= !candidates.is_empty();
-                    matches.extend(candidates);
+                    matches.extend_from_slice(candidates);
                 }
             }
             if !found_locally {
@@ -1029,7 +1033,7 @@ impl SourceTyper<'_> {
             }
         }
         for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
-            if let Some(symbol) = self.lookup_imports(
+            let term_candidates = self.lookup_import_candidates(
                 &contexts,
                 name,
                 false,
@@ -1038,8 +1042,37 @@ impl SourceTyper<'_> {
                     tree_index: import_tree_index,
                     position,
                 },
-            )? {
-                return Ok(Some(symbol));
+            )?;
+            if !term_candidates.is_empty() {
+                return self.unique_symbol_candidate(
+                    &term_candidates,
+                    name,
+                    import_tree_index,
+                    position,
+                );
+            }
+            // Qualifiers may name a class or type alias when no term with that
+            // spelling exists. Keep this fallback here, where a symbol is
+            // being used as a qualifier, rather than in ordinary term import
+            // lookup.
+            let type_name = dotty_core::Name::new(name.text(), dotty_core::Namespace::Type);
+            let type_candidates = self.lookup_import_candidates(
+                &contexts,
+                type_name,
+                true,
+                selection,
+                SourceTreeLocation {
+                    tree_index: import_tree_index,
+                    position,
+                },
+            )?;
+            if !type_candidates.is_empty() {
+                return self.unique_type_candidate(
+                    &type_candidates,
+                    type_name,
+                    import_tree_index,
+                    position,
+                );
             }
         }
         Ok(None)

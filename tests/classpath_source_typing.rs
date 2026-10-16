@@ -1060,6 +1060,86 @@ fn source_import_resolves_a_class_through_descendant_only_packages() {
 }
 
 #[test]
+fn source_import_selects_members_from_the_chosen_class_scope() {
+    let source = SourceId::from_index(58);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "package owner { class C { def selected: Int = 1 }; def selected: Int = 2 }\npackage client { import owner.C.selected\ndef use: Int = selected }",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let owner_package = packages.symbol(&["owner"]).unwrap();
+    let class_name = Name::new(store.names.intern("C"), Namespace::Type);
+    let class = store
+        .scopes
+        .get(packages.scope_of(owner_package).unwrap())
+        .lookup(&class_name)
+        .expect("source class C should be entered");
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    );
+    let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer
+        .type_expression(rhs, context)
+        .expect("the selected class member should resolve");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(selected),
+        ..
+    } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+    else {
+        panic!("the import should retain a reference to its selected method")
+    };
+    let selected = *selected;
+    assert_eq!(
+        typer.store().symbols.get(selected).kind,
+        dotty_core::SymbolKind::Method
+    );
+    assert_eq!(typer.store().symbols.get(selected).owner, Some(class));
+}
+
+#[test]
+fn source_class_import_does_not_leak_into_the_term_namespace() {
+    let source = SourceId::from_index(59);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "package owner { class C }\npackage client { import owner.C\ndef use = C }",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    );
+    let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+    let context = typer.expression_context_for(method).unwrap();
+    let error = typer
+        .type_expression(rhs, context)
+        .expect_err("a class-only import must not resolve as a term reference");
+    assert!(
+        matches!(error, TyperError::TermNameNotFound { .. }),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn source_import_resolves_a_real_tasty_object_member_through_deep_packages() {
     let cases = [
         "import me.cytrowski.tastyfixtures.semantic.Both.make\ndef use = make",
@@ -1144,6 +1224,70 @@ fn source_import_resolves_a_real_tasty_object_member_through_deep_packages() {
             .collect();
         assert!(package_ids.len() >= 4, "every package segment is observed");
     }
+}
+
+#[test]
+fn external_object_import_does_not_select_a_same_named_package_member() {
+    let files = TemporaryDirectory::new("deep-tasty-object-import-package-collision");
+    write_deep_both_tasty(files.path());
+    let source = SourceId::from_index(62);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "package me.cytrowski.tastyfixtures.semantic { def make: Int = 1 }\npackage client { import me.cytrowski.tastyfixtures.semantic.Both.make\ndef use = make }",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(
+        ClasspathSymbolResolver::new(
+            DirectoryClassPath::new(files.path().to_path_buf()),
+            definitions,
+            LoadingSession::with_packages(packages),
+        ),
+        Rc::clone(&log),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+    let (method, rhs) = method_rhs(&unit, typer.store(), "use");
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer
+        .type_expression(rhs, context)
+        .expect("the imported external Object member should be selected");
+    let Type::TermRef {
+        target: TermRefTarget::Symbol(selected),
+        ..
+    } = typer.store().types.get(typer.typed_ast().get(typed).ty)
+    else {
+        panic!("the imported member should retain a stable reference")
+    };
+    let selected = *selected;
+    assert_eq!(
+        typer.store().symbols.get(selected).kind,
+        dotty_core::SymbolKind::Method
+    );
+    let module_class = typer.store().symbols.get(selected).owner.unwrap();
+    assert_eq!(
+        typer.store().symbols.get(module_class).kind,
+        dotty_core::SymbolKind::ModuleClass
+    );
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(module_class).name.text()),
+        "Both$"
+    );
 }
 
 #[test]
@@ -1711,6 +1855,98 @@ fn external_object_import_forms_resolve_the_same_module_member() {
             dotty_core::SymbolKind::Class
         );
     }
+}
+
+#[test]
+fn ambiguous_external_object_member_import_rolls_back_and_retries() {
+    let stubs = TemporaryDirectory::new("scala-source-object-import-overload-rollback");
+    write_scala_source_jdk_stubs(&stubs);
+    let source = SourceId::from_index(63);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let unit = parse_and_name(
+        "import scala.io.Source.fromFile\nimport scala.io.Source.stdin\ndef broken = fromFile\ndef valid: scala.io.BufferedSource = stdin",
+        source,
+        &mut store,
+        &mut packages,
+    );
+    let log = Rc::new(RefCell::new(ResolutionLog::default()));
+    let resolver = RecordingResolver::new(
+        ClasspathSymbolResolver::new(
+            scala_library_classpath(&stubs),
+            definitions,
+            LoadingSession::with_packages(packages),
+        ),
+        Rc::clone(&log),
+    );
+    let typer_packages = Packages::new();
+    let mut typer = SourceTyper::new(
+        &unit.parsed.ast,
+        source,
+        &unit.index,
+        &mut store,
+        definitions,
+        &typer_packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    let (broken_method, broken_rhs) = method_rhs(&unit, typer.store(), "broken");
+    let broken_context = typer.expression_context_for(broken_method).unwrap();
+    let store_checkpoint = typer.store().checkpoint();
+    let typed_checkpoint = typer.typed_ast().checkpoint();
+    let error = typer
+        .type_expression(broken_rhs, broken_context)
+        .expect_err("an overloaded imported method must remain ambiguous");
+    assert!(
+        matches!(
+            error,
+            TyperError::SymbolResolution {
+                error: ResolutionError::Ambiguous { .. },
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(typer.store().checkpoint(), store_checkpoint);
+    assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+    let stale_symbols: Vec<_> = log
+        .borrow()
+        .members
+        .iter()
+        .filter_map(|(name, symbol)| (name == "Source" || name == "fromFile").then_some(*symbol))
+        .collect();
+    assert!(!stale_symbols.is_empty());
+    assert!(
+        stale_symbols
+            .iter()
+            .all(|symbol| !typer.store().symbols.contains(*symbol)),
+        "failed overload selection must remove the temporary Object and its members"
+    );
+
+    let (valid_method, valid_rhs) = method_rhs(&unit, typer.store(), "valid");
+    let valid_context = typer.expression_context_for(valid_method).unwrap();
+    let typed = typer
+        .type_expression(valid_rhs, valid_context)
+        .expect("a later unique member import should succeed in the same session");
+    assert_eq!(
+        typer.source_typed_index().get(source, valid_rhs),
+        Some(typed)
+    );
+    let selected = match typer.store().types.get(typer.typed_ast().get(typed).ty) {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => *symbol,
+        other => panic!("expected stable Source.stdin member reference, got {other:?}"),
+    };
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(selected).name.text()),
+        "stdin"
+    );
 }
 
 #[test]
