@@ -35,15 +35,7 @@ pub(super) fn emit_class(
     validate_emittable_class(plan, &metadata, unit.store, definitions, class_info)?;
 
     let constructor_initializers = match &plan.initialization {
-        JvmClassInitializationPlan::ImplicitNoArg => {
-            if !metadata.fields().is_empty() {
-                return Err(JvmCodegenError::FieldEmissionUnsupported {
-                    class: class_symbol,
-                    field: metadata.fields()[0].symbol(),
-                });
-            }
-            None
-        }
+        JvmClassInitializationPlan::ImplicitNoArg => None,
         JvmClassInitializationPlan::PrimaryConstructor(_) => {
             Some(unit.lower_constructor_field_initializers(class_symbol, definitions)?)
         }
@@ -152,7 +144,7 @@ fn object_constructor_prefix(class: SymbolId) -> Result<CodeBuilder, JvmCodegenE
     Ok(code)
 }
 
-fn validate_emittable_class(
+pub(super) fn validate_emittable_class(
     plan: &crate::JvmClassPlan,
     metadata: &crate::JvmClassMetadata,
     store: &SemanticStore,
@@ -271,6 +263,16 @@ fn validate_emittable_class(
             return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class });
         }
         _ => return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class }),
+    }
+    if matches!(
+        &plan.initialization,
+        JvmClassInitializationPlan::ImplicitNoArg
+    ) && let Some(field) = metadata.fields().first()
+    {
+        return Err(JvmCodegenError::FieldEmissionUnsupported {
+            class: plan.class,
+            field: field.symbol(),
+        });
     }
     Ok(())
 }

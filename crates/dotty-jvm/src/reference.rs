@@ -20,6 +20,54 @@ pub(super) fn project_type(
     project_type_with_metadata(unit, ty, definitions, None)
 }
 
+/// Projects the canonical class type used by source constructor applications.
+/// Source typing retains the owning package as the class reference prefix;
+/// accepting it here still requires an exact root-package TypeRef matching the
+/// class symbol's canonical owner.
+pub(super) fn project_constructor_type(
+    unit: &JvmCompilationUnit<'_>,
+    ty: TypeId,
+    definitions: &Definitions,
+) -> Result<JvmType, JvmCodegenError> {
+    unit.validate()?;
+    let Some(Type::TypeRef { prefix, target }) = unit.store.types.try_get(ty) else {
+        return Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty,
+            kind: UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
+        });
+    };
+    let TypeRefTarget::Symbol(class) = target else {
+        return Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty,
+            kind: UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
+        });
+    };
+    let expected_package = unit
+        .store
+        .symbols
+        .contains(*class)
+        .then(|| unit.store.symbols.get(*class).owner)
+        .flatten();
+    let canonical_package_prefix = matches!(
+        unit.store.types.try_get(*prefix),
+        Some(Type::TypeRef {
+            prefix: package_prefix,
+            target: TypeRefTarget::Symbol(package),
+        }) if *package_prefix == definitions.no_prefix
+            && matches!(unit.store.types.try_get(*package_prefix), Some(Type::NoPrefix))
+            && Some(*package) == expected_package
+            && unit.store.symbols.contains(*package)
+            && unit.store.symbols.get(*package).kind == SymbolKind::Package
+    );
+    if !canonical_package_prefix {
+        return Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty,
+            kind: UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+        });
+    }
+    project_class(unit, ty, *class, definitions, None)
+}
+
 fn project_type_with_metadata(
     unit: &JvmCompilationUnit<'_>,
     ty: TypeId,

@@ -29,9 +29,10 @@ use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmFieldPlan, JvmIntIntrinsic,
     JvmIntIntrinsicError, JvmInvocationKind, JvmLocalBinding, JvmMethodPlan, JvmNameKind,
-    JvmReturnType, JvmType, JvmValueCategory, SymbolRole, UnsupportedJvmCallShapeKind,
-    UnsupportedJvmClassKind, UnsupportedJvmLocalFlag, UnsupportedJvmSymbolFlag,
-    UnsupportedJvmTypeKind, UnsupportedMethodShapeKind, emit_class, resolve_int_intrinsic,
+    JvmPrimaryConstructorPlan, JvmReturnType, JvmType, JvmValueCategory, SymbolRole,
+    UnsupportedJvmCallShapeKind, UnsupportedJvmClassKind, UnsupportedJvmLocalFlag,
+    UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind, UnsupportedMethodShapeKind, emit_class,
+    resolve_int_intrinsic,
 };
 
 struct Fixture {
@@ -5524,6 +5525,578 @@ fn unit_call_stat_needs_no_pop_and_unit_block_ends_with_return() {
             "42",
         );
     }
+}
+
+struct ConstructorCallFixture {
+    store: SemanticStore,
+    ast: TypedAst,
+    definitions: Definitions,
+    class: SymbolId,
+    caller: SymbolId,
+    constructor: SymbolId,
+    apply: TreeId<dotty_core::ast::Typed>,
+    initialization: JvmClassInitializationPlan,
+}
+
+fn constructor_call_fixture(parameter_types: &[JvmType]) -> ConstructorCallFixture {
+    use dotty_core::ast::{
+        AstArena, DefDef, Modifier, Modifiers, Template, TypeDef, TypeTree, Untyped,
+        UntypedTemplateMetadata, ValDef,
+    };
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let source = dotty_core::SourceId::from_index(81);
+    let package = store.symbols.alloc(Symbol {
+        name: Name::new(store.names.intern(""), Namespace::Term),
+        owner: None,
+        kind: SymbolKind::Package,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let class = store.symbols.alloc(Symbol {
+        name: Name::new(store.names.intern("CtorTarget"), Namespace::Type),
+        owner: Some(package),
+        kind: SymbolKind::Class,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Source(source),
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let no_prefix = definitions.no_prefix;
+    let package_type = store.types.alloc(Type::TypeRef {
+        prefix: no_prefix,
+        target: TypeRefTarget::Symbol(package),
+    });
+    let class_type = store.types.alloc(Type::TypeRef {
+        prefix: package_type,
+        target: TypeRefTarget::Symbol(class),
+    });
+    let declarations = store.scopes.alloc(Scope::new(Some(class)));
+    let class_info = store.types.alloc(Type::ClassInfo(ClassInfo {
+        prefix: no_prefix,
+        class,
+        parents: vec![definitions.object_type],
+        declarations,
+        self_type: None,
+    }));
+    store
+        .symbols
+        .set_info(class, SymbolInfo::Complete(class_info));
+
+    let mut source_ast = AstArena::<Untyped>::new();
+    let mut source_parameters = Vec::new();
+    let mut parameter_symbols = Vec::new();
+    let mut method_parameters = Vec::new();
+    let parameter_type_ids = parameter_types
+        .iter()
+        .map(|ty| match ty {
+            JvmType::Int => definitions.int,
+            JvmType::Boolean => definitions.boolean,
+            JvmType::Reference(_) => panic!("constructor fixture only accepts primitive types"),
+        })
+        .collect::<Vec<_>>();
+    for (index, ty) in parameter_type_ids.iter().copied().enumerate() {
+        let text = format!("arg{index}");
+        let name_id = store.names.intern(&text);
+        let parameter_tpt = source_ast.alloc(dotty_core::Tree {
+            kind: TreeKind::TypeTree(TypeTree),
+            position: None,
+            ty: (),
+        });
+        let parameter_tree = source_ast.alloc(dotty_core::Tree {
+            kind: TreeKind::ValDef(ValDef {
+                name: TermName::new(name_id),
+                tpt: parameter_tpt,
+                rhs: None,
+                metadata: Modifiers {
+                    modifiers: vec![Modifier::ParamAccessor, Modifier::PrivateLocal],
+                    ..Modifiers::default()
+                },
+            }),
+            position: None,
+            ty: (),
+        });
+        source_parameters.push(parameter_tree);
+        let parameter = store.symbols.alloc(Symbol {
+            name: Name::new(name_id, Namespace::Term),
+            owner: None,
+            kind: SymbolKind::Parameter,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(ty),
+            origin: SymbolOrigin::Source(source),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        parameter_symbols.push(parameter);
+        method_parameters.push(MethodParam {
+            name: TermName::new(name_id),
+            ty,
+            erased: false,
+            varargs: false,
+        });
+    }
+    let constructor_name = store.names.intern("<init>");
+    let constructor = store.symbols.alloc(Symbol {
+        name: Name::new(constructor_name, Namespace::Term),
+        owner: Some(class),
+        kind: SymbolKind::Constructor,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Source(source),
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    for parameter in &mut parameter_symbols {
+        store.symbols.get_mut(*parameter).owner = Some(constructor);
+    }
+    let constructor_type = store.types.alloc(Type::Method(MethodType {
+        params: method_parameters,
+        result: class_type,
+        kind: MethodKind::Plain,
+    }));
+    store
+        .symbols
+        .set_info(constructor, SymbolInfo::Complete(constructor_type));
+    let constructor_symbol_name = store.symbols.get(constructor).name;
+    store
+        .scopes
+        .get_mut(declarations)
+        .enter(constructor_symbol_name, constructor);
+
+    let type_tpt = source_ast.alloc(dotty_core::Tree {
+        kind: TreeKind::TypeTree(TypeTree),
+        position: None,
+        ty: (),
+    });
+    let constructor_tree = source_ast.alloc(dotty_core::Tree {
+        kind: TreeKind::DefDef(DefDef {
+            name: TermName::new(constructor_name),
+            type_params: Vec::new(),
+            value_param_clauses: vec![source_parameters.clone()],
+            source_param_clause_order: None,
+            tpt: type_tpt,
+            rhs: None,
+            metadata: Modifiers::default(),
+        }),
+        position: None,
+        ty: (),
+    });
+    let template_tree = source_ast.alloc(dotty_core::Tree {
+        kind: TreeKind::Template(Template {
+            constructor: constructor_tree,
+            parents: Vec::new(),
+            self_val: None,
+            body: Vec::new(),
+            metadata: UntypedTemplateMetadata::default(),
+        }),
+        position: None,
+        ty: (),
+    });
+    let class_tree = source_ast.alloc(dotty_core::Tree {
+        kind: TreeKind::TypeDef(TypeDef {
+            name: dotty_core::TypeName::new(store.names.intern("CtorTarget")),
+            rhs: template_tree,
+            metadata: Modifiers::default(),
+            variance: None,
+        }),
+        position: None,
+        ty: (),
+    });
+    let mut index = dotty_core::SourceSemanticIndex::new();
+    index.record_symbol(source, class_tree, class).unwrap();
+    index
+        .record_symbol(source, constructor_tree, constructor)
+        .unwrap();
+    for (&tree, &parameter) in source_parameters.iter().zip(&parameter_symbols) {
+        index
+            .record_derived_symbol(constructor, source, tree, parameter)
+            .unwrap();
+    }
+    let initialization = JvmClassInitializationPlan::PrimaryConstructor(
+        JvmPrimaryConstructorPlan::from_source(
+            class,
+            constructor,
+            parameter_symbols.clone(),
+            &source_ast,
+            &index,
+        )
+        .unwrap(),
+    );
+
+    let caller_name = store.names.intern("caller");
+    let caller = store.symbols.alloc(Symbol {
+        name: Name::new(caller_name, Namespace::Term),
+        owner: Some(class),
+        kind: SymbolKind::Method,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Source(source),
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let caller_signature = store.types.alloc(Type::Method(MethodType {
+        params: Vec::new(),
+        result: definitions.int,
+        kind: MethodKind::Plain,
+    }));
+    store
+        .symbols
+        .set_info(caller, SymbolInfo::Complete(caller_signature));
+    store
+        .scopes
+        .get_mut(declarations)
+        .enter(store.symbols.get(caller).name, caller);
+
+    let ten = store.types.alloc(Type::Constant(Constant::Int(10)));
+    let truth = store.types.alloc(Type::Constant(Constant::Boolean(true)));
+    let function_type = store.types.alloc(Type::TermRef {
+        prefix: class_type,
+        target: TermRefTarget::Symbol(constructor),
+    });
+    let mut ast = TypedAst::new();
+    let mut builder = dotty_core::ast::TypedAstBuilder::new(&mut ast, &store.types);
+    let tpt = builder.type_tree(class_type, None);
+    let new_tree = builder.new_expr(tpt, class_type, None);
+    let function = builder.select(
+        new_tree,
+        Name::new(constructor_name, Namespace::Term),
+        false,
+        function_type,
+        None,
+    );
+    let argument_ids = parameter_types
+        .iter()
+        .map(|ty| {
+            let (constant, literal_ty) = if *ty == JvmType::Boolean {
+                (Constant::Boolean(true), truth)
+            } else {
+                (Constant::Int(10), ten)
+            };
+            builder.literal(constant, literal_ty, None)
+        })
+        .collect();
+    let apply = builder.apply(function, argument_ids, class_type, None);
+
+    ConstructorCallFixture {
+        store,
+        ast,
+        definitions,
+        class,
+        caller,
+        constructor,
+        apply,
+        initialization,
+    }
+}
+
+#[test]
+fn resolves_typed_constructor_application_to_canonical_metadata() {
+    let fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                body: Some(fixture.apply),
+            }],
+            fields: Vec::new(),
+            initialization: fixture.initialization.clone(),
+        }],
+    };
+    let target = unit
+        .resolve_constructor_call(
+            fixture.class,
+            fixture.caller,
+            fixture.apply,
+            &fixture.definitions,
+        )
+        .unwrap();
+    assert_eq!(target.owner_class(), fixture.class);
+    assert_eq!(target.constructor_symbol(), fixture.constructor);
+    assert_eq!(target.owner_internal_name(), "CtorTarget");
+    assert_eq!(target.descriptor().as_str(), "(ZI)V");
+    assert_eq!(target.argument_types(), &[JvmType::Boolean, JvmType::Int]);
+    assert_eq!(target.result_type(), JvmType::Reference(fixture.class));
+    assert_eq!(
+        target.invocation_kind(),
+        crate::JvmConstructorInvocationKind::Special
+    );
+}
+
+#[test]
+fn rejects_constructor_calls_with_wrong_arity_or_argument_type() {
+    let mut fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
+    let application = fixture.ast.get(fixture.apply).clone();
+    let TreeKind::Apply(mut apply) = application.kind else {
+        unreachable!("fixture contains an application")
+    };
+    apply.args.pop();
+    fixture.ast.get_mut(fixture.apply).kind = TreeKind::Apply(apply);
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                body: Some(fixture.apply),
+            }],
+            fields: Vec::new(),
+            initialization: fixture.initialization.clone(),
+        }],
+    };
+    assert!(matches!(
+        unit.resolve_constructor_call(
+            fixture.class,
+            fixture.caller,
+            fixture.apply,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::JvmConstructorCallArityMismatch {
+            expected: 2,
+            found: 1,
+            ..
+        })
+    ));
+
+    let mut fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
+    let application = fixture.ast.get(fixture.apply).clone();
+    let TreeKind::Apply(apply) = application.kind else {
+        unreachable!("fixture contains an application")
+    };
+    fixture.ast.get_mut(apply.args[0]).ty = fixture.definitions.int;
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                body: Some(fixture.apply),
+            }],
+            fields: Vec::new(),
+            initialization: fixture.initialization.clone(),
+        }],
+    };
+    assert!(matches!(
+        unit.resolve_constructor_call(
+            fixture.class,
+            fixture.caller,
+            fixture.apply,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+            expected: JvmType::Boolean,
+            found: Some(JvmType::Int),
+            ..
+        })
+    ));
+}
+
+#[test]
+fn rejects_a_constructor_reference_owned_by_another_class() {
+    let mut fixture = constructor_call_fixture(&[]);
+    let foreign_class = alloc_symbol(
+        &mut fixture.store,
+        SymbolKind::Class,
+        Some(fixture.class),
+        fixture.definitions.object_type,
+    );
+    let constructor_name = fixture.store.names.intern("<init>");
+    let foreign_constructor = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(constructor_name, Namespace::Term),
+        owner: Some(foreign_class),
+        kind: SymbolKind::Constructor,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let application = fixture.ast.get(fixture.apply).clone();
+    let TreeKind::Apply(apply) = application.kind else {
+        unreachable!("fixture contains an application")
+    };
+    let function = fixture.ast.get(apply.function).clone();
+    let TreeKind::Select(select) = function.kind else {
+        unreachable!("fixture contains a constructor selection")
+    };
+    let class_type = fixture.ast.get(select.qualifier).ty;
+    let function_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: class_type,
+        target: TermRefTarget::Symbol(foreign_constructor),
+    });
+    fixture.ast.get_mut(apply.function).ty = function_type;
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                body: Some(fixture.apply),
+            }],
+            fields: Vec::new(),
+            initialization: fixture.initialization.clone(),
+        }],
+    };
+    assert!(matches!(
+        unit.resolve_constructor_call(
+            fixture.class,
+            fixture.caller,
+            fixture.apply,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::JvmConstructorCallWrongOwner {
+            expected,
+            actual: Some(actual),
+            ..
+        }) if expected == fixture.class && actual == foreign_class
+    ));
+}
+
+#[test]
+fn rejects_a_constructor_application_with_a_nonclass_result_type() {
+    let mut fixture = constructor_call_fixture(&[]);
+    fixture.ast.get_mut(fixture.apply).ty = fixture.definitions.int;
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                body: Some(fixture.apply),
+            }],
+            fields: Vec::new(),
+            initialization: fixture.initialization.clone(),
+        }],
+    };
+    assert!(matches!(
+        unit.resolve_constructor_call(
+            fixture.class,
+            fixture.caller,
+            fixture.apply,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::JvmConstructorCallResultTypeMismatch {
+            expected,
+            found: None,
+            ..
+        }) if expected == fixture.class
+    ));
+}
+
+#[test]
+fn implicit_no_arg_resolution_requires_the_selected_declared_constructor() {
+    let fixture = constructor_call_fixture(&[]);
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                body: Some(fixture.apply),
+            }],
+            fields: Vec::new(),
+            initialization: JvmClassInitializationPlan::ImplicitNoArg,
+        }],
+    };
+    let target = unit
+        .resolve_constructor_call(
+            fixture.class,
+            fixture.caller,
+            fixture.apply,
+            &fixture.definitions,
+        )
+        .unwrap();
+    assert_eq!(target.constructor_symbol(), fixture.constructor);
+    assert_eq!(target.descriptor().as_str(), "()V");
+    assert!(target.argument_types().is_empty());
+}
+
+#[test]
+fn implicit_no_arg_resolution_rejects_unplanned_class_fields() {
+    let mut fixture = constructor_call_fixture(&[]);
+    let field_name = fixture.store.names.intern("stored");
+    let field = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(field_name, Namespace::Term),
+        owner: Some(fixture.class),
+        kind: SymbolKind::Field,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Private,
+        info: SymbolInfo::Complete(fixture.definitions.int),
+        origin: SymbolOrigin::Source(dotty_core::SourceId::from_index(81)),
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let class_info = crate::identity::class_info(&fixture.store, fixture.class).unwrap();
+    let field_name = fixture.store.symbols.get(field).name;
+    fixture
+        .store
+        .scopes
+        .get_mut(class_info.declarations)
+        .enter(field_name, field);
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                body: Some(fixture.apply),
+            }],
+            fields: Vec::new(),
+            initialization: JvmClassInitializationPlan::ImplicitNoArg,
+        }],
+    };
+    assert_eq!(
+        unit.resolve_constructor_call(
+            fixture.class,
+            fixture.caller,
+            fixture.apply,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::FieldEmissionUnsupported {
+            class: fixture.class,
+            field,
+        })
+    );
 }
 
 #[test]

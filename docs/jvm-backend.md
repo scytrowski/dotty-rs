@@ -569,6 +569,15 @@ proved constructor, with its exact descriptor and access flags; it does not add
 a fallback constructor, Scala accessors, field stores outside the approved
 initializer path, or `new` expressions.
 
+`JvmCompilationUnit::resolve_constructor_call` resolves the exact typed shape
+`Apply(Select(New(TypeTree(C)), <init>), args)` to a planned class and its
+approved primary constructor metadata. It accepts the proved explicit primary
+constructor or a declared public empty `ImplicitNoArg` constructor, requires
+the class/result/prefix identities and primitive `Int`/`Boolean` arguments to
+match, and rejects private cross-class calls. The returned target is read-only
+metadata for a later emitter; it does not emit allocation or invocation
+instructions. Other application forms and argument types remain unsupported.
+
 ### Constructor field initializer fragments
 
 `JvmCompilationUnit::lower_constructor_field_initializers` consumes the

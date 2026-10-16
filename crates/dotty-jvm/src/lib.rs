@@ -22,6 +22,7 @@ use dotty_core::types::Type;
 mod boolean_ops;
 mod call_target;
 mod constructor;
+mod constructor_call;
 mod constructor_initializers;
 mod descriptor;
 pub use constructor::{JvmConstructorIssue, JvmConstructorMetadata, JvmPrimaryConstructorPlan};
@@ -149,6 +150,13 @@ pub enum JvmInvocationKind {
     Virtual,
 }
 
+/// JVM invocation mode for a validated object constructor call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmConstructorInvocationKind {
+    /// Constructor calls use `invokespecial` after object allocation.
+    Special,
+}
+
 /// A validated target for a same-class typed instance call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmCallTarget {
@@ -158,6 +166,22 @@ pub struct JvmCallTarget {
     method: SymbolId,
     invocation: JvmInvocationKind,
     result: JvmReturnType,
+}
+
+/// Exact validated constructor target for a typed `new C(args)` application.
+///
+/// Resolution is read-only. It supplies the canonical class and constructor
+/// identities, descriptor, access flags, and argument types needed by a later
+/// allocation emitter; it does not create bytecode or constant-pool entries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmConstructorCallTarget {
+    owner_class: SymbolId,
+    owner_internal_name: String,
+    constructor: SymbolId,
+    descriptor: JvmMethodDescriptor,
+    access_flags: dotty_classfile::access_flags::MethodAccessFlags,
+    argument_types: Vec<JvmType>,
+    result_type: JvmType,
 }
 
 /// A JVM class identity derived from the class symbol and its package owners.
@@ -417,6 +441,57 @@ pub enum JvmCodegenError {
     InvalidPrimaryConstructor {
         constructor: SymbolId,
         issue: JvmConstructorIssue,
+    },
+    /// A constructor application has a supported shape but mismatched class identities.
+    JvmConstructorCallClassMismatch {
+        tree: TreeId<Typed>,
+        expected: SymbolId,
+        found: Option<SymbolId>,
+    },
+    /// The selected constructor belongs to a different class than the typed `new` target.
+    JvmConstructorCallWrongOwner {
+        tree: TreeId<Typed>,
+        constructor: SymbolId,
+        expected: SymbolId,
+        actual: Option<SymbolId>,
+    },
+    /// The selected canonical constructor is not present in approved constructor metadata.
+    JvmConstructorCallNotApproved {
+        tree: TreeId<Typed>,
+        constructor: SymbolId,
+        class: SymbolId,
+    },
+    /// Constructor access is not available from the caller class in this subset.
+    InaccessibleJvmConstructor {
+        tree: TreeId<Typed>,
+        constructor: SymbolId,
+        caller_class: SymbolId,
+        owner_class: SymbolId,
+    },
+    /// The call does not supply the exact constructor descriptor arity.
+    JvmConstructorCallArityMismatch {
+        tree: TreeId<Typed>,
+        constructor: SymbolId,
+        expected: usize,
+        found: usize,
+    },
+    /// One argument's completed primitive type differs from its constructor slot.
+    JvmConstructorCallArgumentTypeMismatch {
+        tree: TreeId<Typed>,
+        argument: TreeId<Typed>,
+        expected: JvmType,
+        found: Option<JvmType>,
+    },
+    /// The typed application result does not identify the allocated class.
+    JvmConstructorCallResultTypeMismatch {
+        tree: TreeId<Typed>,
+        expected: SymbolId,
+        found: Option<SymbolId>,
+    },
+    /// The selected constructor is not a proven plain no-argument or planned primary call.
+    UnsupportedJvmConstructorCall {
+        tree: TreeId<Typed>,
+        kind: JvmConstructorCallShapeError,
     },
     /// The class ID is outside the supplied symbol table.
     UnknownClass { class: SymbolId },
@@ -1040,6 +1115,22 @@ pub enum JvmCodegenError {
     },
 }
 
+/// Unsupported typed constructor application shape or metadata relation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmConstructorCallShapeError {
+    NotApplication,
+    TypeApplication,
+    UsingApplication,
+    FunctionNotSelect,
+    QualifierNotNew,
+    TypeTreeNotCanonicalClass,
+    ConstructorReferenceNotCanonical,
+    ConstructorNotInClassScope,
+    UnsupportedInitializationPlan,
+    InvalidImplicitNoArgProof,
+    UnsupportedArgumentType,
+}
+
 /// Semantic role required by a compilation plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SymbolRole {
@@ -1313,6 +1404,48 @@ impl JvmCallTarget {
     /// Result contract, including `Void` for Scala `Unit`.
     pub const fn result(&self) -> JvmReturnType {
         self.result
+    }
+}
+
+impl JvmConstructorCallTarget {
+    /// Canonical planned class that owns the selected constructor.
+    pub const fn owner_class(&self) -> SymbolId {
+        self.owner_class
+    }
+
+    /// JVM internal name of the constructor owner.
+    pub fn owner_internal_name(&self) -> &str {
+        &self.owner_internal_name
+    }
+
+    /// Canonical constructor selected by the typed `TermRef`.
+    pub const fn constructor_symbol(&self) -> SymbolId {
+        self.constructor
+    }
+
+    /// Exact validated constructor descriptor, including `()V` for implicit no-arg.
+    pub const fn descriptor(&self) -> &JvmMethodDescriptor {
+        &self.descriptor
+    }
+
+    /// Validated public/private JVM constructor access flags.
+    pub const fn access_flags(&self) -> dotty_classfile::access_flags::MethodAccessFlags {
+        self.access_flags
+    }
+
+    /// Supported argument types in typed source order.
+    pub fn argument_types(&self) -> &[JvmType] {
+        &self.argument_types
+    }
+
+    /// Exact class-reference type produced by the application.
+    pub const fn result_type(&self) -> JvmType {
+        self.result_type
+    }
+
+    /// Allocation always dispatches through the JVM's special constructor call.
+    pub const fn invocation_kind(&self) -> JvmConstructorInvocationKind {
+        JvmConstructorInvocationKind::Special
     }
 }
 
@@ -1652,6 +1785,23 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
         call_target::resolve_same_class_call(self, caller_class, caller_method, call, definitions)
+    }
+
+    /// Resolves a typed `Apply(Select(New(...), <init>), args)` to the exact
+    /// constructor approved by this compilation unit.
+    ///
+    /// The resolver checks class/constructor identity, initialization proof,
+    /// accessibility, argument order and primitive types. It returns metadata
+    /// for a future allocation emitter and emits no allocation or invocation
+    /// instructions itself.
+    pub fn resolve_constructor_call(
+        &self,
+        caller_class: SymbolId,
+        caller_method: SymbolId,
+        apply_tree: TreeId<Typed>,
+        definitions: &Definitions,
+    ) -> Result<JvmConstructorCallTarget, JvmCodegenError> {
+        constructor_call::resolve(self, caller_class, caller_method, apply_tree, definitions)
     }
 
     /// Lowers the receiver for a validated same-class instance call.
