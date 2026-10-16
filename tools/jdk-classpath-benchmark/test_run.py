@@ -2,6 +2,8 @@ import importlib.machinery
 import importlib.util
 from argparse import Namespace
 import json
+import contextlib
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -191,6 +193,32 @@ class MetadataTests(unittest.TestCase):
         self.assertEqual(len(checked.call_args_list), 31)
         self.assertEqual([int(call.args[0][-1]) for call in checked.call_args_list[1:7]], [1, 2, 4, 1, 2, 4])
         self.assertEqual([cohorts[key]["sample_count"] for key in ("1", "2", "4")], [10, 10, 10])
+
+    def test_metadata_rejects_too_few_process_samples(self):
+        with mock.patch.object(benchmark.sys, "argv", [str(RUNNER), "--metadata", "--samples", "9"]):
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(benchmark.main(), 2)
+        self.assertIn("at least 10", stderr.getvalue())
+
+    def test_metadata_default_output_preserves_historical_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = root / "docs/jdk-classpath-performance-raw.json"
+            old.parent.mkdir()
+            old.write_text("historical baseline")
+            binary = root / "driver"
+            binary.write_bytes(b"fake executable")
+            binary.chmod(0o700)
+            with mock.patch.object(benchmark, "ROOT", root), \
+                 mock.patch.object(benchmark, "jdk_path", return_value=(root, [])), \
+                 mock.patch.object(benchmark, "environment", return_value={}), \
+                 mock.patch.object(benchmark, "run_metadata_samples", return_value={"1": {"summary": {}}}), \
+                 mock.patch.object(benchmark.sys, "argv", [str(RUNNER), "--metadata", "--binary", str(binary)]), \
+                 contextlib.redirect_stdout(io.StringIO()) as stdout:
+                self.assertEqual(benchmark.main(), 0)
+            self.assertEqual(old.read_text(), "historical baseline")
+            self.assertTrue((root / "docs/jdk-module-metadata-performance-raw.json").is_file())
+            self.assertIn("10 per cohort (30 processes)", stdout.getvalue())
 
     def test_child_failure_is_reported(self):
         with mock.patch.object(benchmark.subprocess, "run", return_value=SimpleNamespace(returncode=2, stdout="", stderr="bad descriptor")):

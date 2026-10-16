@@ -151,6 +151,7 @@ def environment(path, modules, explicit_jmods):
         "kernel": run_checked(["uname", "-a"]).stdout.strip(),
         "cpu": cpu_model(),
         "logical_cpu_count": os.cpu_count(),
+        "allowed_cpu_affinity": sorted(os.sched_getaffinity(0)),
         "memory_total_kib": memory_total_kib(),
         "memory_cgroup_limit_bytes": memory_cgroup_limit_bytes(),
         "jdk_distribution": vendor.group(1).strip() if vendor else "unknown",
@@ -431,7 +432,8 @@ def main():
         output = (ROOT / output_name).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-        print(f"wrote {args.samples} raw samples to {output_name}")
+        count_label = f"{args.samples} per cohort ({args.samples * 3} processes)" if args.metadata else str(args.samples)
+        print(f"wrote {count_label} raw samples to {output_name}")
         summaries = {key: cohort["summary"] for key, cohort in report["cohorts"].items()} if args.metadata else report["summary"]
         print(json.dumps(summaries, sort_keys=True))
         return 0
