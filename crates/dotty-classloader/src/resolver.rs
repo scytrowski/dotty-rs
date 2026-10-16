@@ -10,6 +10,7 @@ use dotty_core::{
     ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver,
     Type, TypeId, TypeRefTarget,
 };
+use std::collections::HashSet;
 
 struct ResolverUndo {
     session: SessionCheckpoint,
@@ -68,6 +69,7 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
     collect_load_profiles: bool,
     module_profile: ModuleResolutionProfile,
     collect_module_resolution_profile: bool,
+    negative_module_member_lookups: HashSet<(BinaryName, Name)>,
     #[cfg(test)]
     package_failure_after_segment: Option<usize>,
 }
@@ -83,6 +85,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             collect_load_profiles: false,
             module_profile: ModuleResolutionProfile::default(),
             collect_module_resolution_profile: false,
+            negative_module_member_lookups: HashSet::new(),
             #[cfg(test)]
             package_failure_after_segment: None,
         }
@@ -581,17 +584,24 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                         }
                     })?;
                     self.validate_module_object(store, package, identity.object)?;
-                    let completed =
-                        self.complete_module(store, &identity.object_name)
+                    // `validate_module_object` checks the completed class info
+                    // and the object/module-class completion state. Avoid
+                    // calling `complete_module` for every member lookup: its
+                    // idempotency check walks every declaration in the module
+                    // scope, making repeated lookups quadratic in practice.
+                    if matches!(store.symbols.get(class).info, SymbolInfo::Missing) {
+                        let completed = self
+                            .complete_module(store, &identity.object_name)
                             .map_err(|error| ResolutionError::Malformed {
                                 reason: format!("module completion failed: {error}"),
                             })?;
-                    if completed.object != identity.object || completed.module_class != class {
-                        return Err(ResolutionError::Malformed {
-                            reason: format!(
-                                "module completion changed canonical identity for {class:?}"
-                            ),
-                        });
+                        if completed.object != identity.object || completed.module_class != class {
+                            return Err(ResolutionError::Malformed {
+                                reason: format!(
+                                    "module completion changed canonical identity for {class:?}"
+                                ),
+                            });
+                        }
                     }
                     scope = self.declaration_scope(store, class);
                 } else if scope.is_none() {
@@ -784,10 +794,45 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             MemberSpace::Explicit(owner) => owner,
             _ => return Ok(None),
         };
-        let Some(target) = self.prefix_target(store, owner_type)? else {
+        let target_result = self.prefix_target(store, owner_type)?;
+        let Some(target) = target_result else {
             return Ok(None);
         };
-        let Some((resolved_owner, scope)) = self.resolve_target(store, target)? else {
+        let module_identity_for_cache = match &target {
+            PrefixTarget::Class(class)
+                if store.symbols.get(*class).kind == SymbolKind::ModuleClass =>
+            {
+                self.session
+                    .modules
+                    .values()
+                    .find(|identity| identity.module_class == *class)
+                    .cloned()
+            }
+            _ => None,
+        };
+        let module_member_cache_key = module_identity_for_cache
+            .as_ref()
+            .map(|identity| (identity.object_name.clone(), request.name));
+        if let (Some(cache_key), Some(identity), PrefixTarget::Class(class)) = (
+            module_member_cache_key.as_ref(),
+            module_identity_for_cache.as_ref(),
+            &target,
+        ) && self.negative_module_member_lookups.contains(cache_key)
+            && matches!(store.symbols.get(*class).info, SymbolInfo::Missing)
+        {
+            let package = store.symbols.get(identity.object).owner.ok_or_else(|| {
+                ResolutionError::Malformed {
+                    reason: format!(
+                        "module class {:?} has an ownerless object identity",
+                        identity.module_class
+                    ),
+                }
+            })?;
+            self.validate_module_object(store, package, identity.object)?;
+            return Ok(None);
+        }
+        let owner_result = self.resolve_target(store, target)?;
+        let Some((resolved_owner, scope)) = owner_result else {
             return Ok(None);
         };
         if store.symbols.get(resolved_owner).kind == SymbolKind::Package
@@ -803,6 +848,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             return Ok(None);
         }
         let candidates = store.scopes.get(scope).lookup_all(&request.name);
+        if candidates.is_empty()
+            && let Some(cache_key) = module_member_cache_key
+        {
+            // Module declarations come from immutable classpath TASTy. A
+            // missing member stays missing even when this transaction rolls
+            // back the expensive on-demand module completion.
+            self.negative_module_member_lookups.insert(cache_key);
+        }
         match candidates {
             [] if store.symbols.get(resolved_owner).kind == SymbolKind::Package
                 && matches!(request.space, MemberSpace::Prefix)
@@ -927,7 +980,26 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 self.validate_module_object(store, resolved_owner, *symbol)?;
                 Ok(Some(*symbol))
             }
-            [symbol] => Ok(Some(*symbol)),
+            [symbol] => {
+                if store.symbols.get(resolved_owner).kind != SymbolKind::Package {
+                    if !store.symbols.contains(*symbol) {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "class member scope contains unknown symbol {symbol:?}"
+                            ),
+                        });
+                    }
+                    let member = store.symbols.get(*symbol);
+                    if member.owner != Some(resolved_owner) || member.name != request.name {
+                        return Err(ResolutionError::Malformed {
+                            reason: format!(
+                                "class member {symbol:?} does not match its declaration owner/name"
+                            ),
+                        });
+                    }
+                }
+                Ok(Some(*symbol))
+            }
             many => Err(ResolutionError::Ambiguous {
                 candidates: many.len(),
             }),
@@ -2270,6 +2342,49 @@ mod tests {
         assert_eq!(resolver.session.checkpoint(), session_mark);
         assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
         assert_eq!(store.symbols.get(object).info, SymbolInfo::Missing);
+        assert!(resolver.negative_module_member_lookups.contains(&(
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both"),
+            absent_name
+        )));
+
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: object_ref,
+                    name: absent_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            ),
+            Ok(None),
+            "a repeated missing-member lookup should use the cached classpath result"
+        );
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+
+        assert!(
+            resolver
+                .complete_module_class(&mut store, module_class)
+                .unwrap()
+        );
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: object_ref,
+                    name: absent_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            ),
+            Ok(None),
+            "a cached miss must still inspect a module completed through another resolver hook"
+        );
+        assert!(matches!(
+            store.symbols.get(module_class).info,
+            SymbolInfo::Complete(_)
+        ));
     }
 
     #[test]
