@@ -3378,7 +3378,7 @@ fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
 fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
     let output = TestOutputDirectory::new("planned-virtual-calls");
     let artifacts = compile_planned_constructor_source(
-        "class Counter(seed: Int):\n  def add(value: Int): Int = value + 1\n  def combine(left: Int, right: Int): Int = left * 10 + right\n  def get(): Int = 42\n  def enabled(): Boolean = true\n  def touch(): Unit = ()\n  private def hidden(): Int = 9\n  def privateCall(): Int = this.hidden()\n  def privateReceiver(seed: Int): Int = new Counter(seed).hidden()\nclass Other(seed: Int):\n  def get(): Int = 7\nclass Client:\n  def directGet(seed: Int): Int = new Counter(seed).get()\n  def fromNew(seed: Int): Int = new Counter(seed + 1).add(seed)\n  def ordered(seed: Int): Int = new Counter(seed).combine(seed + 1, seed + 2)\n  def boolean(seed: Int): Boolean = new Counter(seed).enabled()\n  def unitCall(seed: Int): Unit = new Counter(seed).touch()\n  def fromLocal(seed: Int): Int =\n    val counter = new Counter(seed)\n    counter.add(seed)\n  def fromOther(seed: Int): Int = new Other(seed).get()\n",
+        "class Counter(seed: Int):\n  def add(value: Int): Int = value + 1\n  def combine(left: Int, right: Int): Int = left * 10 + right\n  def get(): Int = 42\n  def enabled(): Boolean = true\n  def touch(): Unit = ()\n  private def hidden(): Int = 9\n  def privateCall(): Int = this.hidden()\n  def privateReceiver(seed: Int): Int = new Counter(seed).hidden()\nclass Other(seed: Int):\n  def get(): Int = 7\nclass Client:\n  def directGet(seed: Int): Int = new Counter(seed).get()\n  def fromNew(seed: Int): Int = new Counter(seed + 1).add(seed)\n  def ordered(seed: Int): Int = new Counter(seed).combine(seed + 1, seed + 2)\n  def booleanResult(seed: Int): Boolean = new Counter(seed).enabled()\n  def unitCall(seed: Int): Unit = new Counter(seed).touch()\n  def fromLocal(seed: Int): Int =\n    val counter = new Counter(seed)\n    counter.add(seed)\n  def fromOther(seed: Int): Int = new Other(seed).get()\n",
         output.path(),
     )
     .unwrap();
@@ -3407,8 +3407,8 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
             0xbb, 0x59, 0x1b, 0xb7, 0x1b, 0x04, 0x60, 0x1b, 0x05, 0x60, 0xb6, 0xac,
         ],
     );
-    let boolean = emitted_method_code(&client, "boolean");
-    assert_opcode_sequence(boolean, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xac]);
+    let boolean_result = emitted_method_code(&client, "booleanResult");
+    assert_opcode_sequence(boolean_result, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xac]);
     let unit_call = emitted_method_code(&client, "unitCall");
     assert_opcode_sequence(unit_call, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xb1]);
     let from_local = emitted_method_code(&client, "fromLocal");
@@ -3440,7 +3440,7 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
     };
     assert_eq!(invocation_owner(&client, from_new), "Counter");
     assert_eq!(invocation_owner(&client, ordered), "Counter");
-    assert_eq!(invocation_owner(&client, boolean), "Counter");
+    assert_eq!(invocation_owner(&client, boolean_result), "Counter");
     assert_eq!(invocation_owner(&client, unit_call), "Counter");
     assert_eq!(invocation_owner(&client, direct_get), "Counter");
     assert_eq!(invocation_owner(&client, from_local), "Counter");
@@ -3469,7 +3469,7 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
         let harness = output.path().join("VirtualCallHarness.java");
         fs::write(
             &harness,
-            "public final class VirtualCallHarness { public static void main(String[] args) { Client c = new Client(); if (c.directGet(1) != 42 || c.fromNew(3) != 4 || c.ordered(3) != 45 || !c.boolean(3) || c.fromLocal(3) != 4 || c.fromOther(3) != 7 || new Counter(1).privateCall() != 9 || new Counter(1).privateReceiver(2) != 9) throw new AssertionError(); c.unitCall(1); System.out.println(\"virtual calls ok\"); } }\n",
+            "public final class VirtualCallHarness { public static void main(String[] args) { Client c = new Client(); if (c.directGet(1) != 42 || c.fromNew(3) != 4 || c.ordered(3) != 45 || !c.booleanResult(3) || c.fromLocal(3) != 4 || c.fromOther(3) != 7 || new Counter(1).privateCall() != 9 || new Counter(1).privateReceiver(2) != 9) throw new AssertionError(); c.unitCall(1); System.out.println(\"virtual calls ok\"); } }\n",
         )
         .expect("write Java verification harness");
         let javac = Command::new("javac")
