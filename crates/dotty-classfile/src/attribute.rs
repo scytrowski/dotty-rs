@@ -124,6 +124,15 @@ pub struct ModuleAttribute {
     pub provides: Vec<ModuleProvide>,
 }
 
+/// The payload of a `ModulePackages` attribute (JVMS §4.7.26).
+///
+/// Package indices retain their encoded order. An absent attribute remains
+/// distinct from a present attribute with an empty package table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModulePackagesAttribute {
+    pub package_indices: Vec<ConstantPoolIndex>,
+}
+
 /// Module attribute flag bits (JVMS §4.7.25). These have field-specific
 /// meanings; a bit valid in one table is not necessarily valid in another.
 pub const MODULE_ACC_OPEN: u16 = 0x0020;
@@ -186,8 +195,9 @@ pub const DEFAULT_MAX_ATTRIBUTE_DEPTH: usize = 128;
 /// annotation payloads are represented structurally; unmodeled nested
 /// attributes such as `StackMapTable` and `LineNumberTable` fall through to
 /// [`Attribute::Other`] so their bytes can be preserved. The JPMS `Module`
-/// payload is also represented structurally, without validating the enclosing
-/// `module-info` class shape or resolving the module graph.
+/// payload and its `ModulePackages` / `ModuleMainClass` companions are also
+/// represented structurally. Enclosing class shape is checked separately by
+/// [`crate::class_file::ClassFile::validate_module_descriptor`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attribute<'a> {
     ConstantValue(ConstantPoolIndex),
@@ -211,6 +221,9 @@ pub enum Attribute<'a> {
     BootstrapMethods(Vec<BootstrapMethodEntry>),
     MethodParameters(Vec<MethodParameterEntry>),
     Module(ModuleAttribute),
+    ModulePackages(ModulePackagesAttribute),
+    /// The `main_class_index` payload of `ModuleMainClass` (JVMS §4.7.27).
+    ModuleMainClass(ConstantPoolIndex),
     RuntimeVisibleAnnotations(Vec<Annotation>),
     RuntimeInvisibleAnnotations(Vec<Annotation>),
     /// An attribute name not (yet) modeled above, kept as raw bytes.
@@ -737,6 +750,13 @@ fn validate_attribute_at_depth(
             }
             Ok(())
         }
+        Attribute::ModulePackages(packages) => {
+            for index in &packages.package_indices {
+                pool.package_name(*index)?;
+            }
+            Ok(())
+        }
+        Attribute::ModuleMainClass(index) => pool.class_name(*index).map(|_| ()),
         Attribute::Other(_) => Ok(()),
     }
 }
@@ -842,6 +862,8 @@ fn attribute_name(attribute: &Attribute<'_>) -> Option<&'static str> {
         Attribute::BootstrapMethods(_) => Some("BootstrapMethods"),
         Attribute::MethodParameters(_) => Some("MethodParameters"),
         Attribute::Module(_) => Some("Module"),
+        Attribute::ModulePackages(_) => Some("ModulePackages"),
+        Attribute::ModuleMainClass(_) => Some("ModuleMainClass"),
         Attribute::Record(_) => Some("Record"),
         Attribute::Code(_) => Some("Code"),
         Attribute::RuntimeVisibleAnnotations(_) => Some("RuntimeVisibleAnnotations"),
@@ -1219,6 +1241,14 @@ fn encoded_payload_length(attribute: &Attribute<'_>, depth: usize) -> Result<usi
             add_payload_length(1, repeated_payload_length(parameters.len(), 4)?)?
         }
         Attribute::Module(module) => module_payload_length(module)?,
+        Attribute::ModulePackages(packages) => {
+            checked_u16_len(packages.package_indices.len())?;
+            add_payload_length(
+                2,
+                repeated_payload_length(packages.package_indices.len(), 2)?,
+            )?
+        }
+        Attribute::ModuleMainClass(_) => 2,
         Attribute::Other(raw) => raw.bytes.len(),
         Attribute::Record(components) => record_payload_length(components, depth)?,
         Attribute::Code(code) => code_payload_length(code, depth)?,
@@ -1408,6 +1438,10 @@ impl<'a> Attribute<'a> {
                     }
                 }
                 Attribute::Module(module) => write_module_attribute(writer, module)?,
+                Attribute::ModulePackages(packages) => {
+                    write_index_list(writer, &packages.package_indices)?;
+                }
+                Attribute::ModuleMainClass(index) => writer.write_u2(index.0),
                 Attribute::Record(components) => {
                     writer.write_u2_length(components.len())?;
                     for component in components {
@@ -1486,6 +1520,10 @@ impl<'a> Attribute<'a> {
                 Attribute::MethodParameters(read_method_parameters(&mut sub_reader)?)
             }
             "Module" => Attribute::Module(read_module_attribute(&mut sub_reader)?),
+            "ModulePackages" => Attribute::ModulePackages(ModulePackagesAttribute {
+                package_indices: read_index_list(&mut sub_reader)?,
+            }),
+            "ModuleMainClass" => Attribute::ModuleMainClass(read_index(&mut sub_reader)?),
             "InnerClasses" => Attribute::InnerClasses(read_inner_classes(&mut sub_reader)?),
             "EnclosingMethod" => {
                 let class_index = read_index(&mut sub_reader)?;
@@ -4075,6 +4113,94 @@ mod module_attribute_tests {
             Err(EncodeError::CountOverflow {
                 value: usize::from(u16::MAX) + 1,
                 width: crate::encode_error::LengthWidth::U16,
+            })
+        );
+    }
+}
+
+#[cfg(test)]
+mod module_companion_attribute_tests {
+    use super::*;
+    use crate::constant_pool::{ConstantPoolEntry, EntryKind};
+
+    fn pool() -> ConstantPool {
+        ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("ModulePackages".to_owned())), // #1
+            Some(ConstantPoolEntry::Utf8("p".to_owned())),              // #2
+            Some(ConstantPoolEntry::Package {
+                name_index: ConstantPoolIndex(2),
+            }), // #3
+            Some(ConstantPoolEntry::Utf8("ModuleMainClass".to_owned())), // #4
+            Some(ConstantPoolEntry::Utf8("p/Main".to_owned())),         // #5
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(5),
+            }), // #6
+            Some(ConstantPoolEntry::Utf8("q".to_owned())),              // #7
+            Some(ConstantPoolEntry::Package {
+                name_index: ConstantPoolIndex(7),
+            }), // #8
+        ])
+    }
+
+    fn encoded_info(name_index: u16, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&name_index.to_be_bytes());
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
+    #[test]
+    fn module_packages_roundtrips_ordered_indices_and_empty_presence() {
+        let pool = pool();
+        for package_indices in [vec![], vec![ConstantPoolIndex(3), ConstantPoolIndex(8)]] {
+            let attribute = Attribute::ModulePackages(ModulePackagesAttribute { package_indices });
+            let encoded = attribute.encode(&pool).unwrap();
+            let mut reader = Reader::new(&encoded);
+            assert_eq!(Attribute::decode(&mut reader, &pool), Ok(attribute));
+            assert!(reader.is_at_end());
+        }
+    }
+
+    #[test]
+    fn module_main_class_roundtrips_class_index() {
+        let pool = pool();
+        let attribute = Attribute::ModuleMainClass(ConstantPoolIndex(6));
+        let encoded = attribute.encode(&pool).unwrap();
+        let mut reader = Reader::new(&encoded);
+        assert_eq!(Attribute::decode(&mut reader, &pool), Ok(attribute));
+    }
+
+    #[test]
+    fn companion_attributes_reject_trailing_payload_and_wrong_pool_kinds() {
+        let pool = pool();
+        let trailing_bytes = encoded_info(4, &[0, 6, 0]);
+        let mut trailing = Reader::new(&trailing_bytes);
+        assert_eq!(
+            Attribute::decode(&mut trailing, &pool),
+            Err(AttributeError::TrailingBytes {
+                name: "ModuleMainClass".to_owned(),
+                unread: 1,
+            })
+        );
+
+        assert_eq!(
+            validate_attribute(
+                &Attribute::ModulePackages(ModulePackagesAttribute {
+                    package_indices: vec![ConstantPoolIndex(2)],
+                }),
+                &pool,
+            ),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(2),
+                expected: EntryKind::Package,
+            })
+        );
+        assert_eq!(
+            validate_attribute(&Attribute::ModuleMainClass(ConstantPoolIndex(3)), &pool),
+            Err(PoolRefError::WrongKind {
+                index: ConstantPoolIndex(3),
+                expected: EntryKind::Class,
             })
         );
     }

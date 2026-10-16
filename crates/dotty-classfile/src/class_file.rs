@@ -1,7 +1,8 @@
-use crate::access_flags::ClassAccessFlags;
+use crate::access_flags::{ACC_MODULE, ClassAccessFlags};
 use crate::attribute::{
-    Attribute, AttributeError, decode_attributes, read_index_list, read_optional_index,
-    validate_attributes,
+    Attribute, AttributeError, MODULE_ACC_MANDATED, MODULE_ACC_OPEN, MODULE_ACC_STATIC_PHASE,
+    MODULE_ACC_SYNTHETIC, MODULE_ACC_TRANSITIVE, ModuleAttribute, decode_attributes,
+    read_index_list, read_optional_index, validate_attributes,
 };
 use crate::constant_pool::{
     ConstantPool, ConstantPoolError, ConstantPoolIndex, PoolRefError, read_index,
@@ -139,6 +140,91 @@ pub enum ClassFileError {
     ConstantPool(ConstantPoolError),
     Attribute(AttributeError),
 }
+
+/// A violation found by the explicit `module-info.class` semantic validator.
+/// Structural decoding remains available for ordinary and malformed class
+/// files; callers opt into this stricter JPMS contract when cataloging a
+/// module descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModuleDescriptorError {
+    NotModuleDescriptor,
+    ConstantPool(PoolRefError),
+    UnsupportedVersion { major: u16, minor: u16 },
+    InvalidAccessFlags { flags: u16 },
+    WrongThisClass { name: String },
+    HasSuperclass,
+    HasInterfaces { count: usize },
+    HasFields { count: usize },
+    HasMethods { count: usize },
+    MissingModuleAttribute,
+    DuplicateAttribute { name: &'static str },
+    OpaqueKnownModuleAttribute { name: String },
+    DisallowedAttribute { name: String },
+    InvalidModuleName { name: String },
+    InvalidPackageName { name: String },
+    InvalidDirective { reason: &'static str },
+    DuplicateDirective { table: &'static str, name: String },
+}
+
+impl fmt::Display for ModuleDescriptorError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotModuleDescriptor => formatter.write_str("class file does not have ACC_MODULE"),
+            Self::ConstantPool(error) => error.fmt(formatter),
+            Self::UnsupportedVersion { major, minor } => write!(
+                formatter,
+                "module descriptor version {major}.{minor} is unsupported by the current class-file policy"
+            ),
+            Self::InvalidAccessFlags { flags } => write!(
+                formatter,
+                "module descriptor access flags {flags:#06x} must contain only ACC_MODULE"
+            ),
+            Self::WrongThisClass { name } => write!(
+                formatter,
+                "module descriptor this_class must be module-info, got {name:?}"
+            ),
+            Self::HasSuperclass => formatter.write_str("module descriptor must have no superclass"),
+            Self::HasInterfaces { count } => {
+                write!(formatter, "module descriptor has {count} interface(s)")
+            }
+            Self::HasFields { count } => {
+                write!(formatter, "module descriptor has {count} field(s)")
+            }
+            Self::HasMethods { count } => {
+                write!(formatter, "module descriptor has {count} method(s)")
+            }
+            Self::MissingModuleAttribute => {
+                formatter.write_str("module descriptor is missing its Module attribute")
+            }
+            Self::DuplicateAttribute { name } => {
+                write!(
+                    formatter,
+                    "module descriptor has duplicate {name} attributes"
+                )
+            }
+            Self::OpaqueKnownModuleAttribute { name } => write!(
+                formatter,
+                "recognized JPMS attribute {name:?} must use its typed representation"
+            ),
+            Self::DisallowedAttribute { name } => write!(
+                formatter,
+                "predefined attribute {name:?} is not permitted on module-info"
+            ),
+            Self::InvalidModuleName { name } => {
+                write!(formatter, "invalid JVMS module name {name:?}")
+            }
+            Self::InvalidPackageName { name } => {
+                write!(formatter, "invalid JVMS package name {name:?}")
+            }
+            Self::InvalidDirective { reason } => formatter.write_str(reason),
+            Self::DuplicateDirective { table, name } => {
+                write!(formatter, "duplicate {name:?} in Module {table} table")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ModuleDescriptorError {}
 
 impl fmt::Display for ClassFileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -298,6 +384,487 @@ impl<'a> ClassFile<'a> {
         }
         validate_attributes(&self.attributes, pool)
     }
+
+    /// Validates this class file as a JPMS module descriptor (JVMS §4.1 and
+    /// §4.7.25–§4.7.27). This is deliberately separate from [`Self::decode`]
+    /// and [`Self::validate_references`], so callers can continue to inspect
+    /// ordinary class files without applying module-only shape rules.
+    ///
+    /// The check is bounded by the already-decoded classfile tables and the
+    /// existing attribute nesting limit. It validates module directive
+    /// references, names, cardinality, and the Java 21 `java.base` rules used
+    /// by this crate's pinned JPMS oracle; it does not resolve modules or
+    /// verify referenced classes exist.
+    pub fn validate_module_descriptor(&self) -> Result<(), ModuleDescriptorError> {
+        if !self.access_flags.contains(ACC_MODULE) {
+            return Err(ModuleDescriptorError::NotModuleDescriptor);
+        }
+        if self.version.major < 53 || !self.version.is_compatible() {
+            return Err(ModuleDescriptorError::UnsupportedVersion {
+                major: self.version.major,
+                minor: self.version.minor,
+            });
+        }
+        if self.access_flags.0 != ACC_MODULE {
+            return Err(ModuleDescriptorError::InvalidAccessFlags {
+                flags: self.access_flags.0,
+            });
+        }
+        self.validate_references()
+            .map_err(ModuleDescriptorError::ConstantPool)?;
+
+        let this_name = self
+            .constant_pool
+            .class_name(self.this_class)
+            .map_err(ModuleDescriptorError::ConstantPool)?;
+        if this_name != "module-info" {
+            return Err(ModuleDescriptorError::WrongThisClass {
+                name: this_name.to_owned(),
+            });
+        }
+        if self.super_class.is_some() {
+            return Err(ModuleDescriptorError::HasSuperclass);
+        }
+        if !self.interfaces.is_empty() {
+            return Err(ModuleDescriptorError::HasInterfaces {
+                count: self.interfaces.len(),
+            });
+        }
+        if !self.fields.is_empty() {
+            return Err(ModuleDescriptorError::HasFields {
+                count: self.fields.len(),
+            });
+        }
+        if !self.methods.is_empty() {
+            return Err(ModuleDescriptorError::HasMethods {
+                count: self.methods.len(),
+            });
+        }
+
+        let mut module_count = 0;
+        let mut packages_count = 0;
+        let mut main_class_count = 0;
+        let mut module = None;
+        for attribute in &self.attributes {
+            let name = descriptor_attribute_name(attribute, &self.constant_pool)?;
+            if matches!(attribute, Attribute::Other(_))
+                && matches!(
+                    name.as_str(),
+                    "Module" | "ModulePackages" | "ModuleMainClass"
+                )
+            {
+                return Err(ModuleDescriptorError::OpaqueKnownModuleAttribute { name });
+            }
+            match attribute {
+                Attribute::Module(value) => {
+                    module_count += 1;
+                    module = Some(value);
+                }
+                Attribute::ModulePackages(_) => packages_count += 1,
+                Attribute::ModuleMainClass(_) => main_class_count += 1,
+                _ => {}
+            }
+
+            if is_predefined_attribute(&name)
+                && !matches!(
+                    name.as_str(),
+                    "Module"
+                        | "ModulePackages"
+                        | "ModuleMainClass"
+                        | "InnerClasses"
+                        | "SourceFile"
+                        | "SourceDebugExtension"
+                        | "RuntimeVisibleAnnotations"
+                        | "RuntimeInvisibleAnnotations"
+                )
+            {
+                return Err(ModuleDescriptorError::DisallowedAttribute { name });
+            }
+        }
+        if module_count == 0 {
+            return Err(ModuleDescriptorError::MissingModuleAttribute);
+        }
+        if module_count > 1 {
+            return Err(ModuleDescriptorError::DuplicateAttribute { name: "Module" });
+        }
+        if packages_count > 1 {
+            return Err(ModuleDescriptorError::DuplicateAttribute {
+                name: "ModulePackages",
+            });
+        }
+        if main_class_count > 1 {
+            return Err(ModuleDescriptorError::DuplicateAttribute {
+                name: "ModuleMainClass",
+            });
+        }
+
+        let module = module.ok_or(ModuleDescriptorError::MissingModuleAttribute)?;
+        validate_module_metadata(self, module)
+    }
+}
+
+fn descriptor_attribute_name(
+    attribute: &Attribute<'_>,
+    pool: &ConstantPool,
+) -> Result<String, ModuleDescriptorError> {
+    let name = match attribute {
+        Attribute::Other(raw) => pool
+            .utf8(raw.name_index)
+            .map_err(ModuleDescriptorError::ConstantPool)?,
+        Attribute::ConstantValue(_) => "ConstantValue",
+        Attribute::Signature(_) => "Signature",
+        Attribute::Exceptions(_) => "Exceptions",
+        Attribute::InnerClasses(_) => "InnerClasses",
+        Attribute::EnclosingMethod { .. } => "EnclosingMethod",
+        Attribute::SourceFile(_) => "SourceFile",
+        Attribute::Deprecated => "Deprecated",
+        Attribute::Synthetic => "Synthetic",
+        Attribute::NestHost(_) => "NestHost",
+        Attribute::NestMembers(_) => "NestMembers",
+        Attribute::Record(_) => "Record",
+        Attribute::PermittedSubclasses(_) => "PermittedSubclasses",
+        Attribute::Code(_) => "Code",
+        Attribute::BootstrapMethods(_) => "BootstrapMethods",
+        Attribute::MethodParameters(_) => "MethodParameters",
+        Attribute::Module(_) => "Module",
+        Attribute::ModulePackages(_) => "ModulePackages",
+        Attribute::ModuleMainClass(_) => "ModuleMainClass",
+        Attribute::RuntimeVisibleAnnotations(_) => "RuntimeVisibleAnnotations",
+        Attribute::RuntimeInvisibleAnnotations(_) => "RuntimeInvisibleAnnotations",
+    };
+    Ok(name.to_owned())
+}
+
+/// All predefined classfile attribute names in the Java 21 JVMS. Known
+/// attributes decoded as `Other` (including nested/method-only attributes)
+/// still need location checks; vendor attributes remain opaque and allowed.
+fn is_predefined_attribute(name: &str) -> bool {
+    matches!(
+        name,
+        "ConstantValue"
+            | "Code"
+            | "StackMapTable"
+            | "Exceptions"
+            | "InnerClasses"
+            | "EnclosingMethod"
+            | "Synthetic"
+            | "Signature"
+            | "SourceFile"
+            | "SourceDebugExtension"
+            | "LineNumberTable"
+            | "LocalVariableTable"
+            | "LocalVariableTypeTable"
+            | "Deprecated"
+            | "RuntimeVisibleAnnotations"
+            | "RuntimeInvisibleAnnotations"
+            | "RuntimeVisibleParameterAnnotations"
+            | "RuntimeInvisibleParameterAnnotations"
+            | "RuntimeVisibleTypeAnnotations"
+            | "RuntimeInvisibleTypeAnnotations"
+            | "AnnotationDefault"
+            | "BootstrapMethods"
+            | "MethodParameters"
+            | "Module"
+            | "ModulePackages"
+            | "ModuleMainClass"
+            | "NestHost"
+            | "NestMembers"
+            | "Record"
+            | "PermittedSubclasses"
+    )
+}
+
+fn validate_module_metadata(
+    class_file: &ClassFile<'_>,
+    module: &ModuleAttribute,
+) -> Result<(), ModuleDescriptorError> {
+    let pool = &class_file.constant_pool;
+    let module_name = pool
+        .module_name(module.module_name_index)
+        .map_err(ModuleDescriptorError::ConstantPool)?;
+    if !is_valid_module_name(module_name) {
+        return Err(ModuleDescriptorError::InvalidModuleName {
+            name: module_name.to_owned(),
+        });
+    }
+
+    validate_directive_flags(module)?;
+    ensure_unique(
+        "requires",
+        module
+            .requires
+            .iter()
+            .map(|row| pool.module_name(row.requires_index)),
+    )?;
+    validate_module_names(
+        module
+            .requires
+            .iter()
+            .map(|row| pool.module_name(row.requires_index)),
+    )?;
+    ensure_unique(
+        "exports",
+        module
+            .exports
+            .iter()
+            .map(|row| pool.package_name(row.exports_index)),
+    )?;
+    ensure_unique(
+        "opens",
+        module
+            .opens
+            .iter()
+            .map(|row| pool.package_name(row.opens_index)),
+    )?;
+    ensure_unique(
+        "uses",
+        module.uses.iter().map(|index| pool.class_name(*index)),
+    )?;
+    ensure_unique(
+        "provides",
+        module
+            .provides
+            .iter()
+            .map(|row| pool.class_name(row.provides_index)),
+    )?;
+
+    for row in &module.exports {
+        validate_module_names(row.exports_to.iter().map(|index| pool.module_name(*index)))?;
+        ensure_unique(
+            "exports_to",
+            row.exports_to.iter().map(|index| pool.module_name(*index)),
+        )?;
+    }
+    for row in &module.opens {
+        validate_module_names(row.opens_to.iter().map(|index| pool.module_name(*index)))?;
+        ensure_unique(
+            "opens_to",
+            row.opens_to.iter().map(|index| pool.module_name(*index)),
+        )?;
+    }
+    for row in &module.provides {
+        if row.provides_with.is_empty() {
+            return Err(ModuleDescriptorError::InvalidDirective {
+                reason: "Module provides row must contain at least one provider",
+            });
+        }
+        ensure_unique(
+            "provides_with",
+            row.provides_with
+                .iter()
+                .map(|index| pool.class_name(*index)),
+        )?;
+    }
+
+    if module.module_flags & MODULE_ACC_OPEN != 0 && !module.opens.is_empty() {
+        return Err(ModuleDescriptorError::InvalidDirective {
+            reason: "open module must not have opens rows",
+        });
+    }
+    if module_name == "java.base" {
+        if !module.requires.is_empty() {
+            return Err(ModuleDescriptorError::InvalidDirective {
+                reason: "java.base must not have requires rows",
+            });
+        }
+    } else {
+        let java_base = module
+            .requires
+            .iter()
+            .filter(|row| pool.module_name(row.requires_index) == Ok("java.base"))
+            .collect::<Vec<_>>();
+        if java_base.len() != 1 {
+            return Err(ModuleDescriptorError::InvalidDirective {
+                reason: "non-java.base module must require java.base exactly once",
+            });
+        }
+        let row = java_base[0];
+        if row.requires_flags & MODULE_ACC_SYNTHETIC != 0 {
+            return Err(ModuleDescriptorError::InvalidDirective {
+                reason: "java.base requires row must not be synthetic",
+            });
+        }
+        if class_file.version.major >= 54 && row.requires_flags & MODULE_ACC_STATIC_PHASE != 0 {
+            return Err(ModuleDescriptorError::InvalidDirective {
+                reason: "java.base requires row has forbidden static-phase flag",
+            });
+        }
+        // Java 25 (major 69) permits ACC_TRANSITIVE on java.base; earlier
+        // supported releases retain the prohibition from JVMS 24.
+        if (54..69).contains(&class_file.version.major)
+            && row.requires_flags & MODULE_ACC_TRANSITIVE != 0
+        {
+            return Err(ModuleDescriptorError::InvalidDirective {
+                reason: "java.base requires row has forbidden transitive flag",
+            });
+        }
+    }
+
+    let mut listed_packages = std::collections::HashSet::new();
+    let mut has_module_packages = false;
+    for attribute in &class_file.attributes {
+        if let Attribute::ModulePackages(packages) = attribute {
+            has_module_packages = true;
+            for index in &packages.package_indices {
+                let name = pool
+                    .package_name(*index)
+                    .map_err(ModuleDescriptorError::ConstantPool)?;
+                if !is_valid_package_name(name) {
+                    return Err(ModuleDescriptorError::InvalidPackageName {
+                        name: name.to_owned(),
+                    });
+                }
+                if !listed_packages.insert(name.to_owned()) {
+                    return Err(ModuleDescriptorError::DuplicateDirective {
+                        table: "ModulePackages",
+                        name: name.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+    for index in module
+        .exports
+        .iter()
+        .map(|row| row.exports_index)
+        .chain(module.opens.iter().map(|row| row.opens_index))
+    {
+        validate_package_name(pool, index)?;
+        if has_module_packages {
+            let name = pool
+                .package_name(index)
+                .map_err(ModuleDescriptorError::ConstantPool)?;
+            if !listed_packages.contains(name) {
+                return Err(ModuleDescriptorError::InvalidDirective {
+                    reason: "ModulePackages omits an exported or opened package",
+                });
+            }
+        }
+    }
+    if has_module_packages {
+        for row in &module.provides {
+            for provider in &row.provides_with {
+                let name = pool
+                    .class_name(*provider)
+                    .map_err(ModuleDescriptorError::ConstantPool)?;
+                if let Some((package, _)) = name.rsplit_once('/')
+                    && !listed_packages.contains(package)
+                {
+                    return Err(ModuleDescriptorError::InvalidDirective {
+                        reason: "ModulePackages omits a provider package",
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_directive_flags(module: &ModuleAttribute) -> Result<(), ModuleDescriptorError> {
+    let valid_module = MODULE_ACC_OPEN | MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED;
+    if module.module_flags & !valid_module != 0 {
+        return Err(ModuleDescriptorError::InvalidDirective {
+            reason: "Module has reserved module_flags bits",
+        });
+    }
+    if module.requires.iter().any(|row| {
+        row.requires_flags
+            & !(MODULE_ACC_TRANSITIVE
+                | MODULE_ACC_STATIC_PHASE
+                | MODULE_ACC_SYNTHETIC
+                | MODULE_ACC_MANDATED)
+            != 0
+    }) {
+        return Err(ModuleDescriptorError::InvalidDirective {
+            reason: "Module has reserved requires_flags bits",
+        });
+    }
+    if module
+        .exports
+        .iter()
+        .any(|row| row.exports_flags & !(MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED) != 0)
+        || module
+            .opens
+            .iter()
+            .any(|row| row.opens_flags & !(MODULE_ACC_SYNTHETIC | MODULE_ACC_MANDATED) != 0)
+    {
+        return Err(ModuleDescriptorError::InvalidDirective {
+            reason: "Module has reserved exports_flags or opens_flags bits",
+        });
+    }
+    Ok(())
+}
+
+fn ensure_unique<'a>(
+    table: &'static str,
+    names: impl Iterator<Item = Result<&'a str, PoolRefError>>,
+) -> Result<(), ModuleDescriptorError> {
+    let mut seen = std::collections::HashSet::new();
+    for name in names {
+        let name = name.map_err(ModuleDescriptorError::ConstantPool)?;
+        if !seen.insert(name) {
+            return Err(ModuleDescriptorError::DuplicateDirective {
+                table,
+                name: name.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_module_names<'a>(
+    names: impl Iterator<Item = Result<&'a str, PoolRefError>>,
+) -> Result<(), ModuleDescriptorError> {
+    for name in names {
+        let name = name.map_err(ModuleDescriptorError::ConstantPool)?;
+        if !is_valid_module_name(name) {
+            return Err(ModuleDescriptorError::InvalidModuleName {
+                name: name.to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_package_name(
+    pool: &ConstantPool,
+    index: ConstantPoolIndex,
+) -> Result<(), ModuleDescriptorError> {
+    let name = pool
+        .package_name(index)
+        .map_err(ModuleDescriptorError::ConstantPool)?;
+    if !is_valid_package_name(name) {
+        return Err(ModuleDescriptorError::InvalidPackageName {
+            name: name.to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn is_valid_module_name(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut chars = name.chars();
+    while let Some(ch) = chars.next() {
+        if ('\u{0000}'..='\u{001f}').contains(&ch) {
+            return false;
+        }
+        if ch == '\\' && !matches!(chars.next(), Some('\\' | ':' | '@')) {
+            return false;
+        }
+        if matches!(ch, ':' | '@') {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_valid_package_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('/').all(|part| {
+            !part.is_empty() && !part.chars().any(|ch| matches!(ch, '.' | ';' | '[' | '/'))
+        })
 }
 
 fn encode_pool_ref_error(error: PoolRefError, constant_pool_count: usize) -> EncodeError {
