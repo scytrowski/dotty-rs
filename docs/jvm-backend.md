@@ -9,6 +9,12 @@ expressions to the class-file crate's symbolic code builder, and composes a
 complete class file when the frontend supplies sufficient initialization
 evidence. It does not assemble a source frontend.
 
+The root test adapter exercises the real lexer, parser, namer and typer with
+one semantic store and one `JvmCompilationUnit`; `CounterObjects.scala` emits
+the cooperating `Counter` and `CounterClient` classes from one source session.
+This is end-to-end test orchestration, not a public source compiler or a
+classpath-aware JVM backend.
+
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
 and preserving source parameter order. Backend validation does not rediscover
@@ -67,10 +73,11 @@ local reads lower through the same canonical `SymbolId` lookup to one `iload`
 from the allocated slot. Local loads require the current method's validated
 layout, a completed supported semantic type, and a preceding store on every
 reachable path. Name-only references, foreign or unplanned locals, and reads before
-initialization return typed errors. Reference slots can currently be reserved
-and inspected through metadata, but reference loads and stores return a typed
-unsupported-operation error. The existing bytecode analyzer remains
-responsible for verifier local state and stack-map frames.
+initialization return typed errors. Reference slots are supported only for
+initialized immutable locals of an exact planned class in straight-line method
+bodies; mutable reference locals and reference operations that require CFG
+frame merges remain typed errors. The classfile verifier and mandatory JDK
+gate check the emitted initialized-reference sequence.
 
 The initial plan subset accepts `SymbolKind::Class`, `SymbolKind::Method`, and
 `SymbolKind::Parameter`; other kinds return a structured unsupported-kind
@@ -164,6 +171,29 @@ stack or no value for `Unit`. The source typer accepts direct-new selection
 for ordinary method application. Reference receivers and object creation stay
 outside methods with symbolic branches until reference-aware frame analysis
 exists.
+
+### Real-source object interaction gate
+
+[`tests/fixtures/jvm/CounterObjects.scala`](../tests/fixtures/jvm/CounterObjects.scala)
+is the bounded end-to-end object/reference fixture. One source session plans
+both classes, uses the constructor-owned `start` parameter to initialize
+Counter's private mutable `current` field, and types CounterClient's
+constructor calls, canonical local bindings, and selected `increment`/`get`
+method targets. The test checks complete classfiles, classfile major version
+65, exact primitive method descriptors, and instruction order for
+construction, post-constructor local stores, virtual calls, and integer
+returns. It recompiles with a fresh frontend session and requires
+byte-for-byte identical outputs in source order. A Java harness constructs
+only CounterClient and checks `run(10) == 11`, `run(0) == 1`, `direct() == 42`,
+and `independent() == 31` under `java -Xverify:all`.
+
+The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
+`DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the source integration test on JDK 21.
+Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
+reference method parameters/results, arbitrary classpath classes,
+reference-bearing branches/loops, mutable reference locals, and general
+reference-aware CFG frame merging unsupported. Reference-aware CFG lowering
+is the next required JVM backend increment.
 
 ## Canonical `Int` arithmetic
 

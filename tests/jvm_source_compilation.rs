@@ -3530,6 +3530,318 @@ fn multi_class_source_backend_failure_publishes_no_classes() {
 }
 
 #[test]
+fn real_counter_objects_source_emits_two_deterministic_verified_classes() {
+    let first_output = TestOutputDirectory::new("counter-objects-first");
+    let second_output = TestOutputDirectory::new("counter-objects-second");
+    let source = fs::read_to_string(fixture_path("CounterObjects.scala"))
+        .expect("read CounterObjects fixture");
+    let first = compile_source_classes(&source, "CounterObjects.scala", first_output.path())
+        .expect("Counter and CounterClient should compile from one source session");
+    let second = compile_source_classes(&source, "CounterObjects.scala", second_output.path())
+        .expect("a fresh source session should compile both classes");
+    let first_names = first
+        .iter()
+        .map(|artifact| artifact.class.internal_name())
+        .collect::<Vec<_>>();
+    let second_names = second
+        .iter()
+        .map(|artifact| artifact.class.internal_name())
+        .collect::<Vec<_>>();
+    assert_eq!(first_names, ["Counter", "CounterClient"]);
+    assert_eq!(second_names, ["Counter", "CounterClient"]);
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.bytes())
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| artifact.class.bytes())
+            .collect::<Vec<_>>(),
+        "fresh frontend sessions should produce byte-identical ordered classfiles"
+    );
+    assert_eq!(
+        first_output.class_files(),
+        [
+            first_output.path().join("Counter.class"),
+            first_output.path().join("CounterClient.class")
+        ]
+    );
+    assert_eq!(
+        second_output.class_files(),
+        [
+            second_output.path().join("Counter.class"),
+            second_output.path().join("CounterClient.class")
+        ]
+    );
+
+    let counter = decode_emitted_class(&first[0]);
+    let client = decode_emitted_class(&first[1]);
+    assert_eq!(counter.fields.len(), 1);
+    let [current] = counter.fields.as_slice() else {
+        panic!("Counter emits only its current field");
+    };
+    assert_eq!(
+        counter.constant_pool.utf8(current.name_index),
+        Ok("current")
+    );
+    assert_eq!(
+        counter.constant_pool.utf8(current.descriptor_index),
+        Ok("I")
+    );
+    assert_eq!(
+        current.access_flags.0,
+        dotty_classfile::access_flags::ACC_PRIVATE
+    );
+    assert_eq!(
+        methods_with_descriptors(&counter),
+        [
+            ("<init>".to_owned(), "(I)V".to_owned()),
+            ("increment".to_owned(), "()I".to_owned()),
+            ("get".to_owned(), "()I".to_owned()),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&client),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("run".to_owned(), "(I)I".to_owned()),
+            ("direct".to_owned(), "()I".to_owned()),
+            ("independent".to_owned(), "()I".to_owned()),
+        ]
+    );
+    assert!(
+        counter
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+    assert!(
+        client
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+    assert!(
+        methods_with_descriptors(&counter)
+            .iter()
+            .chain(methods_with_descriptors(&client).iter())
+            .all(|(_, descriptor)| !descriptor.contains('L') && !descriptor.contains('[')),
+        "the fixture must not introduce public reference parameters or results"
+    );
+
+    let counter_constructor = emitted_method_code(&counter, "<init>");
+    assert_opcode_sequence(counter_constructor, &[0x2a, 0xb7, 0x2a, 0x1b, 0xb5, 0xb1]);
+    assert_method_reference(
+        &counter,
+        counter_constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_field_reference(
+        &counter,
+        counter_constructor,
+        0xb5,
+        "Counter",
+        "current",
+        "I",
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&counter, "increment"),
+        &[
+            0x2a, 0x4c, 0x2a, 0xb4, 0x04, 0x60, 0x3d, 0x2b, 0x1c, 0xb5, 0x2a, 0xb4, 0xac,
+        ],
+    );
+    assert_field_reference(
+        &counter,
+        emitted_method_code(&counter, "increment"),
+        0xb4,
+        "Counter",
+        "current",
+        "I",
+    );
+    assert_opcode_sequence(emitted_method_code(&counter, "get"), &[0x2a, 0xb4, 0xac]);
+    assert_field_reference(
+        &counter,
+        emitted_method_code(&counter, "get"),
+        0xb4,
+        "Counter",
+        "current",
+        "I",
+    );
+
+    assert_opcode_sequence(emitted_method_code(&client, "<init>"), &[0x2a, 0xb7, 0xb1]);
+    assert_method_reference(
+        &client,
+        emitted_method_code(&client, "<init>"),
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    let run = emitted_method_code(&client, "run");
+    assert_opcode_sequence(
+        run,
+        &[
+            0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0xb6, 0x57, 0x2c, 0xb6, 0xac,
+        ],
+    );
+    assert_invocation_sequence(
+        &client,
+        run,
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "Counter", "increment", "()I"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    let direct = emitted_method_code(&client, "direct");
+    assert_opcode_sequence(direct, &[0xbb, 0x59, 0x10, 0xb7, 0xb6, 0xac]);
+    assert_eq!(
+        direct[5], 42,
+        "direct passes the literal 42 to the constructor"
+    );
+    assert_invocation_sequence(
+        &client,
+        direct,
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    let independent = emitted_method_code(&client, "independent");
+    assert_opcode_sequence(
+        independent,
+        &[
+            0xbb, 0x59, 0x10, 0xb7, 0x4c, 0xbb, 0x59, 0x10, 0xb7, 0x4d, 0x2b, 0xb6, 0x57, 0x2b,
+            0xb6, 0x2c, 0xb6, 0x60, 0xac,
+        ],
+    );
+    assert_eq!(independent[5], 10, "left is initialized from 10");
+    assert_eq!(
+        independent[15], 20,
+        "right is initialized independently from 20"
+    );
+    assert_invocation_sequence(
+        &client,
+        independent,
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "Counter", "increment", "()I"),
+            (0xb6, "Counter", "get", "()I"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+
+    if require_jdk_or_skip() {
+        verify_counter_objects_with_jdk(first_output.path());
+    }
+}
+
+#[test]
+fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
+    let cases = [
+        (
+            "private-constructor-call",
+            "class CounterClient:\n  def run(seed: Int): Int = new Counter(seed).get()\nclass Counter private (seed: Int):\n  private val current: Int = seed\n  def get(): Int = current\n",
+        ),
+        (
+            "wrong-constructor-arity",
+            "class Counter(seed: Int)\nclass CounterClient:\n  def run(): Int = new Counter().get()\n",
+        ),
+        (
+            "wrong-constructor-argument",
+            "class Counter(seed: Int)\nclass CounterClient:\n  def run(): Int = new Counter(true).get()\n",
+        ),
+        (
+            "unplanned-object-class",
+            "class CounterClient:\n  def run(): Int =\n    new Object()\n    1\n",
+        ),
+        (
+            "reference-method-result",
+            "class Counter(seed: Int)\nclass CounterClient:\n  def make(): Counter = new Counter(1)\n",
+        ),
+        (
+            "reference-var-reassignment",
+            "class Counter(seed: Int)\nclass CounterClient:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    counter = new Counter(seed + 1)\n    counter.get()\n",
+        ),
+        (
+            "reference-if-result",
+            "class Counter(seed: Int):\n  def get(): Int = 1\nclass CounterClient:\n  def run(flag: Boolean, seed: Int): Int =\n    val counter = if flag then new Counter(seed) else new Counter(1)\n    counter.get()\n",
+        ),
+        (
+            "reference-while-result",
+            "class Counter(seed: Int)\nclass CounterClient:\n  def run(seed: Int): Int =\n    while false do new Counter(seed)\n    1\n",
+        ),
+    ];
+    for (label, source) in cases {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("unsupported object source must fail closed");
+        let accepted_stage = match label {
+            "private-constructor-call" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::InaccessibleJvmConstructor { .. })
+            ),
+            "wrong-constructor-arity" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArityMismatch {
+                    expected: 1,
+                    actual: 0,
+                    ..
+                })
+            ),
+            "wrong-constructor-argument" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    ..
+                })
+            ),
+            "unplanned-object-class" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::NewClassInfoUnavailable { .. })
+            ),
+            "reference-method-result" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType {
+                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                    ..
+                })
+            ),
+            "reference-var-reassignment" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::UnstableSelectionPrefix { .. })
+            ),
+            "reference-if-result" => matches!(
+                &error,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow { .. }
+                )
+            ),
+            "reference-while-result" => matches!(
+                &error,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow { .. }
+                )
+            ),
+            _ => unreachable!("all cases have an expected pipeline stage"),
+        };
+        assert!(
+            accepted_stage,
+            "{label} was rejected at an unexpected pipeline stage: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure must not publish any classfile"
+        );
+    }
+}
+
+#[test]
 fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
     let output = TestOutputDirectory::new("two-class-constructor");
     let artifacts = compile_planned_constructor_source(
@@ -3698,6 +4010,8 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
     assert_eq!(invocation_owner(&client, unit_call), "Counter");
     assert_eq!(invocation_owner(&client, direct_get), "Counter");
     assert_eq!(invocation_owner(&client, from_local), "Counter");
+    // Counter.get and Other.get share a spelling; the canonical selected
+    // method and receiver class must keep the two owners distinct.
     assert_eq!(invocation_owner(&client, from_other), "Other");
 
     let counter = decode_class("Counter");
@@ -4365,6 +4679,79 @@ fn assert_method_reference(
     );
 }
 
+fn decode_emitted_class(artifact: &EmittedArtifact) -> ClassFile<'_> {
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode complete generated classfile");
+    assert!(
+        reader.is_at_end(),
+        "class decoder consumes the complete classfile"
+    );
+    class
+        .validate_references()
+        .expect("validate constant-pool references");
+    assert_eq!(class.version.major, 65);
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class),
+        Ok(artifact.class.internal_name())
+    );
+    class
+}
+
+fn methods_with_descriptors(class: &ClassFile<'_>) -> Vec<(String, String)> {
+    class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                class
+                    .constant_pool
+                    .utf8(method.name_index)
+                    .unwrap()
+                    .to_owned(),
+                class
+                    .constant_pool
+                    .utf8(method.descriptor_index)
+                    .unwrap()
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn assert_invocation_sequence(
+    class: &ClassFile<'_>,
+    code: &[u8],
+    expected: &[(u8, &str, &str, &str)],
+) {
+    let actual = decode_subset_instructions(code)
+        .into_iter()
+        .filter(|(_, opcode)| matches!(opcode, 0xb6 | 0xb7))
+        .map(|(offset, opcode)| {
+            let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+            let ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            } = class
+                .constant_pool
+                .get(ConstantPoolIndex(index))
+                .expect("invocation references a constant-pool entry")
+            else {
+                panic!("invokevirtual and invokespecial must reference Methodref");
+            };
+            let owner = class.constant_pool.class_name(*class_index).unwrap();
+            let (name, descriptor) = class
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .unwrap();
+            (opcode, owner, name, descriptor)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "unexpected ordered method references in code"
+    );
+}
+
 fn assert_field_reference(
     class: &ClassFile<'_>,
     code: &[u8],
@@ -4506,6 +4893,138 @@ fn verify_counter_with_jdk(output_directory: &Path) {
         .output()
         .expect("start java verifier for Counter");
     assert!(java.status.success(), "java failed for Counter: {:?}", java);
+}
+
+fn verify_counter_objects_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 output path");
+    let javap = Command::new("javap")
+        .args([
+            "-p",
+            "-c",
+            "-v",
+            "-classpath",
+            output_path,
+            "Counter",
+            "CounterClient",
+        ])
+        .output()
+        .expect("start javap for both CounterObjects classes");
+    assert!(
+        javap.status.success(),
+        "javap rejected CounterObjects outputs\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "private int current;",
+        "public Counter(int);",
+        "public int increment();",
+        "public int get();",
+        "public CounterClient();",
+        "public int run(int);",
+        "public int direct();",
+        "public int independent();",
+        "descriptor: (I)V",
+        "descriptor: (I)I",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap output omitted {expected:?}:\n{javap_output}"
+        );
+    }
+    assert_javap_instruction_sequence(
+        &javap_output,
+        "public int run(int);",
+        &[
+            "new",
+            "dup",
+            "iload_1",
+            "invokespecial",
+            "astore_2",
+            "aload_2",
+            "invokevirtual",
+            "pop",
+            "aload_2",
+            "invokevirtual",
+            "ireturn",
+        ],
+    );
+    assert_javap_instruction_sequence(
+        &javap_output,
+        "public int direct();",
+        &[
+            "new",
+            "dup",
+            "bipush",
+            "invokespecial",
+            "invokevirtual",
+            "ireturn",
+        ],
+    );
+    assert_javap_instruction_sequence(
+        &javap_output,
+        "public int independent();",
+        &[
+            "new",
+            "dup",
+            "bipush",
+            "invokespecial",
+            "astore_1",
+            "new",
+            "dup",
+            "bipush",
+            "invokespecial",
+            "astore_2",
+            "aload_1",
+            "invokevirtual",
+            "pop",
+            "aload_1",
+            "invokevirtual",
+            "aload_2",
+            "invokevirtual",
+            "iadd",
+            "ireturn",
+        ],
+    );
+
+    let harness_path = output_directory.join("CounterObjectsHarness.java");
+    fs::write(
+        &harness_path,
+        "public final class CounterObjectsHarness { public static void main(String[] args) { CounterClient client = new CounterClient(); if (client.run(10) != 11) throw new AssertionError(\"run(10)\"); if (client.run(0) != 1) throw new AssertionError(\"run(0)\"); if (client.direct() != 42) throw new AssertionError(\"direct\"); if (client.independent() != 31) throw new AssertionError(\"independent instances\"); System.out.println(\"counter objects ok\"); } }\n",
+    )
+    .expect("write CounterObjects Java harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness_path)
+        .output()
+        .expect("start javac for CounterObjects");
+    assert!(
+        javac.status.success(),
+        "javac rejected CounterObjects harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "CounterObjectsHarness",
+        ])
+        .output()
+        .expect("start java verifier for CounterObjects");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected CounterObjects\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "counter objects ok"
+    );
 }
 
 fn verify_private_fields_with_jdk(output_directory: &Path) {
