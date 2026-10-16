@@ -7965,6 +7965,24 @@ mod tests {
                 definitions,
                 &packages,
             );
+            let store_checkpoint = typer.store().checkpoint();
+            let package_scope_snapshots = expected_paths
+                .iter()
+                .map(|path| {
+                    let package = typer
+                        .packages
+                        .symbol(path.as_slice())
+                        .expect("lexical package candidate should already be canonical");
+                    let scope = typer.packages.scope_of(package).unwrap();
+                    let entries = typer
+                        .store()
+                        .scopes
+                        .get(scope)
+                        .entered_symbols()
+                        .collect::<Vec<_>>();
+                    (package, scope, entries)
+                })
+                .collect::<Vec<_>>();
 
             let candidates = typer
                 .lexical_package_candidates(
@@ -7996,6 +8014,20 @@ mod tests {
                 typer.packages.symbol(&candidate.package_path) == Some(candidate.package)
                     && typer.packages.scope_of(candidate.package) == Some(candidate.scope)
                     && typer.index.definition_of(candidate.package).is_none()
+            }));
+            assert_eq!(
+                typer.store().checkpoint(),
+                store_checkpoint,
+                "candidate enumeration must not materialize symbols, types, or scopes"
+            );
+            assert!(package_scope_snapshots.iter().all(|(package, scope, entries)| {
+                typer.packages.scope_of(*package) == Some(*scope)
+                    && typer
+                        .store()
+                        .scopes
+                        .get(*scope)
+                        .entered_symbols()
+                        .eq(entries.iter().copied())
             }));
         }
     }
