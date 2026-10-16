@@ -18,6 +18,8 @@
 
 /// Raw and structured AST nodes, tags, references, and AST indexes.
 pub mod ast;
+/// Fresh wire AST construction with symbolic address labels.
+pub mod construction;
 /// File-level parsing, validation, encoding, and AST queries.
 pub mod file;
 /// TASTy header parsing and version validation.
@@ -37,6 +39,7 @@ pub mod writer;
 pub mod tasty {
     pub use super::ast;
     pub use super::ast::*;
+    pub use super::construction::*;
     pub use super::file;
     pub use super::file::*;
     pub use super::header;
