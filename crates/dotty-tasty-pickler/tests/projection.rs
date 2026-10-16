@@ -788,3 +788,28 @@ fn malformed_external_prefixes_cannot_be_replaced_with_a_plausible_package() {
         })
     );
 }
+
+#[test]
+fn unfilled_error_and_structural_name_types_are_never_projected_as_placeholders() {
+    let mut f = Fixture::new();
+    let unfilled = f.store.types.reserve().id();
+    let message = f.store.names.intern("incomplete");
+    let error = f.store.types.alloc(Type::Error(ErrorType { message }));
+    let named = f.store.types.alloc(Type::TypeRef {
+        prefix: f.definitions.object_type,
+        target: TypeRefTarget::Name(dotty_core::TypeName::new(message)),
+    });
+    for (ty, expected) in [
+        (unfilled, PickleError::IncompleteType { ty: unfilled }),
+        (error, PickleError::IncompleteType { ty: error }),
+        (
+            f.definitions.no_prefix,
+            PickleError::UnsupportedTypeReference {
+                ty: f.definitions.no_prefix,
+            },
+        ),
+        (named, PickleError::UnsupportedTypeReference { ty: named }),
+    ] {
+        assert_eq!(context(&f).lower_type(ty).err(), Some(expected));
+    }
+}
