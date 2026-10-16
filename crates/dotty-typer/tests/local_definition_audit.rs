@@ -27,8 +27,14 @@ use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ResolverMetrics {
+    timing_enabled: bool,
     current_file: String,
     current_method: String,
+    module_identity_inner_time: Duration,
+    module_completion_inner_time: Duration,
+    class_completion_inner_time: Duration,
+    member_lookup_inner_time: Duration,
+    package_lookup_inner_time: Duration,
     resolver_package_requests: usize,
     package_successes: usize,
     package_unresolved: usize,
@@ -625,7 +631,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &SemanticStore,
         object: SymbolId,
     ) -> Result<Option<SymbolId>, ResolutionError> {
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.inner.module_class_of_object(store, object);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().module_identity_inner_time += started.elapsed();
+        }
         let (source_file, enclosing_attempt) = {
             let mut metrics = self.metrics.borrow_mut();
             metrics.module_identity_resolver_calls += 1;
@@ -730,6 +740,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         module_class: SymbolId,
     ) -> Result<bool, ResolutionError> {
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let module_class_identity = if store.symbols.contains(module_class) {
             audit_binary_candidate(store, module_class)
                 .unwrap_or_else(|| "<unknown-module-class>".to_owned())
@@ -746,6 +757,9 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let object_origin = symbol_origin_category(store, module_class);
         let request = format!("module-completion::{module_class_identity}");
         let result = self.inner.complete_module_class(store, module_class);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().module_completion_inner_time += started.elapsed();
+        }
         let profiles = self.inner.take_load_profiles();
         let result_state = module_class_observed_state(store, module_class);
         let (outcome, error_category) = match &result {
@@ -795,12 +809,16 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         symbol: SymbolId,
     ) -> Result<bool, ResolutionError> {
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let request = if store.symbols.contains(symbol) {
             format!("completion::{}", audit_symbol_path(store, symbol))
         } else {
             "completion::unknown-symbol".to_owned()
         };
         let result = self.inner.complete_class(store, symbol);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().class_completion_inner_time += started.elapsed();
+        }
         let profiles = self.inner.take_load_profiles();
         let mut metrics = self.metrics.borrow_mut();
         let file = metrics.current_file.clone();
@@ -1027,7 +1045,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     .and_then(|id| audit_binary_candidate(store, id))
             })
             .flatten();
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.inner.resolve_member(store, request);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().member_lookup_inner_time += started.elapsed();
+        }
         let load_profiles = self.inner.take_load_profiles();
         let module_profile = self.inner.take_module_resolution_profile();
         // Profiles describe work performed even when Ok(None) rolls it back.
@@ -1392,7 +1414,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError> {
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.inner.resolve_package(store, path);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().package_lookup_inner_time += started.elapsed();
+        }
         let mut metrics = self.metrics.borrow_mut();
         metrics.resolver_package_requests += 1;
         let (target, outcome, cause, materialized_prefix) = match &result {
@@ -5761,11 +5787,14 @@ fn pinned_scala39_local_definition_audit() {
         "audit requires the repository's pinned Scala 3.9.0 source revision"
     );
     let classpath = audit_classpath_from_environment();
-    let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
-    let files = scala_files(&[root.join("library/src"), root.join("compiler/src")]);
     let profile_files = std::env::var("DOTTY_AUDIT_PROFILE_FILES")
         .ok()
         .map(|files| files.split(',').map(str::to_owned).collect::<BTreeSet<_>>());
+    let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics {
+        timing_enabled: profile_files.is_some(),
+        ..ResolverMetrics::default()
+    }));
+    let files = scala_files(&[root.join("library/src"), root.join("compiler/src")]);
     let expected_files = profile_files.as_ref().map_or(files.len(), BTreeSet::len);
     if let Some(profile_files) = &profile_files {
         assert!(
@@ -9825,13 +9854,17 @@ fn audit_source_inner_filtered(
     );
     let request_metrics = classpath.as_ref().map(|(_, metrics)| Rc::clone(metrics));
     if let (Some((classpath, metrics)), Some(packages)) = (classpath, resolver_packages) {
-        let resolver = ClasspathSymbolResolver::new(
+        let mut resolver = ClasspathSymbolResolver::new(
             classpath.clone(),
             definitions,
             LoadingSession::with_packages(packages),
         )
-        .with_load_profile_collection()
-        .with_module_resolution_profile_collection();
+        .with_load_profile_collection();
+        if !profile_timing
+            || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1")
+        {
+            resolver = resolver.with_module_resolution_profile_collection();
+        }
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: resolver,
             metrics,
@@ -9861,6 +9894,23 @@ fn audit_source_inner_filtered(
     for (method, method_tree, rhs, range) in root_methods {
         let method_started = Instant::now();
         let method_label = profile_timing.then(|| audit_symbol_path(typer.store(), method));
+        let resolver_before = profile_timing.then(|| {
+            let metrics = request_metrics
+                .as_ref()
+                .expect("classpath profiling requires resolver metrics")
+                .borrow();
+            (
+                metrics.module_identity_resolver_calls,
+                metrics.module_completion_resolver_calls,
+                metrics.resolver_member_requests,
+                metrics.resolver_package_requests,
+                metrics.module_identity_inner_time,
+                metrics.module_completion_inner_time,
+                metrics.class_completion_inner_time,
+                metrics.member_lookup_inner_time,
+                metrics.package_lookup_inner_time,
+            )
+        });
         if let Some(method_label) = &method_label {
             eprintln!(
                 "AUDIT_METHOD_START file={path} tree={} method={method_label}",
@@ -9884,6 +9934,39 @@ fn audit_source_inner_filtered(
                 method_tree.index(),
                 method_label.as_deref().unwrap_or("<unknown>"),
                 method_started.elapsed().as_millis()
+            );
+            let metrics = request_metrics
+                .as_ref()
+                .expect("classpath profiling requires resolver metrics")
+                .borrow();
+            let before = resolver_before.expect("profiled resolver counters must be captured");
+            eprintln!(
+                "AUDIT_METHOD_RESOLVER file={path} tree={} module_identity_calls={} module_identity_inner_ms={} module_completion_calls={} module_completion_inner_ms={} class_completion_inner_ms={} member_calls={} member_inner_ms={} package_calls={} package_inner_ms={}",
+                method_tree.index(),
+                metrics.module_identity_resolver_calls - before.0,
+                metrics
+                    .module_identity_inner_time
+                    .saturating_sub(before.4)
+                    .as_millis(),
+                metrics.module_completion_resolver_calls - before.1,
+                metrics
+                    .module_completion_inner_time
+                    .saturating_sub(before.5)
+                    .as_millis(),
+                metrics
+                    .class_completion_inner_time
+                    .saturating_sub(before.6)
+                    .as_millis(),
+                metrics.resolver_member_requests - before.2,
+                metrics
+                    .member_lookup_inner_time
+                    .saturating_sub(before.7)
+                    .as_millis(),
+                metrics.resolver_package_requests - before.3,
+                metrics
+                    .package_lookup_inner_time
+                    .saturating_sub(before.8)
+                    .as_millis()
             );
         }
         if let Some(metrics) = &request_metrics {
