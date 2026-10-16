@@ -308,6 +308,203 @@ fn compile_source(
     Ok(EmittedArtifact { class, path })
 }
 
+fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, PipelineFailure> {
+    let source_id = SourceId::from_index(91);
+    let source = SourceText::new(source_text)
+        .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
+    let scanner = ContextualScanner::new(source_text)
+        .map_err(|error| PipelineFailure::Lexer(format!("{error:?}")))?;
+    if !scanner.diagnostics().is_empty() {
+        return Err(PipelineFailure::LexerDiagnostics(
+            scanner.diagnostics().to_vec(),
+        ));
+    }
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
+    if !parsed.diagnostics.is_empty() {
+        return Err(PipelineFailure::Parser(parsed.diagnostics));
+    }
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "constructor-call-resolver.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .map_err(PipelineFailure::NamerStructural)?
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        NamingOutcome::Named { diagnostics, .. } | NamingOutcome::Rejected { diagnostics } => {
+            return Err(PipelineFailure::NamerDiagnostics(diagnostics));
+        }
+    };
+    let (class, template_tree) =
+        find_single_source_class(&parsed.ast, parsed.root, source_id, &index, &store)?;
+    let TreeKind::Template(template) = &parsed.ast.get(template_tree).kind else {
+        return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+    };
+    let source_methods =
+        collect_source_methods(&parsed.ast, &template.body, source_id, &index, &store)?;
+    let initialization =
+        source_initialization_plan(class, &parsed.ast, template, source_id, &index, &store)
+            .map_err(PipelineFailure::Codegen)?;
+    let constructor = index.symbol_at(source_id, template.constructor).ok_or(
+        PipelineFailure::MissingSourceIdentity("primary constructor"),
+    )?;
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer
+        .complete_symbol(class)
+        .map_err(PipelineFailure::Typer)?;
+    if matches!(
+        initialization,
+        JvmClassInitializationPlan::PrimaryConstructor(_)
+    ) {
+        typer
+            .complete_symbol(constructor)
+            .map_err(PipelineFailure::Typer)?;
+    }
+    let mut fields = Vec::new();
+    for tree in &template.body {
+        let TreeKind::ValDef(definition) = &parsed.ast.get(*tree).kind else {
+            continue;
+        };
+        let Some(field) = index.symbol_at(source_id, *tree) else {
+            continue;
+        };
+        if typer.store().symbols.get(field).kind != SymbolKind::Field {
+            continue;
+        }
+        typer
+            .complete_symbol(field)
+            .map_err(PipelineFailure::Typer)?;
+        let initializer = match definition.rhs {
+            Some(rhs) => {
+                let ty = match typer.store().symbols.get(field).info {
+                    dotty_core::SymbolInfo::Complete(ty) => ty,
+                    _ => return Err(PipelineFailure::UnexpectedSourceShape("field type")),
+                };
+                let context = typer
+                    .field_initializer_context_for(field)
+                    .map_err(PipelineFailure::Typer)?;
+                Some(
+                    typer
+                        .type_expression_expected(rhs, context, ty)
+                        .map_err(PipelineFailure::Typer)?,
+                )
+            }
+            None => None,
+        };
+        let source_visibility = match &definition.metadata.visibility {
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
+                JvmFieldSourceVisibility::PrivateThis
+            }
+            _ => JvmFieldSourceVisibility::PlainPrivate,
+        };
+        fields.push(JvmFieldPlan {
+            field,
+            source_visibility,
+            initializer,
+        });
+    }
+    let mut methods = Vec::with_capacity(source_methods.len());
+    for source_method in source_methods {
+        typer
+            .complete_symbol(source_method.symbol)
+            .map_err(PipelineFailure::Typer)?;
+        let body = match source_method.rhs {
+            Some(rhs) => {
+                let context = typer
+                    .expression_context_for(source_method.symbol)
+                    .map_err(PipelineFailure::Typer)?;
+                Some(
+                    typer
+                        .type_expression(rhs, context)
+                        .map_err(PipelineFailure::Typer)?,
+                )
+            }
+            None => None,
+        };
+        let mut locals = parsed
+            .ast
+            .iter()
+            .filter_map(|(source_tree, node)| {
+                if !matches!(node.kind, TreeKind::ValDef(_)) {
+                    return None;
+                }
+                let binding = typer.typed_local_binding_at(source_id, source_tree)?;
+                (typer.store().symbols.get(binding.symbol()).owner == Some(source_method.symbol))
+                    .then_some(JvmLocalBinding {
+                        declaration: binding.declaration(),
+                        symbol: binding.symbol(),
+                        mutable: typer
+                            .store()
+                            .symbols
+                            .get(binding.symbol())
+                            .flags
+                            .contains(SymbolFlags::MUTABLE),
+                    })
+            })
+            .collect::<Vec<_>>();
+        locals.sort_by_key(|binding| binding.declaration.index());
+        methods.push(JvmMethodPlan {
+            method: source_method.symbol,
+            parameters: source_method.parameters,
+            locals,
+            body,
+        });
+    }
+    let unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: vec![JvmClassPlan {
+            class,
+            methods,
+            fields,
+            initialization,
+        }],
+    };
+    let caller_method = unit.classes[0].methods[0].method;
+    let applications = unit
+        .typed_ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::Apply(apply) = &node.kind else {
+                return None;
+            };
+            let function = unit.typed_ast.try_get(apply.function)?;
+            let TreeKind::Select(select) = &function.kind else {
+                return None;
+            };
+            matches!(
+                unit.typed_ast
+                    .try_get(select.qualifier)
+                    .map(|tree| &tree.kind),
+                Some(TreeKind::New(_))
+            )
+            .then_some(tree)
+        })
+        .collect::<Vec<_>>();
+    applications
+        .into_iter()
+        .map(|application| {
+            unit.resolve_constructor_call(class, caller_method, application, &definitions)
+                .map(|target| target.descriptor().as_str().to_owned())
+                .map_err(PipelineFailure::Codegen)
+        })
+        .collect()
+}
+
 fn assert_source_failure(
     label: &str,
     source: &str,
@@ -324,6 +521,16 @@ fn assert_source_failure(
         output.class_files().is_empty(),
         "{label} failure must not leave a partial class artifact"
     );
+}
+
+#[test]
+fn resolves_real_source_constructor_calls_with_package_and_primitive_references() {
+    let descriptors = resolve_source_constructor_calls(
+        "package example\nclass Counter(start: Int) { private var stored: Int = 1; def make(seed: Int): Int = { val local = seed; new Counter(seed); new Counter(local); new Counter(this.stored); 0 } }",
+    )
+    .expect("real source constructor applications should resolve");
+
+    assert_eq!(descriptors, ["(I)V", "(I)V", "(I)V"]);
 }
 
 fn find_single_source_class(

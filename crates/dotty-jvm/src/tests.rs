@@ -5572,8 +5572,12 @@ fn constructor_call_fixture(parameter_types: &[JvmType]) -> ConstructorCallFixtu
         links: SymbolLinks::default(),
     });
     let no_prefix = definitions.no_prefix;
-    let class_type = store.types.alloc(Type::TypeRef {
+    let package_type = store.types.alloc(Type::TypeRef {
         prefix: no_prefix,
+        target: TypeRefTarget::Symbol(package),
+    });
+    let class_type = store.types.alloc(Type::TypeRef {
+        prefix: package_type,
         target: TypeRefTarget::Symbol(class),
     });
     let declarations = store.scopes.alloc(Scope::new(Some(class)));
@@ -6041,6 +6045,58 @@ fn implicit_no_arg_resolution_requires_the_selected_declared_constructor() {
     assert_eq!(target.constructor_symbol(), fixture.constructor);
     assert_eq!(target.descriptor().as_str(), "()V");
     assert!(target.argument_types().is_empty());
+}
+
+#[test]
+fn implicit_no_arg_resolution_rejects_unplanned_class_fields() {
+    let mut fixture = constructor_call_fixture(&[]);
+    let field_name = fixture.store.names.intern("stored");
+    let field = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(field_name, Namespace::Term),
+        owner: Some(fixture.class),
+        kind: SymbolKind::Field,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Private,
+        info: SymbolInfo::Complete(fixture.definitions.int),
+        origin: SymbolOrigin::Source(dotty_core::SourceId::from_index(81)),
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let class_info = crate::identity::class_info(&fixture.store, fixture.class).unwrap();
+    let field_name = fixture.store.symbols.get(field).name;
+    fixture
+        .store
+        .scopes
+        .get_mut(class_info.declarations)
+        .enter(field_name, field);
+    let unit = JvmCompilationUnit {
+        store: &fixture.store,
+        typed_ast: &fixture.ast,
+        classes: vec![JvmClassPlan {
+            class: fixture.class,
+            methods: vec![JvmMethodPlan {
+                method: fixture.caller,
+                parameters: Vec::new(),
+                locals: Vec::new(),
+                body: Some(fixture.apply),
+            }],
+            fields: Vec::new(),
+            initialization: JvmClassInitializationPlan::ImplicitNoArg,
+        }],
+    };
+    assert_eq!(
+        unit.resolve_constructor_call(
+            fixture.class,
+            fixture.caller,
+            fixture.apply,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::FieldEmissionUnsupported {
+            class: fixture.class,
+            field,
+        })
+    );
 }
 
 #[test]

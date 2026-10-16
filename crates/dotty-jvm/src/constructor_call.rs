@@ -5,7 +5,7 @@ use dotty_core::ast::{ApplyKind, Tree, TreeKind, Typed};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::{SymbolKind, Visibility};
+use dotty_core::symbols::{SymbolInfo, SymbolKind, Visibility};
 use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
 use crate::{
@@ -38,6 +38,14 @@ pub(super) fn resolve(
             method: caller_method,
         });
     }
+    let caller_method_plan = caller_plan
+        .methods
+        .iter()
+        .find(|plan| plan.method == caller_method)
+        .ok_or(JvmCodegenError::CallerMethodNotInJvmPlan {
+            class: caller_class,
+            method: caller_method,
+        })?;
 
     let application = tree(unit.store, unit.typed_ast, apply_tree)?;
     let apply = match &application.kind {
@@ -81,7 +89,7 @@ pub(super) fn resolve(
             found: allocated_class,
         });
     }
-    let result_class = planned_class(unit, application.ty, apply_tree, definitions).ok();
+    let result_class = planned_result_class(unit, application.ty, owner_class, definitions);
     if result_class != Some(owner_class) {
         return Err(JvmCodegenError::JvmConstructorCallResultTypeMismatch {
             tree: apply_tree,
@@ -118,6 +126,14 @@ pub(super) fn resolve(
         .ok_or(JvmCodegenError::MissingClassPlan { class: owner_class })?;
     let class_metadata =
         class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
+    let class_info = crate::identity::class_info(unit.store, owner_class)?;
+    crate::emission::validate_emittable_class(
+        class_plan,
+        &class_metadata,
+        unit.store,
+        definitions,
+        class_info,
+    )?;
     if !unit.store.symbols.contains(constructor) {
         return Err(JvmCodegenError::UnknownMethod {
             method: constructor,
@@ -177,7 +193,13 @@ pub(super) fn resolve(
     let mut argument_types = Vec::with_capacity(apply.args.len());
     for (argument, expected) in apply.args.iter().copied().zip(expected_arguments) {
         let argument_tree = tree(unit.store, unit.typed_ast, argument)?;
-        let found = primitive_argument_type(unit.store, argument_tree.ty, definitions);
+        let found = primitive_argument_type(
+            unit,
+            caller_class,
+            caller_method_plan,
+            argument_tree,
+            definitions,
+        );
         if found != Some(*expected) {
             return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
                 tree: apply_tree,
@@ -289,18 +311,46 @@ fn planned_class(
     tree: TreeId<Typed>,
     definitions: &Definitions,
 ) -> Result<SymbolId, JvmCodegenError> {
-    match unit.reference_type(ty, definitions)? {
+    match crate::reference::project_constructor_type(unit, ty, definitions)? {
         JvmType::Reference(class) => Ok(class),
         _ => Err(unsupported(tree, ShapeError::TypeTreeNotCanonicalClass)),
     }
 }
 
-fn primitive_argument_type(
-    store: &SemanticStore,
+fn planned_result_class(
+    unit: &JvmCompilationUnit<'_>,
     ty: dotty_core::ids::TypeId,
+    expected_class: SymbolId,
+    definitions: &Definitions,
+) -> Option<SymbolId> {
+    match unit.store.types.try_get(ty)? {
+        Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        } if *prefix == definitions.no_prefix
+            && matches!(unit.store.types.try_get(*prefix), Some(Type::NoPrefix))
+            && *class == expected_class =>
+        {
+            Some(*class)
+        }
+        _ => crate::reference::project_constructor_type(unit, ty, definitions)
+            .ok()
+            .and_then(|ty| match ty {
+                JvmType::Reference(class) => Some(class),
+                _ => None,
+            }),
+    }
+}
+
+fn primitive_argument_type(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    caller_method: &JvmMethodPlan,
+    argument_tree: &Tree<Typed>,
     definitions: &Definitions,
 ) -> Option<JvmType> {
-    match store.types.try_get(ty)? {
+    let store = unit.store;
+    match store.types.try_get(argument_tree.ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmType::Int),
         Type::Constant(Constant::Boolean(_)) => Some(JvmType::Boolean),
         Type::TypeRef {
@@ -321,8 +371,106 @@ fn primitive_argument_type(
         {
             Some(JvmType::Boolean)
         }
+        Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(symbol),
+        } => primitive_term_reference_type(
+            unit,
+            caller_class,
+            caller_method,
+            argument_tree,
+            *prefix,
+            *symbol,
+            definitions,
+        ),
         _ => None,
     }
+}
+
+fn primitive_term_reference_type(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    caller_method: &JvmMethodPlan,
+    argument_tree: &Tree<Typed>,
+    prefix: dotty_core::TypeId,
+    symbol: SymbolId,
+    definitions: &Definitions,
+) -> Option<JvmType> {
+    let store = unit.store;
+    let target = store
+        .symbols
+        .contains(symbol)
+        .then(|| store.symbols.get(symbol))?;
+    let reference_is_planned = match target.kind {
+        SymbolKind::Parameter => {
+            target.owner == Some(caller_method.method)
+                && caller_method.parameters.contains(&symbol)
+                && is_ident_of(argument_tree, target.name)
+                && prefix == definitions.no_prefix
+                && matches!(store.types.try_get(prefix), Some(Type::NoPrefix))
+        }
+        SymbolKind::Local => {
+            target.owner == Some(caller_method.method)
+                && caller_method
+                    .locals
+                    .iter()
+                    .any(|binding| binding.symbol == symbol)
+                && is_ident_of(argument_tree, target.name)
+                && prefix == definitions.no_prefix
+                && matches!(store.types.try_get(prefix), Some(Type::NoPrefix))
+        }
+        SymbolKind::Field => {
+            if target.owner != Some(caller_class)
+                || !unit
+                    .classes
+                    .iter()
+                    .find(|plan| plan.class == caller_class)
+                    .is_some_and(|plan| plan.fields.iter().any(|field| field.field == symbol))
+            {
+                false
+            } else {
+                match &argument_tree.kind {
+                    TreeKind::Ident(ident) => {
+                        ident.name == target.name && is_this_prefix(store, prefix, caller_class)
+                    }
+                    TreeKind::Select(select) => {
+                        if select.name != target.name || select.backquoted {
+                            false
+                        } else {
+                            unit.typed_ast
+                                .try_get(select.qualifier)
+                                .is_some_and(|receiver| {
+                                    matches!(
+                                        &receiver.kind,
+                                        TreeKind::This(dotty_core::ast::This { qual: None })
+                                    ) && is_this_prefix(store, receiver.ty, caller_class)
+                                        && prefix == receiver.ty
+                                })
+                        }
+                    }
+                    _ => false,
+                }
+            }
+        }
+        _ => false,
+    };
+    if !reference_is_planned {
+        return None;
+    }
+    let semantic_type = match &target.info {
+        SymbolInfo::Complete(ty) => ty,
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => return None,
+    };
+    crate::descriptor::primitive_semantic_value_type(store, definitions, symbol, *semantic_type)
+        .ok()
+}
+
+fn is_ident_of(tree: &Tree<Typed>, name: dotty_core::Name) -> bool {
+    matches!(&tree.kind, TreeKind::Ident(ident) if ident.name == name && !ident.backquoted)
+}
+
+fn is_this_prefix(store: &SemanticStore, prefix: dotty_core::TypeId, class: SymbolId) -> bool {
+    matches!(store.types.try_get(prefix), Some(Type::ThisType { class: found }) if *found == class)
 }
 
 fn type_symbol(store: &SemanticStore, ty: dotty_core::ids::TypeId) -> Option<SymbolId> {
