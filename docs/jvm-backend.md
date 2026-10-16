@@ -106,6 +106,14 @@ No general Scala type erasure, reference boxing, Unit operand-stack
 representation, raw bytecode, source pipeline orchestration, TASTy integration,
 or macro support is part of this contract.
 
+Object-construction typing, canonical constructor and receiver identity,
+uninitialized-reference verifier constraints, and the multi-class planning
+boundary are recorded separately in
+[`jvm-object-creation-contract.md`](jvm-object-creation-contract.md). That
+contract is an audit only: the current backend does not emit object creation
+or reference locals, and direct method selection from `new C(...)` is
+currently rejected by the Typer as an unstable selection prefix.
+
 ## Canonical `Int` arithmetic
 
 Method bodies resolve typed regular applications against the canonical
