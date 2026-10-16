@@ -594,13 +594,16 @@ impl<'a> Validator<'_, 'a> {
             return Err(PickleError::SourceOrder { class: p.class });
         }
         let mut entered = HashSet::new();
+        let mut invalid_scope = false;
         for symbol in class_scope.entered_symbols() {
             self.charge(1)?;
             if !expected.contains(&symbol) || !entered.insert(symbol) {
-                return Err(PickleError::ScopeMembers { owner: p.class });
+                // Finish the bounded scan before reporting membership: the
+                // winning error must not depend on HashMap iteration order.
+                invalid_scope = true;
             }
         }
-        if entered != expected {
+        if invalid_scope || entered != expected {
             return Err(PickleError::ScopeMembers { owner: p.class });
         }
         for symbol in std::iter::once(p.constructor.symbol)

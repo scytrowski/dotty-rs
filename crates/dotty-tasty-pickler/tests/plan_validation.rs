@@ -675,3 +675,38 @@ fn source_constructor_clause_collections_consume_the_validation_budget() {
         })
     );
 }
+
+#[test]
+fn scope_budget_errors_are_independent_of_the_first_invalid_entry() {
+    for bad_first in [true, false] {
+        let mut f = Fixture::new();
+        let method = f.methods[0].symbol;
+        let constructor = f.constructor.symbol;
+        let name = f.store.symbols.get(method).name;
+        let scope = f.store.scopes.get_mut(f.scope);
+        scope.remove(method);
+        scope.remove(constructor);
+        // One bucket fixes entry order independently of HashMap randomization.
+        // Both states are malformed and exceed the same remaining item budget.
+        let entries = if bad_first {
+            [f.package, constructor, method]
+        } else {
+            [constructor, method, f.package]
+        };
+        for symbol in entries {
+            scope.enter(name, symbol);
+        }
+        let limits = ValidationLimits {
+            max_items: 8,
+            ..ValidationLimits::default()
+        };
+        assert_eq!(
+            f.plan().validate_with_limits(limits).err(),
+            Some(PickleError::LimitExceeded {
+                kind: LimitKind::Items,
+                limit: 8
+            }),
+            "bad_first={bad_first}"
+        );
+    }
+}
