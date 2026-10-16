@@ -201,18 +201,36 @@ must run under JDK 21+ `java -Xverify:all`.
 
 | Form | Current status |
 | --- | --- |
-| Top-level ordinary class in the same validated emission unit | Candidate for the bounded subset |
-| Plain primary constructor with primitive `Int`/`Boolean` arguments | Required future constructor target |
-| Explicit or syntactic zero-argument primary constructor | Canonical class-owned constructor symbol required |
+| Top-level ordinary class in the same validated emission unit | Supported in source order by the root test adapter's one-session batch path |
+| Plain public primary constructor with primitive `Int`/`Boolean` arguments | Supported with canonical class, constructor, and constructor-owned parameter identities |
+| Public implicit no-argument primary constructor | Supported when the source shape proves the backend's exact `()V` constructor |
 | `val c = new C(args)`; discard or read `c` in a straight-line method | Supported with exact class identity, `astore`/`aload`, definite initialization, and category-one `pop` |
 | `val c = new C(args)` and later `c.method()` | Supported for an exact planned class and bounded primitive/Unit method signature |
-| Method receiver when classes declare same-spelled methods | Resolve by selected method and receiver `SymbolId`/`TypeId` |
 | Direct `new C(args).method()` | Supported after constructor initialization for the bounded method subset |
+| Method receiver when planned classes declare same-spelled methods | Selected method and receiver `SymbolId`/`TypeId` preserve the exact owner |
+| Private constructor call, wrong constructor arity/type, or missing external class metadata | Rejected at the originating Typer or backend stage; no artifact is published |
 | `var` reference local, reference method parameter/result, arbitrary classpath receiver | Unsupported; no descriptor fallback |
 | Generic, abstract, trait, external, secondary, or unplanned constructor | Unsupported for JVM emission |
 | Nested allocation or allocation/reference inside branch or short-circuit CFG | Unsupported until verifier-aware reference CFG exists |
 | Duplicate emitted internal class name | `JvmCompilationUnit` validation error |
 
-Reference-aware CFG merging and reference-valued method descriptors remain
-future work. Methods using reference creation or receivers with symbolic
-branches fail with a typed unsupported-control-flow error.
+`tests/fixtures/jvm/CounterObjects.scala` is the end-to-end source gate for this
+slice. One real lexer/parser/namer/typer session builds plans for `Counter` and
+`CounterClient`; the backend emits both classfiles in memory before the root
+adapter publishes either. Decoded descriptors and instructions cover the
+constructor-owned `start` parameter, private mutable field initialization,
+reference local stores/loads, exact `invokevirtual` targets, and primitive
+results. A Java-only harness checks `run(10) == 11`, `run(0) == 1`,
+`direct() == 42`, and `independent() == 31` under `java -Xverify:all`. Fresh
+frontends must produce byte-identical classfiles in source order.
+
+The JDK 21 CI gate sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing `java`,
+`javac`, or `javap` fails the required test instead of skipping it. Rejected
+source forms assert their actual Typer or backend error stage and publish no
+classfiles. Forged, stale, wrong-owner, and unplanned typed receiver targets
+are also covered by `dotty-jvm` unit tests without manufacturing source typed
+trees in the end-to-end harness.
+
+Reference-aware CFG merging remains the next required JVM backend increment.
+Reference-valued method descriptors, mutable reference locals, reference
+results in `If`, and reference-bearing `While` remain unsupported.
