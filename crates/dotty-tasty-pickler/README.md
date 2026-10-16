@@ -1,9 +1,10 @@
 # Source semantic TASTy pickler boundary
 
 This crate implements **read-only plan validation, semantic type/reference
-projection and declaration skeletons** for Scala 3.9.0 TASTy (28.9.0).
-Declaration documents are explicitly incomplete: method RHS emission and
-completed interoperable artifacts remain downstream work.
+projection, declaration skeletons and complete literal-body files** for Scala
+3.9.0 TASTy (28.9.0). `ValidatedPicklePlan::pickle()` returns owned `PickledTasty`
+bytes with the actual existing typed RHS. Independent Scala compilation of this
+producer's output remains the #1195 gate.
 
 `PicklePlan` borrows the canonical semantic store, Definitions, untyped/typed ASTs,
 source semantic index and a `SourceTypedBindings` provider. Source metadata is
@@ -93,7 +94,8 @@ parent and the frozen oracle's `APPLY/SELECTin/NEW` shape. The default construct
 has EMPTYCLAUSE, direct Unit return syntax, no RHS and its provenance-required
 STABLE marker. Its semantic signature still returns the class. The ordinary
 parameterless method has an Int IDENTtpt and no fabricated empty clause,
-METHODtype payload, abstract flag or substitute RHS. Public visibility and empty
+METHODtype payload, abstract flag or substitute RHS. Complete output attaches
+the actual typed Int literal after its declared return syntax. Public visibility and empty
 modifier/annotation tails are checked from symbol records; other metadata is
 unsupported. Parameterized/empty-parens methods and other class forms remain
 outside the validated v0 contract.
@@ -103,8 +105,8 @@ ASTs and SOURCEFILEattr, and structural validation before returning bytes. Its
 tooling string says `incomplete declaration skeleton`, with a fixed diagnostic
 UUID. Positions, Comments and the compiler SourceFile annotation are omitted per
 the reduced-oracle contract. **These bytes are not a completed compiler artifact
-and carry no Scala interoperability claim.** #1194 adds real RHS emission; #1195
-owns independent compilation. Tests compare canonicalized declarations against
+and carry no Scala interoperability claim.** The separate complete-file API
+adds real RHS emission; #1195 owns independent compilation. Tests compare canonicalized declarations against
 the frozen Scala Answer fixture, normalizing only the real method RHS, the
 permitted SourceFile annotation omission, sharing layout and header/section data.
 
@@ -118,3 +120,33 @@ cargo test --locked -p dotty-tasty-pickler
 See the [design contract](../../docs/tasty-pickler-design.md) and independently
 verified [oracle](../../docs/tasty-pickler-oracle.md) for the frozen shape, error
 and ownership rules, and follow-up encoding/interoperability gates.
+
+`ValidatedPicklePlan::pickle_with_limits(PickleLimits)` shares the validated
+declaration builder and emits `TreeKind::Literal(Constant::Int)` from the exact
+method-plan root. `Tree::ty` must be `Type::Constant(Constant::Int(value))` with
+the same value; the declared method result remains `Definitions.int`. The wire
+RHS is one `INTconst` using the safe codec's signed integer encoding. No extra
+type tree or widening node is required by the pinned oracle. Unsupported
+expression kinds are rejected without following their children; no recursive
+expression serializer or truncation is introduced.
+
+The owned result exposes `bytes()`, `source()`, `intended_tasty_path()`, canonical
+`declarations()` with AST-relative addresses, and `body(method_symbol)` with the
+exact serialized typed root. It writes no files. Existing source-span validation
+remains in force; Positions, Comments and the compiler SourceFile annotation
+remain omitted under the reduced-oracle contract.
+
+Complete output uses tooling string `dotty-rs minimal semantic pickler` and the
+pinned Scala PJW64 UUID construction: names payload XOR ASTs payload in the first
+64 bits, Attributes payload in the second, both big-endian. This is deterministic
+content identity, not a cryptographic digest. A regression verifies that algorithm
+against the unchanged Scala-generated Answer fixture.
+
+`PickleLimits` adds a default **16 MiB whole-file budget**, including the header,
+name table, section framing and payloads. The final output size is measured with
+the existing codec before full-file encoding; excess returns
+`LimitExceeded { kind: FileBytes, .. }`. `ProjectionLimits` and `AstBuildLimits`
+also apply, including wire depth and AST bytes. Assembly failures return no
+partial artifact and leave all borrowed semantic stores and arenas unchanged.
+Rust codec round trips and frozen structural/body comparisons are covered here;
+compiler interoperability is not claimed before #1195.
