@@ -313,8 +313,10 @@ and locals keep their existing loads. Other receivers, fields absent from the
 plan, stale targets, and prefixes that do not identify the current instance
 return contextual errors. Field reads within `If`, `While`, or other branching
 CFG regions are rejected explicitly until the stack-map analyzer can track the
-temporary reference operand. Whole-class emission uses this same lowering path
-for planned methods and emits no artifact if any method fails.
+temporary reference operand. Straight-line `Block` results may carry the type
+of a planned field into this same validated read path. Whole-class emission
+uses this lowering path for planned methods and emits no artifact if any
+method fails.
 
 This metadata layer does not encode Scala operator names, nested-class `$`
 names, companion/module classes, trait forwarders, bridges, private-access
@@ -397,6 +399,22 @@ checked, and `javap -c -v` verifies the descriptors, branch/Boolean opcodes,
 and `StackMapTable`. The Java harness checks short-circuit versus eager
 divide-by-zero behavior, Boolean `==`/`!=` truth tables, and side-effect counts
 for short-circuit and strict operators.
+
+`Counter.scala` runs through the same real frontend assembly with a canonical
+constructor parameter, private mutable `current:I`, and public `get`, `set`,
+and `increment` methods. `PrivateFields.scala` covers private final `I` and
+`Z` fields, including true and false Boolean getters. Both stateful fixtures
+are compiled in two fresh frontend sessions and their complete class bytes
+must match. Their decoded constructor descriptors, field flags and references,
+and method instructions are checked structurally; the JDK gate uses
+`javap -c -v` and Java harnesses under `-Xverify:all`. Negative real-source
+cases cover wrong initializer types, immutable assignment, unsupported
+constructor forms, and field reads inside branches; failed compilation must
+leave no class artifact. See
+[`jvm-stateful-class-contract.md`](jvm-stateful-class-contract.md).
+
+These fixtures test the bounded emitted class shape. They do not establish
+Scala public accessor, bridge, or TASTy compatibility.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
 Negative source tests verify that field initialization, invalid while

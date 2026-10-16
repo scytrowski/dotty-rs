@@ -1210,6 +1210,54 @@ fn block_value_type(
     {
         return Ok(Some(JvmType::Boolean));
     }
+    if context.store.symbols.contains(*symbol)
+        && context.store.symbols.get(*symbol).kind == dotty_core::symbols::SymbolKind::Field
+    {
+        let Some((_, class)) = context.call_context else {
+            return Err(JvmCodegenError::JvmFieldReadContextUnavailable {
+                tree,
+                method: context.method.symbol(),
+            });
+        };
+        let class_symbol = class.identity().symbol();
+        if context.control_flow_depth > 0 {
+            return Err(JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
+                tree,
+                method: context.method.symbol(),
+                field: *symbol,
+            });
+        }
+        if context.store.symbols.get(*symbol).owner != Some(class_symbol) {
+            return Err(JvmCodegenError::WrongOwner {
+                symbol: *symbol,
+                expected: class_symbol,
+                actual: context.store.symbols.get(*symbol).owner,
+            });
+        }
+        if !class.fields().iter().any(|field| field.symbol() == *symbol) {
+            return Err(JvmCodegenError::FieldNotInJvmPlan {
+                tree,
+                class: class_symbol,
+                field: *symbol,
+            });
+        }
+        let symbol_type = match context.store.symbols.info(*symbol) {
+            SymbolInfo::Complete(symbol_type) => *symbol_type,
+            SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                return Err(JvmCodegenError::MissingSemanticInfo { symbol: *symbol });
+            }
+            SymbolInfo::Error => {
+                return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *symbol });
+            }
+        };
+        return crate::descriptor::primitive_semantic_value_type(
+            context.store,
+            context.definitions,
+            *symbol,
+            symbol_type,
+        )
+        .map(Some);
+    }
     let Some(parameter) = context
         .method
         .parameters()
