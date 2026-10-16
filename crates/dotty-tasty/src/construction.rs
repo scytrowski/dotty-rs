@@ -524,3 +524,22 @@ impl AstBuilder {
         Err(AstBuildError::Limit("layout passes"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_layout_sizes_reject_machine_and_wire_overflow() {
+        let builder = AstBuilder::new(AstBuildLimits {
+            max_bytes: usize::MAX,
+            ..AstBuildLimits::default()
+        });
+        assert_eq!(builder.add(usize::MAX, 1), Err(AstBuildError::Overflow));
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(
+            builder.bounded(u32::MAX as usize + 1),
+            Err(AstBuildError::Overflow)
+        );
+    }
+}
