@@ -99,6 +99,22 @@ resolution.
   unlinking an open file, removing its path does not invalidate the already
   open handle. Central directories and compressed entries are each bounded
   to 256 MiB before allocation.
+- `JdkClassPath::module_catalog` explicitly reads, validates, and projects
+  each opened JMOD's exact `classes/module-info.class` into an owned
+  `JdkModuleCatalog`. Catalog entries are sorted by their descriptor module
+  names; duplicate names and JMOD filename/descriptor mismatches are typed
+  errors. Requires/exports/opens/uses/provides order and flags, optional
+  versions, `ModulePackages`, `ModuleMainClass`, and `ClassOrigin::Jmod` are
+  preserved as owned data. This is JVM JPMS metadata, separate from Scala
+  module symbols and source resolution.
+- Module metadata decoding is lazy: `JdkClassPath::new` still only opens and
+  indexes JMOD archives as before. Each explicit `module_catalog()` call
+  decodes descriptors from those same open file-backed entries, returns a
+  fresh owned snapshot, and retains no module-info bytes or global cache.
+  Missing descriptors, malformed class files, failed JPMS validation, bad
+  constant-pool references, duplicate module identities, and filename
+  mismatches return `JdkModuleCatalogError` with the JMOD origin and underlying
+  decoder/archive cause when present.
 - Two package-evidence queries with distinct contracts:
 
   | Check | Meaning |
@@ -176,7 +192,10 @@ resolution.
   together with store allocations.
 
 ### Explicitly out of scope
-- `module-info.class`, `ACC_MODULE`, and the `Module*` attributes.
+- JPMS module-path resolution, readability/accessibility checks, module-layer
+  initialization, service loading, JIMAGE, and `ct.sym`. The catalog reports
+  validated descriptor metadata only; it does not alter class lookup or
+  determine which modules a Scala source file can read.
 - Bytecode verification, `StackMapTable` type-checking,
   `invokedynamic`/`CONSTANT_Dynamic` call-site resolution.
 - Explicit field/method/interface-method *overload* resolution (JVMS
@@ -612,6 +631,11 @@ evidence retain their contracts.
   came from (directory/JAR/JMOD path, for diagnostics and
   duplicate-class detection), and which decoder (`.class`/`.tasty`)
   they need.
+- `JdkModuleCatalog` / `JdkModuleDescriptor` — explicit, owned JPMS metadata
+  from validated JMOD module-info class files; directive names use dotted
+  Java spelling and retain class-file order. `JdkModuleCatalog::get` looks up
+  the descriptor's authoritative module name. These types are not used by
+  `ClassLoader`, `ModuleIdentity`, or the Scala semantic model.
 - `ClassRepository` (crate-private) — the state machine described in §5,
   keyed by `BinaryName`, storing `SymbolId`s (not shared-ownership
   symbols — a `SymbolId` is already `Copy` and session-stable).
@@ -710,6 +734,11 @@ exact error variants asserted rather than `is_err()`.
   `DOTTY_JDK_JMODS=/path/to/jdk/jmods cargo test -p dotty-classloader --test real_jdk_class_path -- --ignored`.
   The test is ignored in the normal suite so CI does not depend on a local JDK;
   when explicitly run, a missing or invalid JDK path is a test failure.
+- The ignored JDK metadata integration test
+  `reads_validated_module_metadata_from_real_jdk_modules` uses the same
+  `DOTTY_JDK_JMODS`/`JAVA_HOME` setting and validates the catalog from real
+  `java.base` and `java.net.http` JMODs, including deterministic names,
+  dependencies, exports, JMOD origins, and unchanged regular class lookup.
 - Differential testing against `javap -p -v` on real fixtures is used
   throughout to confirm exact attribute/descriptor/signature shapes
   before writing an assertion against them (e.g. confirming

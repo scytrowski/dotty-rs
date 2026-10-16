@@ -76,3 +76,58 @@ fn finds_and_decodes_classes_from_real_jdk_modules() {
             .is_none()
     );
 }
+
+#[test]
+#[ignore = "requires an installed JDK 21+; see docs/classloader.md"]
+fn reads_validated_module_metadata_from_real_jdk_modules() {
+    let jmods = jmods_directory()
+        .canonicalize()
+        .expect("the supplied JDK jmods directory must exist");
+    let class_path = JdkClassPath::new(&jmods).expect("the supplied JMOD directory must open");
+    let catalog = class_path
+        .module_catalog()
+        .expect("real JDK module descriptors must validate");
+
+    let names = catalog
+        .modules()
+        .iter()
+        .map(|module| module.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+
+    let java_base = catalog.get("java.base").expect("java.base is in the JDK");
+    assert_eq!(java_base.name, "java.base");
+    assert_eq!(
+        java_base.origin,
+        ClassOrigin::Jmod(jmods.join("java.base.jmod"))
+    );
+    assert!(java_base.version.is_some());
+
+    let http = catalog
+        .get("java.net.http")
+        .expect("java.net.http is in the JDK");
+    assert_eq!(
+        http.origin,
+        ClassOrigin::Jmod(jmods.join("java.net.http.jmod"))
+    );
+    assert_eq!(
+        http.requires
+            .iter()
+            .map(|row| row.module.as_str())
+            .collect::<Vec<_>>(),
+        ["java.base"]
+    );
+    assert!(
+        http.exports
+            .iter()
+            .any(|row| row.package == "java.net.http" && row.targets.is_empty())
+    );
+
+    // Metadata inspection is explicit and does not affect regular lookup.
+    assert_real_class(
+        &class_path,
+        &jmods,
+        "java.net.http",
+        "java/net/http/HttpClient",
+    );
+}

@@ -10,6 +10,12 @@ module open for the lifetime of `JdkClassPath`; the measured increment was 69
 descriptors, which is acceptable for the current JDK runtime layout but should
 be revisited if callers impose a low descriptor limit.
 
+These #1161 measurements predate the explicit JPMS metadata API and do not
+measure descriptor decoding. `JdkClassPath::module_catalog()` performs that
+work only when called, reusing the already-open file-backed JMODs and retaining
+no descriptor byte buffers. Runtime, memory, and repeated-call costs for the
+catalog are tracked separately by #1201.
+
 ## Summary
 
 Each cell is **median / p95 across 10 independently launched processes**.

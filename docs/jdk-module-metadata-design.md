@@ -235,8 +235,11 @@ Keep the next work incremental and separate:
 2. **Descriptor validation and metadata extras**: completed by #1199 for
    companion attributes and descriptor validation. JDK-specific attributes
    remain raw unless a later issue requires typed metadata.
-3. **Catalog**: expose module descriptors through a classpath/module catalog
-   without doing resolution in the class-file decoder.
+3. **Catalog**: completed by #1200. `JdkClassPath::module_catalog` lazily
+   reads each existing file-backed JMOD's `classes/module-info.class`, runs
+   the explicit descriptor validator, and returns owned metadata sorted by
+   descriptor name. The catalog rejects duplicate module identities and
+   filename/descriptor mismatches; it does not perform resolution.
 4. **Benchmark**: measure decoding and metadata projection on a bounded JDK
    fixture set; do not benchmark full JMOD archive loading as codec work.
 5. **Compatibility gate**: compare against the pinned Java 21 oracle and add
