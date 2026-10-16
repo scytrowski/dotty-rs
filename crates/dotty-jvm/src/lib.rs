@@ -143,7 +143,7 @@ pub struct JvmMethodDescriptor {
     result: JvmReturnType,
 }
 
-/// Invocation mode selected by the bounded same-class call-target resolver.
+/// Invocation mode selected by the bounded planned-instance call resolver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmInvocationKind {
     /// Ordinary dynamically dispatched instance invocation.
@@ -157,7 +157,7 @@ pub enum JvmConstructorInvocationKind {
     Special,
 }
 
-/// A validated target for a same-class typed instance call.
+/// A validated target for a typed instance call on a planned class receiver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmCallTarget {
     owner_internal_name: String,
@@ -166,6 +166,8 @@ pub struct JvmCallTarget {
     method: SymbolId,
     invocation: JvmInvocationKind,
     result: JvmReturnType,
+    receiver_tree: Option<TreeId<Typed>>,
+    receiver_class: SymbolId,
 }
 
 /// Exact validated constructor target for a typed `new C(args)` application.
@@ -878,8 +880,8 @@ pub enum JvmCodegenError {
         index: usize,
         found: JvmExpressionFlow,
     },
-    /// A same-class call occurs in a control-flow branch whose verifier frames
-    /// cannot represent the temporary reference receiver.
+    /// A virtual call occurs in a control-flow branch whose verifier frames
+    /// cannot represent its temporary reference receiver.
     JvmCallInUnsupportedControlFlow {
         tree: TreeId<Typed>,
         method: SymbolId,
@@ -1104,6 +1106,13 @@ pub enum JvmCodegenError {
         expected: JvmReturnType,
         found: Option<JvmReturnType>,
     },
+    /// Lowering the selected receiver did not produce the exact planned class value.
+    JvmCallReceiverFlowMismatch {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+        expected: SymbolId,
+        found: JvmExpressionFlow,
+    },
     /// The class plan cannot prove that synthesizing the minimal constructor is safe.
     UnsupportedConstructor { class: SymbolId },
     /// The class's parent list is not exactly its canonical `Object` type.
@@ -1229,6 +1238,10 @@ pub enum UnsupportedJvmCallShapeKind {
     UnsupportedFunctionTree,
     /// A selected member's receiver is not a `this` tree.
     NonThisReceiver,
+    /// A receiver is not an immutable local or a validated direct constructor result.
+    UnsupportedReferenceReceiver,
+    /// A local receiver is mutable or missing from the caller's immutable-local plan.
+    MutableOrUnplannedReferenceReceiver,
     /// A selected member's `this` receiver is not the current class.
     NonCurrentThis,
     /// A selected member uses a qualified `this` expression.
@@ -1426,6 +1439,16 @@ impl JvmCallTarget {
     pub const fn result(&self) -> JvmReturnType {
         self.result
     }
+
+    /// Exact typed expression used as the receiver, or `None` for implicit `this`.
+    pub const fn receiver_tree(&self) -> Option<TreeId<Typed>> {
+        self.receiver_tree
+    }
+
+    /// Canonical class identity that must be present on the operand stack.
+    pub const fn receiver_class(&self) -> SymbolId {
+        self.receiver_class
+    }
 }
 
 impl JvmConstructorCallTarget {
@@ -1486,7 +1509,7 @@ impl JvmMethodMetadata {
         &self.descriptor
     }
 
-    /// Conservative flags for a public ordinary instance method.
+    /// Conservative flags for a planned ordinary instance method.
     pub const fn access_flags(&self) -> dotty_classfile::access_flags::MethodAccessFlags {
         self.access_flags
     }
@@ -1806,6 +1829,24 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
         call_target::resolve_same_class_call(self, caller_class, caller_method, call, definitions)
+    }
+
+    /// Resolves a typed instance call on `this`, a validated direct `new`, or
+    /// an immutable initialized local of an exact planned class.
+    ///
+    /// The selected `TermRef` symbol, receiver class, owner declaration scope,
+    /// class/method plans, visibility, primitive descriptor, and call result
+    /// must all agree. This read-only resolver emits no instructions and does
+    /// not validate argument flow; method-body lowering performs those checks
+    /// while evaluating the receiver once before arguments in source order.
+    pub fn resolve_planned_instance_call(
+        &self,
+        caller_class: SymbolId,
+        caller_method: SymbolId,
+        call: TreeId<Typed>,
+        definitions: &Definitions,
+    ) -> Result<JvmCallTarget, JvmCodegenError> {
+        call_target::resolve_instance_call(self, caller_class, caller_method, call, definitions)
     }
 
     /// Resolves a typed `Apply(Select(New(...), <init>), args)` to the exact

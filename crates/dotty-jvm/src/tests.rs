@@ -2996,19 +2996,15 @@ fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
     let mut nonpublic = SignatureFixture::new(0);
     prepare_signature_class(&mut nonpublic, "Answer");
     nonpublic.store.symbols.get_mut(nonpublic.method).visibility = Visibility::Private;
-    assert_eq!(
-        JvmClassPlan {
-            class: nonpublic.class,
-            fields: Vec::new(),
-            methods: vec![nonpublic.plan.clone()],
-            initialization: JvmClassInitializationPlan::Unsupported,
-        }
-        .metadata(&nonpublic.store, &nonpublic.definitions),
-        Err(JvmCodegenError::UnsupportedJvmVisibility {
-            symbol: nonpublic.method,
-            visibility: Visibility::Private,
-        })
-    );
+    let private_metadata = JvmClassPlan {
+        class: nonpublic.class,
+        fields: Vec::new(),
+        methods: vec![nonpublic.plan.clone()],
+        initialization: JvmClassInitializationPlan::Unsupported,
+    }
+    .metadata(&nonpublic.store, &nonpublic.definitions)
+    .expect("plain private methods have valid JVM metadata");
+    assert!(private_metadata.methods()[0].access_flags().is_private());
 
     let mut final_method = SignatureFixture::new(0);
     prepare_signature_class(&mut final_method, "Answer");
@@ -7470,18 +7466,16 @@ fn rejects_visibility_flags_static_extension_and_constructor_call_targets() {
         ApplyKind::Regular,
         int_type,
     );
-    assert_eq!(
-        private.unit().resolve_same_class_call(
+    let target = private
+        .unit()
+        .resolve_same_class_call(
             private.class,
             private.methods[1],
             call,
             &private.definitions,
-        ),
-        Err(JvmCodegenError::UnsupportedJvmVisibility {
-            symbol: private_method,
-            visibility: Visibility::Private,
-        })
-    );
+        )
+        .expect("private calls within the owning class are valid");
+    assert_eq!(target.method_symbol(), private_method);
 
     for (flag, expected) in [
         (SymbolFlags::STATIC, UnsupportedJvmSymbolFlag::Static),
