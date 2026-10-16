@@ -1,0 +1,41 @@
+{
+  "compiler_artifacts_sha256": {
+    "compiler-interface-1.12.0.jar": "92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3",
+    "scala-asm-9.9.0-scala-1.jar": "75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375",
+    "scala-library-3.9.0.jar": "b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd",
+    "scala3-compiler_3-3.9.0.jar": "3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a",
+    "scala3-interfaces-3.9.0.jar": "64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db",
+    "scala3-library_3-3.9.0.jar": "9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba",
+    "tasty-core_3-3.9.0.jar": "66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f",
+    "util-interface-1.11.5.jar": "1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af"
+  },
+  "generation": "run.py generate; dotty.tools.dotc.Main -classpath <pinned-jars> -color:never -sourceroot . -Yprint-tasty -d <fresh-output> *.scala (cwd=tests/fixtures/tasty_pickler)",
+  "jdk_release": {
+    "IMPLEMENTOR": "Eclipse Adoptium",
+    "IMPLEMENTOR_VERSION": "Temurin-21.0.8+9",
+    "JAVA_VERSION": "21.0.8",
+    "OS_ARCH": "x86_64"
+  },
+  "scala_source_revision": "777528f19a58e794c9954a42f433373472ec57f8",
+  "scala_version": "3.9.0",
+  "schema": 1,
+  "sources_sha256": {
+    "Answer.scala": "a6dc526f51dfce838872242246750e833ce10b77ffdb2620745503d66bfd7b22",
+    "Declarations.scala": "66777dae06c9fccebde35e7cf2515e5b07fe288397af07efcf759df8d845cba0",
+    "Empty.scala": "ae39954e680796910cc182c92768ec8da29b98a0819a5decc468a2f2f845877a",
+    "Parameters.scala": "caa5b61881953e96f63f4ad2b44a74674cefe6c7805d13fcee0de082b3baa9e0",
+    "References.scala": "e2e7e02c0a424c2dec7dcc4b9d4de9c7752b4d2568c1639bbcf40dfda7455365"
+  },
+  "tasty_sha256": {
+    "Empty.tasty": "bfacda2b842f4dcfbefe8d4dafe697847e505a2380df0a1eb0a2abdad3155eef",
+    "example/Answer.tasty": "1cf021c302e2bf64fabed58cf7ea1c80689726ad3b198d01d9facb6b2776a4c4",
+    "example/Declarations.tasty": "06af714d14c013aa926110768a0dc3f429361d0645b4e638094f6499138179c6",
+    "example/Parameters.tasty": "f87e10ad2e0b25a3b32de14b7c9eb03b78c3d0fb29c3c9bc537f4634987477d5",
+    "example/References.tasty": "26c79a5c953316f6c98a29c32e4386e71217deeb8c0432ae00db0f51be2a647f"
+  },
+  "tasty_version": [
+    28,
+    9,
+    0
+  ]
+}
