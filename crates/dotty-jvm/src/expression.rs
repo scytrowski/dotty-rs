@@ -152,6 +152,7 @@ struct JvmLoweringContext<'a> {
     control_flow_depth: usize,
     first_field_read: Option<(TreeId<Typed>, SymbolId)>,
     first_field_write: Option<(TreeId<Typed>, SymbolId)>,
+    first_object_creation: Option<TreeId<Typed>>,
     node_visits: usize,
 }
 
@@ -173,6 +174,7 @@ impl<'a> JvmLoweringContext<'a> {
             control_flow_depth: 0,
             first_field_read: None,
             first_field_write: None,
+            first_object_creation: None,
             node_visits: 0,
         }
     }
@@ -258,6 +260,7 @@ pub(super) fn lower_method_body(
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
     validate_field_access_control_flow(&context, &code)?;
+    validate_object_creation_control_flow(&context, &code)?;
     Ok(code)
 }
 
@@ -300,7 +303,23 @@ pub(super) fn lower_planned_method_body(
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
     validate_field_access_control_flow(&context, &code)?;
+    validate_object_creation_control_flow(&context, &code)?;
     Ok(code)
+}
+
+fn validate_object_creation_control_flow(
+    context: &JvmLoweringContext<'_>,
+    code: &CodeBuilder,
+) -> Result<(), JvmCodegenError> {
+    if code.has_branches()
+        && let Some(tree) = context.first_object_creation
+    {
+        return Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
+            tree,
+            method: context.method.symbol(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_field_access_control_flow(
@@ -1407,6 +1426,11 @@ fn emit_apply(
         };
         (application.function, application.args.clone())
     };
+
+    if is_constructor_application(context, function)? {
+        return emit_object_creation(context, tree_id, &arguments, code, depth);
+    }
+
     let intrinsic = crate::resolve_boolean_intrinsic(
         context.store,
         context.typed_ast,
@@ -1517,6 +1541,254 @@ fn emit_apply(
         JvmReturnType::Value(value) => Flow::Value(value),
         JvmReturnType::Void => Flow::Unit,
     })
+}
+
+fn is_constructor_application(
+    context: &JvmLoweringContext<'_>,
+    function: TreeId<Typed>,
+) -> Result<bool, JvmCodegenError> {
+    let function = context.tree(function)?;
+    let TreeKind::Select(select) = &function.kind else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        &context.tree(select.qualifier)?.kind,
+        TreeKind::New(_)
+    ))
+}
+
+fn emit_object_creation(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    arguments: &[TreeId<Typed>],
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let Some((unit, class, _)) = context.call_context else {
+        return Err(JvmCodegenError::JvmConstructorCallContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    };
+    if context.control_flow_depth > 0 {
+        return Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    }
+
+    let target = unit.resolve_constructor_call(
+        class.identity().symbol(),
+        context.method.symbol(),
+        tree_id,
+        context.definitions,
+    )?;
+    if target.argument_types().len() != arguments.len() {
+        return Err(JvmCodegenError::JvmConstructorCallArityMismatch {
+            tree: tree_id,
+            constructor: target.constructor_symbol(),
+            expected: target.argument_types().len(),
+            found: arguments.len(),
+        });
+    }
+
+    let mut budget = 0;
+    for argument in arguments {
+        validate_constructor_argument(context, tree_id, *argument, depth + 1, &mut budget)?;
+    }
+
+    code.new_object(target.owner_internal_name())
+        .and_then(CodeBuilder::dup)
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+
+    for (argument, expected) in arguments
+        .iter()
+        .copied()
+        .zip(target.argument_types().iter().copied())
+    {
+        let found = emit_expression(context, argument, code, depth + 1)?;
+        if found != Flow::Value(expected) {
+            return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                tree: tree_id,
+                argument,
+                expected,
+                found: match found {
+                    Flow::Value(value) => Some(value),
+                    Flow::Unit | Flow::Diverges => None,
+                },
+            });
+        }
+    }
+
+    code.invokespecial(
+        target.owner_internal_name(),
+        "<init>",
+        target.descriptor().as_str(),
+    )
+    .map_err(|error| JvmCodegenError::CodeBuilder {
+        tree: tree_id,
+        error,
+    })?;
+    context.first_object_creation.get_or_insert(tree_id);
+    Ok(Flow::Value(target.result_type()))
+}
+
+fn validate_constructor_argument(
+    context: &JvmLoweringContext<'_>,
+    constructor_call: TreeId<Typed>,
+    tree_id: TreeId<Typed>,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<(), JvmCodegenError> {
+    let unsupported = || JvmCodegenError::UnsupportedJvmConstructorArgument {
+        tree: constructor_call,
+        argument: tree_id,
+    };
+    let tree = context.tree(tree_id)?;
+    if depth >= JVM_EXPRESSION_DEPTH_LIMIT {
+        return Err(JvmCodegenError::ExpressionDepthExceeded {
+            tree: tree_id,
+            position: tree.position,
+            limit: JVM_EXPRESSION_DEPTH_LIMIT,
+        });
+    }
+    if *budget >= JVM_EXPRESSION_NODE_BUDGET {
+        return Err(JvmCodegenError::ExpressionNodeBudgetExceeded {
+            tree: tree_id,
+            limit: JVM_EXPRESSION_NODE_BUDGET,
+        });
+    }
+    *budget += 1;
+    validate_tree_type(context.store, tree_id, tree.ty)?;
+
+    match &tree.kind {
+        TreeKind::Literal(literal) => {
+            let primitive = match literal.value {
+                Constant::Int(_) => JvmType::Int,
+                Constant::Boolean(_) => JvmType::Boolean,
+                _ => return Err(unsupported()),
+            };
+            let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
+            let matches_constant_type = match context.store.types.try_get(tree.ty) {
+                Some(Type::Constant(value)) => value == &literal.value,
+                _ => typed_primitive == Some(primitive),
+            };
+            if typed_primitive != Some(primitive) || !matches_constant_type {
+                return Err(unsupported());
+            }
+            Ok(())
+        }
+        TreeKind::Ident(_) => {
+            let Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) = context.store.types.try_get(tree.ty)
+            else {
+                return Err(unsupported());
+            };
+            let is_parameter = context
+                .method
+                .parameters()
+                .iter()
+                .any(|parameter| parameter.symbol() == *symbol);
+            let is_initialized_primitive_local = local_reference_slot(context, tree_id, *symbol)?
+                .is_some_and(|local| {
+                    context.initialized_locals.contains(symbol)
+                        && matches!(local.ty(), JvmType::Int | JvmType::Boolean)
+                });
+            if !is_parameter && !is_initialized_primitive_local {
+                return Err(unsupported());
+            }
+            Ok(())
+        }
+        TreeKind::Select(_) => {
+            let intrinsic = crate::resolve_boolean_intrinsic(
+                context.store,
+                context.typed_ast,
+                tree_id,
+                context.definitions,
+            )
+            .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
+                tree: tree_id,
+                error,
+            })?;
+            if intrinsic != Some(JvmBooleanIntrinsic::Not) {
+                return Err(unsupported());
+            }
+            let TreeKind::Select(select) = &tree.kind else {
+                unreachable!("select shape was checked above")
+            };
+            validate_constructor_argument(
+                context,
+                constructor_call,
+                select.qualifier,
+                depth + 1,
+                budget,
+            )
+        }
+        TreeKind::Apply(application) => {
+            let boolean_intrinsic = crate::resolve_boolean_intrinsic(
+                context.store,
+                context.typed_ast,
+                tree_id,
+                context.definitions,
+            )
+            .map_err(|error| JvmCodegenError::BooleanIntrinsicResolution {
+                tree: tree_id,
+                error,
+            })?;
+            let safe_boolean = matches!(
+                boolean_intrinsic,
+                Some(JvmBooleanIntrinsic::And | JvmBooleanIntrinsic::Or | JvmBooleanIntrinsic::Xor)
+            );
+            let safe_int = if boolean_intrinsic.is_none() {
+                let int_intrinsic = resolve_int_intrinsic(
+                    context.store,
+                    context.typed_ast,
+                    tree_id,
+                    context.definitions,
+                )
+                .map_err(|error| JvmCodegenError::IntIntrinsicResolution {
+                    tree: tree_id,
+                    error,
+                })?;
+                matches!(
+                    int_intrinsic,
+                    Some(
+                        JvmIntIntrinsic::IntAdd
+                            | JvmIntIntrinsic::IntSubtract
+                            | JvmIntIntrinsic::IntMultiply
+                            | JvmIntIntrinsic::IntDivide
+                            | JvmIntIntrinsic::IntRemainder
+                    )
+                )
+            } else {
+                false
+            };
+            if !safe_int && !safe_boolean {
+                return Err(unsupported());
+            }
+            let function = context.tree(application.function)?;
+            let TreeKind::Select(select) = &function.kind else {
+                return Err(unsupported());
+            };
+            let [right] = application.args.as_slice() else {
+                return Err(unsupported());
+            };
+            validate_constructor_argument(
+                context,
+                constructor_call,
+                select.qualifier,
+                depth + 1,
+                budget,
+            )?;
+            validate_constructor_argument(context, constructor_call, *right, depth + 1, budget)
+        }
+        _ => Err(unsupported()),
+    }
 }
 
 fn emit_short_circuit_boolean_intrinsic(

@@ -488,6 +488,21 @@ pub enum JvmCodegenError {
         expected: SymbolId,
         found: Option<SymbolId>,
     },
+    /// A constructor argument is outside the supported branch-free primitive subset.
+    UnsupportedJvmConstructorArgument {
+        tree: TreeId<Typed>,
+        argument: TreeId<Typed>,
+    },
+    /// Constructor application lowering was requested without a planned unit.
+    JvmConstructorCallContextUnavailable {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+    },
+    /// A method containing an allocation also requires branch-aware verifier frames.
+    JvmObjectCreationInUnsupportedControlFlow {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+    },
     /// The selected constructor is not a proven plain no-argument or planned primary call.
     UnsupportedJvmConstructorCall {
         tree: TreeId<Typed>,
