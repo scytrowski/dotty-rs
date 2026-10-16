@@ -30,11 +30,11 @@ pub struct OmittedMethodBody {
 /// Scala expecting interoperability. Body emission belongs to the next increment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclarationSkeleton {
-    bytes: Vec<u8>,
-    source: SourceMetadata,
-    intended_tasty_path: String,
-    declarations: Vec<SkeletonDeclaration>,
-    omitted_bodies: Vec<OmittedMethodBody>,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) source: SourceMetadata,
+    pub(crate) intended_tasty_path: String,
+    pub(crate) declarations: Vec<SkeletonDeclaration>,
+    pub(crate) omitted_bodies: Vec<OmittedMethodBody>,
 }
 
 impl DeclarationSkeleton {
@@ -99,6 +99,14 @@ impl ValidatedPicklePlan<'_, '_> {
     pub fn declaration_skeleton_with_limits(
         &self,
         limits: ProjectionLimits,
+    ) -> Result<DeclarationSkeleton, PickleError> {
+        self.assemble(limits, None)
+    }
+
+    pub(crate) fn assemble(
+        &self,
+        limits: ProjectionLimits,
+        complete: Option<usize>,
     ) -> Result<DeclarationSkeleton, PickleError> {
         let p = self.plan();
         let mut context = EncodingContext::for_plan(self, limits)?;
@@ -183,11 +191,24 @@ impl ValidatedPicklePlan<'_, '_> {
             let result = context.int_type_syntax()?;
             // No EMPTYCLAUSE for a parameterless method, no invented METHODtype
             // payload, no abstract modifier and no substitute for its real RHS.
+            let mut fields = vec![AstField::Nat(name), AstField::Tree(result)];
+            if complete.is_some() {
+                let body = method.body.ok_or(PickleError::MissingBody {
+                    method: method.symbol,
+                })?;
+                fields.push(AstField::Tree(crate::expression::lower_expression(
+                    p.store,
+                    p.typed_ast,
+                    body,
+                    method.symbol,
+                    &mut context,
+                )?));
+            }
             context.bind_declaration(
                 method.symbol,
                 AstNode::Length {
                     tag: DEFDEF_TAG,
-                    fields: vec![AstField::Nat(name), AstField::Tree(result)],
+                    fields,
                 },
             )?;
             let label = context
@@ -259,7 +280,7 @@ impl ValidatedPicklePlan<'_, '_> {
                 address,
             });
         }
-        let header = Header {
+        let mut header = Header {
             major_version: SCALA_3_9_MAJOR_VERSION,
             minor_version: SCALA_3_9_MINOR_VERSION,
             experimental_version: SCALA_3_9_EXPERIMENTAL_VERSION,
@@ -271,6 +292,16 @@ impl ValidatedPicklePlan<'_, '_> {
         let attributes =
             EncodedSection::attributes(attributes_name, &[Attribute::SourceFile(source_name)])
                 .map_err(encoding)?;
+        if let Some(max_file_bytes) = complete {
+            header.tooling_version = "dotty-rs minimal semantic pickler".into();
+            crate::output::prepare_header(
+                &mut header,
+                &fragment.names,
+                &asts,
+                &attributes,
+                max_file_bytes,
+            )?;
+        }
         let builder = TastyFileBuilder::new(header, fragment.names)
             .with_section(asts)
             .with_section(attributes);

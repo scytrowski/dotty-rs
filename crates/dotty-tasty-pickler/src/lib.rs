@@ -4,9 +4,9 @@
 //! package, its default constructor and one parameterless Int-literal method.
 //! [`EncodingContext`] projects names, types and canonical references into owned
 //! wire fragments. [`ValidatedPicklePlan::declaration_skeleton`] assembles a
-//! structurally validated, explicitly incomplete declaration document. Concrete
-//! method bodies, completed artifacts, loading and source typing remain outside
-//! this increment.
+//! structurally validated, explicitly incomplete declaration document.
+//! [`ValidatedPicklePlan::pickle`] includes the actual typed Int RHS in an owned
+//! file. Independent Scala interoperability remains the #1195 gate.
 //! See `docs/tasty-pickler-design.md` and `docs/tasty-pickler-oracle.md`.
 //!
 //! All IDs, indices and arenas must originate in one compilation session. Core
@@ -17,6 +17,8 @@
 
 mod artifact_name;
 mod error;
+mod expression;
+mod output;
 mod plan;
 mod projection;
 mod skeleton;
@@ -30,3 +32,5 @@ pub use plan::{
 };
 pub use projection::{EncodingContext, ProjectedFragment, ProjectionLimits};
 pub use skeleton::{DeclarationSkeleton, OmittedMethodBody, SkeletonDeclaration};
+
+pub use output::{PickleLimits, PickledTasty};

@@ -83,6 +83,7 @@ pub enum LimitKind {
     NameBytes,
     Names,
     TypeDepth,
+    FileBytes,
 }
 
 /// Typed failures, with canonical identities rather than parsed display strings.
