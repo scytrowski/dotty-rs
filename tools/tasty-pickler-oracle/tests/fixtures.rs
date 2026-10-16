@@ -187,6 +187,60 @@ fn uuid_source_path_and_section_order_are_normalized_without_losing_semantics() 
 }
 
 #[test]
+fn a_string_literal_sharing_the_source_name_entry_is_not_normalized_away() {
+    // A wire-only derivative exercises the normalizer, not Scala typing: replace
+    // the Int leaf by a string referencing the very same name as SOURCEFILEattr.
+    let bytes = fixture("example/Answer");
+    let file = TastyFile::parse_and_validate_scala_3_9(&bytes).unwrap();
+    let source = file
+        .section(StandardSection::Attributes)
+        .unwrap()
+        .decode_attributes()
+        .unwrap()
+        .into_iter()
+        .find_map(|a| match a {
+            Attribute::SourceFile(r) => Some(r),
+            _ => None,
+        })
+        .unwrap();
+    let literal = file.ast_nodes_with_tag(INTCONST_TAG).unwrap()[0];
+    let mut replacement = Writer::new();
+    RawTree::leaf(STRINGCONST_TAG, TermValue::NameRef(source))
+        .unwrap()
+        .encode(&mut replacement)
+        .unwrap();
+    let replacement = replacement.into_inner();
+    assert_eq!(replacement.len(), 2); // Same leaf width: no address relocation.
+    let mut asts = file
+        .section(StandardSection::Asts)
+        .unwrap()
+        .payload
+        .to_vec();
+    asts[literal.offset..literal.offset + replacement.len()].copy_from_slice(&replacement);
+    let mut builder = TastyFileBuilder::new(file.header().clone(), file.names().clone());
+    for section in file.sections().iter() {
+        builder.push_section(EncodedSection::raw(
+            section.name,
+            if section.standard_kind(file.names()) == Some(StandardSection::Asts) {
+                asts.as_slice()
+            } else {
+                section.payload
+            },
+        ));
+    }
+    let changed = builder.encode_validated().unwrap();
+    let snapshot = inspect(&changed, false).unwrap();
+    let literal = nodes(&snapshot)
+        .iter()
+        .find(|n| n["tag"] == "STRINGconst" && n["owner"] == named(&snapshot, "value")["id"])
+        .unwrap();
+    assert_eq!(
+        literal["name"],
+        json!({"utf8": file.render_name(source).unwrap()})
+    );
+}
+
+#[test]
 fn metadata_reduction_preserves_body_identity_and_rejects_other_fixture_shapes() {
     let original = fixture("example/Answer");
     let reduced = reduced_answer(&original).unwrap();

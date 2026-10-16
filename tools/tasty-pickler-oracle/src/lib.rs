@@ -119,6 +119,29 @@ fn modifiers(tail: &[DefinitionTail<'_>]) -> Result<Vec<String>> {
         .collect()
 }
 
+fn is_sourcefile_annotation(file: &TastyFile<'_>, raw: &RawNode<'_>) -> Result<bool> {
+    let annotation = raw.decode_annotation()?;
+    let RawTree::NatAst {
+        tag: TYPEREF_TAG,
+        value,
+        child,
+        ..
+    } = annotation.tycon
+    else {
+        return Ok(false);
+    };
+    let RawTree::Leaf(SimpleTerm {
+        tag: TERMREFPKG_TAG,
+        value: TermValue::NameRef(package),
+        ..
+    }) = *child
+    else {
+        return Ok(false);
+    };
+    Ok(file.render_name(value)? == "SourceFile"
+        && file.render_name(package)? == "scala.annotation.internal")
+}
+
 /// Validate and normalize a fixture. Labels replace byte addresses, but retain
 /// every target identity, structural edge, declaration order and parameter order.
 pub fn inspect(bytes: &[u8], raw_addresses: bool) -> Result<Value> {
@@ -186,7 +209,29 @@ pub fn inspect(bytes: &[u8], raw_addresses: bool) -> Result<Value> {
         let mut reference = None;
         match tree {
             RawTree::Leaf(term) => match term.value {
-                TermValue::NameRef(r) => row["name"] = names.name(r)?,
+                TermValue::NameRef(r) => {
+                    if node.tag == STRINGCONST_TAG && names.sources.contains(&r) {
+                        let mut ancestor = parent;
+                        let mut provenance = false;
+                        while let Some(found) = ancestor {
+                            if found.tag == ANNOTATION_TAG {
+                                provenance = is_sourcefile_annotation(
+                                    &file,
+                                    index.get(found.offset as u32).ok_or("missing annotation")?,
+                                )?;
+                                break;
+                            }
+                            ancestor = index.parent_of(found.offset as u32);
+                        }
+                        row["name"] = if provenance {
+                            names.name(r)?
+                        } else {
+                            json!({"utf8": file.names().get_utf8(r).ok_or("non-UTF8 string literal")?})
+                        };
+                    } else {
+                        row["name"] = names.name(r)?;
+                    }
+                }
                 TermValue::AstRef(r) => reference = Some(r),
                 TermValue::Int(n) => row["value"] = json!(n),
                 TermValue::Tag => (),
@@ -309,27 +354,7 @@ pub fn reduced_answer(bytes: &[u8]) -> Result<Vec<u8>> {
     let DefinitionTail::Annotation(annotation) = &tail[0] else {
         return Err("reduction requires SourceFile annotation".into());
     };
-    let annotation = annotation.decode_annotation()?;
-    let RawTree::NatAst {
-        tag: TYPEREF_TAG,
-        value,
-        child,
-        ..
-    } = annotation.tycon
-    else {
-        return Err("provenance annotation is not a named type".into());
-    };
-    let RawTree::Leaf(SimpleTerm {
-        tag: TERMREFPKG_TAG,
-        value: TermValue::NameRef(package_ref),
-        ..
-    }) = *child
-    else {
-        return Err("provenance annotation has no package prefix".into());
-    };
-    if file.render_name(value)? != "SourceFile"
-        || file.render_name(package_ref)? != "scala.annotation.internal"
-    {
+    if !is_sourcefile_annotation(&file, annotation)? {
         return Err("refusing to remove a non-provenance annotation".into());
     }
     let mut class_bytes = Writer::new();
