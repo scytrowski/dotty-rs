@@ -247,7 +247,11 @@ impl SourceTyper<'_> {
                     )? {
                         return Ok(Some(resolved));
                     }
-                    self.require_stable_selection_prefix(receiver_type, function_tree.index())?;
+                    self.require_stable_application_selection_prefix(
+                        qualifier,
+                        receiver_type,
+                        function_tree.index(),
+                    )?;
                     return Ok(None);
                 }
                 if members.len() == 1 {
@@ -276,14 +280,22 @@ impl SourceTyper<'_> {
                             return Ok(Some(resolved));
                         }
                     }
-                    self.require_stable_selection_prefix(receiver_type, function_tree.index())?;
+                    self.require_stable_application_selection_prefix(
+                        qualifier,
+                        receiver_type,
+                        function_tree.index(),
+                    )?;
                     return Ok(None);
                 }
                 if members
                     .iter()
                     .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
                 {
-                    self.require_stable_selection_prefix(receiver_type, function_tree.index())?;
+                    self.require_stable_application_selection_prefix(
+                        qualifier,
+                        receiver_type,
+                        function_tree.index(),
+                    )?;
                     return Err(TyperError::MixedApplicationCandidateKinds {
                         source: self.source,
                         tree_index: application_tree_index,
@@ -414,14 +426,32 @@ impl SourceTyper<'_> {
                 {
                     return Ok(Some(resolved));
                 }
-                if let ApplicationFunctionShape::Select { receiver_type, .. } = &function_shape {
-                    self.require_stable_selection_prefix(*receiver_type, function_tree.index())?;
+                if let ApplicationFunctionShape::Select {
+                    qualifier,
+                    receiver_type,
+                    ..
+                } = &function_shape
+                {
+                    self.require_stable_application_selection_prefix(
+                        *qualifier,
+                        *receiver_type,
+                        function_tree.index(),
+                    )?;
                 }
                 return Err(error);
             }
             Err(error) => {
-                if let ApplicationFunctionShape::Select { receiver_type, .. } = &function_shape {
-                    self.require_stable_selection_prefix(*receiver_type, function_tree.index())?;
+                if let ApplicationFunctionShape::Select {
+                    qualifier,
+                    receiver_type,
+                    ..
+                } = &function_shape
+                {
+                    self.require_stable_application_selection_prefix(
+                        *qualifier,
+                        *receiver_type,
+                        function_tree.index(),
+                    )?;
                 }
                 return Err(error);
             }
@@ -442,7 +472,11 @@ impl SourceTyper<'_> {
                 qualifier,
                 receiver_type,
             } => {
-                self.require_stable_selection_prefix(receiver_type, function_tree.index())?;
+                self.require_stable_application_selection_prefix(
+                    qualifier,
+                    receiver_type,
+                    function_tree.index(),
+                )?;
                 if winner
                     .member
                     .is_some_and(|member| member.symbol != winner.symbol)

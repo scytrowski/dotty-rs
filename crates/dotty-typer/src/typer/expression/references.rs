@@ -161,6 +161,31 @@ impl SourceTyper<'_> {
         }
     }
 
+    pub(in crate::typer) fn require_stable_application_selection_prefix(
+        &self,
+        qualifier: TreeId<Typed>,
+        qualifier_type: TypeId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let is_initialized_constructor_result = self
+            .typed_arena
+            .try_get(qualifier)
+            .and_then(|tree| match &tree.kind {
+                TreeKind::Apply(application) => self.typed_arena.try_get(application.function),
+                _ => None,
+            })
+            .and_then(|function| match &function.kind {
+                TreeKind::Select(selection) => self.typed_arena.try_get(selection.qualifier),
+                _ => None,
+            })
+            .is_some_and(|tree| matches!(tree.kind, TreeKind::New(_)));
+        if is_initialized_constructor_result {
+            Ok(())
+        } else {
+            self.require_stable_selection_prefix(qualifier_type, tree_index)
+        }
+    }
+
     pub(in crate::typer) fn expression_type_of_symbol(
         &mut self,
         symbol: SymbolId,
@@ -529,7 +554,7 @@ impl SourceTyper<'_> {
             self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?
         };
         let receiver_type = self.typed_arena.get(qualifier).ty;
-        self.require_stable_selection_prefix(receiver_type, tree.index())?;
+        self.require_stable_application_selection_prefix(qualifier, receiver_type, tree.index())?;
         let package_receiver = matches!(
             self.store.types.try_get(receiver_type),
             Some(Type::TermRef {
