@@ -268,6 +268,44 @@ fn descriptor_validation_returns_specific_structural_errors() {
         Err(Error::HasSuperclass)
     );
 
+    let module_name_index = invalid_shape
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Module(module) => Some(module.module_name_index),
+            _ => None,
+        })
+        .unwrap();
+    let utf8_index = match invalid_shape.constant_pool.get(module_name_index).unwrap() {
+        dotty_classfile::constant_pool::ConstantPoolEntry::Module { name_index } => *name_index,
+        _ => unreachable!(),
+    };
+    let mut with_field = decode();
+    with_field.fields.push(dotty_classfile::field::FieldInfo {
+        access_flags: dotty_classfile::access_flags::FieldAccessFlags(0),
+        name_index: utf8_index,
+        descriptor_index: utf8_index,
+        attributes: Vec::new(),
+    });
+    assert_eq!(
+        with_field.validate_module_descriptor(),
+        Err(Error::HasFields { count: 1 })
+    );
+
+    let mut with_method = decode();
+    with_method
+        .methods
+        .push(dotty_classfile::method::MethodInfo {
+            access_flags: dotty_classfile::access_flags::MethodAccessFlags(0),
+            name_index: utf8_index,
+            descriptor_index: utf8_index,
+            attributes: Vec::new(),
+        });
+    assert_eq!(
+        with_method.validate_module_descriptor(),
+        Err(Error::HasMethods { count: 1 })
+    );
+
     let mut invalid_flags = decode();
     invalid_flags.access_flags.0 |= dotty_classfile::access_flags::ACC_PUBLIC;
     assert_eq!(
@@ -346,6 +384,27 @@ fn descriptor_validation_rejects_duplicate_optional_attributes_and_wrong_tags() 
             index: module_index,
             expected: EntryKind::Class
         }))
+    );
+
+    let fixture = FIXTURES
+        .iter()
+        .find(|fixture| fixture.name == "optional module main class present")
+        .unwrap();
+    let mut reader = Reader::new(fixture.bytes);
+    let mut wrong_name = ClassFile::decode(&mut reader).unwrap();
+    wrong_name.this_class = wrong_name
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::ModuleMainClass(index) => Some(*index),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        wrong_name.validate_module_descriptor(),
+        Err(Error::WrongThisClass {
+            name: "fixture/app/Main".to_owned()
+        })
     );
 }
 
