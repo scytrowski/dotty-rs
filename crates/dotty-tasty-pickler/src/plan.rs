@@ -314,17 +314,20 @@ impl<'a> Validator<'_, 'a> {
     }
 
     fn parameter_metadata(
-        &self,
+        &mut self,
         metadata: &Modifiers,
         symbol: SymbolId,
     ) -> Result<(), PickleError> {
-        if metadata.visibility.is_some()
-            || !metadata.annotations.is_empty()
-            || metadata
-                .modifiers
-                .iter()
-                .any(|modifier| *modifier != dotty_core::ast::Modifier::Param)
-        {
+        self.charge(metadata.modifiers.len())?;
+        self.charge(metadata.annotations.len())?;
+        let mut saw_param = false;
+        for modifier in &metadata.modifiers {
+            if *modifier != dotty_core::ast::Modifier::Param || saw_param {
+                return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol)));
+            }
+            saw_param = true;
+        }
+        if metadata.visibility.is_some() || !metadata.annotations.is_empty() {
             return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(symbol)));
         }
         Ok(())

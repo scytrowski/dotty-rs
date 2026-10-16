@@ -167,6 +167,25 @@ fn parameter_scope_and_declared_int_type_are_required() {
             symbol: Some(first),
         })
     );
+
+    let mut f = Fixture::new();
+    let [first, _] = add_parameters(&mut f);
+    let method_tree = f.methods[0].source_tree;
+    let parameter_tree = match &f.source_ast.get(method_tree).kind {
+        TreeKind::DefDef(definition) => definition.value_param_clauses[0][0],
+        _ => panic!(),
+    };
+    let TreeKind::ValDef(parameter) = &mut f.source_ast.get_mut(parameter_tree).kind else {
+        panic!()
+    };
+    parameter.metadata.modifiers = vec![Modifier::Param, Modifier::Param];
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::Unsupported {
+            feature: UnsupportedFeature::SourceMetadata,
+            symbol: Some(first),
+        })
+    );
 }
 
 #[test]
