@@ -308,7 +308,7 @@ fn compile_source(
     Ok(EmittedArtifact { class, path })
 }
 
-fn compile_two_class_constructor_source(
+fn compile_planned_constructor_source(
     source_text: &str,
     output_directory: &Path,
 ) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
@@ -383,9 +383,9 @@ fn compile_two_class_constructor_source(
             collect_source_methods(&parsed.ast, &template.body, source_id, &index, &store)?,
         ));
     }
-    if classes.len() != 2 {
+    if classes.len() < 2 {
         return Err(PipelineFailure::UnexpectedSourceShape(
-            "two planned constructor smoke classes",
+            "at least two planned constructor smoke classes",
         ));
     }
 
@@ -434,10 +434,33 @@ fn compile_two_class_constructor_source(
                 }
                 None => None,
             };
+            let mut locals = parsed
+                .ast
+                .iter()
+                .filter_map(|(source_tree, node)| {
+                    if !matches!(node.kind, TreeKind::ValDef(_)) {
+                        return None;
+                    }
+                    let binding = typer.typed_local_binding_at(source_id, source_tree)?;
+                    (typer.store().symbols.get(binding.symbol()).owner
+                        == Some(source_method.symbol))
+                    .then_some(JvmLocalBinding {
+                        declaration: binding.declaration(),
+                        symbol: binding.symbol(),
+                        mutable: typer
+                            .store()
+                            .symbols
+                            .get(binding.symbol())
+                            .flags
+                            .contains(SymbolFlags::MUTABLE),
+                    })
+                })
+                .collect::<Vec<_>>();
+            locals.sort_by_key(|binding| binding.declaration.index());
             methods.push(JvmMethodPlan {
                 method: source_method.symbol,
                 parameters: source_method.parameters,
-                locals: Vec::new(),
+                locals,
                 body,
             });
         }
@@ -454,10 +477,14 @@ fn compile_two_class_constructor_source(
         typed_ast: typer.typed_ast(),
         classes: plans,
     };
-    let mut emitted = Vec::with_capacity(unit.classes.len());
+    let mut classes = Vec::with_capacity(unit.classes.len());
     for plan in &unit.classes {
         let class =
             emit_class(&unit, plan.class, &definitions).map_err(PipelineFailure::Codegen)?;
+        classes.push(class);
+    }
+    let mut emitted = Vec::with_capacity(classes.len());
+    for class in classes {
         let path = output_directory.join(format!("{}.class", class.internal_name()));
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(PipelineFailure::Io)?;
@@ -3251,7 +3278,7 @@ fn verify_with_jdk(output_directory: &Path) {
 #[test]
 fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
     let output = TestOutputDirectory::new("two-class-constructor");
-    let artifacts = compile_two_class_constructor_source(
+    let artifacts = compile_planned_constructor_source(
         "class Counter(seed: Int)\nclass Client:\n  def build(seed: Int): Int =\n    new Counter(seed + 1)\n    42\n",
         output.path(),
     )
@@ -3348,9 +3375,177 @@ fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
 }
 
 #[test]
+fn immutable_reference_locals_use_canonical_slots_and_verify_on_the_jvm() {
+    let output = TestOutputDirectory::new("reference-local");
+    let artifacts = compile_planned_constructor_source(
+        "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    val counter = new Counter(seed)\n    counter\n    42\n",
+        output.path(),
+    )
+    .unwrap();
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client source class is emitted");
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Client class");
+    class
+        .validate_references()
+        .expect("valid Client references");
+    let code = emitted_method_code(&class, "run");
+    assert_opcode_sequence(
+        code,
+        &[0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0x57, 0x10, 0xac],
+    );
+    let allocation = u16::from_be_bytes([code[1], code[2]]);
+    let ConstantPoolEntry::Class { name_index } = class
+        .constant_pool
+        .get(ConstantPoolIndex(allocation))
+        .expect("Counter class constant")
+    else {
+        panic!("new must reference a class entry")
+    };
+    assert_eq!(class.constant_pool.utf8(*name_index), Ok("Counter"));
+    let invocation = u16::from_be_bytes([code[6], code[7]]);
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = class
+        .constant_pool
+        .get(ConstantPoolIndex(invocation))
+        .expect("constructor method reference")
+    else {
+        panic!("invokespecial must reference a method")
+    };
+    assert_eq!(class.constant_pool.class_name(*class_index), Ok("Counter"));
+    assert_eq!(
+        class.constant_pool.name_and_type(*name_and_type_index),
+        Ok(("<init>", "(I)V"))
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("ReferenceLocalHarness.java");
+        fs::write(
+            &harness,
+            "public final class ReferenceLocalHarness { public static void main(String[] args) { if (new Client().run(10) != 42) throw new AssertionError(); } }\n",
+        )
+        .expect("write JDK verification harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected reference-local harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "ReferenceLocalHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected reference-local classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn locals_keep_distinct_planned_class_identities_in_one_method() {
+    let output = TestOutputDirectory::new("distinct-reference-local-types");
+    let artifacts = compile_planned_constructor_source(
+        "class Counter(seed: Int)\nclass Other(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    val counter = new Counter(seed)\n    val other = new Other(seed)\n    counter\n    other\n    42\n",
+        output.path(),
+    )
+    .unwrap();
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client source class is emitted");
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Client class");
+    class
+        .validate_references()
+        .expect("valid Client references");
+    let code = emitted_method_code(&class, "run");
+    assert_opcode_sequence(
+        code,
+        &[
+            0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0xbb, 0x59, 0x1b, 0xb7, 0x4e, 0x2c, 0x57, 0x2d, 0x57,
+            0x10, 0xac,
+        ],
+    );
+    let class_name = |offset| {
+        let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+        let ConstantPoolEntry::Class { name_index } = class
+            .constant_pool
+            .get(ConstantPoolIndex(index))
+            .expect("allocated planned class")
+        else {
+            panic!("new must reference a class entry")
+        };
+        class.constant_pool.utf8(*name_index).unwrap()
+    };
+    let allocations = decode_subset_instructions(code)
+        .into_iter()
+        .filter_map(|(offset, opcode)| (opcode == 0xbb).then_some(offset))
+        .collect::<Vec<_>>();
+    assert_eq!(allocations.len(), 2);
+    assert_eq!(class_name(allocations[0]), "Counter");
+    assert_eq!(class_name(allocations[1]), "Other");
+}
+
+#[test]
+fn reference_var_and_reference_local_cfg_fail_without_publishing_classfiles() {
+    for (label, source, expected) in [
+        (
+            "reference-var",
+            "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    42\n",
+            "mutable",
+        ),
+        (
+            "reference-cfg",
+            "class Counter(seed: Int)\nclass Client:\n  def run(flag: Boolean, seed: Int): Int =\n    val counter = new Counter(seed)\n    if flag then 1 else 2\n",
+            "cfg",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(label);
+        let result = compile_planned_constructor_source(source, output.path());
+        match (expected, result) {
+            (
+                "mutable",
+                Err(PipelineFailure::Codegen(JvmCodegenError::UnsupportedMutableReferenceLocal {
+                    ..
+                })),
+            ) => {}
+            (
+                "cfg",
+                Err(PipelineFailure::Codegen(
+                    JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. },
+                )),
+            ) => {}
+            (expected, other) => panic!("expected {expected} rejection, got {other:?}"),
+        }
+        assert!(
+            output.class_files().is_empty(),
+            "failed {label} compilation published a partial classfile"
+        );
+    }
+}
+
+#[test]
 fn constructor_arguments_lower_strict_and_unary_boolean_intrinsics_from_source() {
     let output = TestOutputDirectory::new("boolean-constructor-arguments");
-    let artifacts = compile_two_class_constructor_source(
+    let artifacts = compile_planned_constructor_source(
         "class Counter(seed: Boolean)\nclass Client:\n  def buildAnd(flag: Boolean): Int =\n    new Counter(flag & true)\n    42\n  def buildOr(flag: Boolean): Int =\n    new Counter(flag | true)\n    42\n  def buildXor(flag: Boolean): Int =\n    new Counter(flag ^ true)\n    42\n  def buildNot(flag: Boolean): Int =\n    new Counter(!flag)\n    42\n",
         output.path(),
     )

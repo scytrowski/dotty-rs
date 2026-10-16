@@ -121,19 +121,22 @@ to a completed local symbol type. Both projections are read-only and do not
 allocate semantic symbols or types.
 
 References occupy one category-one slot and remain distinct from `Int`,
-`Boolean`, and `Unit`. Local layout may reserve that slot, but the expression
-lowerer does not load or store reference locals yet. Method and constructor
-parameters/results and field descriptors still accept only the existing
-primitive/`Unit` subset; references never erase to `java/lang/Object`, and
-constructor reference arguments remain rejected. The linear code analyzer and
-control-flow lowering remain reference-unaware.
+`Boolean`, and `Unit`. A planned method may initialize an immutable reference
+`val` from a completed, validated `new C(args)`, store it with `astore`, and
+read it by canonical local `SymbolId` with `aload`. The local's checked class
+identity must match the initializer's `Flow::Value`; read-before-store and
+mutable reference locals fail with typed errors. Reference values may be
+discarded as category-one block statements with `pop`, but cannot become
+method/constructor parameters or results, or field descriptors. Constructor
+reference arguments remain rejected. Methods that use reference local
+instructions and contain symbolic branches are rejected until CFG analysis
+tracks reference states.
 
-Future allocation, local-access, and call lowerers must request this checked
-projection from the same validated `JvmCompilationUnit`, carry its class
-`SymbolId` through each `Flow::Value` check, and reject mismatches explicitly.
-This type does not track an uninitialized object: `new`/`dup`/`invokespecial`
-ordering and escape safety require a separate verifier-aware change before
-object creation can be emitted.
+The checked projection carries the class `SymbolId` through every local
+`Flow::Value` check. It does not track uninitialized objects: allocation is
+emitted only as `new`/`dup`/primitive arguments/`invokespecial`, and a local
+store can happen only after that call completes. The JDK verifier gate checks
+the emitted straight-line sequence.
 
 Object-construction typing, canonical constructor and receiver identity,
 uninitialized-reference verifier constraints, and the multi-class planning
@@ -314,18 +317,22 @@ produce a class artifact. Standalone expression/body lowering has no emission
 plan, so it cannot resolve `Apply` targets.
 
 Planned method-body lowering allows initialized primitive local references in
-the final expression or other value positions. Standalone expression APIs have
+the final expression or other value positions, and immutable planned-class
+reference locals in supported straight-line blocks. Standalone expression APIs have
 no local layout and return `MissingLocalBinding` for local references. Typed
 `Block` lowering evaluates supported stats from left to right, then
 lowers the final expression once. An unused Int/Boolean value is discarded
 with one `pop`; Unit already leaves an empty operand stack and needs no pop.
-The final value remains available to its parent expression or method return.
+The final value remains available to its parent expression or method return;
+reference-valued method results remain unsupported. Unused initialized
+references are discarded with one `pop`.
 If a stat definitely returns, lowering stops there and omits the unreachable
 suffix, so dead instructions do not reach CFG analysis. A normally completing
 Unit method receives one trailing `return`; explicit returns remain terminal.
 The block's declared type is checked against its final expression flow.
 Planned method lowering supports initialized primitive `ValDef` statements,
-assignments to initialized mutable primitive locals, and typed `While` loops
+immutable reference `ValDef` statements initialized by validated object
+creation, assignments to initialized mutable primitive locals, and typed `While` loops
 with Boolean conditions. A loop evaluates its condition at the symbolic header
 on every iteration, branches to its exit when false, and emits a back-edge only
 when the body can fall through. Unit bodies leave the stack empty; Int/Boolean
@@ -454,7 +461,8 @@ These fixtures test the bounded emitted class shape. They do not establish
 Scala public accessor, bridge, or TASTy compatibility.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
-Negative source tests verify that field initialization, invalid while
+Negative source tests verify that field initialization, mutable reference
+locals, reference locals in branch-bearing methods, invalid while
 conditions, same-class calls inside loop control flow, private
 construction, immutable-local assignment, missing local references, mismatched
 local initializers and assignments, Unit locals, deferred reference locals,

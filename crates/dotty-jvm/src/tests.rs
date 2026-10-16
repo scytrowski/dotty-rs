@@ -2100,6 +2100,98 @@ fn reference_local_layout_keeps_same_named_symbols_tied_to_distinct_classes() {
 }
 
 #[test]
+fn reference_local_read_before_store_returns_a_typed_error() {
+    let mut fixture = ReferenceFixture::new();
+    let class = fixture.classes[0];
+    let declarations = match fixture.store.symbols.info(class) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => panic!("planned reference class should have ClassInfo"),
+        },
+        _ => panic!("planned reference class should be complete"),
+    };
+    let (method, _) = add_emission_method(
+        &mut fixture.store,
+        class,
+        declarations,
+        "readBeforeStore",
+        &[],
+        fixture.definitions.int,
+    );
+    let reference_type = fixture.type_ref(class);
+    let name = fixture.store.names.intern("counter");
+    let local = fixture.store.symbols.alloc(Symbol {
+        name: Name::new(name, Namespace::Term),
+        owner: Some(method),
+        kind: SymbolKind::Local,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(reference_type),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let local_reference = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TermRefTarget::Symbol(local),
+    });
+    let read = fixture.ast.alloc(Tree {
+        kind: TreeKind::Ident(Ident {
+            name: Name::new(name, Namespace::Term),
+            backquoted: false,
+        }),
+        position: None,
+        ty: local_reference,
+    });
+    let declaration = fixture.ast.alloc(Tree {
+        kind: TreeKind::ValDef(ValDef {
+            name: TermName::new(name),
+            tpt: read,
+            rhs: Some(read),
+            metadata: (),
+        }),
+        position: None,
+        ty: reference_type,
+    });
+    let result = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(42),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let body = fixture.ast.alloc(Tree {
+        kind: TreeKind::Block(Block {
+            stats: vec![declaration],
+            expr: result,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let binding = JvmLocalBinding {
+        declaration,
+        symbol: local,
+        mutable: false,
+    };
+    let mut unit = fixture.unit();
+    unit.classes[0].methods.push(JvmMethodPlan {
+        method,
+        parameters: Vec::new(),
+        locals: vec![binding],
+        body: Some(body),
+    });
+
+    assert!(matches!(
+        unit.lower_method_body(class, method, &fixture.definitions),
+        Err(JvmCodegenError::UninitializedLocalRead {
+            tree: found_tree,
+            symbol: found_symbol,
+        }) if found_tree == read && found_symbol == local
+    ));
+}
+
+#[test]
 fn assignments_reject_immutable_nonlocal_and_mistyped_targets_without_class_output() {
     let emit_case =
         |mutable: bool, parameter_target: bool, invalid_lhs: bool, boolean_rhs: bool| {

@@ -147,18 +147,20 @@ uses of the object before initialization or multiple initialization.
 defines the verifier's uninitialized-object types and their rewrite after
 `invokespecial`.
 
-The first approved lowering, in a future issue, must be restricted to a
-straight-line, branch-free sequence:
+The approved constructor and immutable-reference-local lowering is restricted
+to a straight-line, branch-free sequence:
 
 ```text
 new C
 dup
 evaluate each supported primitive constructor argument once, left to right
 invokespecial C.<init>(descriptor)
+astore <local-slot>       # only after invokespecial completes
+aload <local-slot>        # later reads use the same canonical local identity
 ```
 
-For `val counter = new Counter(seed); counter.get()` in an instance method,
-the expected instruction order is conceptually:
+For `val counter = new Counter(seed); counter` as a discarded block statement
+in an instance method, the emitted instruction order is:
 
 ```text
 new Counter
@@ -167,18 +169,13 @@ iload <seed-slot>
 invokespecial Counter.<init>(I)V
 astore <counter-slot>
 aload <counter-slot>
-invokevirtual Counter.get()I
-ireturn
+pop
 ```
 
-The `Counter.get()` result stays primitive. An `Int`/`Boolean` call used as a
-statement must be followed by `pop`; a Unit-returning call has JVM result
-descriptor `V` and leaves nothing to pop. The call target and receiver are
-still resolved from typed symbol identity.
-These are expected sequences for future lowering, not emitted bytes: this
-issue deliberately adds no object instructions. The direct-new receiver
-sequence cannot be produced from source until the Typer selection-prefix
-blocker is resolved.
+This sequence is covered by a real-source classfile regression and a mandatory
+JDK `-Xverify:all` CI gate. `Counter.get()` remains a separate call-lowering
+increment; the direct-new receiver sequence is blocked by the Typer's
+selection-prefix rule.
 
 Before the matching constructor returns normally, the fresh reference must
 not be stored, returned, passed to another method, used as an ordinary
@@ -206,7 +203,8 @@ must run under JDK 21+ `java -Xverify:all`.
 | Top-level ordinary class in the same validated emission unit | Candidate for the bounded subset |
 | Plain primary constructor with primitive `Int`/`Boolean` arguments | Required future constructor target |
 | Explicit or syntactic zero-argument primary constructor | Canonical class-owned constructor symbol required |
-| `val c = new C(args)` and later `c.method()` | Typed identities are observed; future straight-line local and receiver support only |
+| `val c = new C(args)`; discard or read `c` in a straight-line method | Supported with exact class identity, `astore`/`aload`, definite initialization, and category-one `pop` |
+| `val c = new C(args)` and later `c.method()` | Local storage is supported; non-`this` virtual call lowering remains a separate increment |
 | Method parameter/local receiver with same-spelled methods on different classes | Resolve by selected method and receiver `SymbolId`/`TypeId` |
 | Direct `new C(args).method()` | Currently blocked by `UnstableSelectionPrefix` in Typer |
 | `var` reference local, reference method parameter/result, arbitrary classpath receiver | Unsupported; no descriptor fallback |
@@ -214,6 +212,6 @@ must run under JDK 21+ `java -Xverify:all`.
 | Nested allocation or allocation/reference inside branch or short-circuit CFG | Unsupported until verifier-aware reference CFG exists |
 | Duplicate emitted internal class name | `JvmCompilationUnit` validation error |
 
-The audit adds no `new`, `astore`, `aload`, `invokevirtual`, or reference
-descriptor lowering. That remains the work of dependent implementation
-issues.
+Reference-aware CFG merging, non-`this` virtual calls, and reference-valued
+method descriptors remain future work. Reference-local methods containing
+symbolic branches fail with a typed unsupported-control-flow error.
