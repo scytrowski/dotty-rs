@@ -226,6 +226,28 @@ class MetadataTests(unittest.TestCase):
         # Preserve/report the kernel values even if a later reading is lower.
         self.assertEqual(benchmark.summarize_metadata([row])["observed_peak_rss_kib"], {"median": 500, "p95": 500})
 
+    def test_checked_in_reports_preserve_samples_and_summaries(self):
+        reports = []
+        for name in ("before", "unused", "extended-driver", "performance"):
+            report = json.loads((benchmark.ROOT / f"docs/jdk-module-metadata-{name}-raw.json").read_text())
+            self.assertEqual(report["sample_count"], 10)
+            reports.append(report)
+        for report in reports[:-1]:
+            self.assertEqual(len(report["samples"]), 10)
+            self.assertEqual(benchmark.summarize(report["samples"]), report["summary"])
+        report = reports[-1]
+        self.assertEqual(set(report["cohorts"]), {"1", "2", "4"})
+        for sessions, cohort in report["cohorts"].items():
+            self.assertEqual(cohort["sample_count"], 10)
+            self.assertEqual(len(cohort["samples"]), 10)
+            rows = [sample["measurements"] for sample in cohort["samples"]]
+            for row in rows:
+                benchmark.validate_metadata_sample(row, int(sessions), 69)
+            self.assertEqual(benchmark.summarize_metadata(rows), cohort["summary"])
+        for key in ("rustc", "cargo", "jdk_version", "jdk_distribution", "jmods_sha256", "jmods_total_bytes", "release_profile", "build_overrides", "allowed_cpu_affinity"):
+            for other in reports[1:]:
+                self.assertEqual(reports[0]["environment"][key], other["environment"][key])
+
     def test_child_failure_is_reported(self):
         with mock.patch.object(benchmark.subprocess, "run", return_value=SimpleNamespace(returncode=2, stdout="", stderr="bad descriptor")):
             with self.assertRaisesRegex(RuntimeError, "bad descriptor"):

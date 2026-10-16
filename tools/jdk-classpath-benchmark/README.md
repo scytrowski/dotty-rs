@@ -94,3 +94,8 @@ fingerprinting/preflight warms it. Run without competing builds and retain all
 samples. Smoke now tests both class lookup and catalog projection from the
 checked-in class files packaged into temporary synthetic JMODs using Python's
 standard ZIP writer; neither smoke path invokes Java.
+
+Measured results, matched before/after controls, and scoped follow-up:
+[jdk-module-metadata-performance.md](../../docs/jdk-module-metadata-performance.md).
+The metadata summary uses the maximum checkpoint `VmHWM` as the observed
+peak; every checkpoint value is retained, including lower later readings.
