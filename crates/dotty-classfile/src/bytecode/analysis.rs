@@ -1764,6 +1764,51 @@ mod tests {
     }
 
     #[test]
+    fn characterizes_reference_cfg_operations_as_unsupported_before_type_flow() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class = builder.class("example/Counter").unwrap();
+        let field = builder.field_ref("example/Counter", "value", "I").unwrap();
+        let static_method = builder
+            .method_ref("example/Counter", "make", "()V")
+            .unwrap();
+        let virtual_method = builder.method_ref("example/Counter", "get", "()I").unwrap();
+        let constructor = builder
+            .method_ref("example/Counter", "<init>", "()V")
+            .unwrap();
+        let _pool = builder.finish().unwrap();
+        let cp_index = |index| operand(index);
+
+        // These exact errors are the current boundary, not a verifier result:
+        // the CFG validates the opcode family before it can reason about class
+        // owners, allocation identities, or predecessor types.
+        let reference_operations = [
+            Instruction::AConstNull,
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::AStore(LocalIndex::new(0)),
+            Instruction::GetField(FieldReference::new(cp_index(field))),
+            Instruction::PutField(FieldReference::new(cp_index(field))),
+            Instruction::GetStatic(FieldReference::new(cp_index(field))),
+            Instruction::PutStatic(FieldReference::new(cp_index(field))),
+            Instruction::InvokeStatic(StaticMethodReference::new(cp_index(static_method))),
+            Instruction::InvokeVirtual(VirtualMethodReference::new(cp_index(virtual_method))),
+            Instruction::InvokeSpecial(SpecialMethodReference::new(cp_index(constructor))),
+            Instruction::New(ClassReference::new(cp_index(class))),
+            Instruction::AReturn,
+        ];
+
+        for instruction in reference_operations {
+            assert_eq!(
+                validate_flow_instruction(7, instruction),
+                Err(AnalysisError::UnsupportedFlowInstruction {
+                    instruction: 7,
+                    kind: UnsupportedFlowInstructionKind::Reference,
+                }),
+                "current integer-only CFG rejection for {instruction:?}"
+            );
+        }
+    }
+
+    #[test]
     fn analyzes_static_parameters_integer_arithmetic_and_return() {
         let pool = ConstantPool::default();
         let instructions = [
