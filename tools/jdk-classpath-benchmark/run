@@ -4,6 +4,11 @@
 import argparse
 import datetime as dt
 import json
+import hashlib
+import io
+import resource
+import tempfile
+import zipfile
 import os
 from pathlib import Path
 import platform
@@ -83,6 +88,20 @@ def smoke(binary):
     print(json.dumps(report, sort_keys=True))
 
 
+def metadata_smoke(binary):
+    fixture = ROOT / "crates/dotty-classloader/tests/fixtures/jdk_module_catalog"
+    with tempfile.TemporaryDirectory(prefix="dotty-metadata-smoke-") as temporary:
+        for name in ("fixture.alpha", "fixture.beta", "fixture.minimal"):
+            data = io.BytesIO()
+            with zipfile.ZipFile(data, "w", compression=zipfile.ZIP_STORED) as archive:
+                archive.writestr("classes/module-info.class", (fixture / f"{name}-module-info.class").read_bytes())
+            (Path(temporary) / f"{name}.jmod").write_bytes(b"JM\x01\x00" + data.getvalue())
+        result = run_checked([binary, "--metadata-smoke", "--jmods", temporary])
+    if json.loads(result.stdout) != {"metadata_smoke": True, "module_count": 3}:
+        raise RuntimeError("unexpected metadata smoke output")
+    print(result.stdout.strip())
+
+
 def jdk_path(args):
     if args.jmods:
         path = Path(args.jmods).expanduser().resolve()
@@ -132,6 +151,7 @@ def environment(path, modules, explicit_jmods):
         "kernel": run_checked(["uname", "-a"]).stdout.strip(),
         "cpu": cpu_model(),
         "logical_cpu_count": os.cpu_count(),
+        "allowed_cpu_affinity": sorted(os.sched_getaffinity(0)),
         "memory_total_kib": memory_total_kib(),
         "memory_cgroup_limit_bytes": memory_cgroup_limit_bytes(),
         "jdk_distribution": vendor.group(1).strip() if vendor else "unknown",
@@ -142,6 +162,10 @@ def environment(path, modules, explicit_jmods):
         "rustc": run_checked(["rustc", "-Vv"]).stdout.strip(),
         "cargo": run_checked(["cargo", "-V"]).stdout.strip(),
         "profile": "release",
+        "open_fd_limit_soft_hard": list(resource.getrlimit(resource.RLIMIT_NOFILE)),
+        "jmods_sha256": {module.name: hashlib.sha256(module.read_bytes()).hexdigest() for module in modules},
+        "release_profile": {"opt_level": 3, "lto": False, "codegen_units": 16, "debug": False},
+        "build_overrides": {key: value for key, value in os.environ.items() if key.startswith("CARGO_PROFILE_RELEASE_") or key in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS")},
         "rss_method": "Linux /proc/self/status VmHWM high-water mark in KiB; read at end of the complete benchmark workload",
     }
 
@@ -262,11 +286,117 @@ def summarize(samples):
     }
 
 
+RESOURCE_PHASES = ("before_init", "after_init", "after_first_catalogs", "after_calls", "after_drop_catalogs", "after_drop_paths")
+MODULE_QUERIES = ("java.base", "java.net.http", "java.desktop", "dotty.missing.module")
+
+
+def validate_metadata_sample(row, sessions, module_count):
+    """Reject partial/mismatched samples before deriving any summary."""
+    def integer(value, label, minimum=0):
+        if type(value) is not int or value < minimum:
+            raise RuntimeError(f"invalid metadata sample: {label} must be an integer >= {minimum}")
+
+    if not isinstance(row, dict):
+        raise RuntimeError("invalid metadata sample: expected an object")
+    try:
+        if row["sessions"] != sessions or row["module_count"] != module_count:
+            raise RuntimeError("invalid metadata sample: session/module count differs from requested cohort")
+        integer(row["sessions"], "sessions", 1)
+        integer(row["module_count"], "module_count", 1)
+        for key in ("init_ns", "catalog_string_bytes_per_session"):
+            integer(row[key], key, 1)
+        for key in ("init_per_session_ns", "first_catalog_per_session_ns"):
+            if not isinstance(row[key], list) or len(row[key]) != sessions:
+                raise RuntimeError(f"invalid metadata sample: {key} needs {sessions} entries")
+            for value in row[key]:
+                integer(value, key, 1)
+        for phase in RESOURCE_PHASES:
+            if set(row[phase]) != {"fd_count", "rss_kib", "peak_rss_kib"}:
+                raise RuntimeError(f"invalid metadata sample: wrong resource fields at {phase}")
+            for key, value in row[phase].items():
+                integer(value, f"{phase}.{key}", 1)
+        lookups = row["module_lookups"]
+        if [lookup["module"] for lookup in lookups] != list(MODULE_QUERIES):
+            raise RuntimeError("invalid metadata sample: wrong module query count/order")
+        for lookup in lookups:
+            if lookup["snapshot_iterations"] != 10_000 or lookup["fresh_iterations"] != 20:
+                raise RuntimeError("invalid metadata sample: unexpected lookup iteration counts")
+            for key in ("first_snapshot_lookup_ns", "snapshot_iterations", "snapshot_total_ns", "fresh_iterations", "fresh_total_ns"):
+                integer(lookup[key], key, 1)
+        if row["enumeration"]["iterations"] != 10_000:
+            raise RuntimeError("invalid metadata sample: unexpected enumeration iteration count")
+        for key in ("iterations", "total_ns"):
+            integer(row["enumeration"][key], f"enumeration.{key}", 1)
+        if [item["mode"] for item in row["concurrent"]] != ["shared_session", "independent_sessions"]:
+            raise RuntimeError("invalid metadata sample: wrong concurrent scenario count/order")
+        for item in row["concurrent"]:
+            if item["threads"] != 4 or item["iterations_per_thread"] != 10:
+                raise RuntimeError("invalid metadata sample: expected four concurrent workers with ten calls each")
+            for key in ("threads", "iterations_per_thread", "total_ns"):
+                integer(item[key], key, 1)
+    except (KeyError, TypeError) as error:
+        raise RuntimeError(f"invalid metadata sample: missing or malformed field {error}") from error
+
+
+def summarize_metadata(samples):
+    def metric(getter, scale=1):
+        return quantiles([getter(row) / scale for row in samples])
+
+    return {
+        "observed_peak_rss_kib": metric(lambda row: max(row[phase]["peak_rss_kib"] for phase in RESOURCE_PHASES)),
+        "init_ms": metric(lambda row: row["init_ns"], 1_000_000),
+        "first_catalog_ms_per_session": metric(lambda row: sum(row["first_catalog_per_session_ns"]) / row["sessions"], 1_000_000),
+        "first_catalog_session_0_ms": metric(lambda row: row["first_catalog_per_session_ns"][0], 1_000_000),
+        "resources": {
+            phase: {key: metric(lambda row: row[phase][key]) for key in ("fd_count", "rss_kib", "peak_rss_kib")}
+            for phase in RESOURCE_PHASES
+        },
+        "resource_deltas": {
+            "init_fd_count": metric(lambda row: row["after_init"]["fd_count"] - row["before_init"]["fd_count"]),
+            "metadata_fd_count": metric(lambda row: row["after_calls"]["fd_count"] - row["after_init"]["fd_count"]),
+            "held_catalog_rss_kib": metric(lambda row: row["after_first_catalogs"]["rss_kib"] - row["after_init"]["rss_kib"]),
+        },
+        "catalog_string_bytes_per_session": metric(lambda row: row["catalog_string_bytes_per_session"]),
+        "module_lookups": {
+            name: {
+                "first_snapshot_lookup_ms": metric(lambda row: row["module_lookups"][index]["first_snapshot_lookup_ns"], 1_000_000),
+                "snapshot_ms_per_op": metric(lambda row: row["module_lookups"][index]["snapshot_total_ns"] / row["module_lookups"][index]["snapshot_iterations"], 1_000_000),
+                "fresh_catalog_and_get_ms_per_op": metric(lambda row: row["module_lookups"][index]["fresh_total_ns"] / row["module_lookups"][index]["fresh_iterations"], 1_000_000),
+            } for index, name in enumerate(MODULE_QUERIES)
+        },
+        "snapshot_enumeration_ms_per_op": metric(lambda row: row["enumeration"]["total_ns"] / row["enumeration"]["iterations"], 1_000_000),
+        "concurrent_amortized_ms_per_op": {
+            mode: metric(lambda row: row["concurrent"][index]["total_ns"] / (row["concurrent"][index]["threads"] * row["concurrent"][index]["iterations_per_thread"]), 1_000_000)
+            for index, mode in enumerate(("shared_session", "independent_sessions"))
+        },
+    }
+
+
+def run_metadata_samples(binary, path, count, module_count):
+    # Semantic/source checks run in their own process before any timed sample.
+    preflight = run_checked([binary, "--metadata-check", "--jmods", str(path)])
+    if json.loads(preflight.stdout) != {"metadata_check": True}:
+        raise RuntimeError("metadata preflight did not confirm expected semantics")
+    cohorts = {str(sessions): [] for sessions in (1, 2, 4)}
+    # Interleave session counts to reduce time/order bias between comparable cohorts.
+    for index in range(count):
+        for sessions in (1, 2, 4):
+            result = run_checked([binary, "--metadata", "--jmods", str(path), "--sessions", str(sessions)])
+            row = json.loads(result.stdout)
+            validate_metadata_sample(row, sessions, module_count)
+            cohorts[str(sessions)].append({"sample": index + 1, "measurements": row})
+    return {
+        key: {"sample_count": count, "summary": summarize_metadata([sample["measurements"] for sample in samples]), "samples": samples}
+        for key, samples in cohorts.items()
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--jmods", help="path to a JDK 21 jmods directory (defaults to JAVA_HOME/jmods)")
     parser.add_argument("--samples", type=int, default=10, help="independent fresh-process runs (minimum 10)")
-    parser.add_argument("--output", default="docs/jdk-classpath-performance-raw.json")
+    parser.add_argument("--output", help="raw JSON destination (metadata and baseline have separate defaults)")
+    parser.add_argument("--metadata", action="store_true", help="measure module catalog and 1/2/4 independent sessions")
     parser.add_argument("--smoke", action="store_true", help="run the tiny checked-in JMOD fixture without a JDK")
     parser.add_argument("--binary", help="use an already built release benchmark executable")
     parser.add_argument("--source-revision", default="unspecified", help="classloader source revision represented by the run")
@@ -275,33 +405,40 @@ def main():
 
     try:
         if args.smoke:
-            smoke(build_driver())
+            binary = Path(args.binary).expanduser().resolve() if args.binary else build_driver()
+            smoke(binary)
+            metadata_smoke(binary)
             return 0
         if args.samples < 10:
             raise RuntimeError("--samples must be at least 10 for a baseline run")
         path, modules = jdk_path(args)
         environment_info = environment(path, modules, bool(args.jmods))
+        if args.metadata:
+            environment_info["rss_method"] = "Linux /proc/self/status VmRSS and VmHWM in KiB at resource checkpoints; observed peak is the maximum checkpoint VmHWM"
         if not PROC_STATUS.is_file():
             raise RuntimeError("Linux /proc/self/status with VmHWM is required to measure peak RSS")
         binary = Path(args.binary).expanduser().resolve() if args.binary else build_driver()
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise RuntimeError(f"benchmark executable is unavailable or not executable: {binary}")
-        results = run_samples(binary, path, args.samples)
+        results = None if args.metadata else run_samples(binary, path, args.samples)
         report = {
-            "schema_version": 1,
+            "schema_version": 2 if args.metadata else 1,
+            "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
             "purpose": args.purpose,
             "source_revision": args.source_revision,
             "sample_count": args.samples,
             "process_model": "each raw row is one independently launched release binary process; OS page cache is not flushed",
             "environment": environment_info,
-            "summary": summarize(results),
-            "samples": results,
+            **({"cohorts": run_metadata_samples(binary, path, args.samples, len(modules))} if args.metadata else {"summary": summarize(results), "samples": results}),
         }
-        output = (ROOT / args.output).resolve()
+        output_name = args.output or ("docs/jdk-module-metadata-performance-raw.json" if args.metadata else "docs/jdk-classpath-performance-raw.json")
+        output = (ROOT / output_name).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-        print(f"wrote {args.samples} raw samples to {args.output}")
-        print(json.dumps(report["summary"], sort_keys=True))
+        count_label = f"{args.samples} per cohort ({args.samples * 3} processes)" if args.metadata else str(args.samples)
+        print(f"wrote {count_label} raw samples to {output_name}")
+        summaries = {key: cohort["summary"] for key, cohort in report["cohorts"].items()} if args.metadata else report["summary"]
+        print(json.dumps(summaries, sort_keys=True))
         return 0
     except (OSError, RuntimeError, json.JSONDecodeError) as error:
         print(f"jdk-classpath-benchmark: {error}", file=sys.stderr)

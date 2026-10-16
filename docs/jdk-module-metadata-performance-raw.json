@@ -1,0 +1,3715 @@
+{
+  "binary_sha256": "cd35fa44db12c9d585c4b351812cffa74c9f8c0ee3efc25fde59b882e485c04a",
+  "cohorts": {
+    "1": {
+      "sample_count": 10,
+      "samples": [
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15756,
+              "rss_kib": 15756
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15756,
+              "rss_kib": 15756
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15404,
+              "rss_kib": 14584
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13272,
+              "rss_kib": 13272
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13096,
+              "rss_kib": 13096
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2224,
+              "rss_kib": 2224
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56208951
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 55662927
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 287098
+            },
+            "first_catalog_per_session_ns": [
+              5393119
+            ],
+            "init_ns": 17163539,
+            "init_per_session_ns": [
+              17163379
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 150,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107736546,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 374542
+              },
+              {
+                "first_snapshot_lookup_ns": 521,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 106861236,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 356839
+              },
+              {
+                "first_snapshot_lookup_ns": 241,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 106980107,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 353332
+              },
+              {
+                "first_snapshot_lookup_ns": 340,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107231429,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 375674
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 1
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15848,
+              "rss_kib": 15848
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15848,
+              "rss_kib": 15848
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15160,
+              "rss_kib": 14676
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13356,
+              "rss_kib": 13356
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13180,
+              "rss_kib": 13180
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2364,
+              "rss_kib": 2364
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56732013
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 57347955
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 287810
+            },
+            "first_catalog_per_session_ns": [
+              5624993
+            ],
+            "init_ns": 17216609,
+            "init_per_session_ns": [
+              17216318
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 141,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 109003593,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 365294
+              },
+              {
+                "first_snapshot_lookup_ns": 281,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107746047,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 358071
+              },
+              {
+                "first_snapshot_lookup_ns": 230,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107321711,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 361127
+              },
+              {
+                "first_snapshot_lookup_ns": 270,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107536410,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 374843
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 2
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15884,
+              "rss_kib": 15884
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15884,
+              "rss_kib": 15884
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15468,
+              "rss_kib": 14712
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13240,
+              "rss_kib": 13240
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13072,
+              "rss_kib": 13072
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2204,
+              "rss_kib": 2204
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56477013
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 58047278
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 285876
+            },
+            "first_catalog_per_session_ns": [
+              5431370
+            ],
+            "init_ns": 18236750,
+            "init_per_session_ns": [
+              18236419
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 151,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108189033,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 375343
+              },
+              {
+                "first_snapshot_lookup_ns": 821,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107892953,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 357050
+              },
+              {
+                "first_snapshot_lookup_ns": 491,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107813472,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 355055
+              },
+              {
+                "first_snapshot_lookup_ns": 370,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107660465,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 372928
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 3
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15864,
+              "rss_kib": 15864
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15864,
+              "rss_kib": 15864
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15580,
+              "rss_kib": 14692
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13316,
+              "rss_kib": 13316
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13140,
+              "rss_kib": 13140
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2264,
+              "rss_kib": 2264
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56903685
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56874197
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 295574
+            },
+            "first_catalog_per_session_ns": [
+              5442181
+            ],
+            "init_ns": 17718349,
+            "init_per_session_ns": [
+              17718139
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 131,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108528123,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 364182
+              },
+              {
+                "first_snapshot_lookup_ns": 301,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108257289,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 362459
+              },
+              {
+                "first_snapshot_lookup_ns": 1373,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107068768,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 351639
+              },
+              {
+                "first_snapshot_lookup_ns": 340,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107676896,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 377989
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 4
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15832,
+              "rss_kib": 15832
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15832,
+              "rss_kib": 15832
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15036,
+              "rss_kib": 14660
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13216,
+              "rss_kib": 13216
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13036,
+              "rss_kib": 13036
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2168,
+              "rss_kib": 2168
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57404243
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56876471
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 285816
+            },
+            "first_catalog_per_session_ns": [
+              5356861
+            ],
+            "init_ns": 17424439,
+            "init_per_session_ns": [
+              17424218
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 150,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107937761,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 378249
+              },
+              {
+                "first_snapshot_lookup_ns": 942,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108462252,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 365385
+              },
+              {
+                "first_snapshot_lookup_ns": 822,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108386211,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 353362
+              },
+              {
+                "first_snapshot_lookup_ns": 651,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107893279,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 379401
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 5
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15704,
+              "rss_kib": 15704
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15704,
+              "rss_kib": 15704
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 14984,
+              "rss_kib": 14532
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13216,
+              "rss_kib": 13216
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13048,
+              "rss_kib": 13048
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2308,
+              "rss_kib": 2308
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56252773
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56869470
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 292559
+            },
+            "first_catalog_per_session_ns": [
+              5400563
+            ],
+            "init_ns": 17751932,
+            "init_per_session_ns": [
+              17751541
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 140,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108968350,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 357190
+              },
+              {
+                "first_snapshot_lookup_ns": 420,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108158154,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 367329
+              },
+              {
+                "first_snapshot_lookup_ns": 210,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107791191,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 359304
+              },
+              {
+                "first_snapshot_lookup_ns": 250,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107902138,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 376636
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 6
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15800,
+              "rss_kib": 15800
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15800,
+              "rss_kib": 15800
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15064,
+              "rss_kib": 14628
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13308,
+              "rss_kib": 13308
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13136,
+              "rss_kib": 13136
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2280,
+              "rss_kib": 2280
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56858739
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 57271431
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 286067
+            },
+            "first_catalog_per_session_ns": [
+              5458892
+            ],
+            "init_ns": 18141061,
+            "init_per_session_ns": [
+              18140781
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 160,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 110595356,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 371426
+              },
+              {
+                "first_snapshot_lookup_ns": 1182,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108096445,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 354254
+              },
+              {
+                "first_snapshot_lookup_ns": 1152,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107771854,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 352641
+              },
+              {
+                "first_snapshot_lookup_ns": 941,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107014224,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 381646
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 7
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15884,
+              "rss_kib": 15884
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15884,
+              "rss_kib": 15884
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15344,
+              "rss_kib": 14712
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13332,
+              "rss_kib": 13332
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13156,
+              "rss_kib": 13156
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2284,
+              "rss_kib": 2284
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57120579
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56946676
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 302898
+            },
+            "first_catalog_per_session_ns": [
+              5902052
+            ],
+            "init_ns": 17997213,
+            "init_per_session_ns": [
+              17996973
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 140,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108319900,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 370555
+              },
+              {
+                "first_snapshot_lookup_ns": 481,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 106826344,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 359193
+              },
+              {
+                "first_snapshot_lookup_ns": 481,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107833912,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 350146
+              },
+              {
+                "first_snapshot_lookup_ns": 391,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108050887,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 375223
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 8
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15824,
+              "rss_kib": 15824
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15824,
+              "rss_kib": 15824
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15412,
+              "rss_kib": 14652
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13348,
+              "rss_kib": 13348
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13172,
+              "rss_kib": 13172
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2356,
+              "rss_kib": 2356
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57290429
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 55996794
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 290254
+            },
+            "first_catalog_per_session_ns": [
+              5444926
+            ],
+            "init_ns": 18080287,
+            "init_per_session_ns": [
+              18079967
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 120,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108735604,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 364774
+              },
+              {
+                "first_snapshot_lookup_ns": 501,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108377730,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 362480
+              },
+              {
+                "first_snapshot_lookup_ns": 261,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107968677,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 360906
+              },
+              {
+                "first_snapshot_lookup_ns": 230,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108103300,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 377227
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 9
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 73,
+              "peak_rss_kib": 15868,
+              "rss_kib": 15868
+            },
+            "after_drop_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 15868,
+              "rss_kib": 15868
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 15080,
+              "rss_kib": 14696
+            },
+            "after_first_catalogs": {
+              "fd_count": 73,
+              "peak_rss_kib": 13328,
+              "rss_kib": 13328
+            },
+            "after_init": {
+              "fd_count": 73,
+              "peak_rss_kib": 13152,
+              "rss_kib": 13152
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2284,
+              "rss_kib": 2284
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56311505
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56466894
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 287880
+            },
+            "first_catalog_per_session_ns": [
+              5409599
+            ],
+            "init_ns": 18197306,
+            "init_per_session_ns": [
+              18197156
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 140,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 109434722,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 372538
+              },
+              {
+                "first_snapshot_lookup_ns": 481,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108477200,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 362459
+              },
+              {
+                "first_snapshot_lookup_ns": 210,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108389302,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 352842
+              },
+              {
+                "first_snapshot_lookup_ns": 231,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108328121,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 381805
+              }
+            ],
+            "sessions": 1
+          },
+          "sample": 10
+        }
+      ],
+      "summary": {
+        "catalog_string_bytes_per_session": {
+          "median": 48340.0,
+          "p95": 48340.0
+        },
+        "concurrent_amortized_ms_per_op": {
+          "independent_sessions": {
+            "median": 1.4218833499999999,
+            "p95": 1.45118195
+          },
+          "shared_session": {
+            "median": 1.4198844,
+            "p95": 1.435106075
+          }
+        },
+        "first_catalog_ms_per_session": {
+          "median": 5.4367754999999995,
+          "p95": 5.902052
+        },
+        "first_catalog_session_0_ms": {
+          "median": 5.4367754999999995,
+          "p95": 5.902052
+        },
+        "init_ms": {
+          "median": 17.8745725,
+          "p95": 18.23675
+        },
+        "module_lookups": {
+          "dotty.missing.module": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.00034,
+              "p95": 0.000941
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.389254375,
+              "p95": 5.41640605
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.7693150000000003e-05,
+              "p95": 3.8180500000000005e-05
+            }
+          },
+          "java.base": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.0001405,
+              "p95": 0.00016
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.431593175,
+              "p95": 5.5297678
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.709905e-05,
+              "p95": 3.78249e-05
+            }
+          },
+          "java.desktop": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.000371,
+              "p95": 0.001373
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.3901165749999995,
+              "p95": 5.4194651
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.533469999999999e-05,
+              "p95": 3.61127e-05
+            }
+          },
+          "java.net.http": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.000491,
+              "p95": 0.001182
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.406364975,
+              "p95": 5.42386
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.60826e-05,
+              "p95": 3.67329e-05
+            }
+          }
+        },
+        "observed_peak_rss_kib": {
+          "median": 15840.0,
+          "p95": 15884.0
+        },
+        "resource_deltas": {
+          "held_catalog_rss_kib": {
+            "median": 176.0,
+            "p95": 180.0
+          },
+          "init_fd_count": {
+            "median": 69.0,
+            "p95": 69.0
+          },
+          "metadata_fd_count": {
+            "median": 0.0,
+            "p95": 0.0
+          }
+        },
+        "resources": {
+          "after_calls": {
+            "fd_count": {
+              "median": 73.0,
+              "p95": 73.0
+            },
+            "peak_rss_kib": {
+              "median": 15840.0,
+              "p95": 15884.0
+            },
+            "rss_kib": {
+              "median": 15840.0,
+              "p95": 15884.0
+            }
+          },
+          "after_drop_catalogs": {
+            "fd_count": {
+              "median": 73.0,
+              "p95": 73.0
+            },
+            "peak_rss_kib": {
+              "median": 15840.0,
+              "p95": 15884.0
+            },
+            "rss_kib": {
+              "median": 15840.0,
+              "p95": 15884.0
+            }
+          },
+          "after_drop_paths": {
+            "fd_count": {
+              "median": 4.0,
+              "p95": 4.0
+            },
+            "peak_rss_kib": {
+              "median": 15252.0,
+              "p95": 15580.0
+            },
+            "rss_kib": {
+              "median": 14668.0,
+              "p95": 14712.0
+            }
+          },
+          "after_first_catalogs": {
+            "fd_count": {
+              "median": 73.0,
+              "p95": 73.0
+            },
+            "peak_rss_kib": {
+              "median": 13312.0,
+              "p95": 13356.0
+            },
+            "rss_kib": {
+              "median": 13312.0,
+              "p95": 13356.0
+            }
+          },
+          "after_init": {
+            "fd_count": {
+              "median": 73.0,
+              "p95": 73.0
+            },
+            "peak_rss_kib": {
+              "median": 13138.0,
+              "p95": 13180.0
+            },
+            "rss_kib": {
+              "median": 13138.0,
+              "p95": 13180.0
+            }
+          },
+          "before_init": {
+            "fd_count": {
+              "median": 4.0,
+              "p95": 4.0
+            },
+            "peak_rss_kib": {
+              "median": 2282.0,
+              "p95": 2364.0
+            },
+            "rss_kib": {
+              "median": 2282.0,
+              "p95": 2364.0
+            }
+          }
+        },
+        "snapshot_enumeration_ms_per_op": {
+          "median": 2.87845e-05,
+          "p95": 3.02898e-05
+        }
+      }
+    },
+    "2": {
+      "sample_count": 10,
+      "samples": [
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26400,
+              "rss_kib": 26400
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26400,
+              "rss_kib": 26400
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 26056,
+              "rss_kib": 24056
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 23948,
+              "rss_kib": 23948
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23536,
+              "rss_kib": 23536
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2244,
+              "rss_kib": 2244
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57379045
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 57274798
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 287749
+            },
+            "first_catalog_per_session_ns": [
+              6364238,
+              5390072
+            ],
+            "init_ns": 34136741,
+            "init_per_session_ns": [
+              16921475,
+              17214955
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 210,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107394528,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 362490
+              },
+              {
+                "first_snapshot_lookup_ns": 210,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107436895,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 356939
+              },
+              {
+                "first_snapshot_lookup_ns": 291,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107126071,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 355166
+              },
+              {
+                "first_snapshot_lookup_ns": 311,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 106513224,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 374843
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 1
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26680,
+              "rss_kib": 26680
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26680,
+              "rss_kib": 26680
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 26108,
+              "rss_kib": 24336
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 24140,
+              "rss_kib": 24140
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23720,
+              "rss_kib": 23720
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2360,
+              "rss_kib": 2360
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57477909
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 57040959
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 286026
+            },
+            "first_catalog_per_session_ns": [
+              5456407,
+              5462067
+            ],
+            "init_ns": 34696290,
+            "init_per_session_ns": [
+              17866086,
+              16829843
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 221,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107701246,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 369602
+              },
+              {
+                "first_snapshot_lookup_ns": 461,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107002581,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 361879
+              },
+              {
+                "first_snapshot_lookup_ns": 331,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107702033,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 350296
+              },
+              {
+                "first_snapshot_lookup_ns": 1022,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107648250,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 387727
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 2
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26460,
+              "rss_kib": 26460
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26460,
+              "rss_kib": 26460
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 25776,
+              "rss_kib": 24116
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 24000,
+              "rss_kib": 24000
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23572,
+              "rss_kib": 23572
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2284,
+              "rss_kib": 2284
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56530854
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56913290
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 280787
+            },
+            "first_catalog_per_session_ns": [
+              5438213,
+              5485721
+            ],
+            "init_ns": 34498419,
+            "init_per_session_ns": [
+              18078775,
+              16419134
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 241,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108018343,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 369011
+              },
+              {
+                "first_snapshot_lookup_ns": 201,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107776832,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 368410
+              },
+              {
+                "first_snapshot_lookup_ns": 210,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107582138,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 352250
+              },
+              {
+                "first_snapshot_lookup_ns": 331,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 110163399,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 375343
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 3
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26532,
+              "rss_kib": 26532
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26532,
+              "rss_kib": 26532
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 26060,
+              "rss_kib": 24188
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 24028,
+              "rss_kib": 24028
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23604,
+              "rss_kib": 23604
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2184,
+              "rss_kib": 2184
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56335728
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56169827
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 285786
+            },
+            "first_catalog_per_session_ns": [
+              5569328,
+              5436529
+            ],
+            "init_ns": 34565214,
+            "init_per_session_ns": [
+              18092561,
+              16472233
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 230,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108369613,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 372068
+              },
+              {
+                "first_snapshot_lookup_ns": 281,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108062658,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 366286
+              },
+              {
+                "first_snapshot_lookup_ns": 240,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107791018,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 352701
+              },
+              {
+                "first_snapshot_lookup_ns": 271,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107373587,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 383008
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 4
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26540,
+              "rss_kib": 26540
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26540,
+              "rss_kib": 26540
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 25800,
+              "rss_kib": 24196
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 24020,
+              "rss_kib": 24020
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23600,
+              "rss_kib": 23600
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2312,
+              "rss_kib": 2312
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56953588
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56321362
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 287840
+            },
+            "first_catalog_per_session_ns": [
+              5417023,
+              5434506
+            ],
+            "init_ns": 35828682,
+            "init_per_session_ns": [
+              18003303,
+              17825049
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 230,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108458343,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 365665
+              },
+              {
+                "first_snapshot_lookup_ns": 231,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107328766,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 357580
+              },
+              {
+                "first_snapshot_lookup_ns": 361,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107563753,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 351449
+              },
+              {
+                "first_snapshot_lookup_ns": 871,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107580866,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 378820
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 5
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26460,
+              "rss_kib": 26460
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26460,
+              "rss_kib": 26460
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 25784,
+              "rss_kib": 24116
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 23988,
+              "rss_kib": 23988
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23576,
+              "rss_kib": 23576
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2232,
+              "rss_kib": 2232
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56746600
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56829383
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 294141
+            },
+            "first_catalog_per_session_ns": [
+              5480622,
+              5451117
+            ],
+            "init_ns": 35569116,
+            "init_per_session_ns": [
+              17970201,
+              17598475
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 250,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108725482,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 378139
+              },
+              {
+                "first_snapshot_lookup_ns": 1573,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108417624,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 361558
+              },
+              {
+                "first_snapshot_lookup_ns": 722,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108112230,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 364723
+              },
+              {
+                "first_snapshot_lookup_ns": 551,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108117208,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 391203
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 6
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26572,
+              "rss_kib": 26572
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26572,
+              "rss_kib": 26572
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 25964,
+              "rss_kib": 24228
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 24068,
+              "rss_kib": 24068
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23644,
+              "rss_kib": 23644
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2348,
+              "rss_kib": 2348
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56162073
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 58058308
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 287839
+            },
+            "first_catalog_per_session_ns": [
+              5622989,
+              5497694
+            ],
+            "init_ns": 34117264,
+            "init_per_session_ns": [
+              17396225,
+              16720669
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 210,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 109065722,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 366507
+              },
+              {
+                "first_snapshot_lookup_ns": 250,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108776388,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 364883
+              },
+              {
+                "first_snapshot_lookup_ns": 1082,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108445637,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 353954
+              },
+              {
+                "first_snapshot_lookup_ns": 501,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108602582,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 388839
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 7
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26564,
+              "rss_kib": 26564
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26564,
+              "rss_kib": 26564
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 26140,
+              "rss_kib": 24220
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 23980,
+              "rss_kib": 23980
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23560,
+              "rss_kib": 23560
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2208,
+              "rss_kib": 2208
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56460323
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 57685478
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 286017
+            },
+            "first_catalog_per_session_ns": [
+              5556264,
+              5669055
+            ],
+            "init_ns": 34476929,
+            "init_per_session_ns": [
+              17328338,
+              17148240
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 321,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108747463,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 369713
+              },
+              {
+                "first_snapshot_lookup_ns": 301,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108524544,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 366517
+              },
+              {
+                "first_snapshot_lookup_ns": 792,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108116801,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 349515
+              },
+              {
+                "first_snapshot_lookup_ns": 892,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107179563,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 376015
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 8
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26552,
+              "rss_kib": 26552
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26552,
+              "rss_kib": 26552
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 25808,
+              "rss_kib": 24208
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 23984,
+              "rss_kib": 23984
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23560,
+              "rss_kib": 23560
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2200,
+              "rss_kib": 2200
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56914132
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 58342241
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 284383
+            },
+            "first_catalog_per_session_ns": [
+              5544982,
+              5522631
+            ],
+            "init_ns": 36618933,
+            "init_per_session_ns": [
+              19817173,
+              16801440
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 221,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108939393,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 365054
+              },
+              {
+                "first_snapshot_lookup_ns": 1202,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107745314,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 357390
+              },
+              {
+                "first_snapshot_lookup_ns": 821,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108882360,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 351329
+              },
+              {
+                "first_snapshot_lookup_ns": 1292,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108734218,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 382938
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 9
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 142,
+              "peak_rss_kib": 26560,
+              "rss_kib": 26560
+            },
+            "after_drop_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 26560,
+              "rss_kib": 26560
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 25948,
+              "rss_kib": 24216
+            },
+            "after_first_catalogs": {
+              "fd_count": 142,
+              "peak_rss_kib": 24052,
+              "rss_kib": 24052
+            },
+            "after_init": {
+              "fd_count": 142,
+              "peak_rss_kib": 23624,
+              "rss_kib": 23624
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2264,
+              "rss_kib": 2264
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56935021
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56448070
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 290354
+            },
+            "first_catalog_per_session_ns": [
+              5558849,
+              5519535
+            ],
+            "init_ns": 34493292,
+            "init_per_session_ns": [
+              17758185,
+              16734827
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 241,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108810896,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 364343
+              },
+              {
+                "first_snapshot_lookup_ns": 220,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108230793,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 365285
+              },
+              {
+                "first_snapshot_lookup_ns": 291,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108193538,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 357239
+              },
+              {
+                "first_snapshot_lookup_ns": 320,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108204746,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 381295
+              }
+            ],
+            "sessions": 2
+          },
+          "sample": 10
+        }
+      ],
+      "summary": {
+        "catalog_string_bytes_per_session": {
+          "median": 48340.0,
+          "p95": 48340.0
+        },
+        "concurrent_amortized_ms_per_op": {
+          "independent_sessions": {
+            "median": 1.4244281125,
+            "p95": 1.4585560249999998
+          },
+          "shared_session": {
+            "median": 1.42075915,
+            "p95": 1.436947725
+          }
+        },
+        "first_catalog_ms_per_session": {
+          "median": 5.5183675,
+          "p95": 5.877155
+        },
+        "first_catalog_session_0_ms": {
+          "median": 5.550623,
+          "p95": 6.364238
+        },
+        "init_ms": {
+          "median": 34.5318165,
+          "p95": 36.618933
+        },
+        "module_lookups": {
+          "dotty.missing.module": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.000526,
+              "p95": 0.001292
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.39413645,
+              "p95": 5.50816995
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.8211649999999995e-05,
+              "p95": 3.91203e-05
+            }
+          },
+          "java.base": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.00023,
+              "p95": 0.000321
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.429595624999999,
+              "p95": 5.4532861
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.6775899999999995e-05,
+              "p95": 3.7813899999999994e-05
+            }
+          },
+          "java.desktop": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.000346,
+              "p95": 0.001082
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.3975812,
+              "p95": 5.444118
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.524755e-05,
+              "p95": 3.64723e-05
+            }
+          },
+          "java.net.http": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.0002655,
+              "p95": 0.001573
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.395987249999999,
+              "p95": 5.438819400000001
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.63381e-05,
+              "p95": 3.6841e-05
+            }
+          }
+        },
+        "observed_peak_rss_kib": {
+          "median": 26546.0,
+          "p95": 26680.0
+        },
+        "resource_deltas": {
+          "held_catalog_rss_kib": {
+            "median": 422.0,
+            "p95": 428.0
+          },
+          "init_fd_count": {
+            "median": 138.0,
+            "p95": 138.0
+          },
+          "metadata_fd_count": {
+            "median": 0.0,
+            "p95": 0.0
+          }
+        },
+        "resources": {
+          "after_calls": {
+            "fd_count": {
+              "median": 142.0,
+              "p95": 142.0
+            },
+            "peak_rss_kib": {
+              "median": 26546.0,
+              "p95": 26680.0
+            },
+            "rss_kib": {
+              "median": 26546.0,
+              "p95": 26680.0
+            }
+          },
+          "after_drop_catalogs": {
+            "fd_count": {
+              "median": 142.0,
+              "p95": 142.0
+            },
+            "peak_rss_kib": {
+              "median": 26546.0,
+              "p95": 26680.0
+            },
+            "rss_kib": {
+              "median": 26546.0,
+              "p95": 26680.0
+            }
+          },
+          "after_drop_paths": {
+            "fd_count": {
+              "median": 4.0,
+              "p95": 4.0
+            },
+            "peak_rss_kib": {
+              "median": 25956.0,
+              "p95": 26140.0
+            },
+            "rss_kib": {
+              "median": 24202.0,
+              "p95": 24336.0
+            }
+          },
+          "after_first_catalogs": {
+            "fd_count": {
+              "median": 142.0,
+              "p95": 142.0
+            },
+            "peak_rss_kib": {
+              "median": 24010.0,
+              "p95": 24140.0
+            },
+            "rss_kib": {
+              "median": 24010.0,
+              "p95": 24140.0
+            }
+          },
+          "after_init": {
+            "fd_count": {
+              "median": 142.0,
+              "p95": 142.0
+            },
+            "peak_rss_kib": {
+              "median": 23588.0,
+              "p95": 23720.0
+            },
+            "rss_kib": {
+              "median": 23588.0,
+              "p95": 23720.0
+            }
+          },
+          "before_init": {
+            "fd_count": {
+              "median": 4.0,
+              "p95": 4.0
+            },
+            "peak_rss_kib": {
+              "median": 2254.0,
+              "p95": 2360.0
+            },
+            "rss_kib": {
+              "median": 2254.0,
+              "p95": 2360.0
+            }
+          }
+        },
+        "snapshot_enumeration_ms_per_op": {
+          "median": 2.868875e-05,
+          "p95": 2.94141e-05
+        }
+      }
+    },
+    "4": {
+      "sample_count": 10,
+      "samples": [
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47880,
+              "rss_kib": 47880
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47880,
+              "rss_kib": 47880
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47344,
+              "rss_kib": 43192
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45484,
+              "rss_kib": 45484
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44592,
+              "rss_kib": 44592
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2348,
+              "rss_kib": 2348
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57431975
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56320169
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 289642
+            },
+            "first_catalog_per_session_ns": [
+              5481083,
+              5433314,
+              5421091,
+              5420610
+            ],
+            "init_ns": 70178153,
+            "init_per_session_ns": [
+              17921320,
+              17470174,
+              16850793,
+              17934604
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 240,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108374101,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 375033
+              },
+              {
+                "first_snapshot_lookup_ns": 1193,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107624268,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 360586
+              },
+              {
+                "first_snapshot_lookup_ns": 902,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107456486,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 351058
+              },
+              {
+                "first_snapshot_lookup_ns": 591,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107414967,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 381074
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 1
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47892,
+              "rss_kib": 47892
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47892,
+              "rss_kib": 47892
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47368,
+              "rss_kib": 43204
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45452,
+              "rss_kib": 45452
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44564,
+              "rss_kib": 44564
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2244,
+              "rss_kib": 2244
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57248010
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56287768
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 288571
+            },
+            "first_catalog_per_session_ns": [
+              5488016,
+              6522304,
+              5491743,
+              5424758
+            ],
+            "init_ns": 68330982,
+            "init_per_session_ns": [
+              17567125,
+              17823005,
+              16462816,
+              16477285
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 270,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107610490,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 363111
+              },
+              {
+                "first_snapshot_lookup_ns": 400,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107788116,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 378089
+              },
+              {
+                "first_snapshot_lookup_ns": 160,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 106774785,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 352180
+              },
+              {
+                "first_snapshot_lookup_ns": 250,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107379429,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 376596
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 2
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47792,
+              "rss_kib": 47792
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47792,
+              "rss_kib": 47792
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47172,
+              "rss_kib": 43104
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45388,
+              "rss_kib": 45388
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44496,
+              "rss_kib": 44496
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2304,
+              "rss_kib": 2304
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57384063
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56795242
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 287870
+            },
+            "first_catalog_per_session_ns": [
+              5519094,
+              5503225,
+              5456567,
+              5398108
+            ],
+            "init_ns": 67824852,
+            "init_per_session_ns": [
+              17743787,
+              16888504,
+              16665535,
+              16526264
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 290,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107393545,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 363562
+              },
+              {
+                "first_snapshot_lookup_ns": 621,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108099408,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 354534
+              },
+              {
+                "first_snapshot_lookup_ns": 541,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107954979,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 362039
+              },
+              {
+                "first_snapshot_lookup_ns": 361,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107777244,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 374743
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 3
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47820,
+              "rss_kib": 47820
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47820,
+              "rss_kib": 47820
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47520,
+              "rss_kib": 43132
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45412,
+              "rss_kib": 45412
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44520,
+              "rss_kib": 44520
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2272,
+              "rss_kib": 2272
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57294214
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56802603
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 292178
+            },
+            "first_catalog_per_session_ns": [
+              5510759,
+              5474561,
+              5490651,
+              5463791
+            ],
+            "init_ns": 67440002,
+            "init_per_session_ns": [
+              17492087,
+              16423142,
+              16453949,
+              17070064
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 241,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108542669,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 372989
+              },
+              {
+                "first_snapshot_lookup_ns": 221,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108291738,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 361016
+              },
+              {
+                "first_snapshot_lookup_ns": 290,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108073310,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 358242
+              },
+              {
+                "first_snapshot_lookup_ns": 280,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108202171,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 378339
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 4
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47904,
+              "rss_kib": 47904
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47904,
+              "rss_kib": 47904
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47316,
+              "rss_kib": 43216
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45400,
+              "rss_kib": 45400
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44512,
+              "rss_kib": 44512
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2128,
+              "rss_kib": 2128
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56763320
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56604592
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 285825
+            },
+            "first_catalog_per_session_ns": [
+              5754476,
+              5475784,
+              6763867,
+              5870062
+            ],
+            "init_ns": 67882040,
+            "init_per_session_ns": [
+              17505329,
+              16886550,
+              16569135,
+              16920275
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 772,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108130445,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 371296
+              },
+              {
+                "first_snapshot_lookup_ns": 802,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107873754,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 366888
+              },
+              {
+                "first_snapshot_lookup_ns": 702,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107596556,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 352290
+              },
+              {
+                "first_snapshot_lookup_ns": 881,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107185436,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 376506
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 5
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47912,
+              "rss_kib": 47912
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47912,
+              "rss_kib": 47912
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47188,
+              "rss_kib": 43224
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45404,
+              "rss_kib": 45404
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44508,
+              "rss_kib": 44508
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2128,
+              "rss_kib": 2128
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57054866
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 60121876
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 290314
+            },
+            "first_catalog_per_session_ns": [
+              5539793,
+              5601659,
+              5542127,
+              5431901
+            ],
+            "init_ns": 69567150,
+            "init_per_session_ns": [
+              17348477,
+              18080227,
+              17463732,
+              16673771
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 350,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 112316402,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 378319
+              },
+              {
+                "first_snapshot_lookup_ns": 1583,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107331088,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 377818
+              },
+              {
+                "first_snapshot_lookup_ns": 1262,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107220534,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 375604
+              },
+              {
+                "first_snapshot_lookup_ns": 1052,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108824185,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 384481
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 6
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47944,
+              "rss_kib": 47944
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47944,
+              "rss_kib": 47944
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47336,
+              "rss_kib": 43256
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45496,
+              "rss_kib": 45496
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44596,
+              "rss_kib": 44596
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2408,
+              "rss_kib": 2408
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 56388890
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56400189
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 290305
+            },
+            "first_catalog_per_session_ns": [
+              5426591,
+              5431710,
+              5440477,
+              5421230
+            ],
+            "init_ns": 66979868,
+            "init_per_session_ns": [
+              17518334,
+              16491229,
+              16596126,
+              16373288
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 250,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108150155,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 374712
+              },
+              {
+                "first_snapshot_lookup_ns": 390,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107870151,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 360125
+              },
+              {
+                "first_snapshot_lookup_ns": 1443,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107381883,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 359805
+              },
+              {
+                "first_snapshot_lookup_ns": 631,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107670825,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 377688
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 7
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47916,
+              "rss_kib": 47916
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47916,
+              "rss_kib": 47916
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47172,
+              "rss_kib": 43228
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45456,
+              "rss_kib": 45456
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44556,
+              "rss_kib": 44556
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2240,
+              "rss_kib": 2240
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57482508
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 57274349
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 285715
+            },
+            "first_catalog_per_session_ns": [
+              5457980,
+              5598153,
+              5454563,
+              5519235
+            ],
+            "init_ns": 67389558,
+            "init_per_session_ns": [
+              17410063,
+              16623086,
+              16602498,
+              16753400
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 261,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108349097,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 374532
+              },
+              {
+                "first_snapshot_lookup_ns": 230,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108317820,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 356489
+              },
+              {
+                "first_snapshot_lookup_ns": 421,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108080652,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 358201
+              },
+              {
+                "first_snapshot_lookup_ns": 380,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108076167,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 375755
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 8
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47988,
+              "rss_kib": 47988
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47988,
+              "rss_kib": 47988
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47152,
+              "rss_kib": 43300
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45448,
+              "rss_kib": 45448
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44560,
+              "rss_kib": 44560
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2256,
+              "rss_kib": 2256
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57103027
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 57351564
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 288531
+            },
+            "first_catalog_per_session_ns": [
+              5504366,
+              5503706,
+              5475373,
+              5560152
+            ],
+            "init_ns": 68229683,
+            "init_per_session_ns": [
+              18284140,
+              16602357,
+              16736971,
+              16605635
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 280,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108092334,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 357550
+              },
+              {
+                "first_snapshot_lookup_ns": 281,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107831866,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 359503
+              },
+              {
+                "first_snapshot_lookup_ns": 340,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 106929427,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 361117
+              },
+              {
+                "first_snapshot_lookup_ns": 311,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 107449593,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 376917
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 9
+        },
+        {
+          "measurements": {
+            "after_calls": {
+              "fd_count": 280,
+              "peak_rss_kib": 47916,
+              "rss_kib": 47916
+            },
+            "after_drop_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 47916,
+              "rss_kib": 47916
+            },
+            "after_drop_paths": {
+              "fd_count": 4,
+              "peak_rss_kib": 47404,
+              "rss_kib": 43228
+            },
+            "after_first_catalogs": {
+              "fd_count": 280,
+              "peak_rss_kib": 45476,
+              "rss_kib": 45476
+            },
+            "after_init": {
+              "fd_count": 280,
+              "peak_rss_kib": 44588,
+              "rss_kib": 44588
+            },
+            "before_init": {
+              "fd_count": 4,
+              "peak_rss_kib": 2408,
+              "rss_kib": 2408
+            },
+            "catalog_string_bytes_per_session": 48340,
+            "concurrent": [
+              {
+                "iterations_per_thread": 10,
+                "mode": "shared_session",
+                "threads": 4,
+                "total_ns": 57092618
+              },
+              {
+                "iterations_per_thread": 10,
+                "mode": "independent_sessions",
+                "threads": 4,
+                "total_ns": 56964088
+              }
+            ],
+            "enumeration": {
+              "iterations": 10000,
+              "total_ns": 287909
+            },
+            "first_catalog_per_session_ns": [
+              5426260,
+              5468389,
+              5503064,
+              5409208
+            ],
+            "init_ns": 67332100,
+            "init_per_session_ns": [
+              17507263,
+              16489929,
+              16496428,
+              16837868
+            ],
+            "module_count": 69,
+            "module_lookups": [
+              {
+                "first_snapshot_lookup_ns": 220,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108277182,
+                "module": "java.base",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 363331
+              },
+              {
+                "first_snapshot_lookup_ns": 1724,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 112619892,
+                "module": "java.net.http",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 455403
+              },
+              {
+                "first_snapshot_lookup_ns": 1833,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108520549,
+                "module": "java.desktop",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 378409
+              },
+              {
+                "first_snapshot_lookup_ns": 1122,
+                "fresh_iterations": 20,
+                "fresh_total_ns": 108081533,
+                "module": "dotty.missing.module",
+                "snapshot_iterations": 10000,
+                "snapshot_total_ns": 382527
+              }
+            ],
+            "sessions": 4
+          },
+          "sample": 10
+        }
+      ],
+      "summary": {
+        "catalog_string_bytes_per_session": {
+          "median": 48340.0,
+          "p95": 48340.0
+        },
+        "concurrent_amortized_ms_per_op": {
+          "independent_sessions": {
+            "median": 1.4199730625,
+            "p95": 1.5030469
+          },
+          "shared_session": {
+            "median": 1.4293879625,
+            "p95": 1.4370627
+          }
+        },
+        "first_catalog_ms_per_session": {
+          "median": 5.496211625000001,
+          "p95": 5.96604725
+        },
+        "first_catalog_session_0_ms": {
+          "median": 5.496191,
+          "p95": 5.754476
+        },
+        "init_ms": {
+          "median": 67.853446,
+          "p95": 70.178153
+        },
+        "module_lookups": {
+          "dotty.missing.module": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.00048550000000000004,
+              "p95": 0.001122
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.386201725,
+              "p95": 5.44120925
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.773025e-05,
+              "p95": 3.8448099999999995e-05
+            }
+          },
+          "java.base": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.0002655,
+              "p95": 0.000772
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.410683425,
+              "p95": 5.6158201
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.7214250000000004e-05,
+              "p95": 3.78319e-05
+            }
+          },
+          "java.desktop": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.0006215000000000001,
+              "p95": 0.001833
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.376326049999999,
+              "p95": 5.42602745
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.5902349999999993e-05,
+              "p95": 3.78409e-05
+            }
+          },
+          "java.net.http": {
+            "first_snapshot_lookup_ms": {
+              "median": 0.0005105,
+              "p95": 0.001724
+            },
+            "fresh_catalog_and_get_ms_per_op": {
+              "median": 5.393597625,
+              "p95": 5.630994599999999
+            },
+            "snapshot_ms_per_op": {
+              "median": 3.60801e-05,
+              "p95": 4.55403e-05
+            }
+          }
+        },
+        "observed_peak_rss_kib": {
+          "median": 47908.0,
+          "p95": 47988.0
+        },
+        "resource_deltas": {
+          "held_catalog_rss_kib": {
+            "median": 892.0,
+            "p95": 900.0
+          },
+          "init_fd_count": {
+            "median": 276.0,
+            "p95": 276.0
+          },
+          "metadata_fd_count": {
+            "median": 0.0,
+            "p95": 0.0
+          }
+        },
+        "resources": {
+          "after_calls": {
+            "fd_count": {
+              "median": 280.0,
+              "p95": 280.0
+            },
+            "peak_rss_kib": {
+              "median": 47908.0,
+              "p95": 47988.0
+            },
+            "rss_kib": {
+              "median": 47908.0,
+              "p95": 47988.0
+            }
+          },
+          "after_drop_catalogs": {
+            "fd_count": {
+              "median": 280.0,
+              "p95": 280.0
+            },
+            "peak_rss_kib": {
+              "median": 47908.0,
+              "p95": 47988.0
+            },
+            "rss_kib": {
+              "median": 47908.0,
+              "p95": 47988.0
+            }
+          },
+          "after_drop_paths": {
+            "fd_count": {
+              "median": 4.0,
+              "p95": 4.0
+            },
+            "peak_rss_kib": {
+              "median": 47326.0,
+              "p95": 47520.0
+            },
+            "rss_kib": {
+              "median": 43220.0,
+              "p95": 43300.0
+            }
+          },
+          "after_first_catalogs": {
+            "fd_count": {
+              "median": 280.0,
+              "p95": 280.0
+            },
+            "peak_rss_kib": {
+              "median": 45450.0,
+              "p95": 45496.0
+            },
+            "rss_kib": {
+              "median": 45450.0,
+              "p95": 45496.0
+            }
+          },
+          "after_init": {
+            "fd_count": {
+              "median": 280.0,
+              "p95": 280.0
+            },
+            "peak_rss_kib": {
+              "median": 44558.0,
+              "p95": 44596.0
+            },
+            "rss_kib": {
+              "median": 44558.0,
+              "p95": 44596.0
+            }
+          },
+          "before_init": {
+            "fd_count": {
+              "median": 4.0,
+              "p95": 4.0
+            },
+            "peak_rss_kib": {
+              "median": 2264.0,
+              "p95": 2408.0
+            },
+            "rss_kib": {
+              "median": 2264.0,
+              "p95": 2408.0
+            }
+          }
+        },
+        "snapshot_enumeration_ms_per_op": {
+          "median": 2.88551e-05,
+          "p95": 2.92178e-05
+        }
+      }
+    }
+  },
+  "environment": {
+    "allowed_cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "build_overrides": {},
+    "captured_at_utc": "2026-10-16T07:32:40.620783+00:00",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cpu": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics",
+    "jdk_distribution": "Eclipse Adoptium",
+    "jdk_version": "21.0.8+9-LTS",
+    "jmods_count": 69,
+    "jmods_dir_label": "provided-jmods",
+    "jmods_sha256": {
+      "java.base.jmod": "7e05214a446061c5543f3732f653f514d4e05fa6fd2545aa792c205b24362791",
+      "java.compiler.jmod": "ebd424405bb9c97e8b09c9f0573eda15e2c80f299cecbefe051077e41961a544",
+      "java.datatransfer.jmod": "50fe810eccddd61c31720f1512564a57951fc120dd3392f7c99e7fa8ff30b891",
+      "java.desktop.jmod": "6bda861a1f6de1d7b6ffcff2f4845bf4d92a6d26c907b37c335b584b8ab790e3",
+      "java.instrument.jmod": "c22c7ee4729d32bc29434e3e53fa475f73d8f34a417ee9add957d89417ceb3b9",
+      "java.logging.jmod": "63eec265d767becc0f6a8adba1a8c989046c8c46c75ae161169ca666feb13f95",
+      "java.management.jmod": "c65fd9b559d0726ca450e62aa39c2fccf26100ef4a975c830299ab899c5c2361",
+      "java.management.rmi.jmod": "57a41a0fa74b60687215c3f90c62e19c6b1fd673eae932edf04a263d68a4ffa4",
+      "java.naming.jmod": "3eb84f3cdef0107b08e55f462b69c98ad357e36a10cdb60cc473816504a935eb",
+      "java.net.http.jmod": "ab7d3ebf18a8d3c5dc3eb272f298d1da0ecb25b44f8c141af4dcfd65c9215287",
+      "java.prefs.jmod": "267eb0db6866acae8eedabf59a0c14ef6f24b6c257c3c6585de34e55f98c9f82",
+      "java.rmi.jmod": "e0352d16cf3e69434a8f173beb7b16bf70095b87e8dfe1abd6e3212b5d8fdf52",
+      "java.scripting.jmod": "f805012220bd244db69761e803b6f7901dff62fa7f3ec288d2f5f3be98e4c03a",
+      "java.se.jmod": "dc9098033ba454929cfcbdb1e3a947340294f73a5078c2c03ec406d3d06f3ec8",
+      "java.security.jgss.jmod": "cfef7b329b128923a007ce41683b6a607498e831e0bd0a10b75c3b797f139261",
+      "java.security.sasl.jmod": "bc5c91166b2f7263679a8bb26b6fd7c78cd57097dbffe66cb603a29baea9156d",
+      "java.smartcardio.jmod": "85cb022dd91c09780136fcb931add84203c9ed20c637c79da2e30a5f8a86ec95",
+      "java.sql.jmod": "f94bb15cc32777bcb28089cebeca714fb1e3170fbeacb63364199f1e601b8625",
+      "java.sql.rowset.jmod": "ffe47f7b45b31adf77e4f7c908cde6627333311e012f16d8c6c75f263ef1da46",
+      "java.transaction.xa.jmod": "cc23a12ece6cb8a7a5a6b2413db478f8b989d74043898f4449fcd0d71cae0458",
+      "java.xml.crypto.jmod": "62ab4714f3171d194f6c792e456a978d5eacb0c8132ae998302e9bad833e1e7a",
+      "java.xml.jmod": "2545f0f6aa971e43d67e1780d6147c7b68d833ef9a8d74c6d3cc9cf98e89a09c",
+      "jdk.accessibility.jmod": "cc174fdafeac1a7224e60c4f8f0ec13052b68bf5b736f96b3852baeff271bb5e",
+      "jdk.attach.jmod": "aa6cd83b2387340087c0b044ff8a94fafeafba53adc23095a06f505a3cb3aac8",
+      "jdk.charsets.jmod": "b2896dfa32fe990689698c82ba533f87d6a2eedd4f061a3673aefa3cd50554dd",
+      "jdk.compiler.jmod": "ffba2b8d701a8c3f54909ad2dd9bb1b2448cd61d80199da1eeabbd14eff0a3ed",
+      "jdk.crypto.cryptoki.jmod": "e7be2c98024bbd3794ba586e5616eef8d9dcf97106e8c92b1bedb96e44336bd3",
+      "jdk.crypto.ec.jmod": "a9304a84565dc8389aaefaab50bd508cbabd147e64c445bbbdaf646fab8113fc",
+      "jdk.dynalink.jmod": "7b9bad2b51f479a1f5025c89c23950ad7df66ae974ebd3c5bfbd2b00d3c8c93b",
+      "jdk.editpad.jmod": "237e00e4e5ea08fb638f615e6102f25b8c0a0dc164cf3a252dc1b76ad0d2419d",
+      "jdk.hotspot.agent.jmod": "562257f105f7bc8e6d2d7538372ea02798a3f5b4fcf0bad7731c6631e2aa53b7",
+      "jdk.httpserver.jmod": "ce85319bc9d25875d7bbec6833bdf1986d92559c08d4821be0396db1fe950158",
+      "jdk.incubator.vector.jmod": "e4cd0ac1c187deefbf1ce8188a3009c3d11cfab67e60254604bd5ba2439ede30",
+      "jdk.internal.ed.jmod": "36beab84d43b17243cf8777658607a86f57efd7317767dca68f9cbabbd3821b2",
+      "jdk.internal.jvmstat.jmod": "7900076e22407be35f96aeb61e338c4ebb26e8eda1fe3a28edd8a50db6b56cb0",
+      "jdk.internal.le.jmod": "d7b5ba53c91a869eae0a5192d9e1bf6a68e69f447ad0fb47f738235b48b5225e",
+      "jdk.internal.opt.jmod": "61f95c9016986b437d1d61303095ff43cd9f9b77be92710f634c8d09011c3c15",
+      "jdk.internal.vm.ci.jmod": "09d82bb46d0009cd57d0a774d76d021e5a3f64653f064f8e290fea6f42363211",
+      "jdk.internal.vm.compiler.jmod": "761660ce3b633075c7480db813f842a1308654cf964c6425efb6307a62fd970a",
+      "jdk.internal.vm.compiler.management.jmod": "c5cd5ffe0527da0fb1826fa8678db8cef3c37d03c908e36011349f001e602d27",
+      "jdk.jartool.jmod": "c840cc8f8fc1765ce24d76ab8976aac32dd742f73e831f2d048d8fead0b1e723",
+      "jdk.javadoc.jmod": "27251e37fc116c1fcd4d4015cc018e06abe46df9ed4ec1d2f530d6837267101e",
+      "jdk.jcmd.jmod": "a515c6bf727219144e49728aacd52a5a4ce67bbd136430bea83ef8f11ad298a4",
+      "jdk.jconsole.jmod": "25cbbbde4a93341db48acadc5a06f3c8c7ba81d829573895069b97cef7ce4672",
+      "jdk.jdeps.jmod": "2abbbee9cd65f8e4116f02794a8584f1ae9ab287305c23f40541ec1825fb4c09",
+      "jdk.jdi.jmod": "b688a694b7b1806f4d6eba45b6ce980e1b8a9edb4b28f1d6cb039345cfa6fd9c",
+      "jdk.jdwp.agent.jmod": "f50c33b639cf982a4ac7df2d26d4f8b92c7412575a6e82a513f46c87f4e0c67f",
+      "jdk.jfr.jmod": "5d613a880aaa02dfc299c71dc4b7bec094a15202928d5e1fd1f5cc82a2ddc72b",
+      "jdk.jlink.jmod": "f184a1d01ec0134eb22d02c1b68a5ac6cd1818cd9dc5f1d39e2ce9f79ecf8625",
+      "jdk.jpackage.jmod": "2e66ae437e37fe6100d1ddec855def6eb78ad05ca8522cc147f20ec70486ed51",
+      "jdk.jshell.jmod": "bb1d942f844d6c92eb6e800630528f53beb5b7b5e1bb93a6082c959adbb91899",
+      "jdk.jsobject.jmod": "b2c4da5e5d9f441745ed6ff51beed1f1c0b10c24b8b07747090c9b0841cb40e5",
+      "jdk.jstatd.jmod": "50bb6e7590b13a02b469ec0b77d0b57e8572dca0d94b0a2eb8f512cca52f0be6",
+      "jdk.localedata.jmod": "14a8ec30ee75f20b986fb0df98de5e7fc414506fc068c0df2c0f7a9379eb89bc",
+      "jdk.management.agent.jmod": "e7df1dc7ac2af136e4723a6eb6e18f2f66d09fc1638fce6a0e12259eabfdbac2",
+      "jdk.management.jfr.jmod": "66b9c33910b434d34c3afcadcfe5f86de0f08704bf8abf19ee300f1487026ada",
+      "jdk.management.jmod": "5c54f3cf04d85124b224b42579da0093b0aa2e6763abd9d6eebe82d90b63828e",
+      "jdk.naming.dns.jmod": "d4bac900910e901d122a7adc58de3abca9e08d697ced6c81d0263fe246bd4c39",
+      "jdk.naming.rmi.jmod": "cb3f1b0efe9f1dec3112bf3ffc7a0c6acbdf946b07745b925ea085f0f89da8aa",
+      "jdk.net.jmod": "cf64298f9d2339a7740770c61708d5584c5986debe3b7ebda8e532b4736cd5d3",
+      "jdk.nio.mapmode.jmod": "cc6128230b5b915fcef2226de9c6086f865d19c8b152f0b8e0e0c19627f37217",
+      "jdk.random.jmod": "1888f42044a8d8f3d0553c46783dfce22bbe5b2357b62f0a2d11b376d880be8f",
+      "jdk.sctp.jmod": "d2ea6d655846f66c686dbbd2211fd55fa288283182d1366420ff58be58548e41",
+      "jdk.security.auth.jmod": "1ff1c7794ac49541a7977ce34dd9b5ae5e78448755bf8ecef231679d206132c9",
+      "jdk.security.jgss.jmod": "69f6e55734f467c96ffc53193e459ab1eea8e0ae9db3187d9f73e10fe56fd1fe",
+      "jdk.unsupported.desktop.jmod": "61a8fc10520973319b0d41f31b8c54553516e438ca0a9b47342ebf619f5eb4a5",
+      "jdk.unsupported.jmod": "54013b005781ab2dd24511972460a8d7d745aff32a6ca277ac9ff3e4e0aac431",
+      "jdk.xml.dom.jmod": "26fc071fa3c598e5ae9def71c4ca65fb4bb11db550a14822374b4c800cf22260",
+      "jdk.zipfs.jmod": "36729c04a3a7a1d7f37265abc43fc44b307a081452f870a0f5196ab4e5b39b5e"
+    },
+    "jmods_total_bytes": 86516827,
+    "kernel": "Linux worker 6.12.74+deb13+1-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.74-2 (2026-03-08) x86_64 GNU/Linux",
+    "logical_cpu_count": 16,
+    "memory_cgroup_limit_bytes": null,
+    "memory_total_kib": 30582380,
+    "open_fd_limit_soft_hard": [
+      1024,
+      524288
+    ],
+    "os": "Linux-6.12.74+deb13+1-amd64-x86_64-with-glibc2.41",
+    "profile": "release",
+    "release_profile": {
+      "codegen_units": 16,
+      "debug": false,
+      "lto": false,
+      "opt_level": 3
+    },
+    "rss_method": "Linux /proc/self/status VmRSS and VmHWM in KiB at resource checkpoints; observed peak is the maximum checkpoint VmHWM",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8"
+  },
+  "process_model": "each raw row is one independently launched release binary process; OS page cache is not flushed",
+  "purpose": "explicit-module-metadata",
+  "sample_count": 10,
+  "schema_version": 2,
+  "source_revision": "5a9091a0853e5af45626ddf32b486ac40995208f"
+}

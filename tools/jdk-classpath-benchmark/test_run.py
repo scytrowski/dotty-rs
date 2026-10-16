@@ -2,6 +2,8 @@ import importlib.machinery
 import importlib.util
 from argparse import Namespace
 import json
+import contextlib
+import io
 import os
 from pathlib import Path
 import tempfile
@@ -123,6 +125,143 @@ class SummaryTests(unittest.TestCase):
         command = run.call_args.args[0]
         self.assertEqual(command[2], str(jmods.resolve()))
         self.assertEqual(run.call_args.kwargs["cwd"], benchmark.ROOT)
+
+
+class MetadataTests(unittest.TestCase):
+    @staticmethod
+    def sample(sessions=1, factor=1):
+        row = {
+            "sessions": sessions, "module_count": 69,
+            "catalog_string_bytes_per_session": 80_000,
+            "init_ns": factor * sessions * 1_000_000,
+            "init_per_session_ns": [factor * 1_000_000] * sessions,
+            "first_catalog_per_session_ns": [factor * 2_000_000] * sessions,
+            "module_lookups": [dict(module=name, first_snapshot_lookup_ns=factor * 100,
+                                    snapshot_iterations=10_000, snapshot_total_ns=factor * 1_000_000,
+                                    fresh_iterations=20, fresh_total_ns=factor * 40_000_000)
+                               for name in benchmark.MODULE_QUERIES],
+            "enumeration": {"iterations": 10_000, "total_ns": factor * 2_000_000},
+            "concurrent": [dict(mode=mode, threads=4, iterations_per_thread=10, total_ns=factor * 40_000_000)
+                           for mode in ("shared_session", "independent_sessions")],
+        }
+        for phase in benchmark.RESOURCE_PHASES:
+            row[phase] = {"fd_count": 4 + sessions * 69, "rss_kib": 100 * sessions, "peak_rss_kib": 200 * sessions}
+        return row
+
+    def test_summaries_separate_snapshots_fresh_catalogs_and_amortized_concurrency(self):
+        rows = [self.sample(2, factor) for factor in range(1, 11)]
+        for row in rows:
+            benchmark.validate_metadata_sample(row, 2, 69)
+        result = benchmark.summarize_metadata(rows)
+        self.assertEqual(result["init_ms"], {"median": 11, "p95": 20})
+        self.assertEqual(result["first_catalog_ms_per_session"], {"median": 11, "p95": 20})
+        self.assertEqual(result["module_lookups"]["java.base"]["fresh_catalog_and_get_ms_per_op"], {"median": 11, "p95": 20})
+        self.assertAlmostEqual(result["module_lookups"]["java.base"]["snapshot_ms_per_op"]["median"], 0.00055)
+        self.assertEqual(result["module_lookups"]["java.base"]["snapshot_ms_per_op"]["p95"], 0.001)
+        self.assertEqual(result["concurrent_amortized_ms_per_op"]["shared_session"], {"median": 5.5, "p95": 10})
+        self.assertEqual(result["resources"]["after_init"]["fd_count"], {"median": 142, "p95": 142})
+
+    def test_rejects_missing_fields_and_wrong_counts(self):
+        mutations = [
+            lambda row: row.pop("after_calls"),
+            lambda row: row.update(sessions=2),
+            lambda row: row.update(module_count=68),
+            lambda row: row["module_lookups"].pop(),
+            lambda row: row["concurrent"].pop(),
+            lambda row: row["first_catalog_per_session_ns"].append(1),
+            lambda row: row["after_init"].update(extra=1),
+            lambda row: row["module_lookups"][0].update(fresh_iterations=0),
+            lambda row: row["concurrent"][0].update(threads=0),
+            lambda row: row["after_init"].update(rss_kib=True),
+            lambda row: row.update(init_ns=-1),
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                row = self.sample()
+                mutation(row)
+                with self.assertRaisesRegex(RuntimeError, "invalid metadata sample"):
+                    benchmark.validate_metadata_sample(row, 1, 69)
+
+    def test_samples_are_fresh_processes_and_cohorts_are_interleaved(self):
+        def run(command):
+            if "--metadata-check" in command:
+                return SimpleNamespace(stdout='{"metadata_check": true}')
+            sessions = int(command[-1])
+            return SimpleNamespace(stdout=json.dumps(self.sample(sessions)))
+        with mock.patch.object(benchmark, "run_checked", side_effect=run) as checked:
+            cohorts = benchmark.run_metadata_samples(Path("/driver"), Path("/jmods"), 10, 69)
+        self.assertEqual(len(checked.call_args_list), 31)
+        self.assertEqual([int(call.args[0][-1]) for call in checked.call_args_list[1:7]], [1, 2, 4, 1, 2, 4])
+        self.assertEqual([cohorts[key]["sample_count"] for key in ("1", "2", "4")], [10, 10, 10])
+
+    def test_metadata_rejects_too_few_process_samples(self):
+        with mock.patch.object(benchmark.sys, "argv", [str(RUNNER), "--metadata", "--samples", "9"]):
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(benchmark.main(), 2)
+        self.assertIn("at least 10", stderr.getvalue())
+
+    def test_metadata_default_output_preserves_historical_baseline(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old = root / "docs/jdk-classpath-performance-raw.json"
+            old.parent.mkdir()
+            old.write_text("historical baseline")
+            binary = root / "driver"
+            binary.write_bytes(b"fake executable")
+            binary.chmod(0o700)
+            with mock.patch.object(benchmark, "ROOT", root), \
+                 mock.patch.object(benchmark, "jdk_path", return_value=(root, [])), \
+                 mock.patch.object(benchmark, "environment", return_value={}), \
+                 mock.patch.object(benchmark, "run_metadata_samples", return_value={"1": {"summary": {}}}), \
+                 mock.patch.object(benchmark.sys, "argv", [str(RUNNER), "--metadata", "--binary", str(binary)]), \
+                 contextlib.redirect_stdout(io.StringIO()) as stdout:
+                self.assertEqual(benchmark.main(), 0)
+            self.assertEqual(old.read_text(), "historical baseline")
+            self.assertTrue((root / "docs/jdk-module-metadata-performance-raw.json").is_file())
+            self.assertIn("10 per cohort (30 processes)", stdout.getvalue())
+
+    def test_observed_peak_uses_all_checkpoints(self):
+        row = self.sample()
+        row["after_calls"]["peak_rss_kib"] = 500
+        # Preserve/report the kernel values even if a later reading is lower.
+        self.assertEqual(benchmark.summarize_metadata([row])["observed_peak_rss_kib"], {"median": 500, "p95": 500})
+
+    def test_checked_in_reports_preserve_samples_and_summaries(self):
+        reports = []
+        for name in ("before", "unused", "extended-driver", "performance"):
+            report = json.loads((benchmark.ROOT / f"docs/jdk-module-metadata-{name}-raw.json").read_text())
+            self.assertEqual(report["sample_count"], 10)
+            reports.append(report)
+        for report in reports[:-1]:
+            self.assertEqual(len(report["samples"]), 10)
+            self.assertEqual(benchmark.summarize(report["samples"]), report["summary"])
+        report = reports[-1]
+        self.assertEqual(set(report["cohorts"]), {"1", "2", "4"})
+        for sessions, cohort in report["cohorts"].items():
+            self.assertEqual(cohort["sample_count"], 10)
+            self.assertEqual(len(cohort["samples"]), 10)
+            rows = [sample["measurements"] for sample in cohort["samples"]]
+            for row in rows:
+                benchmark.validate_metadata_sample(row, int(sessions), 69)
+            self.assertEqual(benchmark.summarize_metadata(rows), cohort["summary"])
+        for key in ("rustc", "cargo", "jdk_version", "jdk_distribution", "jmods_sha256", "jmods_total_bytes", "release_profile", "build_overrides", "allowed_cpu_affinity"):
+            for other in reports[1:]:
+                self.assertEqual(reports[0]["environment"][key], other["environment"][key])
+
+    def test_child_failure_is_reported(self):
+        with mock.patch.object(benchmark.subprocess, "run", return_value=SimpleNamespace(returncode=2, stdout="", stderr="bad descriptor")):
+            with self.assertRaisesRegex(RuntimeError, "bad descriptor"):
+                benchmark.run_metadata_samples(Path("/driver"), Path("/jmods"), 10, 69)
+
+    def test_metadata_smoke_builds_fixture_jmods_without_java(self):
+        def run(command):
+            directory = Path(command[-1])
+            with benchmark.zipfile.ZipFile(directory / "fixture.alpha.jmod") as archive:
+                self.assertEqual(archive.namelist(), ["classes/module-info.class"])
+                self.assertTrue(archive.read("classes/module-info.class").startswith(b"\xca\xfe\xba\xbe"))
+            return SimpleNamespace(stdout='{"metadata_smoke": true, "module_count": 3}')
+        with mock.patch.object(benchmark, "run_checked", side_effect=run):
+            benchmark.metadata_smoke(Path("/driver"))
 
 
 if __name__ == "__main__":

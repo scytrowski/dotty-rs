@@ -1,0 +1,1208 @@
+{
+  "binary_sha256": "15595c2477a5fc7ae318ac2a4020667d52b998ba31bbe7804be20a0ce11eb0f5",
+  "environment": {
+    "allowed_cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "build_overrides": {},
+    "captured_at_utc": "2026-10-16T07:30:57.555081+00:00",
+    "cargo": "cargo 1.98.1 (797e8a9bc 2026-08-05)",
+    "cpu": "AMD Ryzen 9 7940HS w/ Radeon 780M Graphics",
+    "jdk_distribution": "Eclipse Adoptium",
+    "jdk_version": "21.0.8+9-LTS",
+    "jmods_count": 69,
+    "jmods_dir_label": "provided-jmods",
+    "jmods_sha256": {
+      "java.base.jmod": "7e05214a446061c5543f3732f653f514d4e05fa6fd2545aa792c205b24362791",
+      "java.compiler.jmod": "ebd424405bb9c97e8b09c9f0573eda15e2c80f299cecbefe051077e41961a544",
+      "java.datatransfer.jmod": "50fe810eccddd61c31720f1512564a57951fc120dd3392f7c99e7fa8ff30b891",
+      "java.desktop.jmod": "6bda861a1f6de1d7b6ffcff2f4845bf4d92a6d26c907b37c335b584b8ab790e3",
+      "java.instrument.jmod": "c22c7ee4729d32bc29434e3e53fa475f73d8f34a417ee9add957d89417ceb3b9",
+      "java.logging.jmod": "63eec265d767becc0f6a8adba1a8c989046c8c46c75ae161169ca666feb13f95",
+      "java.management.jmod": "c65fd9b559d0726ca450e62aa39c2fccf26100ef4a975c830299ab899c5c2361",
+      "java.management.rmi.jmod": "57a41a0fa74b60687215c3f90c62e19c6b1fd673eae932edf04a263d68a4ffa4",
+      "java.naming.jmod": "3eb84f3cdef0107b08e55f462b69c98ad357e36a10cdb60cc473816504a935eb",
+      "java.net.http.jmod": "ab7d3ebf18a8d3c5dc3eb272f298d1da0ecb25b44f8c141af4dcfd65c9215287",
+      "java.prefs.jmod": "267eb0db6866acae8eedabf59a0c14ef6f24b6c257c3c6585de34e55f98c9f82",
+      "java.rmi.jmod": "e0352d16cf3e69434a8f173beb7b16bf70095b87e8dfe1abd6e3212b5d8fdf52",
+      "java.scripting.jmod": "f805012220bd244db69761e803b6f7901dff62fa7f3ec288d2f5f3be98e4c03a",
+      "java.se.jmod": "dc9098033ba454929cfcbdb1e3a947340294f73a5078c2c03ec406d3d06f3ec8",
+      "java.security.jgss.jmod": "cfef7b329b128923a007ce41683b6a607498e831e0bd0a10b75c3b797f139261",
+      "java.security.sasl.jmod": "bc5c91166b2f7263679a8bb26b6fd7c78cd57097dbffe66cb603a29baea9156d",
+      "java.smartcardio.jmod": "85cb022dd91c09780136fcb931add84203c9ed20c637c79da2e30a5f8a86ec95",
+      "java.sql.jmod": "f94bb15cc32777bcb28089cebeca714fb1e3170fbeacb63364199f1e601b8625",
+      "java.sql.rowset.jmod": "ffe47f7b45b31adf77e4f7c908cde6627333311e012f16d8c6c75f263ef1da46",
+      "java.transaction.xa.jmod": "cc23a12ece6cb8a7a5a6b2413db478f8b989d74043898f4449fcd0d71cae0458",
+      "java.xml.crypto.jmod": "62ab4714f3171d194f6c792e456a978d5eacb0c8132ae998302e9bad833e1e7a",
+      "java.xml.jmod": "2545f0f6aa971e43d67e1780d6147c7b68d833ef9a8d74c6d3cc9cf98e89a09c",
+      "jdk.accessibility.jmod": "cc174fdafeac1a7224e60c4f8f0ec13052b68bf5b736f96b3852baeff271bb5e",
+      "jdk.attach.jmod": "aa6cd83b2387340087c0b044ff8a94fafeafba53adc23095a06f505a3cb3aac8",
+      "jdk.charsets.jmod": "b2896dfa32fe990689698c82ba533f87d6a2eedd4f061a3673aefa3cd50554dd",
+      "jdk.compiler.jmod": "ffba2b8d701a8c3f54909ad2dd9bb1b2448cd61d80199da1eeabbd14eff0a3ed",
+      "jdk.crypto.cryptoki.jmod": "e7be2c98024bbd3794ba586e5616eef8d9dcf97106e8c92b1bedb96e44336bd3",
+      "jdk.crypto.ec.jmod": "a9304a84565dc8389aaefaab50bd508cbabd147e64c445bbbdaf646fab8113fc",
+      "jdk.dynalink.jmod": "7b9bad2b51f479a1f5025c89c23950ad7df66ae974ebd3c5bfbd2b00d3c8c93b",
+      "jdk.editpad.jmod": "237e00e4e5ea08fb638f615e6102f25b8c0a0dc164cf3a252dc1b76ad0d2419d",
+      "jdk.hotspot.agent.jmod": "562257f105f7bc8e6d2d7538372ea02798a3f5b4fcf0bad7731c6631e2aa53b7",
+      "jdk.httpserver.jmod": "ce85319bc9d25875d7bbec6833bdf1986d92559c08d4821be0396db1fe950158",
+      "jdk.incubator.vector.jmod": "e4cd0ac1c187deefbf1ce8188a3009c3d11cfab67e60254604bd5ba2439ede30",
+      "jdk.internal.ed.jmod": "36beab84d43b17243cf8777658607a86f57efd7317767dca68f9cbabbd3821b2",
+      "jdk.internal.jvmstat.jmod": "7900076e22407be35f96aeb61e338c4ebb26e8eda1fe3a28edd8a50db6b56cb0",
+      "jdk.internal.le.jmod": "d7b5ba53c91a869eae0a5192d9e1bf6a68e69f447ad0fb47f738235b48b5225e",
+      "jdk.internal.opt.jmod": "61f95c9016986b437d1d61303095ff43cd9f9b77be92710f634c8d09011c3c15",
+      "jdk.internal.vm.ci.jmod": "09d82bb46d0009cd57d0a774d76d021e5a3f64653f064f8e290fea6f42363211",
+      "jdk.internal.vm.compiler.jmod": "761660ce3b633075c7480db813f842a1308654cf964c6425efb6307a62fd970a",
+      "jdk.internal.vm.compiler.management.jmod": "c5cd5ffe0527da0fb1826fa8678db8cef3c37d03c908e36011349f001e602d27",
+      "jdk.jartool.jmod": "c840cc8f8fc1765ce24d76ab8976aac32dd742f73e831f2d048d8fead0b1e723",
+      "jdk.javadoc.jmod": "27251e37fc116c1fcd4d4015cc018e06abe46df9ed4ec1d2f530d6837267101e",
+      "jdk.jcmd.jmod": "a515c6bf727219144e49728aacd52a5a4ce67bbd136430bea83ef8f11ad298a4",
+      "jdk.jconsole.jmod": "25cbbbde4a93341db48acadc5a06f3c8c7ba81d829573895069b97cef7ce4672",
+      "jdk.jdeps.jmod": "2abbbee9cd65f8e4116f02794a8584f1ae9ab287305c23f40541ec1825fb4c09",
+      "jdk.jdi.jmod": "b688a694b7b1806f4d6eba45b6ce980e1b8a9edb4b28f1d6cb039345cfa6fd9c",
+      "jdk.jdwp.agent.jmod": "f50c33b639cf982a4ac7df2d26d4f8b92c7412575a6e82a513f46c87f4e0c67f",
+      "jdk.jfr.jmod": "5d613a880aaa02dfc299c71dc4b7bec094a15202928d5e1fd1f5cc82a2ddc72b",
+      "jdk.jlink.jmod": "f184a1d01ec0134eb22d02c1b68a5ac6cd1818cd9dc5f1d39e2ce9f79ecf8625",
+      "jdk.jpackage.jmod": "2e66ae437e37fe6100d1ddec855def6eb78ad05ca8522cc147f20ec70486ed51",
+      "jdk.jshell.jmod": "bb1d942f844d6c92eb6e800630528f53beb5b7b5e1bb93a6082c959adbb91899",
+      "jdk.jsobject.jmod": "b2c4da5e5d9f441745ed6ff51beed1f1c0b10c24b8b07747090c9b0841cb40e5",
+      "jdk.jstatd.jmod": "50bb6e7590b13a02b469ec0b77d0b57e8572dca0d94b0a2eb8f512cca52f0be6",
+      "jdk.localedata.jmod": "14a8ec30ee75f20b986fb0df98de5e7fc414506fc068c0df2c0f7a9379eb89bc",
+      "jdk.management.agent.jmod": "e7df1dc7ac2af136e4723a6eb6e18f2f66d09fc1638fce6a0e12259eabfdbac2",
+      "jdk.management.jfr.jmod": "66b9c33910b434d34c3afcadcfe5f86de0f08704bf8abf19ee300f1487026ada",
+      "jdk.management.jmod": "5c54f3cf04d85124b224b42579da0093b0aa2e6763abd9d6eebe82d90b63828e",
+      "jdk.naming.dns.jmod": "d4bac900910e901d122a7adc58de3abca9e08d697ced6c81d0263fe246bd4c39",
+      "jdk.naming.rmi.jmod": "cb3f1b0efe9f1dec3112bf3ffc7a0c6acbdf946b07745b925ea085f0f89da8aa",
+      "jdk.net.jmod": "cf64298f9d2339a7740770c61708d5584c5986debe3b7ebda8e532b4736cd5d3",
+      "jdk.nio.mapmode.jmod": "cc6128230b5b915fcef2226de9c6086f865d19c8b152f0b8e0e0c19627f37217",
+      "jdk.random.jmod": "1888f42044a8d8f3d0553c46783dfce22bbe5b2357b62f0a2d11b376d880be8f",
+      "jdk.sctp.jmod": "d2ea6d655846f66c686dbbd2211fd55fa288283182d1366420ff58be58548e41",
+      "jdk.security.auth.jmod": "1ff1c7794ac49541a7977ce34dd9b5ae5e78448755bf8ecef231679d206132c9",
+      "jdk.security.jgss.jmod": "69f6e55734f467c96ffc53193e459ab1eea8e0ae9db3187d9f73e10fe56fd1fe",
+      "jdk.unsupported.desktop.jmod": "61a8fc10520973319b0d41f31b8c54553516e438ca0a9b47342ebf619f5eb4a5",
+      "jdk.unsupported.jmod": "54013b005781ab2dd24511972460a8d7d745aff32a6ca277ac9ff3e4e0aac431",
+      "jdk.xml.dom.jmod": "26fc071fa3c598e5ae9def71c4ca65fb4bb11db550a14822374b4c800cf22260",
+      "jdk.zipfs.jmod": "36729c04a3a7a1d7f37265abc43fc44b307a081452f870a0f5196ab4e5b39b5e"
+    },
+    "jmods_total_bytes": 86516827,
+    "kernel": "Linux worker 6.12.74+deb13+1-amd64 #1 SMP PREEMPT_DYNAMIC Debian 6.12.74-2 (2026-03-08) x86_64 GNU/Linux",
+    "logical_cpu_count": 16,
+    "memory_cgroup_limit_bytes": null,
+    "memory_total_kib": 30582380,
+    "open_fd_limit_soft_hard": [
+      1024,
+      524288
+    ],
+    "os": "Linux-6.12.74+deb13+1-amd64-x86_64-with-glibc2.41",
+    "profile": "release",
+    "release_profile": {
+      "codegen_units": 16,
+      "debug": false,
+      "lto": false,
+      "opt_level": 3
+    },
+    "rss_method": "Linux /proc/self/status VmHWM high-water mark in KiB; read at end of the complete benchmark workload",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8"
+  },
+  "process_model": "each raw row is one independently launched release binary process; OS page cache is not flushed",
+  "purpose": "before-catalog-no-metadata",
+  "sample_count": 10,
+  "samples": [
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 162936,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 158092692
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2164236,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2188491898
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 792345,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 801546950
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1662045,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1634127002
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 196257,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 184634076
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 42065227
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 48737122
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2673551
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 17794720,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 20689,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5238778
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 151864
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 405580
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 66214
+          }
+        ],
+        "peak_rss_kib": 13296
+      },
+      "rss_kib": 13296,
+      "sample": 1
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 167154,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 160859789
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2183302,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2197760300
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 803846,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 803926816
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1664459,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1631928273
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 190888,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 184599491
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 41811963
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 49085837
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2538798
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 17491241,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 21401,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5214752
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 95349
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 407624
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 64802
+          }
+        ],
+        "peak_rss_kib": 13212
+      },
+      "rss_kib": 13212,
+      "sample": 2
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 173385,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 158504124
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2266217,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2197219912
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 838532,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 805063561
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1643891,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1632656717
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 187101,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 185778370
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 41279695
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 48783910
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2426267
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 17457388,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 21651,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5332825
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 182071
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 399339
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 65803
+          }
+        ],
+        "peak_rss_kib": 13228
+      },
+      "rss_kib": 13228,
+      "sample": 3
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 168937,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 159532693
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2223788,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2196170778
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 803085,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 803743570
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1635896,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1635081191
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 194424,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 184898404
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 40879888
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 49967277
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2106437
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 17521618,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 20147,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5217217
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 63419
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 406943
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 64742
+          }
+        ],
+        "peak_rss_kib": 13328
+      },
+      "rss_kib": 13328,
+      "sample": 4
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 172995,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 157640338
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2195484,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2186562984
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 808335,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 809136864
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1682694,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1635680562
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 202590,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 184476314
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 42153653
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 48799409
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2290703
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 17713909,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 21350,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5211638
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 67115
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 397265
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 64220
+          }
+        ],
+        "peak_rss_kib": 13216
+      },
+      "rss_kib": 13216,
+      "sample": 5
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 165079,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 159807510
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2154287,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2202977261
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 800881,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 803178100
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1636737,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1628438630
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 190026,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 186737743
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 42050522
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 48767569
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2209671
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 18301149,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 20529,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5314360
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 67236
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 419095
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 65643
+          }
+        ],
+        "peak_rss_kib": 13176
+      },
+      "rss_kib": 13176,
+      "sample": 6
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 172243,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 158096914
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2186798,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2196462672
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 798948,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 804130140
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1632329,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1639456157
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 204884,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 185397543
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 40936852
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 48430209
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2633114
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 17994486,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 20528,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5138772
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 206797
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 404929
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 64751
+          }
+        ],
+        "peak_rss_kib": 13208
+      },
+      "rss_kib": 13208,
+      "sample": 7
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 166853,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 158981172
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2202027,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2192586851
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 822812,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 805005905
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1631668,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1631210785
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 192701,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 186166494
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 47933917
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 47923379
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 3101073
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 18756264,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 21330,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5275688
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 81754
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 399799
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 63249
+          }
+        ],
+        "peak_rss_kib": 13092
+      },
+      "rss_kib": 13092,
+      "sample": 8
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 167715,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 159399308
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2189413,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2188756225
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 843090,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 802295439
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1653298,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1625584687
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 192611,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 184822217
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 43633199
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 48857168
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2486350
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 17575511,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 34094,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5239891
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 177963
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 409317
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 64751
+          }
+        ],
+        "peak_rss_kib": 13180
+      },
+      "rss_kib": 13180,
+      "sample": 9
+    },
+    {
+      "measurements": {
+        "class_lookups": [
+          {
+            "class": "java/lang/Object",
+            "first_lookup_ns": 167775,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 159677150
+          },
+          {
+            "class": "java/lang/String",
+            "first_lookup_ns": 2201105,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 2196005643
+          },
+          {
+            "class": "java/util/ArrayList",
+            "first_lookup_ns": 825447,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 808605770
+          },
+          {
+            "class": "java/util/concurrent/CompletableFuture",
+            "first_lookup_ns": 1652257,
+            "module": "java.base",
+            "warm_iterations": 1000,
+            "warm_total_ns": 1625944491
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "first_lookup_ns": 196278,
+            "module": "java.net.http",
+            "warm_iterations": 1000,
+            "warm_total_ns": 185061868
+          }
+        ],
+        "concurrent_lookups": [
+          {
+            "class": "java/lang/Object",
+            "iterations_per_thread": 250,
+            "module": "java.base",
+            "threads": 4,
+            "total_ns": 41352713
+          },
+          {
+            "class": "java/net/http/HttpClient",
+            "iterations_per_thread": 250,
+            "module": "java.net.http",
+            "threads": 4,
+            "total_ns": 49994651
+          },
+          {
+            "class": "dotty_issue_1157/DefinitelyMissing",
+            "iterations_per_thread": 250,
+            "module": "missing",
+            "threads": 4,
+            "total_ns": 2500146
+          }
+        ],
+        "fd_count_after_init": 73,
+        "fd_count_after_workload": 73,
+        "init_ns": 18597876,
+        "jmods": "provided",
+        "negative_lookup": {
+          "class": "dotty_issue_1157/DefinitelyMissing",
+          "first_lookup_ns": 20268,
+          "warm_iterations": 1000,
+          "warm_total_ns": 5248157
+        },
+        "package_lookups": [
+          {
+            "iterations": 1000,
+            "package": "java/lang",
+            "query": "contains_package",
+            "total_ns": 341340
+          },
+          {
+            "iterations": 1000,
+            "package": "java/net/http",
+            "query": "contains_package_prefix",
+            "total_ns": 409968
+          },
+          {
+            "iterations": 1000,
+            "package": "java/util/concurrent",
+            "query": "contains_package_prefix",
+            "total_ns": 65543
+          }
+        ],
+        "peak_rss_kib": 13176
+      },
+      "rss_kib": 13176,
+      "sample": 10
+    }
+  ],
+  "schema_version": 1,
+  "source_revision": "064c07bae95cee601f86881f06de19eb1e111853",
+  "summary": {
+    "class_lookups": {
+      "java/lang/Object": {
+        "first_lookup_ms": {
+          "median": 0.167745,
+          "p95": 0.173385
+        },
+        "warm_lookup_ms_per_op": {
+          "median": 0.15919023999999998,
+          "p95": 0.160859789
+        }
+      },
+      "java/lang/String": {
+        "first_lookup_ms": {
+          "median": 2.1924485000000002,
+          "p95": 2.266217
+        },
+        "warm_lookup_ms_per_op": {
+          "median": 2.1960882105,
+          "p95": 2.202977261
+        }
+      },
+      "java/net/http/HttpClient": {
+        "first_lookup_ms": {
+          "median": 0.19356250000000003,
+          "p95": 0.204884
+        },
+        "warm_lookup_ms_per_op": {
+          "median": 0.18498013600000002,
+          "p95": 0.18673774299999998
+        }
+      },
+      "java/util/ArrayList": {
+        "first_lookup_ms": {
+          "median": 0.8060905,
+          "p95": 0.84309
+        },
+        "warm_lookup_ms_per_op": {
+          "median": 0.804028478,
+          "p95": 0.809136864
+        }
+      },
+      "java/util/concurrent/CompletableFuture": {
+        "first_lookup_ms": {
+          "median": 1.648074,
+          "p95": 1.682694
+        },
+        "warm_lookup_ms_per_op": {
+          "median": 1.632292495,
+          "p95": 1.639456157
+        }
+      }
+    },
+    "concurrent_lookup_ms_per_op": {
+      "java.base:java/lang/Object": {
+        "median": 0.0419312425,
+        "p95": 0.047933917
+      },
+      "java.net.http:java/net/http/HttpClient": {
+        "median": 0.0487916595,
+        "p95": 0.049994651
+      },
+      "missing:dotty_issue_1157/DefinitelyMissing": {
+        "median": 0.002493248,
+        "p95": 0.0031010729999999998
+      }
+    },
+    "init_ms": {
+      "median": 17.7543145,
+      "p95": 18.756264
+    },
+    "negative_lookup": {
+      "first_lookup_ms": {
+        "median": 0.0210095,
+        "p95": 0.034094
+      },
+      "warm_lookup_ms_per_op": {
+        "median": 0.0052393345,
+        "p95": 0.005332825
+      }
+    },
+    "open_file_descriptors": {
+      "fd_count_after_init": {
+        "median": 73.0,
+        "p95": 73
+      },
+      "fd_count_after_workload": {
+        "median": 73.0,
+        "p95": 73
+      }
+    },
+    "package_lookup_ms_per_op": {
+      "contains_package:java/lang": {
+        "median": 0.00012360650000000002,
+        "p95": 0.00034134
+      },
+      "contains_package_prefix:java/net/http": {
+        "median": 0.0004062615,
+        "p95": 0.000419095
+      },
+      "contains_package_prefix:java/util/concurrent": {
+        "median": 6.477650000000001e-05,
+        "p95": 6.6214e-05
+      }
+    },
+    "peak_rss_kib": {
+      "median": 13210.0,
+      "p95": 13328
+    }
+  }
+}

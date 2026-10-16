@@ -1,3 +1,6 @@
+#[path = "jdk_classpath_benchmark/metadata.rs"]
+mod metadata;
+
 use dotty_classloader::classloader::{BinaryName, ClassOrigin, ClassPathEntry, JdkClassPath};
 use std::env;
 use std::path::PathBuf;
@@ -18,6 +21,16 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--metadata")) {
+        return metadata::run();
+    }
+    let check_args: Vec<_> = env::args_os().skip(1).collect();
+    if check_args.len() == 3 && check_args[0] == "--metadata-check" && check_args[1] == "--jmods" {
+        return metadata::check(std::path::Path::new(&check_args[2]));
+    }
+    if check_args.len() == 3 && check_args[0] == "--metadata-smoke" && check_args[1] == "--jmods" {
+        return metadata::smoke(std::path::Path::new(&check_args[2]));
+    }
     let mut args = env::args_os().skip(1);
     let first = args.next();
     if first.as_deref() == Some(std::ffi::OsStr::new("--smoke")) && args.next().is_none() {
