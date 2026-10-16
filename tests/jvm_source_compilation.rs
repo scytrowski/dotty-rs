@@ -1844,8 +1844,9 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
         let length = match opcode {
             0x03..=0x0f
             | 0x1a..=0x1d
-            | 0x2a
+            | 0x2a..=0x2d
             | 0x3b..=0x3e
+            | 0x4b..=0x4e
             | 0x57
             | 0x60
             | 0x64
@@ -1858,7 +1859,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0xac
             | 0xb1 => 1,
             0x10 | 0x15 | 0x36 => 2,
-            0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb6..=0xb8 => 3,
+            0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb4..=0xb8 => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };
         assert!(
@@ -2929,6 +2930,487 @@ fn field_initializer_emits_a_complete_verified_class() {
         .output()
         .unwrap();
     assert!(java.status.success(), "java failed: {:?}", java);
+}
+
+#[test]
+fn real_counter_source_compiles_deterministically_and_executes_stateful_methods() {
+    let first_output = TestOutputDirectory::new("counter-first");
+    let second_output = TestOutputDirectory::new("counter-second");
+    let first = compile_fixture("Counter.scala", first_output.path()).unwrap();
+    let second = compile_fixture("Counter.scala", second_output.path()).unwrap();
+
+    assert_eq!(first.class.internal_name(), "Counter");
+    assert_eq!(first.class.bytes(), second.class.bytes());
+    assert_eq!(first_output.class_files(), vec![first.path.clone()]);
+    assert_eq!(second_output.class_files(), vec![second.path.clone()]);
+
+    let mut reader = Reader::new(first.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("Counter should decode completely");
+    assert!(
+        reader.is_at_end(),
+        "decoder consumes the complete Counter file"
+    );
+    class
+        .validate_references()
+        .expect("Counter constant-pool references should be valid");
+    assert_eq!(class.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    assert_eq!(
+        class.constant_pool.class_name(class.this_class),
+        Ok("Counter")
+    );
+    assert_eq!(class.fields.len(), 1);
+    let field = &class.fields[0];
+    assert_eq!(class.constant_pool.utf8(field.name_index), Ok("current"));
+    assert_eq!(class.constant_pool.utf8(field.descriptor_index), Ok("I"));
+    assert_eq!(
+        field.access_flags.0,
+        dotty_classfile::access_flags::ACC_PRIVATE
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("<init>", "(I)V"),
+            ("get", "()I"),
+            ("set", "(I)V"),
+            ("increment", "()I"),
+        ]
+    );
+    assert!(
+        class
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .filter(|method| class.constant_pool.utf8(method.name_index) == Ok("<init>"))
+            .count(),
+        1,
+        "the parameterized class must not acquire a phantom no-arg constructor"
+    );
+
+    let constructor = emitted_method_code(&class, "<init>");
+    assert_opcode_sequence(constructor, &[0x2a, 0xb7, 0x2a, 0x1b, 0xb5, 0xb1]);
+    assert_method_reference(
+        &class,
+        constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_field_reference(&class, constructor, 0xb5, "Counter", "current", "I");
+    assert_opcode_sequence(emitted_method_code(&class, "get"), &[0x2a, 0xb4, 0xac]);
+    assert_field_reference(
+        &class,
+        emitted_method_code(&class, "get"),
+        0xb4,
+        "Counter",
+        "current",
+        "I",
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&class, "set"),
+        &[0x2a, 0x4d, 0x1b, 0x3e, 0x2c, 0x1d, 0xb5, 0xb1],
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&class, "increment"),
+        &[
+            0x2a, 0x4c, 0x2a, 0xb4, 0x04, 0x60, 0x3d, 0x2b, 0x1c, 0xb5, 0x2a, 0xb4, 0xac,
+        ],
+    );
+
+    if require_jdk_or_skip() {
+        verify_counter_with_jdk(first_output.path());
+    }
+}
+
+#[test]
+fn real_private_fields_source_emits_private_final_storage_and_boolean_getter() {
+    let first_output = TestOutputDirectory::new("private-fields-first");
+    let second_output = TestOutputDirectory::new("private-fields-second");
+    let first = compile_fixture("PrivateFields.scala", first_output.path()).unwrap();
+    let second = compile_fixture("PrivateFields.scala", second_output.path()).unwrap();
+
+    assert_eq!(first.class.internal_name(), "PrivateFields");
+    assert_eq!(first.class.bytes(), second.class.bytes());
+    assert_eq!(first_output.class_files(), vec![first.path.clone()]);
+    assert_eq!(second_output.class_files(), vec![second.path.clone()]);
+
+    let mut reader = Reader::new(first.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("PrivateFields should decode completely");
+    assert!(
+        reader.is_at_end(),
+        "decoder consumes the complete PrivateFields file"
+    );
+    class
+        .validate_references()
+        .expect("PrivateFields constant-pool references should be valid");
+    assert_eq!(class.version.major, JVM_CLASSFILE_MAJOR_VERSION);
+    let fields = class
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                class.constant_pool.utf8(field.name_index).unwrap(),
+                class.constant_pool.utf8(field.descriptor_index).unwrap(),
+                field.access_flags,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 3);
+    assert_eq!((fields[0].0, fields[0].1), ("seed", "I"));
+    assert_eq!(
+        fields[0].2.0,
+        dotty_classfile::access_flags::ACC_PRIVATE | dotty_classfile::access_flags::ACC_FINAL
+    );
+    assert_eq!((fields[1].0, fields[1].1), ("enabled", "Z"));
+    assert_eq!(
+        fields[1].2.0,
+        dotty_classfile::access_flags::ACC_PRIVATE | dotty_classfile::access_flags::ACC_FINAL
+    );
+    assert_eq!((fields[2].0, fields[2].1), ("disabled", "Z"));
+    assert_eq!(
+        fields[2].2.0,
+        dotty_classfile::access_flags::ACC_PRIVATE | dotty_classfile::access_flags::ACC_FINAL
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("<init>", "()V"),
+            ("seedValue", "()I"),
+            ("enabledValue", "()Z"),
+            ("disabledValue", "()Z"),
+        ]
+    );
+    assert_eq!(emitted_method_code(&class, "seedValue")[1], 0xb4);
+    assert_field_reference(
+        &class,
+        emitted_method_code(&class, "seedValue"),
+        0xb4,
+        "PrivateFields",
+        "seed",
+        "I",
+    );
+    assert_field_reference(
+        &class,
+        emitted_method_code(&class, "enabledValue"),
+        0xb4,
+        "PrivateFields",
+        "enabled",
+        "Z",
+    );
+    assert_field_reference(
+        &class,
+        emitted_method_code(&class, "disabledValue"),
+        0xb4,
+        "PrivateFields",
+        "disabled",
+        "Z",
+    );
+
+    if require_jdk_or_skip() {
+        verify_private_fields_with_jdk(first_output.path());
+    }
+}
+
+#[test]
+fn unsupported_real_field_and_constructor_sources_fail_without_artifacts() {
+    assert_source_failure(
+        "wrong-field-initializer",
+        "class WrongInitializer { private val seed: Int = true }",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    assert_source_failure(
+        "immutable-field-assignment",
+        "class ImmutableAssignment { private val seed: Int = 1; def update(): Unit = seed = 2 }",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    for (label, source) in [
+        (
+            "defaulted-constructor-parameter",
+            "class WithDefault(value: Int = 1) { private val current: Int = value }",
+        ),
+        (
+            "contextual-constructor-parameter",
+            "class WithUsing(using context: Int) { private val current: Int = context }",
+        ),
+        (
+            "secondary-constructor",
+            "class WithSecondary(value: Int) { private val current: Int = value; def this() = this(0) }",
+        ),
+    ] {
+        assert_source_failure(label, source, |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::UnsupportedConstructor { .. }
+                        | JvmCodegenError::InvalidPrimaryConstructor { .. }
+                )
+            )
+        });
+    }
+    assert_source_failure(
+        "field-read-in-branch",
+        "class BranchingField { private val current: Int = 1; def value(flag: Boolean): Int = if flag then current else current }",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::JvmFieldReadInUnsupportedControlFlow { .. }
+                )
+            )
+        },
+    );
+}
+
+fn assert_method_reference(
+    class: &ClassFile<'_>,
+    code: &[u8],
+    opcode: u8,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+) {
+    let offset = decode_subset_instructions(code)
+        .into_iter()
+        .find_map(|(offset, found)| (found == opcode).then_some(offset))
+        .expect("expected method invocation instruction");
+    let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+    let ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = class
+        .constant_pool
+        .get(ConstantPoolIndex(index))
+        .expect("method invocation constant-pool entry")
+    else {
+        panic!("method invocation must reference Methodref");
+    };
+    assert_eq!(class.constant_pool.class_name(*class_index), Ok(owner));
+    assert_eq!(
+        class.constant_pool.name_and_type(*name_and_type_index),
+        Ok((name, descriptor))
+    );
+}
+
+fn assert_field_reference(
+    class: &ClassFile<'_>,
+    code: &[u8],
+    opcode: u8,
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+) {
+    let offset = decode_subset_instructions(code)
+        .into_iter()
+        .find_map(|(offset, found)| (found == opcode).then_some(offset))
+        .expect("expected field access instruction");
+    let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+    let ConstantPoolEntry::Fieldref {
+        class_index,
+        name_and_type_index,
+    } = class
+        .constant_pool
+        .get(ConstantPoolIndex(index))
+        .expect("field access constant-pool entry")
+    else {
+        panic!("field access must reference Fieldref");
+    };
+    assert_eq!(class.constant_pool.class_name(*class_index), Ok(owner));
+    assert_eq!(
+        class.constant_pool.name_and_type(*name_and_type_index),
+        Ok((name, descriptor))
+    );
+}
+
+fn assert_javap_instruction_sequence(output: &str, method_header: &str, expected: &[&str]) {
+    let method_start = output
+        .find(method_header)
+        .unwrap_or_else(|| panic!("javap output omitted method {method_header:?}:\n{output}"));
+    let method = &output[method_start..];
+    let method_end = method[1..]
+        .find("\n  public ")
+        .or_else(|| method[1..].find("\n  private "))
+        .map_or(method.len(), |offset| offset + 1);
+    let method = &method[..method_end];
+    let code = method
+        .split_once("Code:")
+        .map(|(_, code)| code)
+        .unwrap_or_else(|| panic!("javap method {method_header:?} has no Code section"));
+    let instructions = code
+        .lines()
+        .filter_map(|line| {
+            let (_, instruction) = line.split_once(": ")?;
+            instruction.split_whitespace().next()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        instructions, expected,
+        "unexpected javap instructions for {method_header}:\n{method}"
+    );
+}
+
+fn verify_counter_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 temporary path");
+    let javap = Command::new("javap")
+        .args(["-c", "-v", "-classpath", output_path, "Counter"])
+        .output()
+        .expect("start javap for Counter");
+    assert!(
+        javap.status.success(),
+        "javap rejected Counter: {:?}",
+        javap
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "private int current;",
+        "descriptor: (I)V",
+        "descriptor: ()I",
+        "descriptor: (I)V",
+        "getfield",
+        "putfield",
+        "iadd",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap output omitted {expected:?}:\n{javap_output}"
+        );
+    }
+    assert!(javap_output.contains("public Counter(int)"));
+    assert!(!javap_output.contains("public Counter();"));
+    assert_javap_instruction_sequence(
+        &javap_output,
+        "public Counter(int);",
+        &[
+            "aload_0",
+            "invokespecial",
+            "aload_0",
+            "iload_1",
+            "putfield",
+            "return",
+        ],
+    );
+    assert_javap_instruction_sequence(
+        &javap_output,
+        "public int get();",
+        &["aload_0", "getfield", "ireturn"],
+    );
+    assert_javap_instruction_sequence(
+        &javap_output,
+        "public void set(int);",
+        &[
+            "aload_0", "astore_2", "iload_1", "istore_3", "aload_2", "iload_3", "putfield",
+            "return",
+        ],
+    );
+    assert_javap_instruction_sequence(
+        &javap_output,
+        "public int increment();",
+        &[
+            "aload_0", "astore_1", "aload_0", "getfield", "iconst_1", "iadd", "istore_2",
+            "aload_1", "iload_2", "putfield", "aload_0", "getfield", "ireturn",
+        ],
+    );
+
+    let harness_path = output_directory.join("CounterHarness.java");
+    fs::write(
+        &harness_path,
+        "public final class CounterHarness { public static void main(String[] args) { Counter a = new Counter(10); if (a.get() != 10) throw new AssertionError(\"initial\"); if (a.increment() != 11) throw new AssertionError(\"increment\"); a.set(41); if (a.get() != 41) throw new AssertionError(\"set\"); if (a.increment() != 42) throw new AssertionError(\"increment after set\"); Counter b = new Counter(3); if (b.get() != 3) throw new AssertionError(\"second instance\"); if (a.get() != 42) throw new AssertionError(\"instance state shared\"); } }\n",
+    )
+    .expect("write Counter Java harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness_path)
+        .output()
+        .expect("start javac for Counter");
+    assert!(
+        javac.status.success(),
+        "javac failed for Counter: {:?}",
+        javac
+    );
+    let java = Command::new("java")
+        .args(["-Xverify:all", "-classpath", output_path, "CounterHarness"])
+        .output()
+        .expect("start java verifier for Counter");
+    assert!(java.status.success(), "java failed for Counter: {:?}", java);
+}
+
+fn verify_private_fields_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 temporary path");
+    let javap = Command::new("javap")
+        .args(["-c", "-v", "-classpath", output_path, "PrivateFields"])
+        .output()
+        .expect("start javap for PrivateFields");
+    assert!(
+        javap.status.success(),
+        "javap rejected PrivateFields: {:?}",
+        javap
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "private final int seed;",
+        "private final boolean enabled;",
+        "private final boolean disabled;",
+        "descriptor: ()V",
+        "descriptor: ()I",
+        "descriptor: ()Z",
+        "getfield",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap output omitted {expected:?}:\n{javap_output}"
+        );
+    }
+
+    let harness_path = output_directory.join("PrivateFieldsHarness.java");
+    fs::write(
+        &harness_path,
+        "public final class PrivateFieldsHarness { public static void main(String[] args) { PrivateFields value = new PrivateFields(); if (value.seedValue() != 42) throw new AssertionError(\"seed\"); if (!value.enabledValue()) throw new AssertionError(\"boolean true\"); if (value.disabledValue()) throw new AssertionError(\"boolean false\"); } }\n",
+    )
+    .expect("write PrivateFields Java harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness_path)
+        .output()
+        .expect("start javac for PrivateFields");
+    assert!(
+        javac.status.success(),
+        "javac failed for PrivateFields: {:?}",
+        javac
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "PrivateFieldsHarness",
+        ])
+        .output()
+        .expect("start java verifier for PrivateFields");
+    assert!(
+        java.status.success(),
+        "java failed for PrivateFields: {:?}",
+        java
+    );
 }
 
 #[test]
