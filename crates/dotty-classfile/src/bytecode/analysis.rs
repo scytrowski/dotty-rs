@@ -1,10 +1,9 @@
-//! Descriptor-aware analysis for straight-line code and integer-only CFGs.
+//! Descriptor-aware analysis for straight-line code and typed CFGs.
 //!
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
-//! [`CfgCodeAnalyzer`] propagates integer stack and local states across
-//! symbolic branches. Neither is a full JVM verifier: reference identity,
-//! object initialization, and reference joins are not modeled, and neither
-//! analyzer produces stack-map frames.
+//! [`CfgCodeAnalyzer`] propagates integer and exact initialized-class
+//! references across symbolic branches. Neither analyzer is a full JVM
+//! verifier, and neither produces stack-map frames.
 
 use super::{
     BasicBlockId, BranchInstruction, ClassReference, CodeElement, ConstantPoolOperandKind,
@@ -32,6 +31,29 @@ pub enum ValueKind {
     Double,
     /// An object or array reference.
     Reference,
+}
+
+/// A validated JVM class identity used by CFG reference states.
+///
+/// Identity is the class-file internal name, not a constant-pool index. This
+/// keeps equal names stable across pools while avoiding hierarchy guesses.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ClassIdentity(Arc<str>);
+
+impl ClassIdentity {
+    /// Returns the validated JVM internal class name.
+    pub fn internal_name(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A verifier value retained on a CFG operand stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowValue {
+    /// An int-like JVM value.
+    Integer,
+    /// An initialized reference to this exact class.
+    Object(ClassIdentity),
 }
 
 impl ValueKind {
@@ -65,7 +87,7 @@ pub struct CodeAnalysis {
 }
 
 /// A typed failure while analyzing a method body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnalysisError {
     /// The method descriptor is malformed.
     InvalidMethodDescriptor(DescriptorError),
@@ -230,6 +252,34 @@ pub enum AnalysisError {
         expected_values: usize,
         /// Stack value count from the incoming predecessor.
         incoming_values: usize,
+    },
+    /// Corresponding stack values have incompatible exact verifier types.
+    IncompatibleStackValue {
+        /// Block receiving incompatible states.
+        block: BasicBlockId,
+        /// Zero-based value position from the bottom of the stack.
+        value: usize,
+        /// Type already established for this position.
+        expected: FlowValue,
+        /// Type from the incoming predecessor.
+        incoming: FlowValue,
+    },
+    /// The initialization context does not match the method kind.
+    InvalidInitializationContext {
+        /// Whether the analyzed method is static.
+        is_static: bool,
+        /// Whether the analyzed method is a JVM constructor.
+        is_constructor: bool,
+    },
+    /// A constant-pool class name is not a valid JVM internal name.
+    InvalidClassName {
+        /// Constant-pool Class entry that contains the invalid name.
+        index: ConstantPoolIndex,
+    },
+    /// A non-integer stack value lacks an exact reference identity.
+    UnsupportedFlowStackValue {
+        /// The category of the unrepresentable stack value.
+        actual: ValueKind,
     },
     /// Automatic frame generation cannot emit a frame for an unreachable
     /// block because its verifier state is unknown.
@@ -410,6 +460,38 @@ impl fmt::Display for AnalysisError {
                 "block {} merges operand stacks with {expected_values} and {incoming_values} values",
                 block.index()
             ),
+            Self::IncompatibleStackValue {
+                block,
+                value,
+                expected,
+                incoming,
+            } => write!(
+                formatter,
+                "block {} merges incompatible stack value {value}: {expected:?} and {incoming:?}",
+                block.index()
+            ),
+            Self::InvalidInitializationContext {
+                is_static,
+                is_constructor,
+            } => write!(
+                formatter,
+                "{}{} method has an incompatible current-class initialization context",
+                if *is_static { "static " } else { "instance " },
+                if *is_constructor {
+                    "constructor"
+                } else {
+                    "ordinary"
+                }
+            ),
+            Self::InvalidClassName { index } => write!(
+                formatter,
+                "constant-pool class at index {} has an invalid internal name",
+                index.0
+            ),
+            Self::UnsupportedFlowStackValue { actual } => write!(
+                formatter,
+                "CFG operand stack contains {actual} without a supported exact verifier state"
+            ),
             Self::UnreachableBlock { block } => write!(
                 formatter,
                 "automatic stack-map generation does not support unreachable block {}",
@@ -536,15 +618,17 @@ pub(crate) fn analyze_validated(
     })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalSlot {
     Value(ValueKind),
     Receiver,
+    Object(ClassIdentity),
     CategoryTwoTail,
 }
 
 struct Frame {
     stack: Vec<ValueKind>,
+    stack_classes: Vec<Option<ClassIdentity>>,
     stack_slots: usize,
     locals: Vec<Option<LocalSlot>>,
     max_stack: usize,
@@ -577,6 +661,7 @@ impl Frame {
         }
         Ok(Self {
             stack: Vec::new(),
+            stack_classes: Vec::new(),
             stack_slots: 0,
             locals,
             max_stack: 0,
@@ -646,7 +731,8 @@ impl Frame {
                         actual: top,
                     });
                 }
-                self.push(instruction_index, top)?;
+                let class = self.stack_classes.last().cloned().flatten();
+                self.push_typed(instruction_index, top, class)?;
             }
             Instruction::Pop => {
                 let available = self.stack.len();
@@ -666,6 +752,7 @@ impl Frame {
                     });
                 }
                 self.stack.pop();
+                self.stack_classes.pop();
                 self.stack_slots -= 1;
             }
             Instruction::GetField(reference) => {
@@ -730,6 +817,23 @@ impl Frame {
     }
 
     fn push(&mut self, instruction: usize, value: ValueKind) -> Result<(), AnalysisError> {
+        self.push_typed(instruction, value, None)
+    }
+
+    fn push_object(
+        &mut self,
+        instruction: usize,
+        class: ClassIdentity,
+    ) -> Result<(), AnalysisError> {
+        self.push_typed(instruction, ValueKind::Reference, Some(class))
+    }
+
+    fn push_typed(
+        &mut self,
+        instruction: usize,
+        value: ValueKind,
+        class: Option<ClassIdentity>,
+    ) -> Result<(), AnalysisError> {
         let slots = self.stack_slots.checked_add(value.slots()).ok_or(
             AnalysisError::StackLimitExceeded {
                 instruction,
@@ -740,6 +844,7 @@ impl Frame {
             return Err(AnalysisError::StackLimitExceeded { instruction, slots });
         }
         self.stack.push(value);
+        self.stack_classes.push(class);
         self.stack_slots = slots;
         self.max_stack = self.max_stack.max(slots);
         Ok(())
@@ -750,12 +855,21 @@ impl Frame {
         instruction: usize,
         expected: ValueKind,
     ) -> Result<ValueKind, AnalysisError> {
+        self.pop_typed(instruction, expected).map(|value| value.0)
+    }
+
+    fn pop_typed(
+        &mut self,
+        instruction: usize,
+        expected: ValueKind,
+    ) -> Result<(ValueKind, Option<ClassIdentity>), AnalysisError> {
         let available = self.stack.len();
         let actual = self.stack.pop().ok_or(AnalysisError::StackUnderflow {
             instruction,
             needed: 1,
             available,
         })?;
+        let class = self.stack_classes.pop().flatten();
         self.stack_slots -= actual.slots();
         if actual != expected {
             return Err(AnalysisError::StackTypeMismatch {
@@ -764,7 +878,7 @@ impl Frame {
                 actual,
             });
         }
-        Ok(actual)
+        Ok((actual, class))
     }
 
     fn ensure_empty_stack(&self, instruction: usize) -> Result<(), AnalysisError> {
@@ -783,7 +897,7 @@ impl Frame {
         expected: ValueKind,
     ) -> Result<(), AnalysisError> {
         self.ensure_local_range(instruction, index, expected)?;
-        let slot = self.locals.get(usize::from(index.get())).copied().flatten();
+        let slot = self.locals.get(usize::from(index.get())).cloned().flatten();
         match slot {
             None => Err(AnalysisError::UninitializedLocal {
                 instruction,
@@ -802,6 +916,15 @@ impl Frame {
                 })
             }
             Some(LocalSlot::Value(actual)) => self.push(instruction, actual),
+            Some(LocalSlot::Object(class)) if expected == ValueKind::Reference => {
+                self.push_object(instruction, class)
+            }
+            Some(LocalSlot::Object(_)) => Err(AnalysisError::LocalTypeMismatch {
+                instruction,
+                index: index.get(),
+                expected,
+                actual: ValueKind::Reference,
+            }),
             Some(LocalSlot::Receiver) if expected == ValueKind::Reference => {
                 self.push(instruction, ValueKind::Reference)
             }
@@ -821,13 +944,16 @@ impl Frame {
         expected: ValueKind,
     ) -> Result<(), AnalysisError> {
         self.ensure_local_range(instruction, index, expected)?;
-        self.pop_expected(instruction, expected)?;
+        let actual_class = self.pop_typed(instruction, expected)?.1;
         let start = usize::from(index.get());
         let width = expected.slots();
         for slot in start..start + width {
             self.clear_local_slot(slot);
         }
-        self.locals[start] = Some(LocalSlot::Value(expected));
+        self.locals[start] = Some(match actual_class {
+            Some(class) => LocalSlot::Object(class),
+            None => LocalSlot::Value(expected),
+        });
         if width == 2 {
             self.locals[start + 1] = Some(LocalSlot::CategoryTwoTail);
         }
@@ -1218,8 +1344,8 @@ fn is_return(instruction: Instruction) -> bool {
     )
 }
 
-/// The local-variable lattice used by integer-only CFG analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The local-variable lattice used by CFG analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowLocalState {
     /// The slot is uninitialized or has incompatible predecessor values.
     Top,
@@ -1227,6 +1353,8 @@ pub enum FlowLocalState {
     Integer,
     /// The slot is the current instance receiver.
     Receiver,
+    /// The slot contains an initialized reference to this exact class.
+    Object(ClassIdentity),
 }
 
 /// The incoming verifier state for one reachable basic block.
@@ -1234,8 +1362,8 @@ pub enum FlowLocalState {
 pub struct BlockEntryState {
     /// Local slots, including receiver/argument slots and slots grown by stores.
     pub locals: Vec<FlowLocalState>,
-    /// Operand stack values in bottom-to-top order. Every value is `Int`.
-    pub operand_stack: Vec<ValueKind>,
+    /// Exact int or initialized-class values in bottom-to-top order.
+    pub operand_stack: Vec<FlowValue>,
 }
 
 /// Maxima and incoming states produced by fixed-point CFG analysis.
@@ -1282,7 +1410,8 @@ impl FlowAnalysis {
     }
 }
 
-/// Fixed-point stack and local analysis for integer-only CFGs.
+/// Fixed-point stack and local analysis for integer CFGs with exact
+/// initialized receiver references.
 pub struct CfgCodeAnalyzer;
 
 impl CfgCodeAnalyzer {
@@ -1310,20 +1439,22 @@ impl CfgCodeAnalyzer {
     /// Analyzes reachable instructions in a control-flow graph.
     ///
     /// Int-like parameters initialize integer locals. A receiver in an
-    /// instance method is retained as `Top`, because reference operations are
-    /// outside this analyzer's scope. `if*` branches consume their comparison
-    /// operands, `goto` preserves the stack, and predecessor states are merged
-    /// until stable. Locals merge to `Top`; operand-stack heights must agree.
+    /// instance method is retained as an opaque compatibility placeholder.
+    /// `if*` branches consume their comparison operands, `goto` preserves the
+    /// stack, and predecessor states are merged until stable. Locals merge to
+    /// `Top`; operand-stack heights and exact value types must agree.
     /// Unreachable blocks are retained by the CFG but have no entry state.
     /// Each local can only move from `Integer` to `Top`, so the worklist has a
     /// finite bound based on the graph size and local-state width. An
     /// incompatible stack state fails explicitly instead of growing a cycle.
     ///
-    /// The analyzer supports integer constants, integer local loads/stores,
-    /// `iadd`, `isub`, `imul`, `idiv`, `irem`, `dup`, integer comparisons,
-    /// gotos, and `return`/`ireturn`. Reference, category-two, floating-point,
-    /// exception, and switch flows are not supported. No byte offsets or
-    /// stack-map frames are produced.
+    /// This compatibility entry point supports integer constants, integer
+    /// local loads/stores, `dup`, integer arithmetic/comparisons, gotos, and
+    /// `return`/`ireturn`. Reference, category-two, floating-point, exception,
+    /// and switch flows are not supported. Use
+    /// [`Self::analyze_with_current_class`] to enable exact `aload`/`astore`
+    /// moves of the initialized receiver. No byte offsets or stack-map frames
+    /// are produced.
     pub fn analyze(
         graph: &ControlFlowGraph,
         method_descriptor: &str,
@@ -1336,6 +1467,34 @@ impl CfgCodeAnalyzer {
         Self::analyze_validated(graph, method_descriptor, is_static, constant_pool)
     }
 
+    /// Analyzes using a validated `CONSTANT_Class` as the exact initialized
+    /// receiver type for a non-static, non-constructor method.
+    ///
+    /// The existing [`Self::analyze`] entry point retains its receiver
+    /// placeholder behavior. This context enables only `aload` and `astore`
+    /// reference moves; object creation, fields, calls and reference method
+    /// signatures remain unsupported.
+    pub fn analyze_with_current_class(
+        graph: &ControlFlowGraph,
+        method_name: &str,
+        method_descriptor: &str,
+        is_static: bool,
+        constant_pool: &ConstantPool,
+        current_class: ConstantPoolIndex,
+    ) -> Result<FlowAnalysis, AnalysisError> {
+        constant_pool
+            .validate_for_encoding()
+            .map_err(AnalysisError::InvalidConstantPool)?;
+        Self::analyze_validated_with_current_class(
+            graph,
+            method_name,
+            method_descriptor,
+            is_static,
+            constant_pool,
+            Some(current_class),
+        )
+    }
+
     /// Analyzes against a constant pool whose complete layout was already
     /// validated. Method descriptors and instruction operands are still
     /// checked.
@@ -1345,6 +1504,45 @@ impl CfgCodeAnalyzer {
         is_static: bool,
         constant_pool: &ConstantPool,
     ) -> Result<FlowAnalysis, AnalysisError> {
+        Self::analyze_validated_with_current_class(
+            graph,
+            "",
+            method_descriptor,
+            is_static,
+            constant_pool,
+            None,
+        )
+    }
+
+    fn analyze_validated_with_current_class(
+        graph: &ControlFlowGraph,
+        method_name: &str,
+        method_descriptor: &str,
+        is_static: bool,
+        constant_pool: &ConstantPool,
+        current_class_index: Option<ConstantPoolIndex>,
+    ) -> Result<FlowAnalysis, AnalysisError> {
+        let is_constructor = method_name == "<init>" || method_name == "<clinit>";
+        if current_class_index.is_some() && (is_static || is_constructor) {
+            return Err(AnalysisError::InvalidInitializationContext {
+                is_static,
+                is_constructor,
+            });
+        }
+        let current_class = current_class_index
+            .map(|index| {
+                let name = constant_pool.class_name(index).map_err(|error| {
+                    AnalysisError::InvalidConstantPoolReference {
+                        instruction: 0,
+                        error,
+                    }
+                })?;
+                if !is_valid_internal_name(name) {
+                    return Err(AnalysisError::InvalidClassName { index });
+                }
+                Ok(ClassIdentity(Arc::from(name)))
+            })
+            .transpose()?;
         let descriptor = MethodDescriptor::parse(method_descriptor)
             .map_err(AnalysisError::InvalidMethodDescriptor)?;
         check_parameter_slots(&descriptor, !is_static, None)?;
@@ -1358,6 +1556,15 @@ impl CfgCodeAnalyzer {
         }
 
         let mut initial = Frame::new(&descriptor, is_static)?;
+        if let Some(class) = &current_class {
+            let Some(receiver) = initial.locals.first_mut() else {
+                return Err(AnalysisError::InvalidInitializationContext {
+                    is_static,
+                    is_constructor,
+                });
+            };
+            *receiver = Some(LocalSlot::Object(class.clone()));
+        }
         let mut local_count = initial.locals.len();
         for block in graph.blocks() {
             for (offset, element) in block.instructions.iter().enumerate() {
@@ -1365,7 +1572,11 @@ impl CfgCodeAnalyzer {
                 match element {
                     CodeElement::Instruction(instruction) => {
                         if block.reachable {
-                            validate_flow_instruction(instruction_index, *instruction)?;
+                            validate_flow_instruction_with_context(
+                                instruction_index,
+                                *instruction,
+                                current_class.is_some(),
+                            )?;
                         }
                         if let Some((index, width)) = local_access(*instruction) {
                             let end = usize::from(index.get()) + usize::from(width);
@@ -1390,7 +1601,7 @@ impl CfgCodeAnalyzer {
             }
         }
         initial.locals.resize(local_count, None);
-        let initial_state = state_from_frame(&initial);
+        let initial_state = state_from_frame(&initial)?;
 
         let block_count = graph.blocks().len();
         let initial_state_slots = initial_state
@@ -1457,7 +1668,7 @@ impl CfgCodeAnalyzer {
                 }
             }
             max_stack = max_stack.max(frame.max_stack);
-            let outgoing = state_from_frame(&frame);
+            let outgoing = state_from_frame(&frame)?;
 
             for successor in &block.successors {
                 let Some(slot) = block_entries.get_mut(successor.index()) else {
@@ -1516,6 +1727,14 @@ fn validate_flow_instruction(
     instruction_index: usize,
     instruction: Instruction,
 ) -> Result<(), AnalysisError> {
+    validate_flow_instruction_with_context(instruction_index, instruction, false)
+}
+
+fn validate_flow_instruction_with_context(
+    instruction_index: usize,
+    instruction: Instruction,
+    exact_references: bool,
+) -> Result<(), AnalysisError> {
     let supported = matches!(
         instruction,
         Instruction::IConst(_)
@@ -1536,7 +1755,8 @@ fn validate_flow_instruction(
             | Instruction::Return
             | Instruction::IReturn
             | Instruction::Ldc(LdcConstant::Integer(_))
-    );
+    ) || (exact_references
+        && matches!(instruction, Instruction::ALoad(_) | Instruction::AStore(_)));
     if supported {
         return Ok(());
     }
@@ -1578,6 +1798,13 @@ fn local_access(instruction: Instruction) -> Option<(LocalIndex, u8)> {
     }
 }
 
+fn is_valid_internal_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name
+            .split('/')
+            .any(|part| part.is_empty() || part.chars().any(|c| matches!(c, '.' | ';' | '[')))
+}
+
 fn apply_branch(
     frame: &mut Frame,
     instruction: usize,
@@ -1601,20 +1828,31 @@ fn apply_branch(
     }
 }
 
-fn state_from_frame(frame: &Frame) -> BlockEntryState {
+fn state_from_frame(frame: &Frame) -> Result<BlockEntryState, AnalysisError> {
     let locals = frame
         .locals
         .iter()
         .map(|slot| match slot {
             Some(LocalSlot::Value(ValueKind::Int)) => FlowLocalState::Integer,
             Some(LocalSlot::Receiver) => FlowLocalState::Receiver,
+            Some(LocalSlot::Object(class)) => FlowLocalState::Object(class.clone()),
             _ => FlowLocalState::Top,
         })
         .collect();
-    BlockEntryState {
+    let operand_stack = frame
+        .stack
+        .iter()
+        .zip(&frame.stack_classes)
+        .map(|(value, class)| match (value, class) {
+            (ValueKind::Int, _) => Ok(FlowValue::Integer),
+            (ValueKind::Reference, Some(class)) => Ok(FlowValue::Object(class.clone())),
+            (value, _) => Err(AnalysisError::UnsupportedFlowStackValue { actual: *value }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(BlockEntryState {
         locals,
-        operand_stack: frame.stack.clone(),
-    }
+        operand_stack,
+    })
 }
 
 fn frame_from_state(state: &BlockEntryState) -> Frame {
@@ -1625,11 +1863,29 @@ fn frame_from_state(state: &BlockEntryState) -> Frame {
             FlowLocalState::Top => None,
             FlowLocalState::Integer => Some(LocalSlot::Value(ValueKind::Int)),
             FlowLocalState::Receiver => Some(LocalSlot::Receiver),
+            FlowLocalState::Object(class) => Some(LocalSlot::Object(class.clone())),
         })
         .collect();
-    let stack_slots = state.operand_stack.len();
+    let stack = state
+        .operand_stack
+        .iter()
+        .map(|value| match value {
+            FlowValue::Integer => ValueKind::Int,
+            FlowValue::Object(_) => ValueKind::Reference,
+        })
+        .collect::<Vec<_>>();
+    let stack_classes = state
+        .operand_stack
+        .iter()
+        .map(|value| match value {
+            FlowValue::Integer => None,
+            FlowValue::Object(class) => Some(class.clone()),
+        })
+        .collect();
+    let stack_slots = stack.len();
     Frame {
-        stack: state.operand_stack.clone(),
+        stack,
+        stack_classes,
         stack_slots,
         locals,
         max_stack: stack_slots,
@@ -1641,12 +1897,27 @@ fn merge_flow_states(
     incoming: &BlockEntryState,
     block: BasicBlockId,
 ) -> Result<bool, AnalysisError> {
-    if existing.operand_stack != incoming.operand_stack {
+    if existing.operand_stack.len() != incoming.operand_stack.len() {
         return Err(AnalysisError::IncompatibleStackMerge {
             block,
             expected_values: existing.operand_stack.len(),
             incoming_values: incoming.operand_stack.len(),
         });
+    }
+    for (value, (expected, incoming)) in existing
+        .operand_stack
+        .iter()
+        .zip(&incoming.operand_stack)
+        .enumerate()
+    {
+        if expected != incoming {
+            return Err(AnalysisError::IncompatibleStackValue {
+                block,
+                value,
+                expected: expected.clone(),
+                incoming: incoming.clone(),
+            });
+        }
     }
     let mut changed = false;
     for (existing, incoming) in existing.locals.iter_mut().zip(&incoming.locals) {
@@ -1662,7 +1933,8 @@ fn merge_flow_states(
 mod tests {
     use super::*;
     use crate::bytecode::{
-        ConstantPoolIndexOperand, FieldReference, SmallIntConstant, SmallLongConstant,
+        BranchInstruction, CodeSequence, ConstantPoolIndexOperand, ControlFlowGraph,
+        FieldReference, SmallIntConstant, SmallLongConstant,
     };
     use crate::constant_pool::ConstantPool;
     use crate::constant_pool_builder::ConstantPoolBuilder;
@@ -1673,6 +1945,16 @@ mod tests {
 
     fn method_descriptor(parameters: &str) -> String {
         format!("({parameters})V")
+    }
+
+    fn test_block_id() -> BasicBlockId {
+        let mut sequence = CodeSequence::new();
+        sequence.instruction(Instruction::Return);
+        ControlFlowGraph::build(&sequence).unwrap().blocks()[0].id
+    }
+
+    fn class_identity(name: &str) -> ClassIdentity {
+        ClassIdentity(Arc::from(name))
     }
 
     #[test]
@@ -1806,6 +2088,214 @@ mod tests {
                 "current integer-only CFG rejection for {instruction:?}"
             );
         }
+    }
+
+    #[test]
+    fn preserves_exact_current_class_on_diamond_stack_and_local_joins() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Receiver").unwrap();
+        let pool = builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        let right = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .branch(BranchInstruction::IfEq(right.clone()))
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AStore(LocalIndex::new(1)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(right)
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AStore(LocalIndex::new(1)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .bind(join)
+            .unwrap()
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "ordinary",
+            "()V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        let join_state = flow.entry_state(graph.blocks().last().unwrap().id).unwrap();
+
+        assert_eq!(
+            join_state.locals[1],
+            FlowLocalState::Object(class_identity("example/Receiver"))
+        );
+        assert_eq!(
+            join_state.operand_stack,
+            [FlowValue::Object(class_identity("example/Receiver"))]
+        );
+    }
+
+    #[test]
+    fn preserves_exact_current_class_on_loop_back_edge() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/LoopReceiver").unwrap();
+        let pool = builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        let loop_head = sequence.new_label().unwrap();
+        let exit = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AStore(LocalIndex::new(1)))
+            .bind(loop_head.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .branch(BranchInstruction::IfEq(exit.clone()))
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AStore(LocalIndex::new(1)))
+            .branch(BranchInstruction::Goto(loop_head))
+            .bind(exit)
+            .unwrap()
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "ordinary",
+            "()V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        let loop_state = flow.entry_state(graph.blocks()[1].id).unwrap();
+
+        assert_eq!(
+            loop_state.locals[1],
+            FlowLocalState::Object(class_identity("example/LoopReceiver"))
+        );
+        assert!(loop_state.operand_stack.is_empty());
+    }
+
+    #[test]
+    fn rejects_distinct_reference_and_integer_stack_joins() {
+        let block = test_block_id();
+        let mut existing = BlockEntryState {
+            locals: vec![],
+            operand_stack: vec![FlowValue::Object(class_identity("example/A"))],
+        };
+        let incoming_reference = BlockEntryState {
+            locals: vec![],
+            operand_stack: vec![FlowValue::Object(class_identity("example/B"))],
+        };
+        assert!(matches!(
+            merge_flow_states(&mut existing, &incoming_reference, block),
+            Err(AnalysisError::IncompatibleStackValue { block: actual, value: 0, .. }) if actual == block
+        ));
+
+        let incoming_integer = BlockEntryState {
+            locals: vec![],
+            operand_stack: vec![FlowValue::Integer],
+        };
+        assert!(matches!(
+            merge_flow_states(&mut existing, &incoming_integer, block),
+            Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn conflicting_reference_locals_degrade_to_top_and_cannot_be_loaded() {
+        let mut existing = BlockEntryState {
+            locals: vec![FlowLocalState::Object(class_identity("example/A"))],
+            operand_stack: vec![],
+        };
+        let incoming = BlockEntryState {
+            locals: vec![FlowLocalState::Object(class_identity("example/B"))],
+            operand_stack: vec![],
+        };
+        assert!(merge_flow_states(&mut existing, &incoming, test_block_id()).unwrap());
+        assert_eq!(existing.locals, [FlowLocalState::Top]);
+
+        let mut frame = frame_from_state(&existing);
+        assert_eq!(
+            frame.load_local(4, LocalIndex::new(0), ValueKind::Reference),
+            Err(AnalysisError::UninitializedLocal {
+                instruction: 4,
+                index: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn validates_current_class_context_and_constant_pool_class_name() {
+        let mut sequence = CodeSequence::new();
+        sequence.instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Valid").unwrap();
+        let pool = builder.finish().unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &graph,
+                "ordinary",
+                "()V",
+                true,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::InvalidInitializationContext {
+                is_static: true,
+                is_constructor: false,
+            })
+        );
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &graph,
+                "<init>",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::InvalidInitializationContext {
+                is_static: false,
+                is_constructor: true,
+            })
+        );
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &graph,
+                "ordinary",
+                "()V",
+                false,
+                &pool,
+                ConstantPoolIndex(u16::MAX),
+            ),
+            Err(AnalysisError::InvalidConstantPoolReference { .. })
+        ));
+
+        let malformed = ConstantPool::from_entries(vec![
+            Some(ConstantPoolEntry::Utf8("bad.name".to_owned())),
+            Some(ConstantPoolEntry::Class {
+                name_index: ConstantPoolIndex(1),
+            }),
+        ]);
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &graph,
+                "ordinary",
+                "()V",
+                false,
+                &malformed,
+                ConstantPoolIndex(2),
+            ),
+            Err(AnalysisError::InvalidClassName {
+                index: ConstantPoolIndex(2),
+            })
+        );
     }
 
     #[test]

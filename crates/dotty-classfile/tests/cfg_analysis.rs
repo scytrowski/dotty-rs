@@ -1,6 +1,6 @@
 use dotty_classfile::bytecode::{
     AnalysisError, BranchInstruction, CfgCodeAnalyzer, CodeSequence, ControlFlowGraph,
-    ControlFlowGraphError, FlowLocalState, Instruction, LocalIndex, SmallIntConstant,
+    ControlFlowGraphError, FlowLocalState, FlowValue, Instruction, LocalIndex, SmallIntConstant,
     SmallLongConstant, UnsupportedFlowInstructionKind, ValueKind, VerificationTypeInfo,
     assemble_labeled, generate_stack_map_frames,
 };
@@ -61,7 +61,7 @@ fn pop_updates_branch_stack_state_and_preserves_stack_map_offsets() {
     let join_state = flow
         .entry_state(graph.block_for_label(&join).unwrap())
         .unwrap();
-    assert_eq!(join_state.operand_stack, [ValueKind::Int]);
+    assert_eq!(join_state.operand_stack, [FlowValue::Integer]);
     assert_eq!(flow.max_stack, 1);
 
     let assembled = assemble_labeled(&sequence, &ConstantPool::default()).unwrap();
