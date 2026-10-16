@@ -719,6 +719,11 @@ exact error variants asserted rather than `is_err()`.
   dependencies needs `CompositeClassPath` over two single-format
   in-memory classpaths. Such fixtures must be clearly marked as
   synthetic, not real compiler output.
+- The small catalog fixtures under
+  `crates/dotty-classloader/tests/fixtures/jdk_module_catalog/` retain only
+  `module-info.class` files, not whole JMOD archives. Their source and
+  `generate.sh` pin the reproducer to Amazon Corretto 25.0.4+7-LTS; checksums
+  are listed in `SHA256SUMS`.
 - The ignored resolver regression
   `real_jdk_object_and_get_class_materialize_through_the_resolver` uses the
   real `$JAVA_HOME/jmods/java.base.jmod` `java/lang/Object.class` and small

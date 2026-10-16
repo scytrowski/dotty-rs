@@ -3,8 +3,16 @@ set -euo pipefail
 
 fixture_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 jdk_home=${JAVA_HOME:?set JAVA_HOME to a JDK with javac and jmod}
+java_bin="$jdk_home/bin/java"
 javac_bin="$jdk_home/bin/javac"
 jmod_bin="$jdk_home/bin/jmod"
+
+runtime_version=$("$java_bin" -XshowSettings:properties -version 2>&1 \
+  | awk -F'= ' '/^[[:space:]]*java.runtime.version = / { print $2; exit }')
+if [[ "$runtime_version" != "25.0.4+7-LTS" ]]; then
+  echo "expected Amazon Corretto 25.0.4+7-LTS, got ${runtime_version:-unknown}" >&2
+  exit 1
+fi
 
 work_dir=$(mktemp -d "${TMPDIR:-/tmp}/jdk-module-catalog.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT
@@ -33,4 +41,4 @@ cp "$work_dir/compiled/fixture.minimal/module-info.class" \
     fixture.minimal-module-info.class > SHA256SUMS
 )
 
-echo "generated module catalog fixtures with $($javac_bin -version 2>&1)"
+echo "generated module catalog fixtures with Amazon Corretto $runtime_version"
