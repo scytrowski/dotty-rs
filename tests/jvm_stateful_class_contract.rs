@@ -2,7 +2,7 @@ use dotty_classfile::access_flags::{ACC_PUBLIC, MethodAccessFlags};
 use dotty_classfile::class_file::ClassFileVersion;
 use dotty_classfile::class_file_builder::ClassFileBuilder;
 use dotty_classfile::reader::Reader;
-use dotty_core::ast::{TreeKind, Untyped};
+use dotty_core::ast::{Apply, ApplyKind, AstArena, Select, Tree, TreeKind, Typed, Untyped};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolInfo,
     SymbolKind, TermRefTarget, TreeId, Type, Visibility,
@@ -453,6 +453,128 @@ fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
                     String::from_utf8_lossy(&java.stderr)
                 );
                 fs::remove_dir_all(output).unwrap();
+            }
+        },
+    );
+}
+
+#[test]
+fn constructor_field_initializer_rejects_qualified_parameter_references() {
+    with_source(
+        "class Qualified(start: Int) { private val value: Int = start }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Qualified");
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, _node)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
+                panic!("Qualified source declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                panic!("Qualified declaration should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let parameters = constructor_def.value_param_clauses[0]
+                .iter()
+                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap();
+            let (field, rhs) = template
+                .body
+                .iter()
+                .find_map(|tree| {
+                    let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
+                        return None;
+                    };
+                    Some((index.symbol_at(source, *tree)?, definition.rhs?))
+                })
+                .unwrap();
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let typed_rhs = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            let typed_rhs_tree = typer.typed_ast().get(typed_rhs).clone();
+            assert!(matches!(typed_rhs_tree.kind, TreeKind::Ident(_)));
+
+            for missing_qualifier in [false, true] {
+                let mut typed_ast = AstArena::<Typed>::new();
+                for (_, tree) in typer.typed_ast().iter() {
+                    typed_ast.alloc(tree.clone());
+                }
+
+                let qualifier = if missing_qualifier {
+                    let checkpoint = typed_ast.checkpoint();
+                    typed_ast.alloc(typed_rhs_tree.clone());
+                    let missing = typed_ast.alloc(typed_rhs_tree.clone());
+                    typed_ast.rollback_to(checkpoint);
+                    missing
+                } else {
+                    typed_ast.alloc(Tree {
+                        kind: TreeKind::Apply(Apply {
+                            function: typed_rhs,
+                            args: Vec::new(),
+                            kind: ApplyKind::Regular,
+                        }),
+                        position: None,
+                        ty: typed_rhs_tree.ty,
+                    })
+                };
+                let initializer = typed_ast.alloc(Tree {
+                    kind: TreeKind::Select(Select {
+                        qualifier,
+                        name: typer.store().symbols.get(parameters[0]).name,
+                        backquoted: false,
+                    }),
+                    position: None,
+                    ty: typed_rhs_tree.ty,
+                });
+                if missing_qualifier {
+                    assert!(typed_ast.try_get(qualifier).is_none());
+                }
+
+                let unit = JvmCompilationUnit {
+                    store: typer.store(),
+                    typed_ast: &typed_ast,
+                    classes: vec![JvmClassPlan {
+                        class,
+                        methods: Vec::new(),
+                        fields: vec![JvmFieldPlan {
+                            field,
+                            source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                            initializer: Some(initializer),
+                        }],
+                        initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                            constructor_plan.clone(),
+                        ),
+                    }],
+                };
+                assert!(matches!(
+                    unit.lower_constructor_field_initializers(class, definitions),
+                    Err(dotty_jvm::JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                        field: found_field,
+                        tree,
+                        node: "qualified constructor parameter reference",
+                    }) if found_field == field && tree == initializer
+                ));
             }
         },
     );

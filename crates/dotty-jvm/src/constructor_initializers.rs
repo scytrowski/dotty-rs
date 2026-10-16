@@ -378,6 +378,25 @@ impl ConstructorInitializerContext<'_> {
             .iter()
             .find(|parameter| parameter.symbol() == symbol)
         {
+            if receiver.is_some() {
+                return self.unsupported(tree, "qualified constructor parameter reference");
+            }
+            let Some(Type::TermRef { prefix, target }) = self
+                .typed_ast
+                .try_get(tree)
+                .and_then(|tree| self.store.types.try_get(tree.ty))
+            else {
+                return self.unsupported(
+                    tree,
+                    "constructor parameter reference without a term prefix",
+                );
+            };
+            if *prefix != self.definitions.no_prefix || *target != TermRefTarget::Symbol(symbol) {
+                return self.unsupported(
+                    tree,
+                    "constructor parameter reference with a noncanonical prefix",
+                );
+            }
             if symbol_info.kind != SymbolKind::Parameter
                 || symbol_info.owner != Some(self.constructor.symbol())
             {
