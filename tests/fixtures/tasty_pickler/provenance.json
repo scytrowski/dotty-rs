@@ -25,6 +25,7 @@
     "Empty.scala": "ae39954e680796910cc182c92768ec8da29b98a0819a5decc468a2f2f845877a",
     "Multi.scala": "51569388cace0d6a56186ae93cb875c5938fe190034a4ae8310e659d12fb2e7d",
     "Operations.scala": "5884f839f49e58683af06c26d8d1f54e7d686a6d8ca39f5b7b534eee7d8827d4",
+    "ParameterDecl.scala": "5ec8e5f6def7267da50a0cfde7efe31ef87f2ec531e8e10d22c477f5e1a08c09",
     "Parameters.scala": "caa5b61881953e96f63f4ad2b44a74674cefe6c7805d13fcee0de082b3baa9e0",
     "References.scala": "e2e7e02c0a424c2dec7dcc4b9d4de9c7752b4d2568c1639bbcf40dfda7455365"
   },
@@ -34,6 +35,7 @@
     "example/Declarations.tasty": "06af714d14c013aa926110768a0dc3f429361d0645b4e638094f6499138179c6",
     "example/Multi.tasty": "47de1c2d9e1283253b236fef64c25807ad5c7327dcaf1a1498dfd9b1a5511a04",
     "example/Operations.tasty": "e582316003537e8a0f266e14f7909af679cca46f1061f15dfecb4e20993fb59e",
+    "example/ParameterDecl.tasty": "87df2ae92e632a96c8d21e1c48647edc552f80e342d74c9ec7530db9adc86a65",
     "example/Parameters.tasty": "f87e10ad2e0b25a3b32de14b7c9eb03b78c3d0fb29c3c9bc537f4634987477d5",
     "example/References.tasty": "26c79a5c953316f6c98a29c32e4386e71217deeb8c0432ae00db0f51be2a647f"
   },

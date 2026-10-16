@@ -10,6 +10,8 @@ use std::process::Command;
 
 const ANSWER: &str = include_str!("../../../tests/fixtures/tasty_pickler/Answer.scala");
 const MULTI: &str = include_str!("../../../tests/fixtures/tasty_pickler/Multi.scala");
+const PARAMETER_DECL: &str =
+    include_str!("../../../tests/fixtures/tasty_pickler/ParameterDecl.scala");
 
 fn source_outputs(
     text: &str,
@@ -344,6 +346,91 @@ fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
 }
 
 #[test]
+fn source_int_parameters_emit_ordered_canonical_param_declarations() {
+    use dotty_tasty::tasty::*;
+
+    let (skeleton, first) =
+        source_outputs_named(PARAMETER_DECL, "ParameterDecl.scala", |_| {}).unwrap();
+    let (_, second) = source_outputs_named(PARAMETER_DECL, "ParameterDecl.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    assert_eq!(first.intended_tasty_path(), "example/ParameterDecl.tasty");
+    assert_eq!(first.declarations().len(), 5);
+    assert_eq!(skeleton.declarations().len(), 5);
+
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let address_index = file.ast_address_index().unwrap();
+    let method_declaration = &first.declarations()[2];
+    let method = address_index
+        .get(method_declaration.address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    assert!(method.clauses.is_empty());
+    assert_eq!(
+        method
+            .parameters
+            .iter()
+            .map(|parameter| file.render_name(parameter.name()).unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert!(matches!(
+        method.rhs,
+        Some(RawTree::Leaf(SimpleTerm {
+            tag: INTCONST_TAG,
+            value: TermValue::Int(42),
+            ..
+        }))
+    ));
+
+    let parameter_declarations = &first.declarations()[3..];
+    assert_ne!(
+        parameter_declarations[0].symbol,
+        parameter_declarations[1].symbol
+    );
+    assert!(
+        parameter_declarations
+            .iter()
+            .all(|parameter| parameter.owner == method_declaration.symbol)
+    );
+    for (declaration, expected_name) in parameter_declarations.iter().zip(["first", "second"]) {
+        let raw = address_index.get_node(declaration.address).unwrap();
+        assert_eq!(raw.tag, PARAM_TAG);
+        let parameter = address_index
+            .get(declaration.address)
+            .unwrap()
+            .decode_parameter()
+            .unwrap();
+        assert_eq!(file.render_name(parameter.name()).unwrap(), expected_name);
+        assert!(matches!(
+            parameter.decode_body().unwrap().type_tree,
+            RawTree::NatAst {
+                tag: IDENTTPT_TAG,
+                ..
+            }
+        ));
+    }
+
+    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1240/generated/example/ParameterDecl.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, first.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .env("TMPDIR", root.join("target/issue-1240/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
+        assert!(
+            result.success(),
+            "requested ParameterDecl Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
 fn backquoted_class_and_package_components_use_encoded_artifact_paths_only() {
     use dotty_tasty::tasty::*;
 
@@ -388,15 +475,11 @@ fn real_source_default_constructor_clauses_normalize_without_fabricating_method_
 }
 
 #[test]
-fn valid_scala_empty_parens_and_parameters_are_explicitly_unsupported() {
+fn contextual_and_type_parameter_methods_remain_explicitly_unsupported() {
     for (text, feature) in [
         (
-            "package example; class Answer { def value(x: Int): Int = x }",
-            UnsupportedFeature::ParameterClauses,
-        ),
-        (
             "package example; class Answer { def value(using x: Int): Int = x }",
-            UnsupportedFeature::SymbolMetadata,
+            UnsupportedFeature::SourceMetadata,
         ),
         (
             "package example; class Answer { def value[A]: Int = 42 }",
@@ -415,11 +498,37 @@ fn valid_scala_empty_parens_and_parameters_are_explicitly_unsupported() {
 }
 
 #[test]
+fn unsupported_parameter_kinds_and_defaults_fail_before_emission() {
+    for (text, feature) in [
+        (
+            "package example; class Answer { def value(x: => Int): Int = 42 }",
+            UnsupportedFeature::ParameterClauses,
+        ),
+        (
+            "package example; class Answer { def value(x: Int = 1): Int = 42 }",
+            UnsupportedFeature::ParameterClauses,
+        ),
+        (
+            "package example; class Answer { def value(x: Int)(y: Int): Int = 42 }",
+            UnsupportedFeature::ParameterClauses,
+        ),
+    ] {
+        let result = source_plan(text, |_| {});
+        assert!(
+            matches!(
+                &result,
+                Err(PickleError::Unsupported { feature: actual, .. }) if *actual == feature
+            ),
+            "{text}: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn malformed_clause_shapes_and_empty_class_fail_explicitly() {
     for text in [
         "package example; class Answer { def value()(): Int = 42 }",
         "package example; class Answer { def value()(x: Int): Int = x }",
-        "package example; class Answer { def value(): Int = 42; def other(x: Int): Int = x }",
     ] {
         assert!(matches!(
             source_plan(text, |_| {}),

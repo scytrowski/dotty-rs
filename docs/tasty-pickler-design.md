@@ -216,8 +216,8 @@ It is compiler-generated, not evidence of a source annotation in the core store.
 | --- | --- | --- |
 | Unit/output boundary | One ordinary top-level class in explicit `package example`; one package-aligned `.tasty` per class | Default/nested packages, multiple classes, linked class/object outputs |
 | Class | Public, no type/value parameters, no self type, no fields, no explicit extends or initialization statements; exact canonical implicit Object parent | Traits, objects, companions, nesting, enums, arbitrary inheritance/constructors |
-| Method | One or more public ordinary monomorphic concrete methods, declared Int result, no clause or one explicit empty clause | Nonempty/multiple/curried/contextual clauses, abstract methods |
-| Signature/types | Int result, constant Int RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
+| Method | One or more public ordinary monomorphic concrete methods, declared Int result, no clause, one explicit empty clause, or one plain clause of ordinary Int parameters | Multiple/curried/contextual/erased/repeated/defaulted clauses, abstract methods |
+| Signature/types | Int result and parameter types; canonical Int-literal RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
 | Body | Actual typed Int literal, including its value/type agreement | Calls, blocks, if/match, locals, functions, returns and all other expressions |
 | Metadata | Public/no extra source flags or annotations; required constructor marker; normalized source identity | General annotations/modifiers, full position/comment preservation, outline/best-effort/Java TASTy |
 
@@ -286,9 +286,11 @@ constructor still has a normalized empty value clause and class-instance result.
 The current accepted boundary is one ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
 methods with an Int result and actual typed Int literal bodies. Each method has
-no value clause or one explicit empty ordinary clause; those shapes retain
-distinct semantic and wire forms. Other valid forms remain explicitly
-unsupported. Validation does not re-type source, mutate
+no value clause, one explicit empty ordinary clause, or one plain clause of
+ordinary Int parameters. Clause shapes retain distinct semantic and wire forms;
+parameter identities, source order, ownership, declared types and completed
+method signatures must agree. Other valid forms remain explicitly unsupported.
+Validation does not re-type source, mutate
 stores/arenas/indices/symbols, or publish files. A separate `EncodingContext` now
 projects names/types/references into owned AST fragments. The checked plan's
 `declaration_skeleton` API assembles declaration trees into an explicitly
