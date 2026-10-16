@@ -43,18 +43,37 @@ class HarnessTests(unittest.TestCase):
             env = {k: temporary for k in ("SCALA39_ROOT", "JAVA_HOME", "COURSIER_MAVEN_ROOT")}
             with mock.patch.dict(os.environ, env, clear=True):
                 with mock.patch.object(oracle, "execute", return_value=oracle.REVISION):
-                    with self.assertRaisesRegex(RuntimeError, "missing compiler Java executable"):
+                    with self.assertRaisesRegex(RuntimeError, "missing JDK Java executable"):
                         oracle.Toolchain()
 
     def fake_cache(self, root):
         (root / "bin").mkdir()
-        (root / "bin/java").touch()
+        for executable in ("java", "javac", "javap"):
+            (root / "bin" / executable).touch()
         (root / "release").write_text('JAVA_VERSION="21"\nIMPLEMENTOR="test"\n'
                                       'IMPLEMENTOR_VERSION="test"\nOS_ARCH="test"\n')
         for group, artifact, version in oracle.ARTIFACTS:
             path = root / group / artifact / version / f"{artifact}-{version}.jar"
             path.parent.mkdir(parents=True)
             path.touch()
+
+    def test_runtime_tools_and_jdk_21_are_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.fake_cache(root)
+            env = {k: temporary for k in ("SCALA39_ROOT", "JAVA_HOME", "COURSIER_MAVEN_ROOT")}
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch.object(oracle, "execute", return_value=oracle.REVISION):
+                    (root / "bin/javac").unlink()
+                    with self.assertRaisesRegex(RuntimeError, "missing JDK javac executable"):
+                        oracle.Toolchain()
+                    (root / "bin/javac").touch()
+                    (root / "release").write_text('JAVA_VERSION="17.0.12"\nIMPLEMENTOR="test"\n'
+                                                  'IMPLEMENTOR_VERSION="test"\nOS_ARCH="test"\n')
+                    with mock.patch.object(oracle, "execute", side_effect=[oracle.REVISION,
+                                                                           "Scala compiler version 3.9.0 -- test"]):
+                        with self.assertRaisesRegex(RuntimeError, "JDK 21 or newer is required"):
+                            oracle.Toolchain()
 
     def test_wrong_compiler_version_and_unpinned_artifacts_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
