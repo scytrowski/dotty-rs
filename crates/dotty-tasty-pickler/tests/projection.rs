@@ -703,6 +703,64 @@ fn namespace_owner_and_class_scope_mismatches_are_typed_failures() {
 }
 
 #[test]
+fn this_type_rejects_a_canonical_reserved_type_parameter_without_mutation() {
+    let mut f = Fixture::new();
+    let name = Name::new(f.store.names.intern("T"), Namespace::Type);
+    let bounds = f.store.types.alloc(Type::Bounds {
+        low: f.definitions.nothing_type,
+        high: f.definitions.any_type,
+    });
+    let parameter = support::source_symbol(
+        &mut f.store,
+        name,
+        SymbolKind::TypeParameter,
+        f.class,
+        f.source,
+        SymbolInfo::Complete(bounds),
+    );
+    f.store.scopes.get_mut(f.scope).enter(name, parameter);
+    let tree = support::node(&mut f.source_ast, TreeKind::TypeTree(TypeTree));
+    f.index.record_symbol(f.source, tree, parameter).unwrap();
+    let this = f.store.types.alloc(Type::ThisType { class: parameter });
+    let ordinary = f
+        .store
+        .types
+        .alloc(Type::type_ref(f.definitions.no_prefix, parameter));
+    let before = f.snapshot();
+    let mut c = context(&f);
+    c.reserve_declaration(parameter).unwrap();
+    c.lower_type(ordinary).unwrap();
+    assert_eq!(
+        c.lower_type(this).err(),
+        Some(PickleError::Reference {
+            symbol: parameter,
+            reason: ReferenceError::Kind,
+        })
+    );
+    assert_eq!(c.finish(&[]).err(), Some(PickleError::ProjectionAborted));
+    assert_eq!(f.snapshot(), before);
+}
+
+#[test]
+fn package_this_type_keeps_the_canonical_package_reference() {
+    let mut f = Fixture::new();
+    let this = f.store.types.alloc(Type::ThisType { class: f.package });
+    let before = f.snapshot();
+    let mut c = context(&f);
+    let label = c.lower_type(this).unwrap();
+    let fragment = c.finish(&[label]).unwrap();
+    let RawTree::Leaf(leaf) = at(&fragment, label) else {
+        panic!()
+    };
+    assert_eq!(leaf.tag, TERMREFPKG_TAG);
+    assert_eq!(
+        fragment.names.render(leaf.name_ref().unwrap()).unwrap(),
+        "example"
+    );
+    assert_eq!(f.snapshot(), before);
+}
+
+#[test]
 fn package_owner_cycles_and_nonpackage_owners_are_rejected() {
     let mut f = Fixture::new();
     f.store.symbols.get_mut(f.package).owner = Some(f.package);

@@ -750,10 +750,9 @@ impl<'a> EncodingContext<'a> {
                     }
                 }
             }
-            Type::ThisType { class } => {
-                if self.symbol(*class)?.kind == SymbolKind::Package {
-                    self.package_inner(*class, false)?
-                } else {
+            Type::ThisType { class } => match self.symbol(*class)?.kind {
+                SymbolKind::Package => self.package_inner(*class, false)?,
+                SymbolKind::Class => {
                     self.namespace(*class, true)?;
                     let child = self.local_inner(*class, None, depth)?;
                     self.wire
@@ -763,7 +762,8 @@ impl<'a> EncodingContext<'a> {
                         })
                         .map_err(construction)?
                 }
-            }
+                _ => return Err(reference(*class, ReferenceError::Kind)),
+            },
             Type::Method(method) => {
                 if self.active.contains(&method.result) {
                     return Err(PickleError::CyclicType { ty: method.result });

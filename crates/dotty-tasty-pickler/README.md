@@ -44,12 +44,14 @@ signatures remain unsupported. Package scope provenance remains an integration
 precondition because core packages do not store their scope on the symbol.
 
 `lower_type` supports canonical type/term references, local/package `this` and one
-ordinary monomorphic method clause. Non-plain clauses, nested method-valued
-parameters/results, erased/varargs parameters, structural name targets and other
-semantic forms return typed errors. Int result syntax wrappers are separate from
-semantic types; constructor Unit syntax never changes the class-instance semantic
-signature. Sharing keys exact TypeIds. Repeated calls produce SHAREDtype labels
-that must follow their original occurrence in emission order.
+ordinary monomorphic method clause. Non-package `this` requires a supported local
+class symbol; a type parameter cannot denote a class `this` type. Non-plain
+clauses, nested method-valued parameters/results, erased/varargs parameters,
+structural name targets and other semantic forms return typed errors. Int result
+syntax wrappers are separate from semantic types; constructor Unit syntax never
+changes the class-instance semantic signature. Sharing keys exact TypeIds.
+Repeated calls produce SHAREDtype labels that must follow their original
+occurrence in emission order.
 
 `finish` returns an owned `ProjectedFragment` (names and AST fragment bytes).
 Every label must be bound and emitted exactly once as an ordered root or child;
