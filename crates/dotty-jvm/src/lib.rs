@@ -22,8 +22,13 @@ use dotty_core::types::Type;
 mod boolean_ops;
 mod call_target;
 mod constructor;
+mod constructor_initializers;
 mod descriptor;
 pub use constructor::{JvmConstructorIssue, JvmConstructorMetadata, JvmPrimaryConstructorPlan};
+pub use constructor_initializers::{
+    JvmConstructorFieldInitializer, JvmConstructorFieldInitializerPlan,
+    JvmConstructorInitializerInstruction,
+};
 mod emission;
 mod expression;
 mod identity;
@@ -626,6 +631,20 @@ pub enum JvmCodegenError {
         initializer: TreeId<Typed>,
         expected: JvmType,
         found: Option<JvmType>,
+    },
+    /// Constructor initializer lowering requires a validated primary constructor plan.
+    ConstructorInitializerContextUnavailable { class: SymbolId },
+    /// A field initializer reads a field before its source-ordered store.
+    FieldInitializerReadsUninitializedField {
+        field: SymbolId,
+        tree: TreeId<Typed>,
+        referenced_field: SymbolId,
+    },
+    /// A typed initializer tree is outside the supported literal/reference/intrinsic subset.
+    UnsupportedConstructorFieldInitializer {
+        field: SymbolId,
+        tree: TreeId<Typed>,
+        node: &'static str,
     },
     /// The source field modifier has no supported JVM field mapping.
     UnsupportedJvmFieldFlag {
@@ -1519,6 +1538,23 @@ impl JvmCompilationUnit<'_> {
             .body
             .ok_or(JvmCodegenError::MissingTypedBody { method })?;
         expression::lower_planned_method_body(self, &metadata, definitions, method_metadata, body)
+    }
+
+    /// Lowers planned primitive field initializers into source-ordered
+    /// constructor fragments using the validated primary-constructor slots.
+    ///
+    /// The returned plan excludes the superclass constructor call and final
+    /// `return`; callers must place its instructions after `Object.<init>()V`.
+    /// It supports primitive literals, canonical constructor parameters,
+    /// approved `Int` addition and Boolean negation, and reads of fields that
+    /// were initialized earlier in this plan. Unsupported expressions and
+    /// self/forward field reads return typed errors without modifying the unit.
+    pub fn lower_constructor_field_initializers(
+        &self,
+        class: SymbolId,
+        definitions: &Definitions,
+    ) -> Result<JvmConstructorFieldInitializerPlan, JvmCodegenError> {
+        constructor_initializers::lower(self, class, definitions)
     }
 
     /// Resolves a typed ordinary call to a planned same-class virtual target.

@@ -508,3 +508,29 @@ parameter accessors, annotations, qualified visibility, and non-primitive
 parameters fail with structured errors. Source proof rejection does not
 publish partial metadata or mutate semantic state. No new Scala constructor,
 accessor, field store, `new` expression, or JVM constructor body is synthesized.
+
+### Constructor field initializer fragments
+
+`JvmCompilationUnit::lower_constructor_field_initializers` consumes the
+validated `PrimaryConstructor` metadata and the ordered `JvmFieldPlan` list.
+The frontend obtains each field's source RHS from its canonical source
+declaration, calls `field_initializer_context_for(field)`, types that RHS once,
+and supplies the exact `TreeId<Typed>` retained in `SourceTypedIndex`. It
+collects fields by source template order and constructor parameters through
+`Template.constructor` plus their derived `SymbolId`s; equal printed names do
+not substitute one identity for another.
+
+The result is a checked instruction plan, not a complete constructor. Each
+field fragment starts with `aload_0`, lowers one primitive value, and ends with
+`putfield` for that canonical field. Supported RHS forms are Int/Boolean
+literals, constructor-owned Int/Boolean parameters, canonical `Int.+`,
+canonical Boolean negation, empty-statement blocks, and reads of fields whose
+initializer fragment precedes the current one. Self and forward field reads,
+user method calls, `this` escape, control-flow expressions, and other
+unsupported typed nodes fail with contextual `JvmCodegenError`s.
+
+`JvmConstructorFieldInitializerPlan::append_to` appends only those field
+instructions. The caller must emit `aload_0; invokespecial
+java/lang/Object.<init>()V` before the plan and append `return` after it. This
+API does not install class fields or synthesize a JVM constructor; complete
+class and constructor emission remains a separate increment.
