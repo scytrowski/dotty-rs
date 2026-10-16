@@ -1,11 +1,11 @@
 # JVM stateful class source contract
 
-This document records the current Parser → Namer → Typer evidence needed
-before JVM field and primary-constructor emission is added. It targets the
+This document records the current bounded Parser → Namer → Typer → JVM
+contract for private primitive fields and primary constructors. It targets the
 pinned Scala 3.9.0 reference at revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
-This is a characterization contract; it does not claim that `dotty-jvm` emits
-fields, accessors, or parameterized constructors.
+It covers the real-source `Counter` and `PrivateFields` integration fixtures;
+it does not claim full Scala ABI, generated accessor, or TASTy support.
 
 ## Reproducible source evidence
 
@@ -17,8 +17,8 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 
 | Source shape | Canonical field identity | Initializer / constructor evidence | Status |
 | --- | --- | --- | --- |
-| `class Plain { private val seed: Int = 42; private val enabled: Boolean = true }` | Each declaration maps to a distinct `SymbolKind::Field`, owned by `Plain`, with `Visibility::Private`; neither has `MUTABLE`. `SymbolInfo` completes to the canonical Int or Boolean type. | Template body order is `seed`, then `enabled`. Each source RHS is typed with `type_expression_expected(rhs, context, completed_field_type)` using `field_initializer_context_for`; its literal `TreeId<Typed>` is read back unchanged through `source_typed_index().get(source, rhs)`. The literal keeps its singleton `Type::Constant` type. The frontend-issued `JvmFieldPlan`s preserve this order and project `I`/`Z`, private access, and immutable `ACC_FINAL`. | Frontend and JVM field metadata characterized; class-file field emission is unsupported. |
-| `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | Source binding and explicit constructor metadata characterized; constructor and field emission remain unsupported. |
+| `class Plain { private val seed: Int = 42; private val enabled: Boolean = true }` | Each declaration maps to a distinct `SymbolKind::Field`, owned by `Plain`, with `Visibility::Private`; neither has `MUTABLE`. `SymbolInfo` completes to the canonical Int or Boolean type. | Template body order is `seed`, then `enabled`. Each source RHS is typed with `type_expression_expected(rhs, context, completed_field_type)` using `field_initializer_context_for`; its literal `TreeId<Typed>` is read back unchanged through `source_typed_index().get(source, rhs)`. The literal keeps its singleton `Type::Constant` type. The frontend-issued `JvmFieldPlan`s preserve this order and project `I`/`Z`, private access, and immutable `ACC_FINAL`. | The `PrivateFields.scala` source integration emits private final `I` and `Z` storage, explicit getters, and one `()V` constructor; JDK CI verifies and executes the class. |
+| `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | The `Counter.scala` source integration emits exactly `<init>(I)V`, initializes `current:I` from the canonical constructor parameter, and lowers `get`, `set`, and `increment`. Fresh frontend runs produce identical class bytes; JDK CI verifies independent instance state and method behavior. |
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The parameter order comes from the source constructor clause. | Identity audit only; public accessor ABI is out of scope. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same clause ordering as `val`. | Identity audit only; public getter/setter ABI is out of scope. |
 
@@ -89,14 +89,13 @@ These rules are visible in the pinned compiler sources:
 - [`Memoize.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/transform/Memoize.scala) adds private backing fields and directs getters/setters to storage.
 - [`SymDenotations.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/core/SymDenotations.scala) defines class parameter accessors and distinguishes getters from setters.
 
-The current JVM metadata increment is limited to private primitive instance
-fields and ordinary user methods. It does not emit storage and must not claim
-compatibility for public Scala
-getters/setters, constructor parameter accessors, bridges, inheritance,
-qualified access, `lazy`, generic/reference-valued members, or secondary
-constructors. Scala 3.9.0 source inspection is recorded here; a generated
-`javap` comparison was unavailable in this environment because the local
-reference launcher requires missing `sbt`, and no Java runtime is installed.
+The current whole-class emitter supports private primitive instance fields,
+one plain primary constructor, and planned ordinary user methods for a
+top-level Object-derived class. The JDK 21 CI gate uses `javap -c -v`,
+`javac`, and `java -Xverify:all` on the real fixtures. It does not claim
+compatibility for public Scala getters/setters, constructor parameter
+accessors, bridges, inheritance, qualified access, `lazy`,
+generic/reference-valued members, or secondary constructors.
 
 ## Stage-labeled rejection matrix
 
@@ -132,7 +131,8 @@ a valid field plan.
 ## Platform-neutral adapter shapes
 
 Field plans and explicit primary-constructor metadata are implemented in
-`dotty-jvm`; constructor emission remains unsupported. The constructor plan
+`dotty-jvm`; the whole-class emitter consumes both after frontend validation.
+The constructor plan
 retains private source evidence checked by `JvmPrimaryConstructorPlan::from_source`
 against the shared AST/index. Its inputs include the exact constructor and
 ordered derived parameter IDs. The field shape below remains unchanged:
@@ -159,14 +159,16 @@ initializer conformance, source-order initialization, and the supported class
 and constructor shape. The class artifact must only be returned after every
 field, method, constructor, and class-file structure validates successfully.
 
-`JvmClassInitializationPlan::PrimaryConstructor` now projects explicit metadata
-without permitting emission. `ImplicitNoArg` remains the only implemented
-proof authorizing constructor bytecode. It is valid only for the already documented
-empty no-argument class subset and must not be upgraded based on an empty
-method list when source fields or constructor parameters exist.
+`JvmClassInitializationPlan::PrimaryConstructor` authorizes emission of its
+exact constructor descriptor/access and source-ordered private primitive field
+initializers. `ImplicitNoArg` is reserved for the empty no-argument class
+subset and never implies fields or constructor parameters.
 
 The constructor metadata regressions in `jvm_stateful_class_contract.rs` cover
 `()V`, `(I)V`, `(ZI)V`, private access, canonical identity order, and the
-254-parameter instance limit. Unsupported source shapes are rejected before
-projection; malformed semantic information is also checked independently.
-See [the backend contract](jvm-backend.md#explicit-primary-constructor-metadata).
+254-parameter instance limit. `jvm_source_compilation.rs` adds whole-pipeline
+fixtures and verifies complete class bytes, descriptors, flags, field
+references, deterministic fresh-session output, and executable JDK harnesses.
+Unsupported source shapes are rejected before projection; malformed semantic
+information is also checked independently. See [the backend
+contract](jvm-backend.md#explicit-primary-constructor-metadata).
