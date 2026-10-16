@@ -75,19 +75,23 @@ the relevant typed backend failures include:
 
 | Invalid plan or selected shape | Backend error |
 | --- | --- |
-| Constructor symbol is not the source-proven primary constructor, has unsupported source shape, or is private | `InvalidPrimaryConstructor { issue: SourceIdentity/SourceShape/Visibility/... }` |
+| Constructor symbol is not the source-proven primary constructor or has an unsupported source shape | `InvalidPrimaryConstructor { issue: SourceIdentity/SourceShape/... }` |
 | Target class has no plan in this unit | `MissingClassPlan` |
 | Abstract, generic, trait, object, nested, or otherwise unsupported class form | `UnsupportedJvmClass` |
 | Reference class appears in a public primitive-only method descriptor | `UnsupportedJvmType { kind: ReferenceClass }` |
 | Call uses an arbitrary non-`this` selection in the current same-class resolver | `UnsupportedJvmCallShape { kind: NonThisReceiver }` |
 | Distinct class symbols have the same emitted internal name | `DuplicateJvmClassIdentity` |
 
-Private constructor access is therefore not source-checked by the current
-Typer. A future constructor-call resolver must check visibility against the
-canonical caller and constructor symbols before producing executable code;
-the source-aware `JvmPrimaryConstructorPlan::from_source` already rejects a
-private primary constructor as `InvalidPrimaryConstructor { issue:
-Visibility }`. An accepted typed tree is not proof that JVM access is valid.
+Private constructor access is not source-checked by the current Typer, and
+`JvmPrimaryConstructorPlan::from_source` is not a call-site access check: it
+accepts a private primary constructor and preserves its visibility as
+`ACC_PRIVATE` metadata. The existing
+[`ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result`](../tests/jvm_stateful_class_contract.rs)
+regression covers `class C private (x: Int)` and verifies that the plan and
+class metadata can be produced. A future constructor-call resolver must check
+visibility against the canonical caller and constructor symbols before
+producing executable code. An accepted typed tree or constructor metadata is
+not proof that a particular caller may invoke it.
 
 The typer also resolves a declared secondary constructor when it is the unique
 applicable constructor. That fact is not permission for the JVM subset in
