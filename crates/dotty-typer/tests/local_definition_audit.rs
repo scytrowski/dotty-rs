@@ -2584,6 +2584,11 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         "stdin"
     );
     assert_eq!(
+        stdin_entry.owner,
+        Some(source_module_class),
+        "retry must use the same canonical ModuleClass shell"
+    );
+    assert_eq!(
         audit_symbol_path(typer.store(), stdin_entry.owner.unwrap()),
         "scala.io.Source$"
     );
