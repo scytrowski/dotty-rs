@@ -158,6 +158,7 @@ pub enum ModuleDescriptorError {
     HasMethods { count: usize },
     MissingModuleAttribute,
     DuplicateAttribute { name: &'static str },
+    OpaqueKnownModuleAttribute { name: String },
     DisallowedAttribute { name: String },
     InvalidModuleName { name: String },
     InvalidPackageName { name: String },
@@ -201,6 +202,10 @@ impl fmt::Display for ModuleDescriptorError {
                     "module descriptor has duplicate {name} attributes"
                 )
             }
+            Self::OpaqueKnownModuleAttribute { name } => write!(
+                formatter,
+                "recognized JPMS attribute {name:?} must use its typed representation"
+            ),
             Self::DisallowedAttribute { name } => write!(
                 formatter,
                 "predefined attribute {name:?} is not permitted on module-info"
@@ -442,6 +447,14 @@ impl<'a> ClassFile<'a> {
         let mut module = None;
         for attribute in &self.attributes {
             let name = descriptor_attribute_name(attribute, &self.constant_pool)?;
+            if matches!(attribute, Attribute::Other(_))
+                && matches!(
+                    name.as_str(),
+                    "Module" | "ModulePackages" | "ModuleMainClass"
+                )
+            {
+                return Err(ModuleDescriptorError::OpaqueKnownModuleAttribute { name });
+            }
             match attribute {
                 Attribute::Module(value) => {
                     module_count += 1;
@@ -671,13 +684,18 @@ fn validate_module_metadata(
                 reason: "java.base requires row must not be synthetic",
             });
         }
-        // Java 21's JVMS forbids these bits for java.base in version 54.0+
-        // (the Java 26 specification relaxes the transitive bit).
-        if (54..=65).contains(&class_file.version.major)
-            && row.requires_flags & (MODULE_ACC_TRANSITIVE | MODULE_ACC_STATIC_PHASE) != 0
+        if class_file.version.major >= 54 && row.requires_flags & MODULE_ACC_STATIC_PHASE != 0 {
+            return Err(ModuleDescriptorError::InvalidDirective {
+                reason: "java.base requires row has forbidden static-phase flag",
+            });
+        }
+        // Java 26 (major 70) permits ACC_TRANSITIVE on java.base; earlier
+        // supported releases retain the prohibition from JVMS 21.
+        if (54..70).contains(&class_file.version.major)
+            && row.requires_flags & MODULE_ACC_TRANSITIVE != 0
         {
             return Err(ModuleDescriptorError::InvalidDirective {
-                reason: "java.base requires row has forbidden transitive/static-phase flags",
+                reason: "java.base requires row has forbidden transitive flag",
             });
         }
     }

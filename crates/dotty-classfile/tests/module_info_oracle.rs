@@ -409,6 +409,123 @@ fn descriptor_validation_rejects_duplicate_optional_attributes_and_wrong_tags() 
 }
 
 #[test]
+fn java_base_requires_flags_follow_each_supported_release_rule() {
+    use dotty_classfile::attribute::{MODULE_ACC_STATIC_PHASE, MODULE_ACC_TRANSITIVE};
+    use dotty_classfile::class_file::ModuleDescriptorError as Error;
+
+    let fixture = FIXTURES
+        .iter()
+        .find(|fixture| fixture.name == "minimal descriptor with optional attributes absent")
+        .unwrap();
+    for major in [65, 66, 69, 70] {
+        let mut reader = Reader::new(fixture.bytes);
+        let mut class_file = ClassFile::decode(&mut reader).unwrap();
+        class_file.version.major = major;
+        for attribute in &mut class_file.attributes {
+            if let Attribute::Module(module) = attribute {
+                module.requires[0].requires_flags |= MODULE_ACC_STATIC_PHASE;
+            }
+        }
+        assert_eq!(
+            class_file.validate_module_descriptor(),
+            Err(Error::InvalidDirective {
+                reason: "java.base requires row has forbidden static-phase flag"
+            }),
+            "ACC_STATIC_PHASE remains prohibited at major {major}"
+        );
+    }
+
+    for major in [65, 66, 69] {
+        let mut reader = Reader::new(fixture.bytes);
+        let mut class_file = ClassFile::decode(&mut reader).unwrap();
+        class_file.version.major = major;
+        for attribute in &mut class_file.attributes {
+            if let Attribute::Module(module) = attribute {
+                module.requires[0].requires_flags |= MODULE_ACC_TRANSITIVE;
+            }
+        }
+        assert!(
+            matches!(
+                class_file.validate_module_descriptor(),
+                Err(Error::InvalidDirective {
+                    reason: "java.base requires row has forbidden transitive flag"
+                })
+            ),
+            "ACC_TRANSITIVE remains prohibited at major {major}"
+        );
+    }
+
+    let mut reader = Reader::new(fixture.bytes);
+    let mut java_26 = ClassFile::decode(&mut reader).unwrap();
+    java_26.version.major = 70;
+    for attribute in &mut java_26.attributes {
+        if let Attribute::Module(module) = attribute {
+            module.requires[0].requires_flags |= MODULE_ACC_TRANSITIVE;
+        }
+    }
+    assert_eq!(java_26.validate_module_descriptor(), Ok(()));
+}
+
+#[test]
+fn opaque_attributes_with_known_jpms_names_cannot_bypass_validation() {
+    use dotty_classfile::class_file::ModuleDescriptorError as Error;
+
+    for (fixture_name, target_name) in [
+        (
+            "minimal descriptor with optional attributes absent",
+            "Module",
+        ),
+        ("JDK 21 java.base", "ModulePackages"),
+        ("optional module main class present", "ModuleMainClass"),
+    ] {
+        let fixture = FIXTURES
+            .iter()
+            .find(|fixture| fixture.name == fixture_name)
+            .unwrap();
+        let mut reader = Reader::new(fixture.bytes);
+        let mut class_file = ClassFile::decode(&mut reader).unwrap();
+        let typed = class_file
+            .attributes
+            .iter()
+            .find(|attribute| attribute_name(&class_file, attribute) == target_name)
+            .unwrap()
+            .clone();
+        let encoded = typed.encode(&class_file.constant_pool).unwrap();
+        let name_index = u16::from_be_bytes([encoded[0], encoded[1]]);
+        class_file
+            .attributes
+            .push(Attribute::Other(dotty_classfile::attribute::RawAttribute {
+                name_index: dotty_classfile::constant_pool::ConstantPoolIndex(name_index),
+                bytes: &encoded[6..],
+            }));
+        assert_eq!(
+            class_file.validate_module_descriptor(),
+            Err(Error::OpaqueKnownModuleAttribute {
+                name: target_name.to_owned()
+            }),
+            "raw {target_name} is rejected before encoding"
+        );
+
+        let encoded_class = class_file.encode().unwrap();
+        let mut reader = Reader::new(&encoded_class);
+        let decoded = ClassFile::decode(&mut reader).unwrap();
+        let expected_name = match target_name {
+            "Module" => "Module",
+            "ModulePackages" => "ModulePackages",
+            "ModuleMainClass" => "ModuleMainClass",
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            decoded.validate_module_descriptor(),
+            Err(Error::DuplicateAttribute {
+                name: expected_name
+            }),
+            "encoded/decoded duplicate {target_name} remains invalid"
+        );
+    }
+}
+
+#[test]
 fn zero_module_and_requires_version_indices_mean_absent_versions() {
     let fixture = FIXTURES
         .iter()
