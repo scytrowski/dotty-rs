@@ -153,6 +153,7 @@ struct JvmLoweringContext<'a> {
     first_field_read: Option<(TreeId<Typed>, SymbolId)>,
     first_field_write: Option<(TreeId<Typed>, SymbolId)>,
     first_object_creation: Option<TreeId<Typed>>,
+    first_reference_local: Option<TreeId<Typed>>,
     node_visits: usize,
 }
 
@@ -175,6 +176,7 @@ impl<'a> JvmLoweringContext<'a> {
             first_field_read: None,
             first_field_write: None,
             first_object_creation: None,
+            first_reference_local: None,
             node_visits: 0,
         }
     }
@@ -260,6 +262,7 @@ pub(super) fn lower_method_body(
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
     validate_field_access_control_flow(&context, &code)?;
+    validate_reference_local_control_flow(&context, &code)?;
     validate_object_creation_control_flow(&context, &code)?;
     Ok(code)
 }
@@ -303,6 +306,7 @@ pub(super) fn lower_planned_method_body(
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
     validate_field_access_control_flow(&context, &code)?;
+    validate_reference_local_control_flow(&context, &code)?;
     validate_object_creation_control_flow(&context, &code)?;
     Ok(code)
 }
@@ -315,6 +319,21 @@ fn validate_object_creation_control_flow(
         && let Some(tree) = context.first_object_creation
     {
         return Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
+            tree,
+            method: context.method.symbol(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_reference_local_control_flow(
+    context: &JvmLoweringContext<'_>,
+    code: &CodeBuilder,
+) -> Result<(), JvmCodegenError> {
+    if code.has_branches()
+        && let Some(tree) = context.first_reference_local
+    {
+        return Err(JvmCodegenError::ReferenceLocalInUnsupportedControlFlow {
             tree,
             method: context.method.symbol(),
         });
@@ -447,9 +466,14 @@ fn lower_leaf(
                     });
                 }
                 if matches!(local.ty(), JvmType::Reference(_)) {
-                    return Err(JvmCodegenError::ReferenceLocalInstructionUnsupported {
-                        tree: tree_id,
-                    });
+                    context.first_reference_local.get_or_insert(tree_id);
+                    code.aload(usize::from(local.slot())).map_err(|error| {
+                        JvmCodegenError::CodeBuilder {
+                            tree: tree_id,
+                            error,
+                        }
+                    })?;
+                    return Ok(Flow::Value(local.ty()));
                 }
                 code.iload(usize::from(local.slot())).map_err(|error| {
                     JvmCodegenError::CodeBuilder {
@@ -1231,14 +1255,19 @@ fn emit_local_declaration(
     }
 
     if matches!(local.ty(), JvmType::Reference(_)) {
-        return Err(JvmCodegenError::ReferenceLocalInstructionUnsupported { tree: declaration });
+        context.first_reference_local.get_or_insert(declaration);
+        code.astore(usize::from(local.slot()))
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: declaration,
+                error,
+            })?;
+    } else {
+        code.istore(usize::from(local.slot()))
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: declaration,
+                error,
+            })?;
     }
-
-    code.istore(usize::from(local.slot()))
-        .map_err(|error| JvmCodegenError::CodeBuilder {
-            tree: declaration,
-            error,
-        })?;
     context.initialized_locals.insert(local.symbol());
     Ok(())
 }
@@ -1272,6 +1301,17 @@ fn block_value_type(
 ) -> Result<Option<JvmType>, JvmCodegenError> {
     if let Some(value_type) = primitive_type(context.store, ty, context.definitions) {
         return Ok(Some(value_type));
+    }
+    if matches!(context.store.types.try_get(ty), Some(Type::TypeRef { .. })) {
+        let Some((unit, _, _)) = context.call_context else {
+            return Ok(None);
+        };
+        let projected = crate::reference::project_type(unit, ty, context.definitions)
+            .or_else(|_| crate::reference::project_constructor_type(unit, ty, context.definitions));
+        return Ok(match projected {
+            Ok(JvmType::Reference(class)) => Some(JvmType::Reference(class)),
+            Ok(_) | Err(_) => None,
+        });
     }
     let Some(Type::TermRef {
         target: TermRefTarget::Symbol(symbol),
