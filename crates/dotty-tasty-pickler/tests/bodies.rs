@@ -258,11 +258,80 @@ fn bad_method_owner_and_result_type_are_specific_errors() {
     );
     f.store.symbols.get_mut(method).owner = Some(f.class);
     f.store.symbols.get_mut(method).info = SymbolInfo::Complete(f.definitions.unit);
-    assert!(matches!(
-        emit(&f),
-        Err(PickleError::MalformedType {
-            role: TypeRole::MethodResult,
+    assert_eq!(
+        emit(&f).unwrap_err(),
+        PickleError::UnsupportedTypeReference {
+            ty: f.definitions.unit
+        }
+    );
+}
+
+#[test]
+fn full_rhs_and_declared_result_match_the_unchanged_scala_oracle() {
+    let f = Fixture::new();
+    let output = emit(&f).unwrap();
+    let generated = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let oracle = TastyFile::parse_and_validate_scala_3_9(include_bytes!(
+        "../../../tests/fixtures/tasty_pickler/tasty/example/Answer.tasty"
+    ))
+    .unwrap();
+    let generated_index = generated.ast_address_index().unwrap();
+    let oracle_index = oracle.ast_address_index().unwrap();
+    let actual = generated_index
+        .get(output.declarations()[2].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let expected = oracle_index
+        .iter()
+        .find_map(|tree| {
+            let body = tree.decode_defdef_body().ok()?;
+            (oracle.render_name(body.name).ok()?.as_str() == "value").then_some(body)
+        })
+        .unwrap();
+    let (Some(RawTree::Leaf(actual_rhs)), Some(RawTree::Leaf(expected_rhs))) =
+        (actual.rhs, expected.rhs)
+    else {
+        panic!()
+    };
+    assert_eq!(
+        (actual_rhs.tag, actual_rhs.value),
+        (expected_rhs.tag, expected_rhs.value)
+    );
+    let (
+        RawTree::NatAst {
+            tag: a_tag,
+            value: a_name,
             ..
-        }) | Err(PickleError::UnsupportedTypeReference { .. })
-    ));
+        },
+        RawTree::NatAst {
+            tag: e_tag,
+            value: e_name,
+            ..
+        },
+    ) = (actual.return_type, expected.return_type)
+    else {
+        panic!()
+    };
+    assert_eq!(a_tag, e_tag);
+    assert_eq!(
+        generated.render_name(a_name).unwrap(),
+        oracle.render_name(e_name).unwrap()
+    );
+}
+
+#[test]
+fn stale_canonical_symbol_is_rejected_before_assembly() {
+    let mut f = Fixture::new();
+    let mark = f.store.checkpoint();
+    let stale = f.store.symbols.alloc(f.store.symbols.get(f.class).clone());
+    f.store.rollback_to(mark);
+    let mut plan = f.plan();
+    plan.class = stale;
+    assert_eq!(
+        plan.validate()
+            .and_then(|checked| checked.pickle())
+            .unwrap_err(),
+        PickleError::InvalidSymbol { symbol: stale }
+    );
 }

@@ -144,3 +144,31 @@ pub(crate) fn prepare_header(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uuid_hash_matches_the_frozen_scala_producer() {
+        let bytes =
+            include_bytes!("../../../tests/fixtures/tasty_pickler/tasty/example/Answer.tasty");
+        let file = TastyFile::parse_and_validate_scala_3_9(bytes).unwrap();
+        let mut writer = Writer::new();
+        file.names().encode(&mut writer).unwrap();
+        let mut reader = Reader::new(writer.as_slice());
+        let size = reader.read_nat().unwrap() as usize;
+        let names_hash = hash(reader.read_bytes(size).unwrap());
+        let asts_hash = hash(file.section(StandardSection::Asts).unwrap().payload);
+        assert_eq!(
+            &file.header().uuid[..8],
+            &(names_hash ^ asts_hash).to_be_bytes()
+        );
+        let other_hash = file
+            .sections()
+            .iter()
+            .filter(|s| s.name != file.names().find_utf8("ASTs").unwrap())
+            .fold(0u64, |h, s| h ^ hash(s.payload));
+        assert_eq!(&file.header().uuid[8..], &other_hash.to_be_bytes());
+    }
+}
