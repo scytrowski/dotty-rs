@@ -131,6 +131,16 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             printf 'import-prefix reconciliation markers were missing\n' >&2
             exit 1
         fi
+        PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/import_prefix_profile.py" \
+            "$tmp_dir/$run.profile" \
+            --rows "$tmp_dir/$run.import-prefix-targets.tsv" \
+            --evidence "$tmp_dir/$run.import-prefix-evidence.tsv" \
+            --candidate-baseline "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md" \
+            --candidate-baseline-evidence "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0-import-prefix-classpath-evidence.tsv" \
+            --candidates "$tmp_dir/$run.lexical-package-candidates.tsv" \
+            --classpath "$SCALA39_CLASSPATH" \
+            --jdk-jmods "$java_home/jmods" \
+            --jdk-release "$jdk_release" >"$tmp_dir/$run.import-prefix-summary.txt"
         printf '%s ' "$run"
         sed -n '/^IMPORT_PREFIX_TIMING /p' "$tmp_dir/$run.log"
     done
@@ -145,20 +155,21 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             printf 'normalized import-prefix reconciliation was not deterministic\n' >&2
             exit 1
         fi
-        import_prefix_run_summary='Both normalized profiles matched byte-for-byte.'
+        for sidecar in \
+            import-prefix-targets.tsv \
+            import-prefix-evidence.tsv \
+            lexical-package-candidates.tsv \
+            import-prefix-summary.txt; do
+            if ! cmp -s "$tmp_dir/first.$sidecar" "$tmp_dir/second.$sidecar"; then
+                diff -u "$tmp_dir/first.$sidecar" "$tmp_dir/second.$sidecar" >&2 || true
+                printf 'normalized import-prefix %s sidecar was not deterministic\n' "$sidecar" >&2
+                exit 1
+            fi
+        done
+        import_prefix_run_summary='Both normalized profiles, reconciliation, and generated sidecars matched byte-for-byte.'
     else
         import_prefix_run_summary='One profile run completed; determinism was not checked.'
     fi
-    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/import_prefix_profile.py" \
-        "$tmp_dir/first.profile" \
-        --rows "$tmp_dir/import-prefix-targets.tsv" \
-        --evidence "$tmp_dir/import-prefix-evidence.tsv" \
-        --candidate-baseline "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md" \
-        --candidate-baseline-evidence "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0-import-prefix-classpath-evidence.tsv" \
-        --candidates "$tmp_dir/import-prefix-candidates.tsv" \
-        --classpath "$SCALA39_CLASSPATH" \
-        --jdk-jmods "$java_home/jmods" \
-        --jdk-release "$jdk_release" >"$tmp_dir/import-prefix-summary.txt"
     PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/scala39_import_oracle.py" \
         >"$tmp_dir/import-oracle.txt"
     prefix_targets_path="${output_path%.md}-import-prefix-targets.tsv"
@@ -219,9 +230,9 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         cat "$tmp_dir/first.profile"
         printf '```\n'
     } >"$output_path"
-    cp "$tmp_dir/import-prefix-targets.tsv" "$prefix_targets_path"
-    cp "$tmp_dir/import-prefix-evidence.tsv" "$prefix_evidence_path"
-    cp "$tmp_dir/import-prefix-candidates.tsv" "$prefix_candidates_path"
+    cp "$tmp_dir/first.import-prefix-targets.tsv" "$prefix_targets_path"
+    cp "$tmp_dir/first.import-prefix-evidence.tsv" "$prefix_evidence_path"
+    cp "$tmp_dir/first.lexical-package-candidates.tsv" "$prefix_candidates_path"
     cp "$tmp_dir/first.reconciliation" "$prefix_reconciliation_path"
     printf 'Wrote import-prefix profile to %s and TSVs to %s / %s / %s / %s\n' \
         "$output_path" "$prefix_targets_path" "$prefix_evidence_path" "$prefix_candidates_path" "$prefix_reconciliation_path"
@@ -253,7 +264,7 @@ if [[ "$verify_determinism" == 1 ]] \
 fi
 
 if [[ "$verify_determinism" == 1 ]]; then
-    audit_run_summary='two runs were compared byte-for-byte'
+    audit_run_summary='two normalized reports and their generated sidecars were compared byte-for-byte'
 else
     audit_run_summary='one run was completed; determinism was not checked'
 fi
@@ -295,6 +306,15 @@ mkdir -p "$(dirname -- "$output_path")"
 cohort_path="${output_path%.md}-deferred-cohorts.tsv"
 PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
     "$tmp_dir/first.report" --rows "$tmp_dir/cohorts.tsv" >"$tmp_dir/gate.txt"
+if [[ "$verify_determinism" == 1 ]]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
+        "$tmp_dir/second.report" --rows "$tmp_dir/second-cohorts.tsv" >"$tmp_dir/second-gate.txt"
+    if ! cmp -s "$tmp_dir/cohorts.tsv" "$tmp_dir/second-cohorts.tsv"; then
+        diff -u "$tmp_dir/cohorts.tsv" "$tmp_dir/second-cohorts.tsv" >&2 || true
+        printf 'deferred-cohort TSV sidecar was not deterministic\n' >&2
+        exit 1
+    fi
+fi
 module_profile_path="${output_path%.md}-package-term-profile.tsv"
 module_blockers_path="${output_path%.md}-package-term-first-blockers.tsv"
 frozen_module_profile="$repo_root/docs/typer-classpath-corpus-audit-3.9.0-package-term-profile.tsv"
@@ -318,6 +338,21 @@ module_reprofile_path="${output_path%.md}-object-module-reprofile.tsv"
 PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/object_module_reprofile.py" compare \
     "$frozen_object_module_blockers" "$tmp_dir/first.report" \
     --rows "$tmp_dir/object-module-reprofile.tsv" >"$tmp_dir/object-module-summary.txt"
+if [[ "$verify_determinism" == 1 ]]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/object_module_reprofile.py" compare \
+        "$frozen_object_module_blockers" "$tmp_dir/second.report" \
+        --rows "$tmp_dir/second-object-module-reprofile.tsv" >"$tmp_dir/second-object-module-summary.txt"
+    if ! cmp -s "$tmp_dir/object-module-reprofile.tsv" "$tmp_dir/second-object-module-reprofile.tsv"; then
+        diff -u "$tmp_dir/object-module-reprofile.tsv" "$tmp_dir/second-object-module-reprofile.tsv" >&2 || true
+        printf 'object-module reprofile TSV sidecar was not deterministic\n' >&2
+        exit 1
+    fi
+    if ! cmp -s "$tmp_dir/object-module-summary.txt" "$tmp_dir/second-object-module-summary.txt"; then
+        diff -u "$tmp_dir/object-module-summary.txt" "$tmp_dir/second-object-module-summary.txt" >&2 || true
+        printf 'object-module summary sidecar was not deterministic\n' >&2
+        exit 1
+    fi
+fi
 if [[ "$module_reprofile_path" != "$frozen_object_module_blockers" ]]; then
     cp "$tmp_dir/object-module-reprofile.tsv" "$module_reprofile_path"
 fi
