@@ -8972,6 +8972,7 @@ mod tests {
         let (value, _) = val_symbol(&parsed, &store, &index, source, "x");
         let (_, type_tree) = val_symbol(&parsed, &store, &index, source, "x");
         let position = parsed.ast.get(type_tree).position;
+        let store_checkpoint = store.checkpoint();
         let mut typer = SourceTyper::new(
             &parsed.ast,
             source,
@@ -8981,17 +8982,25 @@ mod tests {
             &packages,
         );
 
-        assert!(matches!(
-            typer.complete_symbol(value),
-            Err(TyperError::AmbiguousTypeName {
-                name,
-                tree_index,
-                position: found_position,
-                ..
-            }) if typer.store().names.resolve(name.text()) == "C"
-                && tree_index == type_tree.index()
-                && found_position == position
-        ));
+        for _ in 0..2 {
+            assert!(matches!(
+                typer.complete_symbol(value),
+                Err(TyperError::AmbiguousTypeName {
+                    name,
+                    tree_index,
+                    position: found_position,
+                    ..
+                }) if typer.store().names.resolve(name.text()) == "C"
+                    && tree_index == type_tree.index()
+                    && found_position == position
+            ));
+            assert_eq!(typer.store().checkpoint(), store_checkpoint);
+            assert_eq!(
+                typer.source_type_index().type_at(source, type_tree),
+                None,
+                "an ambiguous same-scope import must not retain a projected type"
+            );
+        }
     }
 
     #[test]
