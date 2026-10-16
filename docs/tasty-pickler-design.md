@@ -152,3 +152,350 @@ attributes, address-aware/relocated structured encoding). These APIs encode wire
 structure; they do not choose source symbols or infer missing declaration edges.
 See [TASTy API](tasty-api.md), [format](tasty-format-3.9.0.md), and
 [semantic unpickler](tasty-semantic-unpickler.md) for existing guarantees.
+
+## 5. Minimal output and identity-to-wire mapping
+
+An audit experiment compiled the exact example with the cached Scala 3.9.0
+compiler, inspected `-Yprint-tasty`, and compiled a standalone copy with
+`-from-tasty`. The observed output is one `example/Answer.tasty`, alongside the
+compiler's `example/Answer.class` in its original output directory. The standalone
+copy had no class file; Scala emitted a new class in a separate directory.
+This confirms the **input layout**, not interoperability of future Rust output.
+Checked-in fixtures and repeatable snapshot tooling belong to #1190.
+
+The printed AST had this shape (addresses and name indexes intentionally omitted):
+
+```text
+PACKAGE
+  TERMREFpkg example
+  TYPEDEF Answer
+    TEMPLATE
+      APPLY                              // implicit Object parent construction
+        SELECTin <init>[SIGNED: () -> java.lang.Object]
+          NEW
+            TYPEREF Object (TERMREFpkg java.lang)
+          SHAREDtype -> that Object type // selection owner
+      DEFDEF <init>
+        EMPTYCLAUSE
+        TYPEREF Unit (TERMREFpkg scala)
+        STABLE                           // modifier; no constructor RHS
+      DEFDEF value                       // no EMPTYCLAUSE
+        IDENTtpt Int
+          TYPEREF Int (TERMREFpkg scala)
+        INTconst 42
+    ANNOTATION SourceFile(...)           // compiler provenance, class tail
+```
+
+The compiler also printed `Positions` and `SOURCEFILEattr` in `Attributes`; its
+name table included `Comments` even though the printed file had no comment body.
+Do not infer section presence merely from an interned name. The annotation
+introduces additional `APPLY`, `SELECTin`, `NEW`, signed-name and string nodes.
+It is compiler-generated, not evidence of a source annotation in the core store.
+
+| Source semantic identity / edge | TASTy projection and required check |
+| --- | --- |
+| Class owner chain, package `SymbolId` | `PACKAGE` + `TERMREFpkg` qualified name. Walk actual package owners, validate kinds/cycles/root, render names only after identities are fixed. |
+| Class `SymbolId`, complete `ClassInfo` | One `TYPEDEF` containing `TEMPLATE`; definition-address map keyed by class ID. `ClassInfo.class` and scope owner must equal the root ID. Package/class output path follows this same chain. |
+| Template and source class association | Template header is not a second source class symbol. Keep its address/bookkeeping private; validate the source `TypeDef.rhs` edge and class ownership. |
+| `ClassInfo.parents == [Definitions.object_type]` | Explicit implicit-parent `APPLY(SELECTin(NEW(Object type), signed Object <init>, Object owner type))` from the observed oracle. `java.lang.Object` is a language dependency name here, not a JVM descriptor. |
+| Canonical primary constructor `SymbolId` | `DEFDEF <init>`, empty value clause, `scala.Unit` return tree, no RHS, `STABLE`; bind the constructor ID to the definition address. Completed constructor info must instead return the owning class after clause normalization. |
+| Method `SymbolId`, source `DefDef` | `DEFDEF` name is an ordinary name, scoped by class nesting; no owner guessed from spelling. Signature comes from clauses + result tree. Parameterless `value` carries no empty-clause marker. |
+| Ordered parameter `SymbolId`s | `PARAM` definitions in source clause order; method owners/types checked against semantic signature. Empty and absent clauses stay distinct. Nonempty clauses are characterization fixtures, deferred from first complete slice. |
+| Method result `TypeId == Definitions.int` | Oracle uses `IDENTtpt(Int, TYPEREF(Int, TERMREFpkg(scala)))`; a semantic `TypeTree` alone would encode the type directly. #1190 must pin any allowed syntax-wrapper normalization before changing this observed form. |
+| RHS `(source, untyped_rhs) -> typed_body` | Exact source binding for this method, pointing into supplied typed arena. Read `TreeKind::Literal(Constant::Int(n))` and `Tree.ty = Type::Constant(Constant::Int(n))`; emit that actual `INTconst n`, not the declared result type or a hardcoded 42. |
+| Local declaration references | `TYPEREFdirect`/`TERMREFdirect` for true local no-prefix refs, or `*REFsymbol` plus prefix; targets are mapped definition addresses, including forward fixups. No raw core numeric ID goes into an address field. |
+| External builtin references | Identity-specific `Definitions` mapping gives public `TYPEREF`/`TERMREFpkg` for Int/Unit/Object. The Object constructor's signed reference is a bounded oracle-defined dependency operation, not a fabricated source constructor ID. |
+| Reused semantic `TypeId` | Optional deterministic `SHAREDtype` to a previously bound compatible type node. No merging of separately identified declarations by spelling. |
+| Flags/visibility/annotations | Definition tails come from semantic symbol facts, plus explicitly documented default-constructor/provenance wire rules. Unsupported metadata produces an error, never silent loss. |
+| Source ID, source filename and optional spans | Check `SymbolOrigin::Source`, symbol/tree source spans and plan source agree. Encode normalized source name in `Attributes`; positions use final relocated AST addresses if enabled. Never substitute lexical-context owner for semantic owner. |
+
+### Supported and deferred surface
+
+| Surface | First complete file (#1194/#1195) | Deferred / oracle-only |
+| --- | --- | --- |
+| Unit/output boundary | One ordinary top-level class in explicit `package example`; one package-aligned `.tasty` per class | Default/nested packages, multiple classes, linked class/object outputs |
+| Class | Public, no type/value parameters, no self type, no fields, no explicit extends or initialization statements; exact canonical implicit Object parent | Traits, objects, companions, nesting, enums, arbitrary inheritance/constructors |
+| Method | One public ordinary monomorphic **parameterless** concrete method, declared Int result | Nonempty/empty-parens/curried/contextual clauses, abstract methods: #1190 characterization only |
+| Signature/types | Int result, constant Int RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
+| Body | Actual typed Int literal, including its value/type agreement | Calls, blocks, if/match, locals, functions, returns and all other expressions |
+| Metadata | Public/no extra source flags or annotations; required constructor marker; normalized source identity | General annotations/modifiers, full position/comment preservation, outline/best-effort/Java TASTy |
+
+An empty class is an oracle control, not an automatic broadening of the first
+end-to-end acceptance test. #1193 may expose a clearly marked partial declaration
+skeleton for structural tests; it must not present a missing concrete RHS as a
+complete or interoperable file.
+
+Compiler provenance is a specific oracle question: the first candidate may omit
+`Positions`, comments, and Scala's injected `SourceFile` annotation while retaining
+`SOURCEFILEattr`. #1190 must independently compile that reduced candidate (or
+require the minimal additional provenance encoding). This decision must be frozen
+before #1191 begins; successful compilation of the unchanged Scala fixture does
+not settle it. Do not add general annotation support or synthetic core symbols
+merely to reproduce incidental upstream bytes.
+
+## 6. Proposed immutable input contract
+
+The following is an interface sketch for #1191, **not an API added by this audit**.
+It deliberately includes source evidence: an arbitrary in-range typed-body ID is
+not an authoritative method/body association.
+
+```rust,ignore
+// All semantic IDs below belong to these exact borrowed stores/arenas.
+struct PicklePlan<'a> {
+    store: &'a SemanticStore,
+    definitions: &'a Definitions,
+    typed_ast: &'a AstArena<Typed>,
+    source_ast: &'a AstArena<Untyped>,
+    source_index: &'a SourceSemanticIndex,
+    typed_bindings: &'a dyn SourceTypedBindings,
+    source: SourceId,
+    source_name: &'a str,                 // normalized, source-relative
+    class: SymbolId,
+    class_tree: TreeId<Untyped>,
+    constructor: DefaultConstructorPlan,
+    methods: &'a [MethodPicklePlan],       // source declaration order
+}
+trait SourceTypedBindings {              // pickler-owned port; no Typer import
+    fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>)
+        -> Option<TreeId<Typed>>;
+}
+struct MethodPicklePlan {
+    symbol: SymbolId,
+    source_tree: TreeId<Untyped>,
+    parameter_clauses: Vec<Vec<SymbolId>>, // [] != [[]]; v0 requires []
+    body: Option<TreeId<Typed>>,
+}
+struct DefaultConstructorPlan {
+    symbol: SymbolId,
+    source_tree: TreeId<Untyped>,          // exact Template.constructor edge
+}
+```
+
+Names of the structs/port are provisional; the ownership and evidence are not.
+Owning small ordered ID vectors does not clone semantic records. `validate(&self,
+limits) -> Result<ValidatedPicklePlan<'_>, PickleError>` returns a borrowed checked
+view; `encode(validated) -> Result<GeneratedTasty, PickleError>` eventually returns
+owned bytes, root class ID, normalized relative artifact path and header UUID.
+Neither operation mutates input stores, arenas, indices or symbols, invokes Typer,
+or publishes files. The caller stages/publishes only a complete successful result.
+
+The integration adapter implements the port by delegating to its actual
+`SourceTypedIndex::get`. The port remains a trusted producer assertion; the
+pickler can check its returned binding and source graph, but cannot prove an
+arbitrary caller implemented it honestly. This is the same-session precondition,
+not a claim that bare numeric IDs authenticate their origin.
+
+Validation must cover:
+
+1. Live IDs, supported class kind and canonical source provenance. Cross-check
+   `source_index.symbol_at(source, class_tree) == class`; follow the actual
+   template/constructor/body edges. Check all available spans have this source
+   and valid ranges; absent synthetic positions are allowed.
+2. Completed class info with matching class/scope identity; package-only, acyclic
+   full owner chain; source name/origin agreement. Reject malformed scopes,
+   unsupported self type/parents and explicit initialization.
+3. Exact constructor and member membership, kinds and owners; ordered methods
+   equal the supported source body declarations; no omitted/duplicate identities
+   or unrecognized extra class declarations. Use unordered scopes only to check
+   set membership. Missing source semantics is not an empty class.
+4. Complete method/constructor signatures and parameter clause checks. Require
+   `[]` for `value`, `[[]]` for the default constructor's normalized signature;
+   verify constructor effective result references this class, not Unit. The plan
+   does not use a fake `Type::Method([], Int)` for a parameterless method.
+5. For a source method with RHS, require a body and exact equality with
+   `typed_bindings.typed_at(source, source_definition.rhs)`. Require the live
+   literal node and constant type to agree, with canonical widened result Int.
+   A source declaration without RHS is distinct from an untyped concrete RHS;
+   the first complete slice rejects abstract declarations as unsupported.
+6. Supported public visibility, source flags and annotation set; checked builtin
+   identities, names/namespaces and external reference rules. External builtin
+   `Missing` info is allowed only for the validated `Definitions` mapping.
+
+Compared with `JvmCompilationUnit`, this adds source declaration/RHS provenance,
+clause boundaries, constructor identity and source metadata. It excludes JVM
+local slots, erasure, field layouts, classfile versions, internal names and JVM
+initialization plans. It can be implemented without production frontend changes.
+
+## 7. Typed failure contract and resource bounds
+
+`PickleError` should be a structured enum with `SymbolId`, phase-correct `TreeId`,
+`TypeId`, source and expected/actual roles where relevant. Keep these categories
+separate; messages are presentation, not machine-readable discriminants.
+
+| Category | Examples / required context |
+| --- | --- |
+| `IncompleteSemanticInfo` | Emitted source symbol `Missing`/`Deferred`/`Error`, absent source/RHS binding, missing completed class/member type; include symbol and info state. |
+| `InvalidId` / `InvalidBinding` | Out-of-range symbol/type/tree/scope/name; mismatched source/typed RHS mapping, wrong AST kind or constant/type mismatch. Include relevant ID and role, expected/actual binding/type. |
+| `InvalidOwner` / `InvalidDeclaration` | Foreign method or parameter, duplicate member, class/scope mismatch, owner cycle, missing/extra member, wrong constructor; include involved identities and expected/actual owners. |
+| `UnsupportedConstruct` | Valid Scala outside the table: object, generic method, abstract method, annotation, source flag, or nonliteral body; include feature and source symbol/tree/span. |
+| `UnsupportedTypeReference` | Structural name-designator, unapproved external or ownerless symbol, private/shadowed dependency, unsupported semantic type; include TypeId/target/prefix. A missing source type instead uses incomplete info. |
+| `LimitExceeded` / `CyclicInput` | Owner/type/tree cycle, depth/fuel/name/node/byte budget, checked-address overflow; include budget and location. |
+| `Encoding` | Preserve the typed `NameTableError`, `WriteError`, `TermEncodeError`, or `TastyFileError` cause as applicable, plus emission context. Never parse error strings. |
+
+Initial proposed defaults: maximum semantic/tree/owner depth 256, total visited
+nodes/edges 1,000,000, name entries 100,000, and complete encoded output 16 MiB.
+Expose limits explicitly; check additions/conversions and reserve sizes before
+allocation. Wire `u32` address/nat bounds still apply even with a larger caller
+budget. Keep emitted tree depth within the codec's default 1024 index/tree limits
+or pass a consistent stricter limit. Use iterative traversal or bounded recursion,
+active-path cycle checks and total fuel (including repeated DAG edges). Do not
+rely on Rust allocation panics, unchecked `get`, or stack overflow for errors.
+Any failure leaves source state unchanged and yields no partial artifact.
+
+## 8. Deterministic emission and codec handoff
+
+Emission order is fixed: validate source/class boundary; collect constructor and
+source-ordered methods; reserve local declarations; intern names dependency-first;
+lower parents, constructor, methods and metadata; bind/fix references; assemble
+sections and file; validate final bytes. Within a template, parent precedes the
+constructor, which precedes ordinary methods. Emit modifiers in a documented
+order consistent with upstream `pickleFlags`, not numeric flag/hash iteration.
+
+Keep separate maps `SymbolId -> definition label/final address` and `TypeId ->
+encoded type label/address`. Identity maps are lookup-only; ordering comes from
+plan traversal. External refs never acquire fake local definition addresses.
+Type sharing uses exact TypeIds and compatible wire roles; direct references and
+shared-node references must target visible legal node starts of the right kind.
+
+Reserve forward labels independently of numeric addresses. Resolve every label
+exactly once; reject duplicate/unbound targets. Length-prefix/address widths can
+change after fixups, so use the existing address-aware/relocated codec, or a
+bounded layout pass with codec-produced sizes until stable, then revalidate all
+refs. Never patch a compact variable-length reference assuming width cannot
+change. Forward-reference tests must cross a nat-width boundary, not just target
+a preceding definition.
+
+There is an implementation seam to verify in #1192: current
+`EncodedSection::structured_asts_relocated` relocates **existing** raw/structured
+node offsets; its relocation checks preserve the original visible node sequence.
+It is not a semantic `SymbolId`/fresh-label allocator. Prove fresh construction
+and fixups through the public codec, or add a narrow wire-only construction API
+with isolated relocation/overflow tests. Do not put semantic IDs in the wire crate
+or duplicate primitive TASTy writing in the semantic adapter.
+
+Use `NameTableBuilder`, `EncodedSection` and `TastyFileBuilder`; section order is
+`ASTs`, then optional `Positions`, optional `Comments`, then `Attributes`. Target
+header is magic + 28.9.0 + an honest fixed adapter tooling version + deterministic
+UUID. A content-derived UUID can follow the pinned Scala name/AST and remaining
+section PJW-hash rule; do not use timestamps, random IDs or absolute paths. The
+UUID is a wire identifier, not semantic identity. Any future classfile linkage
+must use this file's actual UUID, never an unrelated fixture class's attribute.
+
+Normalize only documented source-path/tooling/UUID noise when comparing to Scala.
+Two Rust runs with equal semantic input, source name and configuration must emit
+equal bytes, including stable names, labels, sections and UUID, regardless of
+HashMap layout or allocation order. Compiler-vs-Rust comparisons are structural
+and semantic, not byte-for-byte. `TastyFile::encode` roundtrip of a parsed fixture
+proves preservation of that fixture representation, not source semantic pickling.
+
+## 9. Independent validation and follow-up acceptance
+
+| Verifier | What it proves | What it cannot prove |
+| --- | --- | --- |
+| `TastyFile::parse_and_validate_scala_3_9` | Target header, wire grammar and reference validity within existing codec checks | Scala ownership/type correctness or interoperability |
+| Structured AST assertions | Exact package/class/constructor/method clauses, result/ref edges, actual literal value | That an independent compiler accepts those choices |
+| `TastyUnpickler::enter_symbols` + `complete_symbol` in a fresh store | Canonicalized declaration owners, metadata, parameter/signature/parent parity for the supported inverse | Typed-body reconstruction or independent acceptance; inverse can share a bug |
+| Independently Scala-generated #1190 fixtures | Real 3.9.0 structure, synthetic facts, distinctions and external signatures | Acceptance of new Rust-generated output |
+| Pinned Scala `-from-tasty`, fresh output | Independent unpickling and compiler phases generate a class from the candidate | Runtime behavior unless that emitted class is executed |
+| Fresh class + Java/Scala runtime harness | `new example.Answer().value() == 42` from the independently compiled output | General Scala pickler completeness |
+
+Semantic parity uses an explicit mapping between entered wire-definition addresses
+and source class/method/constructor roles, then compares owner graphs and normalized
+types across stores. Numeric SymbolIds/TypeIds are not comparable across sessions.
+The unpickler does not reconstruct literal bodies: assert `INTconst` separately.
+
+### Verified `-from-tasty` layout and commands
+
+The pinned compiler's [`Driver.fromTastySetup`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/Driver.scala)
+adds the input root to the classpath using
+[`TastyFileUtil.getClassPath/getClassName`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/fromtasty/TastyFileUtil.scala).
+[`TASTYRun`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/fromtasty/TASTYRun.scala)
+accepts `.tasty` or `.jar`, derives class names, and
+[`ReadTasty`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/fromtasty/ReadTasty.scala)
+resolves them via classpath loaders. `SymbolLoaders.initializeFromClassPath`
+chooses `TastyLoader` for a TASTy binary. Thus a package-aligned standalone TASTy
+works here despite historical error messages referring to missing class files.
+A random renamed path must not be assumed equivalent; #1190 should pin rejection.
+
+Use an explicitly cached classpath. Existing dependency versions are enumerated
+in [`module-oracle/run`](../tools/typer-classpath-corpus-audit/module-oracle/run):
+Scala compiler/library/scala-library/tasty-core/interfaces **3.9.0**, scala-asm
+**9.9.0-scala-1**, compiler-interface **1.12.0**, util-interface **1.11.5**.
+`SCALA39_CLASSPATH` below is the colon-separated list of those JARs;
+`SCALA39_ROOT` is the checkout at the audited hash and `JAVA_HOME` a recorded JDK.
+The audit used cached Maven artifacts and Temurin 21.0.8, with no downloads.
+
+```sh
+test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = \
+  777528f19a58e794c9954a42f433373472ec57f8
+"$JAVA_HOME/bin/java" -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.Main -version
+# Require exactly Scala 3.9.0; #1190 records artifact provenance/hashes as well.
+mkdir -p oracle candidate/example compiled
+"$JAVA_HOME/bin/java" -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.Main \
+  -classpath "$SCALA39_CLASSPATH" -Yprint-tasty -d oracle Answer.scala
+# Audit layout control only: copy solely oracle/example/Answer.tasty into candidate.
+# Final #1195 substitutes actual Rust-produced bytes at this path.
+"$JAVA_HOME/bin/java" -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.Main \
+  -classpath "$SCALA39_CLASSPATH" -from-tasty -d compiled \
+  candidate/example/Answer.tasty
+# Require compiled/example/Answer.class and verify/execute that newly emitted class.
+"$JAVA_HOME/bin/java" -cp "$SCALA39_CLASSPATH" dotty.tools.dotc.decompiler.Main \
+  -classpath "$SCALA39_CLASSPATH" candidate/example/Answer.tasty
+```
+
+The last command independently decompiles; it is **not** a compilation gate.
+The launcher `dotty.tools.MainGenericCompiler -decompile` also dispatches to the
+decompiler. Passing `-decompile` directly to `dotty.tools.dotc.Main` did not select
+that driver in this audit and failed; use the explicit entry point above.
+Do not confuse a successful pretty-print with successful `-from-tasty` compilation.
+
+Keep candidate and output roots separate and initially empty, preserve package
+layout, and exclude the original oracle output/source directories from classpath
+and runtime. No adjacent `.class` or borrowed classfile TASTY attribute was needed
+in the observed minimal case. A JAR case must preserve the same package paths;
+it is supported by upstream but was not exercised in this audit. Full classfile
+linkage and other backends remain outside this adapter.
+
+### Downstream work and merge gates
+
+1. **[#1190 — oracle/fixtures](https://github.com/scytrowski/dotty-rs/issues/1190),
+   independent of this audit:** check in small Scala sources, generated TASTy and
+   normalized machine-readable snapshots under `tests/fixtures/tasty_pickler/`
+   until the crate exists. Cover Answer, Empty, ordered multi-parameter method
+   and abstract declaration, plus parameterless vs `()`. Pin parent `SELECTin`,
+   Object constructor signed result, Unit constructor syntax, no constructor RHS,
+   STABLE, Int `IDENTtpt`, literal type, names/refs, section/metadata facts. Test
+   reduced provenance/position omission; freeze accepted shape with this design.
+   Include valid fixture success, malformed candidate rejection, bad layout,
+   and requested-tool missing/version-mismatch/nonzero failure. Do not silently
+   skip an explicitly requested oracle or fetch tools in ordinary CI.
+2. **[#1191 — immutable plan](https://github.com/scytrowski/dotty-rs/issues/1191):**
+   starts only after #1189 and #1190 merge. Implement the borrowed boundary and
+   source-binding port; test live/wrong IDs, incorrect source/owner/binding,
+   duplicate/omitted members, incomplete info, flags, clauses, limits and unchanged
+   stores after failure. No encoder or shared typed-unit refactor.
+3. **[#1192 — names/types/refs](https://github.com/scytrowski/dotty-rs/issues/1192):**
+   consume the checked plan; implement identity-based builtin/reference mapping,
+   deterministic name interning and bounded type projection; prove fresh-label
+   codec/fixup path and nat-width changes. Test same-spelled symbols under distinct
+   owners, namespace differences and non-ASCII names. No class/file serialization.
+4. **[#1193 — declarations](https://github.com/scytrowski/dotty-rs/issues/1193):**
+   emit frozen package/class/template/default-constructor/method structure with
+   canonical metadata and owner bindings. Compare decoded skeleton to #1190;
+   deliberately partial missing-RHS output remains explicitly non-interoperable.
+5. **[#1194 — real body/file](https://github.com/scytrowski/dotty-rs/issues/1194):**
+   bind the actual frontend literal to the correct method, validate its constant
+   and declared Int result, assemble owned 28.9.0 bytes and run Rust validation.
+   Test non-42 literals as well, wrong type, missing/foreign body, unsupported node,
+   metadata omissions, limits and determinism; do not hardcode the canonical RHS.
+6. **[#1195 — independent gate](https://github.com/scytrowski/dotty-rs/issues/1195):**
+   real source pipeline, Rust wire + structural + semantic parity checks, pinned
+   Scala compilation of **Rust output**, fresh emitted-class inspection and runtime
+   value 42. Include malformed/unsupported candidates and a missing-tool negative
+   control; run two independent source sessions for determinism. Any independent
+   compiler failure is a failed gate, even if all Rust roundtrips pass.
+
+Each implementation increment runs focused crate/boundary regressions and all
+AGENTS.md checks. This audit changes documentation only; it does not regenerate
+baselines, introduce production dependencies, implement the pickler, or add
+modules/objects/generics/inline/macros/full source positions to the sprint.
