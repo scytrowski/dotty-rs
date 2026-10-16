@@ -17,6 +17,7 @@ reads checked-in files and needs no Scala installation or network access.
 and TASTy SHA-256 values, compiler dependency hashes, JDK identity and the exact
 generation command. The harness verifies the source checkout revision, compiler
 version and all eight cached JAR hashes. It does not download dependencies.
+JAR hashes are checked before invoking the compiler, including its version probe.
 Scala's source checkout and release artifacts are separate inputs: both are
 pinned, rather than assuming a version string alone authenticates the compiler.
 
@@ -219,6 +220,10 @@ they do not claim a new independent run occurred. There is no silent skip in the
 explicit `check` or `verify` commands: missing configuration/executable/JARs,
 wrong revision/version/hash, nonzero compiler exit, empty decompiler output,
 missing fresh class or unexpected negative-control acceptance fails the command.
+Each subprocess has a 180-second timeout; timeouts or unavailable tools are harness
+failures and cannot count as a successful invalid-input rejection. The inspector
+limits input to 1 MiB, AST depth to 256, name depth to 128, visible nodes/names to
+10,000 each and total name expansion visits to 100,000.
 Actual missing-tool CLI rejection was exercised as well as the unit controls.
 The final sprint gate must compile **Rust-produced** bytes and execute the emitted
 class; this issue's compiler-generated/reduced fixtures cannot satisfy it.

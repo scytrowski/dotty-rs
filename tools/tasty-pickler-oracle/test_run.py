@@ -60,21 +60,38 @@ class HarnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.fake_cache(root)
+            version_fixtures = root / "version-fixtures"
+            version_fixtures.mkdir()
+            jars = {f"{artifact}-{version}.jar": oracle.digest(
+                root / group / artifact / version / f"{artifact}-{version}.jar")
+                for group, artifact, version in oracle.ARTIFACTS}
+            (version_fixtures / "provenance.json").write_text(json.dumps({
+                "compiler_artifacts_sha256": jars}))
             env = {k: temporary for k in ("SCALA39_ROOT", "JAVA_HOME", "COURSIER_MAVEN_ROOT")}
             for version, error in [("3.8.4", "expected Scala 3.9.0"),
                                    ("3.9.0", "artifacts differ")]:
                 with self.subTest(version=version):
                     with mock.patch.dict(os.environ, env, clear=True):
                         with mock.patch.object(oracle, "execute", side_effect=[
-                                oracle.REVISION, f"Scala compiler version {version} -- test"]):
-                            with self.assertRaisesRegex(RuntimeError, error):
-                                oracle.Toolchain()
+                                oracle.REVISION, f"Scala compiler version {version} -- test"]) as execute:
+                            with mock.patch.object(oracle, "FIXTURES",
+                                                   version_fixtures if version == "3.8.4" else oracle.FIXTURES):
+                                with self.assertRaisesRegex(RuntimeError, error):
+                                    oracle.Toolchain()
+                            if version == "3.9.0":
+                                self.assertEqual(execute.call_count, 1)  # git only, no unverified JVM invocation
 
     def test_nonzero_process_exit_is_observable(self):
         failed = subprocess.CompletedProcess(["compiler"], 17, "specific reader failure")
         with mock.patch.object(oracle.subprocess, "run", return_value=failed):
             with self.assertRaisesRegex(oracle.CommandFailure, "specific reader failure"):
                 oracle.execute(["compiler"])
+
+    def test_timeout_is_a_harness_failure_not_a_reader_negative_control(self):
+        with mock.patch.object(oracle.subprocess, "run", side_effect=
+                               subprocess.TimeoutExpired(["compiler"], 180)):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                oracle.expect_failure(lambda: oracle.execute(["compiler"]), "invalid candidate")
 
     def test_negative_controls_cannot_mask_missing_tools(self):
         with self.assertRaisesRegex(RuntimeError, "configuration unavailable"):

@@ -34,8 +34,13 @@ class CommandFailure(RuntimeError):
 
 
 def execute(args: list[str | Path], *, cwd: Path = ROOT) -> str:
-    result = subprocess.run([str(a) for a in args], cwd=cwd, text=True,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        result = subprocess.run([str(a) for a in args], cwd=cwd, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                timeout=180)
+    except subprocess.TimeoutExpired as error:
+        # A timeout is a harness failure, never an expected reader rejection.
+        raise RuntimeError(f"command timed out after 180 seconds: {args}") from error
     if result.returncode:
         raise CommandFailure(f"command failed ({result.returncode}): {args}\n{result.stdout}")
     return result.stdout
@@ -76,6 +81,9 @@ class Toolchain:
                 raise RuntimeError(f"missing cached compiler dependency: {jar}")
         self.classpath = os.pathsep.join(str(p) for p in jars)
         self.artifacts = {p.name: digest(p) for p in jars}
+        pinned = json.loads((FIXTURES / "provenance.json").read_text())
+        if self.artifacts != pinned["compiler_artifacts_sha256"]:
+            raise RuntimeError("compiler artifacts differ from pinned SHA-256 provenance")
         release = dict(re.findall(r'^([A-Z_]+)="(.*)"$',
                                   (java_home / "release").read_text(), re.MULTILINE))
         self.jdk_release = {key: release[key] for key in
@@ -83,10 +91,6 @@ class Toolchain:
         version = self.compiler(["-version"])
         if not re.search(r"Scala compiler version 3\.9\.0 --", version):
             raise RuntimeError(f"expected Scala 3.9.0 compiler, got: {version}")
-        if (FIXTURES / "provenance.json").exists():
-            pinned = json.loads((FIXTURES / "provenance.json").read_text())
-            if self.artifacts != pinned["compiler_artifacts_sha256"]:
-                raise RuntimeError("compiler artifacts differ from pinned SHA-256 provenance")
 
     def compiler(self, args: list[str | Path], *, decompile: bool = False,
                  cwd: Path = ROOT) -> str:
@@ -102,7 +106,7 @@ def inspector() -> Path:
     else:
         execute(["cargo", "build", "--locked", "-p", "tasty-pickler-oracle"])
         # Cargo honors CARGO_TARGET_DIR; do not assume target/debug for custom CI.
-        metadata = json.loads(execute(["cargo", "metadata", "--format-version", "1", "--no-deps"]))
+        metadata = json.loads(execute(["cargo", "metadata", "--locked", "--format-version", "1", "--no-deps"]))
         binary = Path(metadata["target_directory"]) / "debug/tasty-pickler-oracle"
     if not binary.is_file():
         raise RuntimeError(f"missing Rust inspector executable: {binary}")
@@ -232,7 +236,9 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
     expect_failure(lambda: snapshot(binary, corrupt), "Rust rejects invalid magic")
     # Also exercise the independent compiler rejection itself, not just Rust's
     # validator. This is deliberately outside the normal validate-first pipeline.
-    expect_failure(lambda: toolchain.compiler(["-from-tasty", corrupt]),
+    bad_wire_output = directory / "invalid-wire-output"
+    bad_wire_output.mkdir()
+    expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", bad_wire_output, corrupt]),
                    "Scala rejects invalid magic")
     misplaced = directory / "wrong-layout/Answer.tasty"
     misplaced.parent.mkdir()
