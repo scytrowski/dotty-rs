@@ -790,6 +790,26 @@ fn malformed_external_prefixes_cannot_be_replaced_with_a_plausible_package() {
 }
 
 #[test]
+fn separate_local_and_external_apis_report_the_expected_origin_class() {
+    let mut f = Fixture::new();
+    let external = dependency(&mut f);
+    assert_eq!(
+        context(&f).reserve_declaration(external).err(),
+        Some(PickleError::Reference {
+            symbol: external,
+            reason: ReferenceError::NotLocal
+        })
+    );
+    assert_eq!(
+        context(&f).register_external(f.class, f.index.scope_of(f.package).unwrap()),
+        Err(PickleError::Reference {
+            symbol: f.class,
+            reason: ReferenceError::NotExternal
+        })
+    );
+}
+
+#[test]
 fn unfilled_error_and_structural_name_types_are_never_projected_as_placeholders() {
     let mut f = Fixture::new();
     let unfilled = f.store.types.reserve().id();

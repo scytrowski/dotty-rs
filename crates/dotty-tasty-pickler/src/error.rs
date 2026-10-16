@@ -15,6 +15,7 @@ pub enum ReferenceError {
     Ambiguous,
     NotRegistered,
     NotLocal,
+    NotExternal,
     Metadata,
     DeclarationTag,
 }
@@ -74,7 +75,7 @@ pub enum UnsupportedFeature {
     Name,
 }
 
-/// Bounded validation work; encoding limits will be introduced with encoding.
+/// Bounded validation and semantic projection work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LimitKind {
     OwnerDepth,
@@ -218,7 +219,7 @@ pub enum PickleError {
         kind: LimitKind,
         limit: usize,
     },
-    /// Reserved for the eventual encoder; no current validation path encodes.
+    /// Preserves name-table and primitive codec errors during projection.
     Encoding {
         cause: Box<TastyFileError>,
     },

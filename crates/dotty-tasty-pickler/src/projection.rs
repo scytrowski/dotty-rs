@@ -506,8 +506,9 @@ impl<'a> EncodingContext<'a> {
     pub fn declaration_label(&self, symbol: SymbolId) -> Option<AstLabel> {
         self.declarations.get(&symbol).copied()
     }
-    /// Adds a caller-supplied wire node (e.g. a later definition's body). No
-    /// semantic identity or unchecked numeric AST address is introduced.
+    /// Adds a caller-supplied wire node (e.g. a later definition's body).
+    /// Reference leaves/category-four operands use symbolic labels; payload
+    /// grammar remains the downstream producer's responsibility.
     pub fn wire_node(&mut self, node: AstNode) -> Result<AstLabel, PickleError> {
         self.run(|c| {
             c.charge(1)?;
@@ -593,7 +594,7 @@ impl<'a> EncodingContext<'a> {
             c.namespace(symbol, true)?;
             let s = c.symbol(symbol)?;
             if s.origin == SymbolOrigin::Source(c.source) || s.origin == SymbolOrigin::Builtin {
-                return Err(reference(symbol, ReferenceError::NotLocal));
+                return Err(reference(symbol, ReferenceError::NotExternal));
             }
             if s.kind != SymbolKind::Class {
                 return Err(reference(symbol, ReferenceError::Kind));
