@@ -54,7 +54,7 @@ the contract. File links are relative to this document.
 | Source structure/order | [`ast/common.rs`](../crates/dotty-core/src/ast/common.rs), `PackageDef.stats`, `TypeDef.rhs`, `Template.constructor/parents/body`, `DefDef.type_params/value_param_clauses/source_param_clause_order/tpt/rhs`. A class is a `TypeDef` with a `Template`, not a separate `ClassDef`. |
 | Canonical source identity | [`source_semantics.rs`](../crates/dotty-core/src/source_semantics.rs), `SourceSemanticIndex::symbol_at(source, tree)`. The key includes `SourceId` because tree IDs are arena-relative. `definition_of(symbol)` supplies reverse canonical/derived provenance; packages deliberately have no unique reverse source definition. |
 | Derived identity | Same file, `derived_symbol_at(owner, source, tree)`. Constructor parameter copies are distinct owner-specific symbols, never replacements for `symbol_at`. |
-| Naming class/constructor | [`naming.rs`](../crates/dotty-namer/src/naming.rs), `enter_class_or_trait_header`, `scan_class_or_trait`: enter class, class scope, primary constructor from `template.constructor`, constructor scope and parameter copies. `enter_method_header` enters ordinary members and parameters. |
+| Naming class/constructor | [`naming.rs`](../crates/dotty-namer/src/naming.rs), `enter_class_or_trait_header`, `scan_template_body`: enter class, class scope, primary constructor from `template.constructor`, constructor scope and parameter copies. `enter_method_header` enters ordinary members and parameters. |
 | Semantic metadata | [`symbols/symbol.rs`](../crates/dotty-core/src/symbols/symbol.rs), `Symbol.{owner,kind,flags,visibility,info,origin,annotations,position}`. Owners and scope membership are distinct. [`completion.rs`](../crates/dotty-core/src/symbols/completion.rs), `SymbolInfo::Complete(TypeId)` is required for emitted declarations. |
 | Class membership/parents | [`types/class_info.rs`](../crates/dotty-core/src/types/class_info.rs), `ClassInfo.{class,prefix,parents,declarations,self_type}`. Its declaration scope is the semantic membership authority; do not create `Symbol.children`. |
 | Class completion | [`completion/declarations.rs`](../crates/dotty-typer/src/typer/completion/declarations.rs), `complete_class_info`: projects source parents and inserts `Definitions.object_type` if none, or before a first trait parent. Publishes `ClassInfo` with `prefix = no_prefix`. |
@@ -279,6 +279,14 @@ owned bytes, root class ID, normalized relative artifact path and header UUID.
 Neither operation mutates input stores, arenas, indices or symbols, invokes Typer,
 or publishes files. The caller stages/publishes only a complete successful result.
 
+The source filename is supplied by the integration layer: `SymbolOrigin::Source`
+contains a SourceId, not a path, so the store cannot authenticate that filename.
+Require a normalized relative name without absolute or parent-traversal segments;
+use it consistently for provenance and keep it separate from the package-derived
+output path. Source-text length is also not in the plan: the producer guarantees
+span bounds in that source, while the pickler checks source identity and local
+range invariants.
+
 The integration adapter implements the port by delegating to its actual
 `SourceTypedIndex::get`. The port remains a trusted producer assertion; the
 pickler can check its returned binding and source graph, but cannot prove an
@@ -292,7 +300,7 @@ Validation must cover:
    template/constructor/body edges. Check all available spans have this source
    and valid ranges; absent synthetic positions are allowed.
 2. Completed class info with matching class/scope identity; package-only, acyclic
-   full owner chain; source name/origin agreement. Reject malformed scopes,
+   full owner chain and matching `SymbolOrigin::Source(source)`. Reject malformed scopes,
    unsupported self type/parents and explicit initialization.
 3. Exact constructor and member membership, kinds and owners; ordered methods
    equal the supported source body declarations; no omitted/duplicate identities
