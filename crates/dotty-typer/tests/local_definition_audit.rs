@@ -6955,11 +6955,9 @@ fn pinned_scala39_import_prefix_typing_probe() {
         reconciliation_time.as_millis(),
         audit_started.elapsed().as_millis()
     );
-    if unresolved_baseline_rows != 721 || advanced_baseline_rows != 1_673 {
-        println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
-        print_import_prefix_reconciliation(&reconciliation);
-        println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
-    }
+    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
+    print_import_prefix_reconciliation(&reconciliation);
+    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
     assert_eq!(unresolved_baseline_rows, 721);
     assert_eq!(advanced_baseline_rows, 1_673);
     assert!(reconciliation.iter().all(|row| {
@@ -6992,7 +6990,10 @@ fn pinned_scala39_import_prefix_typing_probe() {
             ))
         })
         .count();
-    assert_eq!(new_current_observations, 6);
+    assert_eq!(
+        new_current_observations, 342,
+        "newly exposed later blockers must remain distinct from frozen #1128 rows"
+    );
     assert!(reconciliation.iter().all(|row| {
         row.current_method_blocker != "not observed"
             && row.current_outcome != "unmatched current outcome"

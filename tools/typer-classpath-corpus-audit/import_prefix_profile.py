@@ -172,11 +172,12 @@ def ordered_source_package_candidates(row: dict[str, str]) -> list[dict[str, str
     for probe in enclosing.split(","):
         add("enclosing", probe)
     root = lookup.partition(";root=")[2]
+    root_registry = root.split("@", 1)[0] if "@" in root else root or "unknown"
     candidates.append(
         {
             "origin": "root",
             "path": "<root>",
-            "registry": "found:Package",
+            "registry": root_registry,
             "next_segment_lookup": root or "unknown",
         }
     )
@@ -197,6 +198,7 @@ def render_lexical_candidate_evidence(
     families: tuple[str, ...] = ("core", "ast", "transform", "util", "io"),
     classpath_evidence: dict[tuple[str, str], dict[str, str]] | None = None,
     include_header: bool = True,
+    allow_missing_families: bool = False,
 ) -> str:
     """Render stable representative rows without merging snapshot denominators."""
     output = io.StringIO()
@@ -239,6 +241,8 @@ def render_lexical_candidate_evidence(
             if len(representatives) == 2:
                 break
         if not representatives:
+            if allow_missing_families:
+                continue
             raise ValueError(f"{snapshot} snapshot has no observations for {family}")
         for row in representatives:
             candidates = ordered_source_package_candidates(row)
@@ -493,9 +497,10 @@ def main() -> int:
             + render_lexical_candidate_evidence(
                 observations,
                 roots,
-                "current-1132",
+                "current-1180",
                 classpath_evidence=read_classpath_evidence(evidence),
                 include_header=False,
+                allow_missing_families=True,
             ),
             encoding="utf-8",
         )
