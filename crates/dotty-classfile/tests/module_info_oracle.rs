@@ -1,5 +1,5 @@
-//! Pins JDK 21 and tiny javac/jmod descriptors as a typed Module codec oracle;
-//! companion Module* attributes remain opaque.
+//! Pins JDK 21 and tiny javac/jmod descriptors as typed JPMS codec and
+//! descriptor-validation oracles.
 
 use dotty_classfile::access_flags::ACC_MODULE;
 use dotty_classfile::attribute::{Attribute, MODULE_ACC_TRANSITIVE};
@@ -18,31 +18,31 @@ const FIXTURES: &[Fixture] = &[
         name: "JDK 21 java.base",
         bytes: include_bytes!("fixtures/jdk_module_info/jdk21/java.base-module-info.class"),
         module_name: "java.base",
-        opaque_attributes: &["ModulePackages", "ModuleTarget", "ModuleHashes"],
+        opaque_attributes: &["ModuleTarget", "ModuleHashes"],
     },
     Fixture {
         name: "JDK 21 java.net.http",
         bytes: include_bytes!("fixtures/jdk_module_info/jdk21/java.net.http-module-info.class"),
         module_name: "java.net.http",
-        opaque_attributes: &["ModulePackages", "ModuleTarget"],
+        opaque_attributes: &["ModuleTarget"],
     },
     Fixture {
         name: "JDK 21 jdk.jshell",
         bytes: include_bytes!("fixtures/jdk_module_info/jdk21/jdk.jshell-module-info.class"),
         module_name: "jdk.jshell",
-        opaque_attributes: &["ModulePackages", "ModuleTarget"],
+        opaque_attributes: &["ModuleTarget"],
     },
     Fixture {
         name: "directed exports, opens, uses and provides",
         bytes: include_bytes!("fixtures/jdk_module_info/generated/directives-module-info.class"),
         module_name: "fixture.directives",
-        opaque_attributes: &["ModulePackages"],
+        opaque_attributes: &[],
     },
     Fixture {
         name: "optional module main class present",
         bytes: include_bytes!("fixtures/jdk_module_info/generated/main-class-module-info.class"),
         module_name: "fixture.main",
-        opaque_attributes: &["ModuleMainClass", "ModulePackages"],
+        opaque_attributes: &[],
     },
     Fixture {
         name: "minimal descriptor with optional attributes absent",
@@ -70,6 +70,8 @@ fn attribute_name(class_file: &ClassFile<'_>, attribute: &Attribute<'_>) -> Stri
         Attribute::SourceFile(_) => "SourceFile".to_owned(),
         Attribute::InnerClasses(_) => "InnerClasses".to_owned(),
         Attribute::Module(_) => "Module".to_owned(),
+        Attribute::ModulePackages(_) => "ModulePackages".to_owned(),
+        Attribute::ModuleMainClass(_) => "ModuleMainClass".to_owned(),
         other => panic!("unexpected structured module-info attribute: {other:?}"),
     }
 }
@@ -114,6 +116,11 @@ fn jdk_and_minimal_module_info_fixtures_decode_and_roundtrip() {
         class_file.validate_references().unwrap_or_else(|error| {
             panic!("{} has invalid modeled references: {error}", fixture.name)
         });
+        class_file
+            .validate_module_descriptor()
+            .unwrap_or_else(|error| {
+                panic!("{} is not a valid module descriptor: {error}", fixture.name)
+            });
 
         let names: Vec<_> = class_file
             .attributes
@@ -140,7 +147,7 @@ fn jdk_and_minimal_module_info_fixtures_decode_and_roundtrip() {
         );
         assert_eq!(
             opaque, fixture.opaque_attributes,
-            "{} preserves expected Module* attributes opaquely",
+            "{} preserves expected opaque attributes",
             fixture.name
         );
 
@@ -165,10 +172,181 @@ fn jdk_and_minimal_module_info_fixtures_decode_and_roundtrip() {
         assert_eq!(
             class_file.encode().unwrap(),
             fixture.bytes,
-            "{} roundtrips byte-for-byte with typed Module and opaque companion attributes",
+            "{} roundtrips byte-for-byte with typed JPMS attributes",
             fixture.name
         );
     }
+}
+
+#[test]
+fn module_companion_attributes_are_typed_and_presence_is_preserved() {
+    let mut counts = Vec::new();
+    for fixture in FIXTURES {
+        let mut reader = Reader::new(fixture.bytes);
+        let class_file = ClassFile::decode(&mut reader).unwrap();
+        let packages = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::ModulePackages(value) => Some(value.package_indices.len()),
+                _ => None,
+            });
+        let main_class = class_file
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                Attribute::ModuleMainClass(index) => Some(
+                    class_file
+                        .constant_pool
+                        .class_name(*index)
+                        .unwrap()
+                        .to_owned(),
+                ),
+                _ => None,
+            });
+        counts.push((fixture.module_name, packages, main_class));
+    }
+    assert_eq!(counts[0], ("java.base", Some(196), None));
+    assert_eq!(counts[1], ("java.net.http", Some(6), None));
+    assert_eq!(counts[3], ("fixture.directives", Some(2), None));
+    assert_eq!(
+        counts[4],
+        ("fixture.main", Some(1), Some("fixture/app/Main".to_owned()))
+    );
+    assert_eq!(counts[5], ("fixture.minimal", None, None));
+}
+
+#[test]
+fn descriptor_validation_returns_specific_structural_errors() {
+    use dotty_classfile::class_file::ModuleDescriptorError as Error;
+
+    let fixture = FIXTURES
+        .iter()
+        .find(|fixture| fixture.name == "minimal descriptor with optional attributes absent")
+        .unwrap();
+    let decode = || {
+        let mut reader = Reader::new(fixture.bytes);
+        ClassFile::decode(&mut reader).unwrap()
+    };
+
+    let mut missing_module = decode();
+    missing_module
+        .attributes
+        .retain(|attribute| !matches!(attribute, Attribute::Module(_)));
+    assert_eq!(
+        missing_module.validate_module_descriptor(),
+        Err(Error::MissingModuleAttribute)
+    );
+
+    let mut duplicate_module = decode();
+    let module = duplicate_module
+        .attributes
+        .iter()
+        .find(|attribute| matches!(attribute, Attribute::Module(_)))
+        .unwrap()
+        .clone();
+    duplicate_module.attributes.push(module);
+    assert_eq!(
+        duplicate_module.validate_module_descriptor(),
+        Err(Error::DuplicateAttribute { name: "Module" })
+    );
+
+    let mut invalid_version = decode();
+    invalid_version.version.major = 52;
+    assert_eq!(
+        invalid_version.validate_module_descriptor(),
+        Err(Error::UnsupportedVersion {
+            major: 52,
+            minor: 0
+        })
+    );
+
+    let mut invalid_shape = decode();
+    invalid_shape.super_class = Some(invalid_shape.this_class);
+    assert_eq!(
+        invalid_shape.validate_module_descriptor(),
+        Err(Error::HasSuperclass)
+    );
+
+    let mut invalid_flags = decode();
+    invalid_flags.access_flags.0 |= dotty_classfile::access_flags::ACC_PUBLIC;
+    assert_eq!(
+        invalid_flags.validate_module_descriptor(),
+        Err(Error::InvalidAccessFlags {
+            flags: ACC_MODULE | dotty_classfile::access_flags::ACC_PUBLIC
+        })
+    );
+
+    let mut ordinary_class = decode();
+    ordinary_class.access_flags.0 = 0;
+    assert_eq!(
+        ordinary_class.validate_module_descriptor(),
+        Err(Error::NotModuleDescriptor)
+    );
+}
+
+#[test]
+fn descriptor_validation_rejects_duplicate_optional_attributes_and_wrong_tags() {
+    use dotty_classfile::class_file::ModuleDescriptorError as Error;
+    use dotty_classfile::constant_pool::{EntryKind, PoolRefError};
+
+    let fixture = FIXTURES
+        .iter()
+        .find(|fixture| fixture.name == "optional module main class present")
+        .unwrap();
+    let mut reader = Reader::new(fixture.bytes);
+    let mut class_file = ClassFile::decode(&mut reader).unwrap();
+
+    let main_class = class_file
+        .attributes
+        .iter()
+        .find(|attribute| matches!(attribute, Attribute::ModuleMainClass(_)))
+        .unwrap()
+        .clone();
+    class_file.attributes.push(main_class);
+    assert_eq!(
+        class_file.validate_module_descriptor(),
+        Err(Error::DuplicateAttribute {
+            name: "ModuleMainClass"
+        })
+    );
+
+    class_file.attributes.pop();
+    let packages = class_file
+        .attributes
+        .iter()
+        .find(|attribute| matches!(attribute, Attribute::ModulePackages(_)))
+        .unwrap()
+        .clone();
+    class_file.attributes.push(packages);
+    assert_eq!(
+        class_file.validate_module_descriptor(),
+        Err(Error::DuplicateAttribute {
+            name: "ModulePackages"
+        })
+    );
+
+    class_file.attributes.pop();
+    let module_index = class_file
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            Attribute::Module(module) => Some(module.module_name_index),
+            _ => None,
+        })
+        .unwrap();
+    for attribute in &mut class_file.attributes {
+        if let Attribute::ModuleMainClass(index) = attribute {
+            *index = module_index;
+        }
+    }
+    assert_eq!(
+        class_file.validate_module_descriptor(),
+        Err(Error::ConstantPool(PoolRefError::WrongKind {
+            index: module_index,
+            expected: EntryKind::Class
+        }))
+    );
 }
 
 #[test]
