@@ -654,10 +654,12 @@ impl<'a> Validator<'_, 'a> {
                 self.unsupported(UnsupportedFeature::TypeParameters, Some(constructor.symbol))
             );
         }
-        if definition
-            .value_param_clauses
-            .iter()
-            .any(|clause| !clause.is_empty())
+        self.charge(definition.value_param_clauses.len())?;
+        if definition.value_param_clauses.len() > 1
+            || definition
+                .value_param_clauses
+                .first()
+                .is_some_and(|clause| !clause.is_empty())
         {
             return Err(self.unsupported(
                 UnsupportedFeature::ParameterClauses,
@@ -669,10 +671,7 @@ impl<'a> Validator<'_, 'a> {
             definition,
             &constructor.parameter_clauses,
         )?;
-        if definition.value_param_clauses.iter().any(|c| !c.is_empty())
-            || definition.value_param_clauses.len() > 1
-            || definition.source_param_clause_order.is_some()
-        {
+        if definition.source_param_clause_order.is_some() {
             return Err(self.unsupported(
                 UnsupportedFeature::ParameterClauses,
                 Some(constructor.symbol),

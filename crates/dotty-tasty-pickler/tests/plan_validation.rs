@@ -654,3 +654,24 @@ fn the_package_must_bind_the_root_class_name_unambiguously() {
         Some(PickleError::ScopeMembers { owner: f.package })
     );
 }
+
+#[test]
+fn source_constructor_clause_collections_consume_the_validation_budget() {
+    let mut f = Fixture::new();
+    let TreeKind::DefDef(constructor) = &mut f.source_ast.get_mut(f.constructor.source_tree).kind
+    else {
+        panic!()
+    };
+    constructor.value_param_clauses = vec![vec![]; 32];
+    let limits = ValidationLimits {
+        max_items: 20,
+        ..ValidationLimits::default()
+    };
+    assert_eq!(
+        f.plan().validate_with_limits(limits).err(),
+        Some(PickleError::LimitExceeded {
+            kind: LimitKind::Items,
+            limit: 20
+        })
+    );
+}
