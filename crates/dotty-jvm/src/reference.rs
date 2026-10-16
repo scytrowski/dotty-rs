@@ -43,10 +43,49 @@ fn project_type_with_metadata(
             ty,
             reason: InvalidTypeReason::Error,
         }),
-        Some(Type::TypeRef {
-            target: TypeRefTarget::Symbol(class),
-            ..
-        }) => project_class(unit, ty, *class, definitions, metadata),
+        Some(Type::TypeRef { prefix, target }) => {
+            match unit.store.types.try_get(*prefix) {
+                None => {
+                    return Err(JvmCodegenError::InvalidReferenceType {
+                        ty: *prefix,
+                        reason: InvalidTypeReason::MissingOrUnfilled,
+                    });
+                }
+                Some(Type::Error(_)) => {
+                    return Err(JvmCodegenError::InvalidReferenceType {
+                        ty: *prefix,
+                        reason: InvalidTypeReason::Error,
+                    });
+                }
+                Some(Type::NoType) => {
+                    return Err(JvmCodegenError::InvalidReferenceType {
+                        ty: *prefix,
+                        reason: InvalidTypeReason::NoType,
+                    });
+                }
+                Some(Type::NoPrefix)
+                    if *prefix == definitions.no_prefix
+                        && matches!(
+                            unit.store.types.try_get(definitions.no_prefix),
+                            Some(Type::NoPrefix)
+                        ) => {}
+                _ => {
+                    return Err(JvmCodegenError::UnsupportedJvmReferenceType {
+                        ty,
+                        kind: UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+                    });
+                }
+            }
+            match target {
+                TypeRefTarget::Symbol(class) => {
+                    project_class(unit, ty, *class, definitions, metadata)
+                }
+                _ => Err(JvmCodegenError::UnsupportedJvmReferenceType {
+                    ty,
+                    kind: UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
+                }),
+            }
+        }
         Some(_) => Err(JvmCodegenError::UnsupportedJvmReferenceType {
             ty,
             kind: UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
@@ -136,10 +175,9 @@ fn project_class(
         });
     }
 
-    // Re-run complete unit metadata validation: this proves the target has a
-    // valid top-level class identity, supported ordinary class metadata, no
-    // type parameters, and a complete set of caller-owned plans. No semantic
-    // store or type-arena state is changed by this projection.
+    // Validate complete unit metadata when this is a public standalone
+    // projection. Expression lowering supplies the metadata it already
+    // validated when creating the local layout.
     let generated_metadata;
     let metadata = match metadata {
         Some(metadata) => metadata,
@@ -164,7 +202,6 @@ pub(super) fn project_local_type(
     ty: TypeId,
     definitions: &Definitions,
 ) -> Result<JvmType, JvmCodegenError> {
-    unit.validate()?;
     project_local_type_with_metadata(unit, symbol, ty, definitions, None)
 }
 

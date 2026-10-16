@@ -1151,6 +1151,7 @@ pub enum UnsupportedJvmTypeKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmReferenceTypeKind {
     NotCanonicalTypeRef,
+    UnsupportedPrefix,
     UnsupportedSymbolKind,
     ExternalClass,
     ObjectClass,
@@ -1532,8 +1533,18 @@ impl JvmCompilationUnit<'_> {
         symbol: SymbolId,
         ty: TypeId,
         definitions: &Definitions,
+        metadata: Option<&[JvmClassMetadata]>,
     ) -> Result<JvmType, JvmCodegenError> {
-        reference::project_local_type(self, symbol, ty, definitions)
+        match metadata {
+            Some(metadata) => reference::project_local_type_with_metadata(
+                self,
+                symbol,
+                ty,
+                definitions,
+                Some(metadata),
+            ),
+            None => reference::project_local_type(self, symbol, ty, definitions),
+        }
     }
 
     /// Projects all planned class identities and method metadata in plan order.

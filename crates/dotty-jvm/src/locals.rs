@@ -125,6 +125,16 @@ pub(super) fn method_local_layout_for(
 ) -> Result<JvmLocalLayout, JvmCodegenError> {
     unit.validate()?;
     let all_metadata = unit.metadata(definitions)?;
+    method_local_layout_for_with_metadata(unit, method, bindings, definitions, &all_metadata)
+}
+
+pub(super) fn method_local_layout_for_with_metadata(
+    unit: &JvmCompilationUnit<'_>,
+    method: &JvmMethodMetadata,
+    bindings: &[JvmLocalBinding],
+    definitions: &Definitions,
+    all_metadata: &[crate::JvmClassMetadata],
+) -> Result<JvmLocalLayout, JvmCodegenError> {
     let method_symbol = method.symbol();
     let Some((class_plan, method_plan)) = unit.classes.iter().find_map(|class_plan| {
         class_plan
@@ -183,7 +193,7 @@ pub(super) fn method_local_layout_for(
             binding.symbol,
             ty,
             definitions,
-            Some(&all_metadata),
+            Some(all_metadata),
         )?;
         allocator.reserve(*binding, value_type)?;
     }

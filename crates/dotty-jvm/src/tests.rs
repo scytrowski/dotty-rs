@@ -1182,6 +1182,19 @@ fn reference_projection_rejects_unplanned_stale_and_noncanonical_targets() {
         left: counter_parent,
         right: other_parent,
     });
+    let qualified_prefix = fixture.type_ref(counter);
+    let unsupported_prefix_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: qualified_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
+    let prefix_checkpoint = fixture.store.checkpoint();
+    let _reused_prefix_slot = fixture.store.types.alloc(Type::NoPrefix);
+    let missing_prefix = fixture.store.types.alloc(Type::NoPrefix);
+    fixture.store.rollback_to(prefix_checkpoint);
+    let dangling_prefix_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: missing_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
     let checkpoint = fixture.store.checkpoint();
     let stale_type = fixture.store.types.alloc(Type::TypeRef {
         prefix: fixture.definitions.no_prefix,
@@ -1199,6 +1212,20 @@ fn reference_projection_rejects_unplanned_stale_and_noncanonical_targets() {
         Err(JvmCodegenError::InvalidReferenceType {
             ty: stale_type,
             reason: InvalidTypeReason::MissingOrUnfilled,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(dangling_prefix_type, &fixture.definitions),
+        Err(JvmCodegenError::InvalidReferenceType {
+            ty: missing_prefix,
+            reason: InvalidTypeReason::MissingOrUnfilled,
+        })
+    );
+    assert_eq!(
+        unit.reference_type(unsupported_prefix_type, &fixture.definitions),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: unsupported_prefix_type,
+            kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
         })
     );
     assert_eq!(
@@ -1960,7 +1987,7 @@ fn local_layout_reserves_exact_category_one_slots_for_planned_references() {
     assert_eq!(layout.local(symbol).unwrap().slot(), 1);
     assert_eq!(layout.local(symbol).unwrap().ty().slot_width(), 1);
     assert_eq!(
-        unit.local_value_type(symbol, reference_type, &fixture.definitions),
+        unit.local_value_type(symbol, reference_type, &fixture.definitions, None),
         Ok(JvmType::Reference(class))
     );
 }
