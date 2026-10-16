@@ -81,6 +81,13 @@ containing the exact real typed RHS roots. It does not write a file. The
 semantic/name/wire budgets; any failure returns a typed error without publishing
 partial output or mutating the compilation session.
 
+Each artifact path component uses the pinned Scala name encoding (for example,
+`A-B` becomes `A$minusB`), while source spelling stays unchanged in TASTy names
+and source metadata. Non-identifier characters use uppercase `$uNNNN` escapes
+per UTF-16 code unit. Java identifier-part classification is frozen to the
+oracle's Temurin 21.0.8 / Unicode 15.0 table, so builds need no JDK and do not
+silently change encoding when the host Unicode tables change.
+
 The parent application comes from the validated ClassInfo's canonical Object
 parent and the frozen oracle's `APPLY/SELECTin/NEW` shape. The default constructor
 has EMPTYCLAUSE, direct Unit return syntax, no RHS and its provenance-required

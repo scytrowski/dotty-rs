@@ -169,7 +169,6 @@ fn source_plan(
         dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(skeleton.provisional_bytes())
             .unwrap();
     assert_eq!(file.source_file().unwrap(), Some("Answer.scala"));
-    assert_eq!(skeleton.intended_tasty_path(), "example/Answer.tasty");
     assert_eq!(
         skeleton.omitted_bodies(),
         &[OmittedMethodBody {
@@ -193,7 +192,38 @@ fn source_plan(
 
 #[test]
 fn actual_answer_source_hands_off_exact_canonical_symbols_and_typed_rhs() {
-    source_plan(ANSWER, |_| {}).unwrap();
+    let skeleton = source_plan(ANSWER, |_| {}).unwrap();
+    assert_eq!(skeleton.intended_tasty_path(), "example/Answer.tasty");
+}
+
+#[test]
+fn backquoted_class_and_package_components_use_encoded_artifact_paths_only() {
+    use dotty_tasty::tasty::*;
+
+    for (package, class, expected) in [
+        ("example", "A-B", "example/A$minusB.tasty"),
+        ("p-q", "Answer", "p$minusq/Answer.tasty"),
+        ("p+q", "A B", "p$plusq/A$u0020B.tasty"),
+        ("example", "😀", "example/$uD83D$uDE00.tasty"),
+    ] {
+        let text = format!("package `{package}`; class `{class}` {{ def value: Int = 42 }}");
+        let skeleton = source_plan(&text, |_| {}).unwrap();
+        assert_eq!(skeleton.intended_tasty_path(), expected);
+        let file = TastyFile::parse_and_validate_scala_3_9(skeleton.provisional_bytes()).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let definition = index
+            .get(skeleton.declarations()[0].address)
+            .unwrap()
+            .decode_definition()
+            .unwrap();
+        assert_eq!(file.render_name(definition.name()).unwrap(), class);
+        let roots = file.asts().unwrap();
+        let wire_package = roots.get(0).unwrap().decode_package().unwrap();
+        let RawTree::Leaf(path) = wire_package.path else {
+            panic!()
+        };
+        assert_eq!(file.render_name(path.name_ref().unwrap()).unwrap(), package);
+    }
 }
 
 #[test]

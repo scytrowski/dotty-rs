@@ -15,6 +15,7 @@
 //! ID or a dishonest source-to-typed binding provider. Callers must preserve that
 //! session invariant. Validation only borrows semantic data and publishes no files.
 
+mod artifact_name;
 mod error;
 mod plan;
 mod projection;

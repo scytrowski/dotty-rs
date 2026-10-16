@@ -469,8 +469,17 @@ validated one-class plan and `EncodingContext` reservations. The constructor and
 methods keep their exact canonical identities, checked owners and source order;
 `declarations()` exposes their final addresses within ASTs, never core numeric
 IDs substituted for byte addresses. `intended_tasty_path()` comes from the
-canonical package/class names, independently of the source filename retained in
+Scala-encoded canonical package/class components, independently of source
+spelling in wire names and the source filename retained in
 `SourceMetadata` and SOURCEFILEattr. No API publishes a file.
+
+Artifact component encoding follows the pinned compiler's
+`util/NameTransformer.scala` and `core/Names.scala` SimpleName encoding. Operators
+use their `$op` expansions, `$` is retained, and non-Java-identifier UTF-16 units
+use uppercase `$uNNNN`. Supplementary scalars therefore encode as two surrogate
+escapes. The Java identifier-part table is frozen from the #1190 oracle's JDK 21
+(Temurin 21.0.8, Unicode 15.0), without adding a JDK/runtime dependency. This path
+encoding does not rewrite TASTy name-table entries or define symbol identity.
 
 The wire shape is PACKAGE, TERMREFpkg, class TYPEDEF/TEMPLATE, the checked
 ClassInfo Object parent application, default constructor, then ordinary method.

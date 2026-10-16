@@ -46,7 +46,7 @@ impl DeclarationSkeleton {
     pub fn source(&self) -> &SourceMetadata {
         &self.source
     }
-    /// Intended path of the future completed artifact; this API writes no files.
+    /// Intended path with Scala-encoded package/class components; writes no files.
     pub fn intended_tasty_path(&self) -> &str {
         &self.intended_tasty_path
     }
@@ -278,8 +278,8 @@ impl ValidatedPicklePlan<'_, '_> {
         let bytes = builder.encode_validated().map_err(encoding)?;
         let intended_tasty_path = format!(
             "{}/{}.tasty",
-            text(self, symbol(self, self.package())?.name)?,
-            text(self, class_record.name)?
+            crate::artifact_name::encode_component(text(self, symbol(self, self.package())?.name)?),
+            crate::artifact_name::encode_component(text(self, class_record.name)?)
         );
         Ok(DeclarationSkeleton {
             bytes,
