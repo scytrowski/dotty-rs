@@ -216,7 +216,7 @@ It is compiler-generated, not evidence of a source annotation in the core store.
 | --- | --- | --- |
 | Unit/output boundary | One ordinary top-level class in explicit `package example`; one package-aligned `.tasty` per class | Default/nested packages, multiple classes, linked class/object outputs |
 | Class | Public, no type/value parameters, no self type, no fields, no explicit extends or initialization statements; exact canonical implicit Object parent | Traits, objects, companions, nesting, enums, arbitrary inheritance/constructors |
-| Method | One public ordinary monomorphic **parameterless** concrete method, declared Int result | Nonempty/empty-parens/curried/contextual clauses, abstract methods: #1190 characterization only |
+| Method | One or more public ordinary monomorphic concrete methods, declared Int result, no clause or one explicit empty clause | Nonempty/multiple/curried/contextual clauses, abstract methods |
 | Signature/types | Int result, constant Int RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
 | Body | Actual typed Int literal, including its value/type agreement | Calls, blocks, if/match, locals, functions, returns and all other expressions |
 | Metadata | Public/no extra source flags or annotations; required constructor marker; normalized source identity | General annotations/modifiers, full position/comment preservation, outline/best-effort/Java TASTy |
@@ -264,7 +264,7 @@ trait SourceTypedBindings {              // pickler-owned port; no Typer import
 struct MethodPicklePlan {
     symbol: SymbolId,
     source_tree: TreeId<Untyped>,
-    parameter_clauses: Vec<Vec<SymbolId>>, // [] != [[]]; v0 requires []
+    parameter_clauses: Vec<Vec<SymbolId>>, // [] != [[]]; v0 accepts both
     body: Option<TreeId<Typed>>,
 }
 struct DefaultConstructorPlan {
@@ -284,9 +284,11 @@ Constructor parameter IDs describe the **source** clauses; the semantic default
 constructor still has a normalized empty value clause and class-instance result.
 
 The current accepted boundary is one ordinary public class in one explicit named
-package, implicit Object parent, default constructor and one public parameterless
-method with a declared Int result and an actual typed Int literal. Other valid
-forms remain explicitly unsupported. Validation does not re-type source, mutate
+package, implicit Object parent, default constructor and one or more public
+methods with an Int result and actual typed Int literal bodies. Each method has
+no value clause or one explicit empty ordinary clause; those shapes retain
+distinct semantic and wire forms. Other valid forms remain explicitly
+unsupported. Validation does not re-type source, mutate
 stores/arenas/indices/symbols, or publish files. A separate `EncodingContext` now
 projects names/types/references into owned AST fragments. The checked plan's
 `declaration_skeleton` API assembles declaration trees into an explicitly

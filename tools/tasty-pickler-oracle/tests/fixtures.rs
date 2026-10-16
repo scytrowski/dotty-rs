@@ -32,6 +32,7 @@ fn independent_fixtures_match_normalized_snapshots() {
         "example/Declarations",
         "example/References",
         "example/Operations",
+        "example/Multi",
     ] {
         let expected: Value = serde_json::from_slice(
             &fs::read(
@@ -228,6 +229,40 @@ fn operations_pins_calls_parameter_refs_forward_refs_and_clause_shapes() {
         .unwrap();
     assert_eq!(forward_qualifier["tag"], "QUALTHIS");
     assert_eq!(method("second")["parent"], method("first")["parent"]);
+}
+
+#[test]
+fn multi_pins_ordered_literal_methods_and_empty_value_clause() {
+    let snapshot = inspect(&fixture("example/Multi"), false).unwrap();
+    let class = named(&snapshot, "Multi");
+    let methods = ["one", "two", "zero"].map(|name| {
+        nodes(&snapshot)
+            .iter()
+            .find(|node| node["tag"] == "DEFDEF" && node["name"] == json!({"utf8":name}))
+            .unwrap()
+    });
+    assert!(methods.iter().all(|method| method["owner"] == class["id"]));
+    assert_eq!(methods[0]["header"], json!([]));
+    assert_eq!(methods[1]["header"], json!([]));
+    assert_eq!(methods[2]["header"], json!([{"clause":"EMPTYCLAUSE"}]));
+    assert!(
+        methods
+            .iter()
+            .all(|method| method["has_rhs"].as_bool() == Some(true))
+    );
+    let literals = nodes(&snapshot)
+        .iter()
+        .filter(|node| node["tag"] == "INTconst")
+        .map(|node| (node["parent"].clone(), node["value"].as_i64().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        literals,
+        methods
+            .iter()
+            .zip([1, 2, 0])
+            .map(|(method, value)| (method["id"].clone(), value))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
