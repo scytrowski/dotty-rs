@@ -246,7 +246,8 @@ pub struct JvmFieldMetadata {
 /// Frontend evidence about class initialization for whole-class emission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmClassInitializationPlan {
-    /// Validated source constructor metadata only; does not authorize emission.
+    /// Validated source constructor proof used to emit its exact primary
+    /// constructor and the planned primitive fields.
     PrimaryConstructor(JvmPrimaryConstructorPlan),
     /// The frontend proved that an empty `Object.<init>()V` constructor is
     /// equivalent to the source class: no constructor parameters or body,
@@ -1509,8 +1510,8 @@ impl JvmCompilationUnit<'_> {
 
     /// Lowers one explicitly planned method body using this unit's validated
     /// class, field, and method metadata. This method-level path can lower
-    /// private primitive field reads and mutable field assignments while
-    /// whole-class field installation is still unsupported by [`emit_class`].
+    /// private primitive field reads and mutable field assignments; [`emit_class`]
+    /// installs only fields covered by a validated primary constructor.
     pub fn lower_method_body(
         &self,
         class: SymbolId,

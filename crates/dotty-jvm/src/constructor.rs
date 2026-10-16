@@ -91,7 +91,7 @@ impl JvmPrimaryConstructorPlan {
             return Err(fail(JvmConstructorIssue::SourceShape));
         };
         if !def.type_params.is_empty()
-            || def.value_param_clauses.len() != 1
+            || def.value_param_clauses.len() > 1
             || !def.metadata.modifiers.is_empty()
             || !def.metadata.annotations.is_empty()
         {
@@ -102,7 +102,11 @@ impl JvmPrimaryConstructorPlan {
             Some(VisibilitySyntax::Private { qualifier: None }) => Visibility::Private,
             _ => return Err(fail(JvmConstructorIssue::Visibility)),
         };
-        let source_parameters = &def.value_param_clauses[0];
+        let source_parameters = def
+            .value_param_clauses
+            .first()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if parameters.len() != source_parameters.len() {
             return Err(fail(JvmConstructorIssue::ParameterIdentity));
         }

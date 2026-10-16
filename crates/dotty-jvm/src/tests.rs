@@ -6396,10 +6396,9 @@ fn class_emission_fails_closed_for_unknown_constructor_fields_and_superclasses()
         .enter(Name::new(field_name, Namespace::Term), field);
     assert_eq!(
         fixture.emit(),
-        Err(JvmCodegenError::UnsupportedJvmClassMember {
+        Err(JvmCodegenError::FieldEmissionUnsupported {
             class: fixture.class,
-            member: field,
-            kind: SymbolKind::Field
+            field,
         })
     );
 

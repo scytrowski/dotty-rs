@@ -182,7 +182,7 @@ fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots()
                 .filter_map(|tree| index.symbol_at(source, *tree))
                 .collect::<Vec<_>>();
             assert_eq!(
-                body_order,
+                &body_order[..fields.len()],
                 fields
                     .iter()
                     .map(|(field, _, _)| *field)
@@ -225,7 +225,7 @@ fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots()
 #[test]
 fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
     with_source(
-        "class Counter(start: Int, flag: Boolean) { private val seed: Int = 42; private var current: Int = start; private val doubled: Int = start + 1; private val active: Boolean = !flag; private val copied: Int = current }",
+        "class Counter(start: Int, flag: Boolean) { private val seed: Int = 42; private var current: Int = start; private val doubled: Int = start + 1; private val active: Boolean = !flag; private val copied: Int = current; def get(): Int = current; def increment(): Unit = current = current + 1; def set(value: Int): Unit = current = value; def enabled(): Boolean = active }",
         |ast, source, index, definitions, typer| {
             let class = symbol_named(ast, index, source, typer, "Counter");
             typer.complete_symbol(class).unwrap();
@@ -302,9 +302,46 @@ fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
                 field_symbols.push(field);
             }
 
+            let mut method_plans = Vec::new();
+            for name in ["get", "increment", "set", "enabled"] {
+                let (method, method_tree, rhs) = template
+                    .body
+                    .iter()
+                    .find_map(|tree| {
+                        let TreeKind::DefDef(definition) = &ast.get(*tree).kind else {
+                            return None;
+                        };
+                        (typer
+                            .store()
+                            .names
+                            .resolve(definition.name.as_name().text())
+                            == name)
+                            .then_some((index.symbol_at(source, *tree)?, *tree, definition.rhs?))
+                    })
+                    .unwrap_or_else(|| panic!("missing method {name}"));
+                typer.complete_symbol(method).unwrap();
+                let TreeKind::DefDef(definition) = &ast.get(method_tree).kind else {
+                    unreachable!()
+                };
+                let parameters = definition
+                    .value_param_clauses
+                    .iter()
+                    .flatten()
+                    .map(|tree| index.symbol_at(source, *tree).unwrap())
+                    .collect();
+                let context = typer.expression_context_for(method).unwrap();
+                let body = typer.type_expression(rhs, context).unwrap();
+                method_plans.push(JvmMethodPlan {
+                    method,
+                    parameters,
+                    locals: Vec::new(),
+                    body: Some(body),
+                });
+            }
+
             let class_plan = JvmClassPlan {
                 class,
-                methods: Vec::new(),
+                methods: method_plans,
                 fields: field_plans,
                 initialization: JvmClassInitializationPlan::PrimaryConstructor(constructor_plan),
             };
@@ -379,36 +416,62 @@ fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
             let copied = initializer_plan.fields()[4].instructions();
             assert!(copied.iter().any(|instruction| matches!(instruction, JvmConstructorInitializerInstruction::GetField { field, .. } if *field == field_symbols[1])));
 
-            if require_jdk21_or_skip() {
-                let mut class_builder = ClassFileBuilder::new(
-                    "Counter",
-                    ClassFileVersion {
-                        major: 65,
-                        minor: 0,
-                    },
-                )
-                .unwrap();
-                for field in class_metadata.fields() {
-                    class_builder
-                        .add_field(field.name(), field.descriptor(), field.access_flags())
-                        .unwrap();
-                }
-                let mut constructor_code = dotty_classfile::bytecode::CodeBuilder::new();
-                constructor_code
-                    .aload(0)
-                    .and_then(|code| code.invokespecial("java/lang/Object", "<init>", "()V"))
-                    .unwrap();
-                initializer_plan.append_to(&mut constructor_code).unwrap();
-                constructor_code.return_void().unwrap();
-                class_builder
-                    .add_prebuilt_code_method(
-                        "<init>",
-                        constructor_metadata.descriptor().as_str(),
-                        constructor_metadata.access_flags(),
-                        constructor_code,
+            let generated = emit_class(&unit, class, definitions).unwrap();
+            let mut reader = Reader::new(generated.bytes());
+            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+            class_file.validate_references().unwrap();
+            assert_eq!(class_file.fields.len(), 5);
+            assert_eq!(class_file.methods.len(), 5);
+            assert_eq!(
+                class_file
+                    .constant_pool
+                    .utf8(class_file.methods[0].name_index)
+                    .unwrap(),
+                "<init>"
+            );
+            assert_eq!(
+                class_file
+                    .constant_pool
+                    .utf8(class_file.methods[0].descriptor_index)
+                    .unwrap(),
+                "(IZ)V"
+            );
+            assert_eq!(
+                class_file
+                    .fields
+                    .iter()
+                    .map(|field| class_file.constant_pool.utf8(field.name_index).unwrap())
+                    .collect::<Vec<_>>(),
+                ["seed", "current", "doubled", "active", "copied"]
+            );
+            assert!(class_file.fields[0].access_flags.is_private());
+            assert!(class_file.fields[0].access_flags.is_final());
+            assert!(class_file.fields[1].access_flags.is_private());
+            assert!(!class_file.fields[1].access_flags.is_final());
+            let method_identities = class_file.methods[1..]
+                .iter()
+                .map(|method| {
+                    (
+                        class_file.constant_pool.utf8(method.name_index).unwrap(),
+                        class_file
+                            .constant_pool
+                            .utf8(method.descriptor_index)
+                            .unwrap(),
                     )
-                    .unwrap();
-                let class_bytes = class_builder.encode().unwrap();
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                method_identities,
+                [
+                    ("get", "()I"),
+                    ("increment", "()V"),
+                    ("set", "(I)V"),
+                    ("enabled", "()Z")
+                ]
+            );
+
+            if require_jdk21_or_skip() {
+                let class_bytes = generated.into_bytes();
                 let nonce = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
@@ -422,7 +485,7 @@ fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
                 let harness = output.join("ConstructorHarness.java");
                 fs::write(
                     &harness,
-                    "public final class ConstructorHarness { private static java.lang.reflect.Field field(String name) throws Exception { java.lang.reflect.Field field = Counter.class.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Counter counter = new Counter(9, true); if (field(\"seed\").getInt(counter) != 42) throw new AssertionError(\"seed\"); if (field(\"current\").getInt(counter) != 9) throw new AssertionError(\"current\"); if (field(\"doubled\").getInt(counter) != 10) throw new AssertionError(\"doubled\"); if (field(\"active\").getBoolean(counter)) throw new AssertionError(\"active\"); if (field(\"copied\").getInt(counter) != 9) throw new AssertionError(\"copied\"); } }\n",
+                    "public final class ConstructorHarness { private static java.lang.reflect.Field field(String name) throws Exception { java.lang.reflect.Field field = Counter.class.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Counter counter = new Counter(9, true); if (field(\"seed\").getInt(counter) != 42) throw new AssertionError(\"seed\"); if (field(\"current\").getInt(counter) != 9) throw new AssertionError(\"current\"); if (field(\"doubled\").getInt(counter) != 10) throw new AssertionError(\"doubled\"); if (field(\"active\").getBoolean(counter)) throw new AssertionError(\"active\"); if (field(\"copied\").getInt(counter) != 9) throw new AssertionError(\"copied\"); if (counter.get() != 9 || !counter.enabled()) throw new AssertionError(\"getter\"); counter.increment(); if (counter.get() != 10) throw new AssertionError(\"increment\"); counter.set(17); if (counter.get() != 17) throw new AssertionError(\"setter\"); } }\n",
                 )
                 .unwrap();
                 let javac = Command::new("javac")
@@ -2591,6 +2654,7 @@ fn field_metadata_distinguishes_private_this_from_plain_private() {
 fn ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result() {
     for (text, descriptor) in [
         ("class C()", "()V"),
+        ("class C", "()V"),
         ("class C(x: Int)", "(I)V"),
         ("class C(flag: Boolean, x: Int)", "(ZI)V"),
         ("class C private (x: Int)", "(I)V"),
@@ -2645,9 +2709,24 @@ fn ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result
                 typed_ast: typer.typed_ast(),
                 classes: vec![plan],
             };
+            let generated = emit_class(&unit, class, definitions).unwrap();
+            let mut reader = Reader::new(generated.bytes());
+            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+            assert_eq!(class_file.methods.len(), 1);
+            let emitted_constructor = &class_file.methods[0];
             assert_eq!(
-                emit_class(&unit, class, definitions),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedConstructor { class })
+                class_file
+                    .constant_pool
+                    .utf8(emitted_constructor.descriptor_index)
+                    .unwrap(),
+                descriptor
+            );
+            assert_eq!(
+                class_file
+                    .constant_pool
+                    .utf8(emitted_constructor.name_index)
+                    .unwrap(),
+                "<init>"
             );
             let constructor_metadata = metadata.constructor().unwrap();
             assert_eq!(constructor_metadata.descriptor().as_str(), descriptor);

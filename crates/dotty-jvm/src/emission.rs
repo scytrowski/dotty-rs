@@ -29,21 +29,30 @@ pub(super) fn emit_class(
         .ok_or(JvmCodegenError::MissingClassPlan {
             class: class_symbol,
         })?;
-    if plan.initialization != JvmClassInitializationPlan::ImplicitNoArg {
-        return Err(JvmCodegenError::UnsupportedConstructor {
-            class: class_symbol,
-        });
-    }
 
     let metadata = plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
-    if let Some(field) = metadata.fields().first() {
-        return Err(JvmCodegenError::FieldEmissionUnsupported {
-            class: class_symbol,
-            field: field.symbol(),
-        });
-    }
     let class_info = super::identity::class_info(unit.store, class_symbol)?;
-    validate_emittable_class(plan, unit.store, definitions, class_info)?;
+    validate_emittable_class(plan, &metadata, unit.store, definitions, class_info)?;
+
+    let constructor_initializers = match &plan.initialization {
+        JvmClassInitializationPlan::ImplicitNoArg => {
+            if !metadata.fields().is_empty() {
+                return Err(JvmCodegenError::FieldEmissionUnsupported {
+                    class: class_symbol,
+                    field: metadata.fields()[0].symbol(),
+                });
+            }
+            None
+        }
+        JvmClassInitializationPlan::PrimaryConstructor(_) => {
+            Some(unit.lower_constructor_field_initializers(class_symbol, definitions)?)
+        }
+        JvmClassInitializationPlan::Unsupported => {
+            return Err(JvmCodegenError::UnsupportedConstructor {
+                class: class_symbol,
+            });
+        }
+    };
 
     let mut builder = ClassFileBuilder::new(
         metadata.identity().internal_name(),
@@ -57,10 +66,52 @@ pub(super) fn emit_class(
         .set_access_flags(metadata.identity().access_flags())
         .map_err(|error| class_file_error(class_symbol, None, error))?;
 
-    let constructor = empty_object_constructor(class_symbol)?;
-    builder
-        .add_prebuilt_code_method("<init>", "()V", MethodAccessFlags(ACC_PUBLIC), constructor)
-        .map_err(|error| class_file_error(class_symbol, None, error))?;
+    for field in metadata.fields() {
+        builder
+            .add_field(field.name(), field.descriptor(), field.access_flags())
+            .map_err(|error| class_file_error(class_symbol, None, error))?;
+    }
+
+    match constructor_initializers {
+        None => {
+            let mut constructor = object_constructor_prefix(class_symbol)?;
+            constructor
+                .return_void()
+                .map_err(|error| JvmCodegenError::ConstructorCodeBuilder {
+                    class: class_symbol,
+                    error,
+                })?;
+            builder
+                .add_prebuilt_code_method(
+                    "<init>",
+                    "()V",
+                    MethodAccessFlags(ACC_PUBLIC),
+                    constructor,
+                )
+                .map_err(|error| class_file_error(class_symbol, None, error))?;
+        }
+        Some(initializers) => {
+            let constructor_metadata = initializers.constructor();
+            let mut constructor = object_constructor_prefix(class_symbol)?;
+            initializers.append_to(&mut constructor)?;
+            constructor
+                .return_void()
+                .map_err(|error| JvmCodegenError::ConstructorCodeBuilder {
+                    class: class_symbol,
+                    error,
+                })?;
+            builder
+                .add_prebuilt_code_method(
+                    "<init>",
+                    constructor_metadata.descriptor().as_str(),
+                    constructor_metadata.access_flags(),
+                    constructor,
+                )
+                .map_err(|error| {
+                    class_file_error(class_symbol, Some(constructor_metadata.symbol()), error)
+                })?;
+        }
+    }
 
     for (method_plan, method_metadata) in plan.methods.iter().zip(metadata.methods()) {
         let body = method_plan.body.ok_or(JvmCodegenError::MissingTypedBody {
@@ -92,19 +143,18 @@ pub(super) fn emit_class(
     })
 }
 
-fn empty_object_constructor(class: SymbolId) -> Result<CodeBuilder, JvmCodegenError> {
+fn object_constructor_prefix(class: SymbolId) -> Result<CodeBuilder, JvmCodegenError> {
     let mut code = CodeBuilder::new();
     code.aload(0)
         .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
     code.invokespecial("java/lang/Object", "<init>", "()V")
-        .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
-    code.return_void()
         .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
     Ok(code)
 }
 
 fn validate_emittable_class(
     plan: &crate::JvmClassPlan,
+    metadata: &crate::JvmClassMetadata,
     store: &SemanticStore,
     definitions: &dotty_core::definitions::Definitions,
     class_info: &dotty_core::types::ClassInfo,
@@ -136,11 +186,35 @@ fn validate_emittable_class(
 
     let declarations = store.scopes.get(class_info.declarations).entered_symbols();
     let declared: HashSet<_> = declarations.collect();
+    if let Some(symbol) = declared
+        .iter()
+        .copied()
+        .find(|symbol| !store.symbols.contains(*symbol))
+    {
+        return Err(JvmCodegenError::InvalidClassDeclaration {
+            class: plan.class,
+            symbol,
+        });
+    }
+    let planned_methods: HashSet<_> = plan.methods.iter().map(|method| method.method).collect();
+    let planned_fields: HashSet<_> = metadata
+        .fields()
+        .iter()
+        .map(|field| field.symbol())
+        .collect();
     for method in &plan.methods {
         if !declared.contains(&method.method) {
             return Err(JvmCodegenError::MethodNotInClassDeclarations {
                 class: plan.class,
                 method: method.method,
+            });
+        }
+    }
+    for field in metadata.fields() {
+        if !declared.contains(&field.symbol()) || field.owner() != plan.class {
+            return Err(JvmCodegenError::FieldEmissionUnsupported {
+                class: plan.class,
+                field: field.symbol(),
             });
         }
     }
@@ -154,7 +228,20 @@ fn validate_emittable_class(
     for member in owned_declarations {
         let symbol = store.symbols.get(member);
         match symbol.kind {
-            SymbolKind::Method => {}
+            SymbolKind::Method if planned_methods.contains(&member) => {}
+            SymbolKind::Method => {
+                return Err(JvmCodegenError::MethodNotInJvmPlanForBody {
+                    class: plan.class,
+                    method: member,
+                });
+            }
+            SymbolKind::Field if planned_fields.contains(&member) => {}
+            SymbolKind::Field => {
+                return Err(JvmCodegenError::FieldEmissionUnsupported {
+                    class: plan.class,
+                    field: member,
+                });
+            }
             SymbolKind::Constructor => constructors.push(member),
             kind => {
                 return Err(JvmCodegenError::UnsupportedJvmClassMember {
@@ -165,11 +252,25 @@ fn validate_emittable_class(
             }
         }
     }
+
     if constructors.len() > 1 {
         return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class });
     }
-    if let Some(constructor) = constructors.first().copied() {
-        validate_primary_constructor(store, plan.class, constructor)?;
+    match (
+        &plan.initialization,
+        metadata.constructor(),
+        constructors.as_slice(),
+    ) {
+        (JvmClassInitializationPlan::ImplicitNoArg, None, []) => {}
+        (JvmClassInitializationPlan::ImplicitNoArg, None, [constructor]) => {
+            validate_primary_constructor(store, plan.class, *constructor)?;
+        }
+        (JvmClassInitializationPlan::PrimaryConstructor(_), Some(metadata), [constructor])
+            if metadata.symbol() == *constructor => {}
+        (JvmClassInitializationPlan::Unsupported, _, _) => {
+            return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class });
+        }
+        _ => return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class }),
     }
     Ok(())
 }

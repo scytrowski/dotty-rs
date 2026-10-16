@@ -18,8 +18,8 @@ use crate::{
 
 /// A verified source-ordered list of constructor-local field initializer fragments.
 ///
-/// This plan does not contain the superclass constructor call or a return and is
-/// not a complete JVM constructor. A future constructor emitter must call
+/// This plan does not contain the superclass constructor call or a return and
+/// is not a complete JVM constructor. Whole-class emission calls
 /// `Object.<init>()V` before appending these instructions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmConstructorFieldInitializerPlan {
@@ -95,7 +95,7 @@ impl JvmConstructorFieldInitializerPlan {
     ///
     /// The caller is responsible for placing this sequence after the
     /// `Object.<init>()V` call and for adding a constructor return afterward.
-    /// This method does not emit either instruction.
+    /// Whole-class emission performs both steps.
     pub fn append_to(&self, code: &mut CodeBuilder) -> Result<(), JvmCodegenError> {
         for field in &self.fields {
             for instruction in &field.instructions {

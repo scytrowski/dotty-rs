@@ -13,7 +13,8 @@ use dotty_core::{
 };
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmLocalBinding, JvmMethodPlan, JvmNameKind, emit_class,
+    JvmCodegenError, JvmCompilationUnit, JvmFieldPlan, JvmFieldSourceVisibility, JvmLocalBinding,
+    JvmMethodPlan, JvmNameKind, JvmPrimaryConstructorPlan, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -162,8 +163,15 @@ fn compile_source(
     };
     let source_methods =
         collect_source_methods(&parsed.ast, &template.body, source_id, &index, &store)?;
-    let initialization =
-        prove_implicit_noarg_constructor(&parsed.ast, template, source_id, &index, &store);
+    let initialization = source_initialization_plan(
+        class_symbol,
+        &parsed.ast,
+        template,
+        source_id,
+        &index,
+        &store,
+    )
+    .map_err(PipelineFailure::Codegen)?;
 
     let mut typer = SourceTyper::new(
         &parsed.ast,
@@ -176,6 +184,61 @@ fn compile_source(
     typer
         .complete_symbol(class_symbol)
         .map_err(PipelineFailure::Typer)?;
+    let constructor_symbol = index.symbol_at(source_id, template.constructor).ok_or(
+        PipelineFailure::MissingSourceIdentity("primary constructor"),
+    )?;
+    let mut fields = Vec::new();
+    if matches!(
+        initialization,
+        JvmClassInitializationPlan::PrimaryConstructor(_)
+    ) {
+        typer
+            .complete_symbol(constructor_symbol)
+            .map_err(PipelineFailure::Typer)?;
+        for tree in &template.body {
+            let TreeKind::ValDef(definition) = &parsed.ast.get(*tree).kind else {
+                continue;
+            };
+            let Some(field) = index.symbol_at(source_id, *tree) else {
+                continue;
+            };
+            if typer.store().symbols.get(field).kind != SymbolKind::Field {
+                continue;
+            }
+            typer
+                .complete_symbol(field)
+                .map_err(PipelineFailure::Typer)?;
+            let initializer = match definition.rhs {
+                Some(rhs) => {
+                    let ty = match typer.store().symbols.get(field).info {
+                        dotty_core::SymbolInfo::Complete(ty) => ty,
+                        _ => return Err(PipelineFailure::UnexpectedSourceShape("field type")),
+                    };
+                    let context = typer
+                        .field_initializer_context_for(field)
+                        .map_err(PipelineFailure::Typer)?;
+                    Some(
+                        typer
+                            .type_expression_expected(rhs, context, ty)
+                            .map_err(PipelineFailure::Typer)?,
+                    )
+                }
+                None => None,
+            };
+            let source_visibility = match &definition.metadata.visibility {
+                Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
+                    JvmFieldSourceVisibility::PrivateThis
+                }
+                _ => JvmFieldSourceVisibility::PlainPrivate,
+            };
+            fields.push(JvmFieldPlan {
+                field,
+                source_visibility,
+                initializer,
+            });
+        }
+    }
+
     let mut methods = Vec::with_capacity(source_methods.len());
     for source_method in source_methods {
         typer
@@ -229,7 +292,7 @@ fn compile_source(
         typed_ast: typer.typed_ast(),
         classes: vec![JvmClassPlan {
             class: class_symbol,
-            fields: Vec::new(),
+            fields,
             methods,
             initialization,
         }],
@@ -336,6 +399,63 @@ fn collect_source_methods(
         });
     }
     Ok(methods)
+}
+
+fn source_initialization_plan(
+    class: SymbolId,
+    ast: &dotty_core::AstArena<Untyped>,
+    template: &Template<Untyped>,
+    source: SourceId,
+    index: &SourceSemanticIndex,
+    store: &SemanticStore,
+) -> Result<JvmClassInitializationPlan, JvmCodegenError> {
+    let has_fields = template.body.iter().any(|tree| {
+        matches!(ast.get(*tree).kind, TreeKind::ValDef(_))
+            && index
+                .symbol_at(source, *tree)
+                .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field)
+    });
+    let constructor = index
+        .symbol_at(source, template.constructor)
+        .ok_or(JvmCodegenError::UnsupportedConstructor { class })?;
+    let TreeKind::DefDef(definition) = &ast.get(template.constructor).kind else {
+        return Ok(JvmClassInitializationPlan::Unsupported);
+    };
+    let has_parameters = definition
+        .value_param_clauses
+        .iter()
+        .any(|clause| !clause.is_empty());
+    let no_template_initializers = template.body.iter().all(|tree| match &ast.get(*tree).kind {
+        TreeKind::DefDef(_) => true,
+        TreeKind::ValDef(_) => index
+            .symbol_at(source, *tree)
+            .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field),
+        _ => false,
+    });
+    if !has_fields && !has_parameters {
+        return Ok(prove_implicit_noarg_constructor(
+            ast, template, source, index, store,
+        ));
+    }
+    if !template.parents.is_empty() || template.self_val.is_some() || !no_template_initializers {
+        return Ok(JvmClassInitializationPlan::Unsupported);
+    }
+    let parameters = definition
+        .value_param_clauses
+        .iter()
+        .flatten()
+        .map(|tree| {
+            index.derived_symbol_at(constructor, source, *tree).ok_or(
+                JvmCodegenError::InvalidPrimaryConstructor {
+                    constructor,
+                    issue: dotty_jvm::JvmConstructorIssue::ParameterIdentity,
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(JvmClassInitializationPlan::PrimaryConstructor(
+        JvmPrimaryConstructorPlan::from_source(class, constructor, parameters, ast, index)?,
+    ))
 }
 
 fn prove_implicit_noarg_constructor(
@@ -2760,14 +2880,69 @@ fn verify_with_jdk(output_directory: &Path) {
 }
 
 #[test]
-fn field_initializer_is_rejected_without_a_partial_class_file() {
+fn field_initializer_emits_a_complete_verified_class() {
     let output = TestOutputDirectory::new("field-initializer");
-    let error = compile_fixture("FieldInitializer.scala", output.path()).unwrap_err();
-    assert!(matches!(
-        error,
-        PipelineFailure::Codegen(JvmCodegenError::UnsupportedConstructor { .. })
-    ));
-    assert!(output.class_files().is_empty());
+    let artifact = compile_fixture("FieldInitializer.scala", output.path()).unwrap();
+    let mut reader = Reader::new(artifact.class.bytes());
+    let class_file = ClassFile::decode(&mut reader).unwrap();
+    class_file.validate_references().unwrap();
+    assert_eq!(class_file.fields.len(), 1);
+    assert_eq!(class_file.methods.len(), 2);
+    assert_eq!(
+        class_file
+            .constant_pool
+            .utf8(class_file.methods[0].name_index)
+            .unwrap(),
+        "<init>"
+    );
+    assert_eq!(
+        class_file
+            .constant_pool
+            .utf8(class_file.methods[0].descriptor_index)
+            .unwrap(),
+        "()V"
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness_path = output.path().join("FieldInitializerHarness.java");
+    fs::write(
+        &harness_path,
+        "public final class FieldInitializerHarness { public static void main(String[] args) { FieldInitializer instance = new FieldInitializer(); if (instance.value() != 1) throw new AssertionError(\"value\"); } }\n",
+    )
+    .unwrap();
+    let javac = Command::new("javac")
+        .args(["-classpath", output.path().to_str().unwrap(), "-d"])
+        .arg(output.path())
+        .arg(&harness_path)
+        .output()
+        .unwrap();
+    assert!(javac.status.success(), "javac failed: {:?}", javac);
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output.path().to_str().unwrap(),
+            "FieldInitializerHarness",
+        ])
+        .output()
+        .unwrap();
+    assert!(java.status.success(), "java failed: {:?}", java);
+}
+
+#[test]
+fn public_primitive_field_storage_is_rejected_without_an_artifact() {
+    assert_source_failure(
+        "public-field",
+        "class PublicField():\n  val seed: Int = 1",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility { .. })
+            )
+        },
+    );
 }
 
 #[test]
