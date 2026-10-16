@@ -79,12 +79,101 @@ impl ClassPathEntry for Issue1174StackedPath {
     }
 }
 
+struct DottyCoreClassPath;
+
+impl ClassPathEntry for DottyCoreClassPath {
+    fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        let bytes = match name.as_internal() {
+            "dotty/tools/dotc/core/Contexts" => class_file_stub(name.as_internal()),
+            "java/lang/Object" => java_object_stub(),
+            _ => return Ok(None),
+        };
+        Ok(Some(ClassResource::new(
+            bytes,
+            ClassFormat::Class,
+            ClassOrigin::Directory("<issue-1180-core-package-classfile-fixture>".into()),
+        )))
+    }
+
+    fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(matches!(
+            package,
+            ["dotty"]
+                | ["dotty", "tools"]
+                | ["dotty", "tools", "dotc"]
+                | ["dotty", "tools", "dotc", "core"]
+        ))
+    }
+}
+
+struct TracedResolver<E: ClassPathEntry> {
+    inner: ClasspathSymbolResolver<E>,
+    package_requests: std::rc::Rc<std::cell::RefCell<Vec<(Vec<String>, Option<SymbolId>)>>>,
+}
+
+impl<E: ClassPathEntry> SymbolResolver for TracedResolver<E> {
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.module_class_of_object(store, object)
+    }
+
+    fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+        self.inner.checkpoint()
+    }
+
+    fn rollback_to(
+        &mut self,
+        store: &mut SemanticStore,
+        checkpoint: dotty_core::ResolverCheckpoint,
+    ) {
+        self.inner.rollback_to(store, checkpoint);
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner.resolve_member(store, request)
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let result = self.inner.resolve_package(store, path)?;
+        self.package_requests.borrow_mut().push((
+            path.iter().map(|segment| (*segment).to_owned()).collect(),
+            result,
+        ));
+        Ok(result)
+    }
+}
+
 fn java_object_stub() -> Vec<u8> {
     let internal_name = b"java/lang/Object";
     let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 3, 1];
     bytes.extend_from_slice(&(internal_name.len() as u16).to_be_bytes());
     bytes.extend_from_slice(internal_name);
     bytes.extend_from_slice(&[7, 0, 1, 0, 0x21, 0, 2, 0, 0]);
+    bytes.extend_from_slice(&[0; 8]);
+    bytes
+}
+
+fn class_file_stub(internal_name: &str) -> Vec<u8> {
+    let internal_name = internal_name.as_bytes();
+    let object_name = b"java/lang/Object";
+    let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE, 0, 0, 0, 61, 0, 5, 1];
+    bytes.extend_from_slice(&(internal_name.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(internal_name);
+    bytes.extend_from_slice(&[7, 0, 1, 1]);
+    bytes.extend_from_slice(&(object_name.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(object_name);
+    bytes.extend_from_slice(&[7, 0, 3, 0, 0x21, 0, 2, 0, 4]);
     bytes.extend_from_slice(&[0; 8]);
     bytes
 }
@@ -476,6 +565,130 @@ fn source_relative_class_import_resolves_through_the_scala39_classpath_artifact(
     assert_eq!(
         typer.store().symbols.get(package).owner,
         Some(current_package)
+    );
+}
+
+#[test]
+fn dotty_core_import_resolves_to_its_package_before_a_later_lookup_blocker() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let mut packages = Packages::new();
+    let source = SourceId::from_index(1180);
+    let source_text = "package dotty.tools.dotc\nimport core.Contexts\nobject Use { def accepted(context: Contexts): Contexts = context; def blocked(context: Contexts): Int = context.noSuchMember }";
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Issue1180DottyCoreImport.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (accepted, accepted_tpt) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "accepted" =>
+            {
+                Some((index.symbol_at(source, tree).unwrap(), definition.tpt))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let (blocked, blocked_rhs) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::DefDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "blocked" =>
+            {
+                Some((
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                ))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let package_requests = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let resolver = TracedResolver {
+        inner: ClasspathSymbolResolver::new(
+            DottyCoreClassPath,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        ),
+        package_requests: std::rc::Rc::clone(&package_requests),
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(resolver));
+
+    typer.complete_symbol(accepted).unwrap();
+
+    let package_attempts = package_requests.borrow();
+    let core_package = package_attempts
+        .iter()
+        .find_map(|(path, result)| {
+            (path == &["dotty", "tools", "dotc", "core"])
+                .then_some(*result)
+                .flatten()
+        })
+        .unwrap();
+    assert!(package_attempts.iter().any(|(path, result)| {
+        path == &["dotty", "tools", "dotc", "core"] && *result == Some(core_package)
+    }));
+    drop(package_attempts);
+
+    let accepted_type = typer
+        .source_type_index()
+        .type_at(source, accepted_tpt)
+        .unwrap();
+    let Type::TypeRef {
+        target: TypeRefTarget::Symbol(context_class),
+        ..
+    } = typer.store().types.get(accepted_type)
+    else {
+        panic!("expected the imported class type")
+    };
+    assert_eq!(
+        typer.store().symbols.get(*context_class).kind,
+        SymbolKind::Class
+    );
+    assert_eq!(
+        typer
+            .store()
+            .names
+            .resolve(typer.store().symbols.get(*context_class).name.text()),
+        "Contexts"
+    );
+    assert_eq!(
+        typer.store().symbols.get(*context_class).owner,
+        Some(core_package)
+    );
+
+    let context = typer.expression_context_for(blocked).unwrap();
+    let blocked_error = typer.type_expression(blocked_rhs, context).unwrap_err();
+    assert!(
+        matches!(
+            blocked_error,
+            dotty_typer::TyperError::MemberNotFound { .. }
+        ),
+        "unexpected later blocker: {blocked_error:?}"
     );
 }
 
