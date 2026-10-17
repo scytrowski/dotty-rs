@@ -5,9 +5,196 @@ use dotty_classfile::bytecode::{
     assemble_labeled, generate_stack_map_frames,
 };
 use dotty_classfile::classfile::ConstantPool;
+use dotty_classfile::constant_pool_builder::ConstantPoolBuilder;
 
 fn local(index: u16) -> LocalIndex {
     LocalIndex::new(index)
+}
+
+fn assert_local_object(state: &FlowLocalState, expected: &str) {
+    assert!(matches!(state, FlowLocalState::Object(class) if class.internal_name() == expected));
+}
+
+#[test]
+fn exact_reference_parameters_seed_instance_slots_and_survive_cfg_edges() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+
+    let mut sequence = CodeSequence::new();
+    let otherwise = sequence.new_label().unwrap();
+    sequence.instruction(Instruction::ILoad(local(1)));
+    sequence.branch(BranchInstruction::IfEq(otherwise.clone()));
+    sequence.instruction(Instruction::ALoad(local(2)));
+    sequence.instruction(Instruction::AReturn);
+    sequence.bind(otherwise.clone()).unwrap();
+    sequence.instruction(Instruction::ALoad(local(3)));
+    sequence.instruction(Instruction::AReturn);
+
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let flow = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "choose",
+        "(ZLexample/Counter;Lexample/Counter;)Lexample/Counter;",
+        false,
+        &pool,
+        owner,
+    )
+    .unwrap();
+    let entry_locals = &flow.entry_state(graph.entry_block()).unwrap().locals;
+    assert_local_object(&entry_locals[0], "example/Client");
+    assert_eq!(entry_locals[1], FlowLocalState::Integer);
+    assert_local_object(&entry_locals[2], "example/Counter");
+    assert_local_object(&entry_locals[3], "example/Counter");
+    let branch_locals = &flow
+        .entry_state(graph.block_for_label(&otherwise).unwrap())
+        .unwrap()
+        .locals;
+    assert_local_object(&branch_locals[0], "example/Client");
+    assert_eq!(branch_locals[1], FlowLocalState::Integer);
+    assert_local_object(&branch_locals[2], "example/Counter");
+    assert_local_object(&branch_locals[3], "example/Counter");
+
+    let error = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "choose",
+        "(ZLexample/Counter;Lexample/Counter;)Lexample/Other;",
+        false,
+        &pool,
+        owner,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            AnalysisError::WrongExactReferenceReturn {
+                instruction: 5,
+                expected,
+                actual,
+            } if expected.internal_name() == "example/Other"
+                && actual.internal_name() == "example/Counter"
+        ),
+        "unexpected exact return error: {error:?}"
+    );
+}
+
+#[test]
+fn exact_reference_descriptor_shapes_and_local_errors_are_typed() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+
+    let mut empty = CodeSequence::new();
+    empty.instruction(Instruction::Return);
+    let empty_graph = ControlFlowGraph::build(&empty).unwrap();
+    assert_eq!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &empty_graph,
+            "invalidName",
+            "(Lbad.name;)V",
+            false,
+            &pool,
+            owner,
+        ),
+        Err(AnalysisError::InvalidDescriptorClassName {
+            parameter: Some(0),
+            name: "bad.name".to_owned(),
+        })
+    );
+    assert_eq!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &empty_graph,
+            "arrayParameter",
+            "([Lexample/Counter;)V",
+            false,
+            &pool,
+            owner,
+        ),
+        Err(AnalysisError::UnsupportedMethodDescriptorType {
+            parameter: Some(0),
+            actual: dotty_classfile::descriptor::FieldType::Array(Box::new(
+                dotty_classfile::descriptor::FieldType::Object("example/Counter".to_owned())
+            )),
+        })
+    );
+    assert_eq!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &empty_graph,
+            "categoryTwoParameter",
+            "(JLexample/Counter;)V",
+            false,
+            &pool,
+            owner,
+        ),
+        Err(AnalysisError::UnsupportedMethodDescriptorType {
+            parameter: Some(0),
+            actual: dotty_classfile::descriptor::FieldType::Long,
+        })
+    );
+
+    let mut wrong_slot = CodeSequence::new();
+    wrong_slot.instruction(Instruction::ALoad(local(1)));
+    wrong_slot.instruction(Instruction::AReturn);
+    let wrong_slot_graph = ControlFlowGraph::build(&wrong_slot).unwrap();
+    assert_eq!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &wrong_slot_graph,
+            "wrongSlot",
+            "(ZLexample/Counter;)Lexample/Counter;",
+            false,
+            &pool,
+            owner,
+        ),
+        Err(AnalysisError::LocalTypeMismatch {
+            instruction: 0,
+            index: 1,
+            expected: ValueKind::Reference,
+            actual: ValueKind::Int,
+        })
+    );
+}
+
+#[test]
+fn exact_reference_stack_joins_reject_distinct_class_identities() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+
+    let mut sequence = CodeSequence::new();
+    let otherwise = sequence.new_label().unwrap();
+    let join = sequence.new_label().unwrap();
+    sequence.instruction(Instruction::ILoad(local(1)));
+    sequence.branch(BranchInstruction::IfEq(otherwise.clone()));
+    sequence.instruction(Instruction::ALoad(local(2)));
+    sequence.branch(BranchInstruction::Goto(join.clone()));
+    sequence.bind(otherwise).unwrap();
+    sequence.instruction(Instruction::ALoad(local(3)));
+    sequence.bind(join.clone()).unwrap();
+    sequence.instruction(Instruction::AReturn);
+
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let error = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "joinDifferentClasses",
+        "(ZLexample/A;Lexample/B;)Lexample/A;",
+        false,
+        &pool,
+        owner,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            AnalysisError::IncompatibleStackValue {
+                value: 0,
+                expected: FlowValue::Object(expected),
+                incoming: FlowValue::Object(incoming),
+                ..
+            } if expected.internal_name() == "example/B"
+                && incoming.internal_name() == "example/A"
+        ),
+        "unexpected exact stack-join error: {error:?}"
+    );
 }
 
 #[test]
@@ -400,7 +587,7 @@ fn incompatible_operand_stack_heights_fail_at_the_join() {
     let error =
         CfgCodeAnalyzer::analyze(&graph, "()I", true, &ConstantPool::default()).unwrap_err();
     assert!(matches!(
-        error,
+        &error,
         AnalysisError::IncompatibleStackMerge {
             block,
             expected_values: 0,
@@ -484,7 +671,7 @@ fn nonconverging_stack_cycle_and_reachable_fallthrough_are_rejected() {
     let error =
         CfgCodeAnalyzer::analyze(&graph, "()V", true, &ConstantPool::default()).unwrap_err();
     assert!(matches!(
-        error,
+        &error,
         AnalysisError::IncompatibleStackMerge {
             block,
             expected_values: 0,

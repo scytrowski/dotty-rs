@@ -291,6 +291,22 @@ pub enum AnalysisError {
         /// Return category represented by the actual opcode, or `None` for void.
         actual: Option<ValueKind>,
     },
+    /// An `areturn` value does not match the exact class in the method result descriptor.
+    WrongExactReferenceReturn {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Exact class required by the method descriptor.
+        expected: ClassIdentity,
+        /// Exact class found on the operand stack.
+        actual: ClassIdentity,
+    },
+    /// An `areturn` value has no exact initialized class identity.
+    MissingExactReferenceReturn {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Exact class required by the method descriptor.
+        expected: ClassIdentity,
+    },
     /// Values remain on the stack after a return value has been consumed.
     NonEmptyStackAtReturn {
         /// Zero-based instruction position.
@@ -318,6 +334,20 @@ pub enum AnalysisError {
         parameter: usize,
         /// Parameter's JVM category.
         actual: ValueKind,
+    },
+    /// A bounded exact-reference method descriptor contains an unsupported type.
+    UnsupportedMethodDescriptorType {
+        /// Zero-based parameter position, or `None` for the result.
+        parameter: Option<usize>,
+        /// Unsupported descriptor type.
+        actual: FieldType,
+    },
+    /// An object type in a method descriptor has an invalid JVM internal name.
+    InvalidDescriptorClassName {
+        /// Zero-based parameter position, or `None` for the result.
+        parameter: Option<usize>,
+        /// Invalid class name from the descriptor.
+        name: String,
     },
     /// Incoming operand stacks disagree at a block entry.
     IncompatibleStackMerge {
@@ -577,6 +607,24 @@ impl fmt::Display for AnalysisError {
                 formatter,
                 "instruction {instruction} returns {actual:?}, but the method descriptor requires {expected:?}"
             ),
+            Self::WrongExactReferenceReturn {
+                instruction,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} returns {}, but the method descriptor requires {}",
+                actual.internal_name(),
+                expected.internal_name()
+            ),
+            Self::MissingExactReferenceReturn {
+                instruction,
+                expected,
+            } => write!(
+                formatter,
+                "instruction {instruction} returns a reference without an exact class identity required for {}",
+                expected.internal_name()
+            ),
             Self::NonEmptyStackAtReturn { instruction, slots } => write!(
                 formatter,
                 "instruction {instruction} returns with {slots} operand-stack slots remaining"
@@ -596,6 +644,25 @@ impl fmt::Display for AnalysisError {
                 formatter,
                 "method parameter {parameter} has unsupported CFG analysis category {actual}"
             ),
+            Self::UnsupportedMethodDescriptorType { parameter, actual } => {
+                if let Some(parameter) = parameter {
+                    write!(formatter, "method parameter {parameter}")?;
+                } else {
+                    formatter.write_str("method result")?;
+                }
+                write!(
+                    formatter,
+                    " has unsupported exact-reference descriptor type {actual:?}"
+                )
+            }
+            Self::InvalidDescriptorClassName { parameter, name } => {
+                if let Some(parameter) = parameter {
+                    write!(formatter, "method parameter {parameter}")?;
+                } else {
+                    formatter.write_str("method result")?;
+                }
+                write!(formatter, " has invalid JVM class name {name:?}")
+            }
             Self::IncompatibleStackMerge {
                 block,
                 expected_values,
@@ -727,10 +794,41 @@ pub(crate) fn analyze_validated(
     instructions: &[Instruction],
     constant_pool: &ConstantPool,
 ) -> Result<CodeAnalysis, AnalysisError> {
+    analyze_validated_with_current_class(
+        "",
+        method_descriptor,
+        is_static,
+        instructions,
+        constant_pool,
+        None,
+    )
+}
+
+pub(crate) fn analyze_validated_with_current_class(
+    method_name: &str,
+    method_descriptor: &str,
+    is_static: bool,
+    instructions: &[Instruction],
+    constant_pool: &ConstantPool,
+    current_class_index: Option<ConstantPoolIndex>,
+) -> Result<CodeAnalysis, AnalysisError> {
     let descriptor = MethodDescriptor::parse(method_descriptor)
         .map_err(AnalysisError::InvalidMethodDescriptor)?;
     check_parameter_slots(&descriptor, !is_static, None)?;
-    let mut frame = Frame::new(&descriptor, is_static)?;
+    if current_class_index.is_some() {
+        validate_descriptor_class_names(&descriptor)?;
+        validate_bounded_reference_descriptor(&descriptor)?;
+    }
+    let current_class = current_class_index
+        .map(|index| class_identity_from_pool(constant_pool, index, 0))
+        .transpose()?;
+    if current_class_index.is_some() && matches!(method_name, "<init>" | "<clinit>") {
+        return Err(AnalysisError::InvalidInitializationContext {
+            is_static,
+            is_constructor: true,
+        });
+    }
+    let mut frame = Frame::new(&descriptor, is_static, current_class.as_ref())?;
     let mut returned = false;
 
     for (instruction_index, instruction) in instructions.iter().copied().enumerate() {
@@ -744,7 +842,7 @@ pub(crate) fn analyze_validated(
             instruction,
             &descriptor,
             constant_pool,
-            None,
+            current_class.as_ref(),
         )?;
         returned = is_return(instruction);
     }
@@ -767,6 +865,78 @@ pub(crate) fn analyze_validated(
             }
         })?,
     })
+}
+
+fn validate_descriptor_class_names(descriptor: &MethodDescriptor) -> Result<(), AnalysisError> {
+    for (parameter, ty) in descriptor.parameters.iter().enumerate() {
+        validate_descriptor_type_name(ty, Some(parameter))?;
+    }
+    if let Some(result) = &descriptor.return_type {
+        validate_descriptor_type_name(result, None)?;
+    }
+    Ok(())
+}
+
+fn validate_descriptor_type_name(
+    ty: &FieldType,
+    parameter: Option<usize>,
+) -> Result<(), AnalysisError> {
+    match ty {
+        FieldType::Object(name) if !is_valid_internal_name(name) => {
+            Err(AnalysisError::InvalidDescriptorClassName {
+                parameter,
+                name: name.clone(),
+            })
+        }
+        FieldType::Array(element) => validate_descriptor_type_name(element, parameter),
+        _ => Ok(()),
+    }
+}
+
+fn validate_bounded_reference_descriptor(
+    descriptor: &MethodDescriptor,
+) -> Result<(), AnalysisError> {
+    let has_reference = descriptor
+        .parameters
+        .iter()
+        .chain(descriptor.return_type.iter())
+        .any(|ty| matches!(ty, FieldType::Object(_) | FieldType::Array(_)));
+    if !has_reference {
+        return Ok(());
+    }
+
+    for (parameter, ty) in descriptor.parameters.iter().enumerate() {
+        if !matches!(ty, FieldType::Object(_)) && value_kind(ty) != ValueKind::Int {
+            return Err(AnalysisError::UnsupportedMethodDescriptorType {
+                parameter: Some(parameter),
+                actual: ty.clone(),
+            });
+        }
+    }
+    if let Some(result) = &descriptor.return_type
+        && !matches!(result, FieldType::Object(_))
+        && value_kind(result) != ValueKind::Int
+    {
+        return Err(AnalysisError::UnsupportedMethodDescriptorType {
+            parameter: None,
+            actual: result.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn class_identity_from_pool(
+    pool: &ConstantPool,
+    index: ConstantPoolIndex,
+    instruction: usize,
+) -> Result<ClassIdentity, AnalysisError> {
+    let name = pool
+        .class_name(index)
+        .map_err(|error| AnalysisError::InvalidConstantPoolReference { instruction, error })?;
+    if !is_valid_internal_name(name) {
+        return Err(AnalysisError::InvalidClassName { index });
+    }
+    Ok(ClassIdentity(Arc::from(name)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -794,10 +964,19 @@ struct UninitializedAllocation {
 }
 
 impl Frame {
-    fn new(descriptor: &MethodDescriptor, is_static: bool) -> Result<Self, AnalysisError> {
+    fn new(
+        descriptor: &MethodDescriptor,
+        is_static: bool,
+        current_class: Option<&ClassIdentity>,
+    ) -> Result<Self, AnalysisError> {
         let mut locals = Vec::new();
         if !is_static {
-            locals.push(Some(LocalSlot::Receiver));
+            locals.push(Some(
+                current_class
+                    .cloned()
+                    .map(LocalSlot::Object)
+                    .unwrap_or(LocalSlot::Receiver),
+            ));
         }
         for parameter in &descriptor.parameters {
             let kind = value_kind(parameter);
@@ -813,7 +992,12 @@ impl Frame {
                     width: u8::try_from(width).unwrap_or(2),
                 });
             }
-            locals.push(Some(LocalSlot::Value(kind)));
+            locals.push(Some(match (current_class, parameter) {
+                (Some(_), FieldType::Object(name)) => {
+                    LocalSlot::Object(ClassIdentity(Arc::from(name.as_str())))
+                }
+                _ => LocalSlot::Value(kind),
+            }));
             if width == 2 {
                 locals.push(Some(LocalSlot::CategoryTwoTail));
             }
@@ -1036,6 +1220,9 @@ impl Frame {
                     Some(ValueKind::Reference),
                     method_descriptor,
                 )?;
+                if flow_current_class.is_some() {
+                    self.check_exact_reference_return(instruction_index, method_descriptor)?;
+                }
                 self.pop_expected(instruction_index, ValueKind::Reference)?;
                 self.ensure_empty_stack(instruction_index)?;
             }
@@ -1821,6 +2008,44 @@ impl Frame {
             })
         }
     }
+
+    fn check_exact_reference_return(
+        &self,
+        instruction: usize,
+        descriptor: &MethodDescriptor,
+    ) -> Result<(), AnalysisError> {
+        let Some(FieldType::Object(expected_name)) = descriptor.return_type.as_ref() else {
+            return Ok(());
+        };
+        let expected = ClassIdentity(Arc::from(expected_name.as_str()));
+        let Some(ValueKind::Reference) = self.stack.last() else {
+            // Preserve the ordinary return-category or stack-underflow error.
+            return Ok(());
+        };
+        if let Some(allocation_site) = self.stack_allocation_sites.last().copied().flatten() {
+            return Err(AnalysisError::UninitializedReferenceUse {
+                instruction,
+                allocation_site,
+            });
+        }
+        let Some(actual) = self.stack_classes.last().cloned().flatten() else {
+            return Err(AnalysisError::MissingExactReferenceReturn {
+                instruction,
+                expected,
+            });
+        };
+        // Every initialized reference type is assignable to the JVM root class.
+        // Other superclass relationships are not inferred without hierarchy data.
+        if actual == expected || expected.internal_name() == "java/lang/Object" {
+            Ok(())
+        } else {
+            Err(AnalysisError::WrongExactReferenceReturn {
+                instruction,
+                expected,
+                actual,
+            })
+        }
+    }
 }
 
 fn check_parameter_slots(
@@ -2104,24 +2329,17 @@ impl CfgCodeAnalyzer {
             });
         }
         let current_class = current_class_index
-            .map(|index| {
-                let name = constant_pool.class_name(index).map_err(|error| {
-                    AnalysisError::InvalidConstantPoolReference {
-                        instruction: 0,
-                        error,
-                    }
-                })?;
-                if !is_valid_internal_name(name) {
-                    return Err(AnalysisError::InvalidClassName { index });
-                }
-                Ok(ClassIdentity(Arc::from(name)))
-            })
+            .map(|index| class_identity_from_pool(constant_pool, index, 0))
             .transpose()?;
         let descriptor = MethodDescriptor::parse(method_descriptor)
             .map_err(AnalysisError::InvalidMethodDescriptor)?;
+        validate_descriptor_class_names(&descriptor)?;
+        validate_bounded_reference_descriptor(&descriptor)?;
         check_parameter_slots(&descriptor, !is_static, None)?;
         for (parameter, ty) in descriptor.parameters.iter().enumerate() {
-            if value_kind(ty) != ValueKind::Int {
+            if value_kind(ty) != ValueKind::Int
+                && !(current_class.is_some() && matches!(ty, FieldType::Object(_)))
+            {
                 return Err(AnalysisError::UnsupportedFlowParameter {
                     parameter,
                     actual: value_kind(ty),
@@ -2129,18 +2347,7 @@ impl CfgCodeAnalyzer {
             }
         }
 
-        let mut initial = Frame::new(&descriptor, is_static)?;
-        if let Some(class) = &current_class
-            && !is_static
-        {
-            let Some(receiver) = initial.locals.first_mut() else {
-                return Err(AnalysisError::InvalidInitializationContext {
-                    is_static,
-                    is_constructor,
-                });
-            };
-            *receiver = Some(LocalSlot::Object(class.clone()));
-        }
+        let mut initial = Frame::new(&descriptor, is_static, current_class.as_ref())?;
         let mut local_count = initial.locals.len();
         for block in graph.blocks() {
             for (offset, element) in block.instructions.iter().enumerate() {
@@ -2343,6 +2550,7 @@ fn validate_flow_instruction_with_context(
             instruction,
             Instruction::ALoad(_)
                 | Instruction::AStore(_)
+                | Instruction::AReturn
                 | Instruction::GetField(_)
                 | Instruction::PutField(_)
                 | Instruction::InvokeVirtual(_)
