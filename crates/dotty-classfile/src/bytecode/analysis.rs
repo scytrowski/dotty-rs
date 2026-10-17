@@ -3,8 +3,8 @@
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
 //! [`CfgCodeAnalyzer`] propagates integer and exact initialized-class
 //! references across symbolic branches, including bounded primitive virtual
-//! calls. Neither analyzer is a full JVM verifier, and neither produces
-//! stack-map frames.
+//! calls and in-block object initialization. Neither analyzer is a full JVM
+//! verifier, and neither produces stack-map frames.
 
 use super::{
     BasicBlockId, BranchInstruction, ClassReference, CodeElement, ConstantPoolOperandKind,
@@ -218,6 +218,27 @@ pub enum AnalysisError {
         /// Owner named by the method reference.
         expected: ClassIdentity,
         /// Exact receiver class on the operand stack.
+        actual: ClassIdentity,
+    },
+    /// An uninitialized allocation was used as an ordinary value.
+    UninitializedReferenceUse {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Allocation instruction that created the reference.
+        allocation_site: usize,
+    },
+    /// A constructor call did not use an uninitialized allocation receiver.
+    ConstructorReceiverNotUninitialized {
+        /// Zero-based instruction position.
+        instruction: usize,
+    },
+    /// A constructor owner does not match the class created at the allocation site.
+    ConstructorOwnerMismatch {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Class created by the `new` instruction.
+        allocated: ClassIdentity,
+        /// Owner named by the constructor method reference.
         actual: ClassIdentity,
     },
     /// A local access extends past the maximum representable `max_locals`.
@@ -498,6 +519,27 @@ impl fmt::Display for AnalysisError {
                 expected.internal_name(),
                 actual.internal_name()
             ),
+            Self::UninitializedReferenceUse {
+                instruction,
+                allocation_site,
+            } => write!(
+                formatter,
+                "instruction {instruction} uses uninitialized allocation from instruction {allocation_site}"
+            ),
+            Self::ConstructorReceiverNotUninitialized { instruction } => write!(
+                formatter,
+                "instruction {instruction} constructor receiver is not an uninitialized allocation"
+            ),
+            Self::ConstructorOwnerMismatch {
+                instruction,
+                allocated,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} constructor owner {} does not match allocated class {}",
+                actual.internal_name(),
+                allocated.internal_name()
+            ),
             Self::LocalLimitExceeded {
                 instruction,
                 index,
@@ -738,9 +780,17 @@ enum LocalSlot {
 struct Frame {
     stack: Vec<ValueKind>,
     stack_classes: Vec<Option<ClassIdentity>>,
+    stack_allocation_sites: Vec<Option<usize>>,
     stack_slots: usize,
+    pending_allocation: Option<UninitializedAllocation>,
     locals: Vec<Option<LocalSlot>>,
     max_stack: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UninitializedAllocation {
+    site: usize,
+    class: ClassIdentity,
 }
 
 impl Frame {
@@ -771,7 +821,9 @@ impl Frame {
         Ok(Self {
             stack: Vec::new(),
             stack_classes: Vec::new(),
+            stack_allocation_sites: Vec::new(),
             stack_slots: 0,
+            pending_allocation: None,
             locals,
             max_stack: 0,
         })
@@ -842,7 +894,12 @@ impl Frame {
                     });
                 }
                 let class = self.stack_classes.last().cloned().flatten();
+                let allocation_site = self.stack_allocation_sites.last().copied().flatten();
                 self.push_typed(instruction_index, top, class)?;
+                *self
+                    .stack_allocation_sites
+                    .last_mut()
+                    .expect("push_typed adds an allocation-site slot") = allocation_site;
             }
             Instruction::Pop => {
                 let available = self.stack.len();
@@ -863,10 +920,12 @@ impl Frame {
                 }
                 self.stack.pop();
                 self.stack_classes.pop();
+                self.stack_allocation_sites.pop();
                 self.stack_slots -= 1;
             }
             Instruction::GetField(reference) => {
                 if flow_current_class.is_some() {
+                    self.ensure_no_pending_allocation(instruction_index)?;
                     let (owner, ty) = self.flow_field_type(instruction_index, reference, pool)?;
                     validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
                     self.pop_field_receiver(instruction_index, &owner)?;
@@ -879,6 +938,7 @@ impl Frame {
             }
             Instruction::PutField(reference) => {
                 if flow_current_class.is_some() {
+                    self.ensure_no_pending_allocation(instruction_index)?;
                     let (owner, ty) = self.flow_field_type(instruction_index, reference, pool)?;
                     validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
                     self.pop_expected(instruction_index, ValueKind::Int)?;
@@ -903,6 +963,7 @@ impl Frame {
             }
             Instruction::InvokeVirtual(reference) => {
                 if flow_current_class.is_some() {
+                    self.ensure_no_pending_allocation(instruction_index)?;
                     let (owner, name, descriptor) =
                         self.virtual_method(instruction_index, reference, pool)?;
                     validate_flow_virtual_signature(
@@ -918,23 +979,58 @@ impl Frame {
                 }
             }
             Instruction::InvokeSpecial(reference) => {
-                let descriptor = self.method_descriptor(instruction_index, reference, pool)?;
-                self.invoke(instruction_index, &descriptor, true)?;
+                if flow_current_class.is_some() {
+                    let (owner, name, descriptor) =
+                        self.special_method(instruction_index, reference, pool)?;
+                    self.invoke_constructor_flow(
+                        instruction_index,
+                        reference.index().get(),
+                        &owner,
+                        name,
+                        &descriptor,
+                    )?;
+                } else {
+                    let descriptor = self.method_descriptor(instruction_index, reference, pool)?;
+                    self.invoke(instruction_index, &descriptor, true)?;
+                }
             }
             Instruction::New(reference) => {
-                self.validate_class(instruction_index, reference, pool)?;
-                self.push(instruction_index, ValueKind::Reference)?;
+                if flow_current_class.is_some() {
+                    if let Some(allocation) = &self.pending_allocation {
+                        return Err(AnalysisError::UninitializedReferenceUse {
+                            instruction: instruction_index,
+                            allocation_site: allocation.site,
+                        });
+                    }
+                    let class = self.allocation_class(instruction_index, reference, pool)?;
+                    self.pending_allocation = Some(UninitializedAllocation {
+                        site: instruction_index,
+                        class: class.clone(),
+                    });
+                    self.push_typed(instruction_index, ValueKind::Reference, Some(class))?;
+                    *self
+                        .stack_allocation_sites
+                        .last_mut()
+                        .expect("push_typed adds an allocation-site slot") =
+                        Some(instruction_index);
+                } else {
+                    self.validate_class(instruction_index, reference, pool)?;
+                    self.push(instruction_index, ValueKind::Reference)?;
+                }
             }
             Instruction::Return => {
+                self.ensure_no_pending_allocation(instruction_index)?;
                 self.check_return(instruction_index, None, method_descriptor)?;
                 self.ensure_empty_stack(instruction_index)?;
             }
             Instruction::IReturn => {
+                self.ensure_no_pending_allocation(instruction_index)?;
                 self.check_return(instruction_index, Some(ValueKind::Int), method_descriptor)?;
                 self.pop_expected(instruction_index, ValueKind::Int)?;
                 self.ensure_empty_stack(instruction_index)?;
             }
             Instruction::AReturn => {
+                self.ensure_no_pending_allocation(instruction_index)?;
                 self.check_return(
                     instruction_index,
                     Some(ValueKind::Reference),
@@ -944,6 +1040,7 @@ impl Frame {
                 self.ensure_empty_stack(instruction_index)?;
             }
             Instruction::LReturn => {
+                self.ensure_no_pending_allocation(instruction_index)?;
                 self.check_return(instruction_index, Some(ValueKind::Long), method_descriptor)?;
                 self.pop_expected(instruction_index, ValueKind::Long)?;
                 self.ensure_empty_stack(instruction_index)?;
@@ -981,6 +1078,7 @@ impl Frame {
         }
         self.stack.push(value);
         self.stack_classes.push(class);
+        self.stack_allocation_sites.push(None);
         self.stack_slots = slots;
         self.max_stack = self.max_stack.max(slots);
         Ok(())
@@ -999,6 +1097,12 @@ impl Frame {
         instruction: usize,
         expected: ValueKind,
     ) -> Result<(ValueKind, Option<ClassIdentity>), AnalysisError> {
+        if let Some(site) = self.stack_allocation_sites.last().copied().flatten() {
+            return Err(AnalysisError::UninitializedReferenceUse {
+                instruction,
+                allocation_site: site,
+            });
+        }
         let available = self.stack.len();
         let actual = self.stack.pop().ok_or(AnalysisError::StackUnderflow {
             instruction,
@@ -1006,6 +1110,7 @@ impl Frame {
             available,
         })?;
         let class = self.stack_classes.pop().flatten();
+        self.stack_allocation_sites.pop();
         self.stack_slots -= actual.slots();
         if actual != expected {
             return Err(AnalysisError::StackTypeMismatch {
@@ -1460,6 +1565,167 @@ impl Frame {
         Ok((ClassIdentity(Arc::from(owner)), name, descriptor))
     }
 
+    fn special_method<'a>(
+        &self,
+        instruction: usize,
+        reference: SpecialMethodReference,
+        pool: &'a ConstantPool,
+    ) -> Result<(ClassIdentity, &'a str, MethodDescriptor), AnalysisError> {
+        let index = reference.index().get();
+        let entry = pool
+            .get(index)
+            .ok_or(AnalysisError::InvalidConstantPoolOperand {
+                instruction,
+                index,
+                expected: ConstantPoolOperandKind::StaticOrSpecialMethodReference,
+            })?;
+        let (class_index, name_and_type_index) = match entry {
+            ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            } => (*class_index, *name_and_type_index),
+            _ => {
+                return Err(AnalysisError::InvalidConstantPoolOperand {
+                    instruction,
+                    index,
+                    expected: ConstantPoolOperandKind::StaticOrSpecialMethodReference,
+                });
+            }
+        };
+        let owner = pool
+            .class_name(class_index)
+            .map_err(|error| AnalysisError::InvalidConstantPoolReference { instruction, error })?;
+        if !is_valid_internal_name(owner) {
+            return Err(AnalysisError::InvalidClassName { index: class_index });
+        }
+        let (name, raw_descriptor) = pool
+            .name_and_type(name_and_type_index)
+            .map_err(|error| AnalysisError::InvalidConstantPoolReference { instruction, error })?;
+        let descriptor = MethodDescriptor::parse(raw_descriptor).map_err(|error| {
+            AnalysisError::InvalidReferencedMethodDescriptor {
+                instruction,
+                index,
+                error,
+            }
+        })?;
+        Ok((ClassIdentity(Arc::from(owner)), name, descriptor))
+    }
+
+    fn allocation_class(
+        &self,
+        instruction: usize,
+        reference: ClassReference,
+        pool: &ConstantPool,
+    ) -> Result<ClassIdentity, AnalysisError> {
+        let index = reference.index().get();
+        let name =
+            pool.class_name(index)
+                .map_err(|_| AnalysisError::InvalidConstantPoolOperand {
+                    instruction,
+                    index,
+                    expected: ConstantPoolOperandKind::Class,
+                })?;
+        if !is_valid_internal_name(name) {
+            return Err(AnalysisError::InvalidClassName { index });
+        }
+        Ok(ClassIdentity(Arc::from(name)))
+    }
+
+    fn invoke_constructor_flow(
+        &mut self,
+        instruction: usize,
+        index: ConstantPoolIndex,
+        owner: &ClassIdentity,
+        name: &str,
+        descriptor: &MethodDescriptor,
+    ) -> Result<(), AnalysisError> {
+        if name != "<init>" {
+            return Err(AnalysisError::InvalidReferencedMethodName { instruction, index });
+        }
+        if let Some(actual) = descriptor.return_type.as_ref() {
+            return Err(AnalysisError::UnsupportedFlowMethodReturn {
+                instruction,
+                actual: actual.clone(),
+            });
+        }
+        check_parameter_slots(descriptor, true, Some(instruction))?;
+        for (parameter, ty) in descriptor.parameters.iter().enumerate() {
+            if !matches!(ty, FieldType::Int | FieldType::Boolean) {
+                return Err(AnalysisError::UnsupportedFlowMethodParameter {
+                    instruction,
+                    parameter,
+                    actual: ty.clone(),
+                });
+            }
+        }
+        for _ in descriptor.parameters.iter().rev() {
+            self.pop_expected(instruction, ValueKind::Int)?;
+        }
+
+        let Some(actual_kind) = self.stack.last().copied() else {
+            return Err(AnalysisError::StackUnderflow {
+                instruction,
+                needed: 1,
+                available: 0,
+            });
+        };
+        if actual_kind != ValueKind::Reference {
+            return Err(AnalysisError::StackTypeMismatch {
+                instruction,
+                expected: ValueKind::Reference,
+                actual: actual_kind,
+            });
+        }
+        let Some(site) = self.stack_allocation_sites.last().copied().flatten() else {
+            return Err(AnalysisError::ConstructorReceiverNotUninitialized { instruction });
+        };
+        let Some(allocated) = self.stack_classes.last().cloned().flatten() else {
+            return Err(AnalysisError::ConstructorReceiverNotUninitialized { instruction });
+        };
+        if allocated != *owner {
+            return Err(AnalysisError::ConstructorOwnerMismatch {
+                instruction,
+                allocated,
+                actual: owner.clone(),
+            });
+        }
+        let matches_pending = self
+            .pending_allocation
+            .as_ref()
+            .is_some_and(|allocation| allocation.site == site && allocation.class == allocated);
+        if !matches_pending {
+            return Err(AnalysisError::ConstructorReceiverNotUninitialized { instruction });
+        }
+
+        self.stack.pop();
+        self.stack_classes.pop();
+        self.stack_allocation_sites.pop();
+        self.stack_slots -= 1;
+        self.pending_allocation = None;
+        for (class, allocation_site) in self
+            .stack_classes
+            .iter_mut()
+            .zip(&mut self.stack_allocation_sites)
+        {
+            if *allocation_site == Some(site) {
+                *allocation_site = None;
+                *class = Some(allocated.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn ensure_no_pending_allocation(&self, instruction: usize) -> Result<(), AnalysisError> {
+        if let Some(allocation) = &self.pending_allocation {
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction,
+                allocation_site: allocation.site,
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     fn invoke_virtual_flow(
         &mut self,
         instruction: usize,
@@ -1700,7 +1966,8 @@ impl FlowAnalysis {
 }
 
 /// Fixed-point stack and local analysis for integer CFGs with exact
-/// initialized receiver references and bounded primitive virtual calls.
+/// initialized receiver references, bounded primitive virtual calls, and
+/// in-block allocation-site initialization.
 pub struct CfgCodeAnalyzer;
 
 impl CfgCodeAnalyzer {
@@ -1763,9 +2030,12 @@ impl CfgCodeAnalyzer {
     /// placeholder behavior. This context enables exact initialized-reference
     /// moves, `dup`/`pop`, `getfield`/`putfield` for `int` and `boolean` fields,
     /// and `invokevirtual` methods with `int`/`boolean` parameters and
-    /// `int`/`boolean`/`void` results. Field and method owners must match the
-    /// exact receiver. Object creation, other invocation kinds, and reference
-    /// field or method types remain unsupported.
+    /// `int`/`boolean`/`void` results. It also supports in-block `new; dup;
+    /// primitive arguments; invokespecial <init>` with an exact allocation
+    /// class and owner match. Uninitialized values may not escape to locals,
+    /// ordinary operations, branches, or block boundaries. Field and method
+    /// owners must match the exact receiver. Other invocation kinds and
+    /// reference field or method types remain unsupported.
     pub fn analyze_with_current_class(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -1954,6 +2224,7 @@ impl CfgCodeAnalyzer {
                     )?,
                     CodeElement::Branch(branch) => {
                         apply_branch(&mut frame, instruction_index, branch)?;
+                        frame.ensure_no_pending_allocation(instruction_index)?;
                     }
                     CodeElement::Label(_) => {
                         return Err(AnalysisError::UnsupportedFlowInstruction {
@@ -1963,6 +2234,7 @@ impl CfgCodeAnalyzer {
                     }
                 }
             }
+            frame.ensure_no_pending_allocation(block.instruction_range.end.saturating_sub(1))?;
             max_stack = max_stack.max(frame.max_stack);
             let outgoing = state_from_frame(&frame)?;
 
@@ -2059,6 +2331,8 @@ fn validate_flow_instruction_with_context(
                 | Instruction::GetField(_)
                 | Instruction::PutField(_)
                 | Instruction::InvokeVirtual(_)
+                | Instruction::InvokeSpecial(_)
+                | Instruction::New(_)
         ));
     if supported {
         return Ok(());
@@ -2236,7 +2510,9 @@ fn frame_from_state(state: &BlockEntryState) -> Frame {
     Frame {
         stack,
         stack_classes,
+        stack_allocation_sites: vec![None; stack_slots],
         stack_slots,
+        pending_allocation: None,
         locals,
         max_stack: stack_slots,
     }
@@ -3655,6 +3931,493 @@ mod tests {
         .unwrap();
         assert_eq!(analysis.max_stack, 2);
         assert_eq!(analysis.max_locals, 0);
+    }
+
+    #[test]
+    fn cfg_initializes_all_aliases_for_zero_one_and_multiple_primitive_arguments() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class = builder.class("example/Counter").unwrap();
+        let no_args = builder
+            .method_ref("example/Counter", "<init>", "()V")
+            .unwrap();
+        let one_arg = builder
+            .method_ref("example/Counter", "<init>", "(I)V")
+            .unwrap();
+        let many_args = builder
+            .method_ref("example/Counter", "<init>", "(IZI)V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+        let class_identity = class_identity("example/Counter");
+
+        for (constructor, arguments, expected_max_stack) in
+            [(no_args, 0, 2), (one_arg, 1, 3), (many_args, 3, 5)]
+        {
+            let mut sequence = CodeSequence::new();
+            let after = sequence.new_label().unwrap();
+            sequence
+                .instruction(Instruction::New(ClassReference::new(operand(class))))
+                .instruction(Instruction::Dup);
+            for _ in 0..arguments {
+                sequence.instruction(Instruction::IConst(SmallIntConstant::One));
+            }
+            sequence
+                .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                    operand(constructor),
+                )))
+                .instruction(Instruction::AStore(LocalIndex::new(2)))
+                .branch(BranchInstruction::Goto(after.clone()))
+                .bind(after.clone())
+                .unwrap()
+                .instruction(Instruction::Return);
+            let graph = ControlFlowGraph::build(&sequence).unwrap();
+            let flow = CfgCodeAnalyzer::analyze_with_current_class(
+                &graph,
+                "createCounter",
+                "()V",
+                false,
+                &pool,
+                class,
+            )
+            .unwrap();
+
+            let initialized = flow
+                .entry_state(graph.block_for_label(&after).unwrap())
+                .unwrap();
+            assert_eq!(
+                initialized.locals[2],
+                FlowLocalState::Object(class_identity.clone())
+            );
+            assert!(initialized.operand_stack.is_empty());
+            assert_eq!(flow.max_stack, expected_max_stack);
+            assert_eq!(flow.max_locals, 3);
+        }
+    }
+
+    #[test]
+    fn cfg_rewrites_every_surviving_duplicate_after_constructor_call() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class = builder.class("example/Counter").unwrap();
+        let constructor = builder
+            .method_ref("example/Counter", "<init>", "()V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        let after = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .branch(BranchInstruction::Goto(after.clone()))
+            .bind(after.clone())
+            .unwrap()
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "createCounter",
+            "()V",
+            false,
+            &pool,
+            class,
+        )
+        .unwrap();
+
+        assert_eq!(
+            flow.entry_state(graph.block_for_label(&after).unwrap())
+                .unwrap()
+                .operand_stack,
+            [
+                FlowValue::Object(class_identity("example/Counter")),
+                FlowValue::Object(class_identity("example/Counter")),
+            ]
+        );
+        assert_eq!(flow.max_stack, 3);
+    }
+
+    #[test]
+    fn cfg_allows_distinct_initialized_allocations_to_join_and_reinitialize_in_loops() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class = builder.class("example/Counter").unwrap();
+        let constructor = builder
+            .method_ref("example/Counter", "<init>", "(I)V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut branches = CodeSequence::new();
+        let otherwise = branches.new_label().unwrap();
+        let join = branches.new_label().unwrap();
+        branches
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .branch(BranchInstruction::IfEq(otherwise.clone()))
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::Bipush(10))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::AStore(LocalIndex::new(2)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(otherwise)
+            .unwrap()
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::Bipush(20))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::AStore(LocalIndex::new(2)))
+            .bind(join.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&branches).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "createOnEitherPath",
+            "(Z)V",
+            false,
+            &pool,
+            class,
+        )
+        .unwrap();
+        assert_eq!(
+            flow.entry_state(graph.block_for_label(&join).unwrap())
+                .unwrap()
+                .locals[2],
+            FlowLocalState::Object(class_identity("example/Counter"))
+        );
+        assert_eq!(flow.max_stack, 3);
+
+        let mut loop_code = CodeSequence::new();
+        let loop_head = loop_code.new_label().unwrap();
+        let exit = loop_code.new_label().unwrap();
+        loop_code
+            .bind(loop_head.clone())
+            .unwrap()
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::AStore(LocalIndex::new(2)))
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .branch(BranchInstruction::IfEq(exit.clone()))
+            .branch(BranchInstruction::Goto(loop_head.clone()))
+            .bind(exit)
+            .unwrap()
+            .instruction(Instruction::Return);
+        let loop_graph = ControlFlowGraph::build(&loop_code).unwrap();
+        let loop_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &loop_graph,
+            "createEachIteration",
+            "(I)V",
+            false,
+            &pool,
+            class,
+        )
+        .unwrap();
+        assert_eq!(loop_flow.max_stack, 3);
+        assert_eq!(
+            loop_flow
+                .entry_state(loop_graph.block_for_label(&loop_head).unwrap())
+                .unwrap()
+                .locals[2],
+            FlowLocalState::Top
+        );
+    }
+
+    #[test]
+    fn cfg_rejects_uninitialized_reference_escapes_and_invalid_constructor_calls() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class = builder.class("example/Counter").unwrap();
+        let other_constructor = builder
+            .method_ref("example/Other", "<init>", "()V")
+            .unwrap();
+        let constructor = builder
+            .method_ref("example/Counter", "<init>", "()V")
+            .unwrap();
+        let bad_name = builder
+            .method_ref("example/Counter", "<clinit>", "()V")
+            .unwrap();
+        let field = builder.field_ref("example/Counter", "value", "I").unwrap();
+        let pool = builder.finish().unwrap();
+
+        let analyze_sequence = |sequence: &CodeSequence| {
+            let graph = ControlFlowGraph::build(sequence).unwrap();
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &graph,
+                "createCounter",
+                "()V",
+                false,
+                &pool,
+                class,
+            )
+        };
+
+        let mut store = CodeSequence::new();
+        store
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::AStore(LocalIndex::new(2)))
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&store),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 1,
+                allocation_site: 0,
+            })
+        );
+
+        let mut branch = CodeSequence::new();
+        let target = branch.new_label().unwrap();
+        branch
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .branch(BranchInstruction::Goto(target.clone()))
+            .bind(target)
+            .unwrap()
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&branch),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 2,
+                allocation_site: 0,
+            })
+        );
+
+        let mut wrong_owner = CodeSequence::new();
+        wrong_owner
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(other_constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&wrong_owner),
+            Err(AnalysisError::ConstructorOwnerMismatch {
+                instruction: 2,
+                allocated: class_identity("example/Counter"),
+                actual: class_identity("example/Other"),
+            })
+        );
+
+        let mut field_read = CodeSequence::new();
+        field_read
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::GetField(FieldReference::new(operand(field))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&field_read),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 2,
+                allocation_site: 0,
+            })
+        );
+
+        let mut double_init = CodeSequence::new();
+        double_init
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&double_init),
+            Err(AnalysisError::ConstructorReceiverNotUninitialized { instruction: 3 })
+        );
+
+        let mut bad_name_code = CodeSequence::new();
+        bad_name_code
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(bad_name),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert!(matches!(
+            analyze_sequence(&bad_name_code),
+            Err(AnalysisError::InvalidReferencedMethodName { instruction: 2, .. })
+        ));
+
+        let mut missing_init = CodeSequence::new();
+        missing_init
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&missing_init),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 3,
+                allocation_site: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn cfg_validates_constructor_descriptor_and_rejects_nested_allocations() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class = builder.class("example/Counter").unwrap();
+        let int_constructor = builder
+            .method_ref("example/Counter", "<init>", "(I)V")
+            .unwrap();
+        let void_constructor = builder
+            .method_ref("example/Counter", "<init>", "()V")
+            .unwrap();
+        let reference_constructor = builder
+            .method_ref("example/Counter", "<init>", "(Ljava/lang/Object;)V")
+            .unwrap();
+        let returning_constructor = builder
+            .method_ref("example/Counter", "<init>", "()I")
+            .unwrap();
+        let malformed_constructor = builder
+            .method_ref("example/Counter", "<init>", "not-a-method")
+            .unwrap();
+        let interface_constructor = builder
+            .interface_method_ref("example/Counter", "<init>", "()V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let analyze_sequence = |sequence: &CodeSequence| {
+            let graph = ControlFlowGraph::build(sequence).unwrap();
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &graph,
+                "createCounter",
+                "()V",
+                false,
+                &pool,
+                class,
+            )
+        };
+
+        let mut wrong_arity = CodeSequence::new();
+        wrong_arity
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(int_constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&wrong_arity),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 2,
+                allocation_site: 0,
+            })
+        );
+
+        let mut wrong_category = CodeSequence::new();
+        wrong_category
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(void_constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&wrong_category),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 3,
+                expected: ValueKind::Reference,
+                actual: ValueKind::Int,
+            })
+        );
+
+        for (constructor, expected) in [
+            (
+                reference_constructor,
+                AnalysisError::UnsupportedFlowMethodParameter {
+                    instruction: 2,
+                    parameter: 0,
+                    actual: FieldType::Object("java/lang/Object".to_owned()),
+                },
+            ),
+            (
+                returning_constructor,
+                AnalysisError::UnsupportedFlowMethodReturn {
+                    instruction: 2,
+                    actual: FieldType::Int,
+                },
+            ),
+        ] {
+            let mut sequence = CodeSequence::new();
+            sequence
+                .instruction(Instruction::New(ClassReference::new(operand(class))))
+                .instruction(Instruction::Dup)
+                .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                    operand(constructor),
+                )))
+                .instruction(Instruction::Pop)
+                .instruction(Instruction::Return);
+            assert_eq!(analyze_sequence(&sequence), Err(expected));
+        }
+
+        let mut malformed = CodeSequence::new();
+        malformed
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(malformed_constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert!(matches!(
+            analyze_sequence(&malformed),
+            Err(AnalysisError::InvalidReferencedMethodDescriptor { instruction: 2, .. })
+        ));
+
+        let mut interface_reference = CodeSequence::new();
+        interface_reference
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(interface_constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert!(matches!(
+            analyze_sequence(&interface_reference),
+            Err(AnalysisError::InvalidConstantPoolOperand { instruction: 2, .. })
+        ));
+
+        let mut nested = CodeSequence::new();
+        nested
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&nested),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 2,
+                allocation_site: 0,
+            })
+        );
     }
 
     #[test]
