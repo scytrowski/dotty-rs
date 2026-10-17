@@ -468,6 +468,24 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             Ok(())
         })
         .expect("typed factory construction succeeds");
+    caller
+        .add_static_method("branchBox", "(I)V", |code| {
+            let target = code.new_label()?;
+            code.new_object("Box")?;
+            code.dup()?;
+            code.iconst(42)?;
+            code.invokespecial("Box", "<init>", "(I)V")?;
+            code.astore(1)?;
+            code.iload(0)?;
+            code.ifeq(target.clone())?;
+            code.return_void()?;
+            code.mark(target)?;
+            code.aload(1)?;
+            code.pop()?;
+            code.return_void()?;
+            Ok(())
+        })
+        .expect("branched reference-local construction succeeds");
     let caller_bytes = caller
         .encode()
         .expect("Caller is generated through the typed builder");
@@ -592,7 +610,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let caller = decode_and_validate(&caller_bytes);
     assert_eq!(caller.version, version);
     assert_eq!(caller.access_flags.0, ACC_PUBLIC | ACC_SUPER);
-    assert_eq!(caller.methods.len(), 2);
+    assert_eq!(caller.methods.len(), 3);
     let answer = &caller.methods[0];
     assert_eq!(caller.constant_pool.utf8(answer.name_index), Ok("answer"));
     assert_eq!(
@@ -645,6 +663,38 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     assert!(factory_code.exception_table.is_empty());
     assert!(factory_code.attributes.is_empty());
 
+    let branch_factory = &caller.methods[2];
+    assert_eq!(
+        caller.constant_pool.utf8(branch_factory.name_index),
+        Ok("branchBox")
+    );
+    let branch_factory_code = code(branch_factory);
+    assert_eq!(
+        (
+            branch_factory_code.max_stack,
+            branch_factory_code.max_locals
+        ),
+        (3, 2)
+    );
+    assert_eq!(
+        assert_stack_map_targets(&caller, branch_factory, 1).len(),
+        1
+    );
+    let [Attribute::Other(branch_stack_map)] = branch_factory_code.attributes.as_slice() else {
+        panic!("expected StackMapTable on branched reference factory");
+    };
+    let frame = branch_stack_map.bytes;
+    assert_eq!(&frame[..2], &[0, 1]);
+    assert_eq!(frame[2], 255);
+    assert_eq!(&frame[5..7], &[0, 2]); // int parameter and Box local
+    assert_eq!(frame[7], 1);
+    assert_eq!(frame[8], 7);
+    let box_class = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+        frame[9], frame[10],
+    ]));
+    assert_eq!(caller.constant_pool.class_name(box_class), Ok("Box"));
+    assert_eq!(&frame[11..13], &[0, 0]); // empty operand stack
+
     if !require_jdk_or_skip() {
         return;
     }
@@ -652,7 +702,43 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let harness_path = directory.path().join("GeneratedClassesHarness.java");
     fs::write(
         &harness_path,
-        "public final class GeneratedClassesHarness {\n    public static void main(String[] args) {\n        int calculator = Calculator.add(20, 22);\n        if (calculator != 42) throw new AssertionError(\"Calculator.add: \" + calculator);\n        Calculator.discard();\n        int maxForward = Calculator.max(20, 22);\n        int maxReverse = Calculator.max(22, 20);\n        int maxEqual = Calculator.max(22, 22);\n        if (maxForward != 22 || maxReverse != 22 || maxEqual != 22) throw new AssertionError(\"Calculator.max: \" + maxForward + \", \" + maxReverse + \", \" + maxEqual);\n        int sumTen = Calculator.sumTo(10);\n        int sumZero = Calculator.sumTo(0);\n        int sumOne = Calculator.sumTo(1);\n        if (sumTen != 55 || sumZero != 0 || sumOne != 1) throw new AssertionError(\"Calculator.sumTo: \" + sumTen + \", \" + sumZero + \", \" + sumOne);\n        int nestedZero = Calculator.nested(0, 1);\n        int nestedLess = Calculator.nested(1, 2);\n        int nestedEqual = Calculator.nested(2, 2);\n        int nestedGreater = Calculator.nested(3, 2);\n        if (nestedZero != 100 || nestedLess != 10 || nestedEqual != 1 || nestedGreater != 0) throw new AssertionError(\"Calculator.nested: \" + nestedZero + \", \" + nestedLess + \", \" + nestedEqual + \", \" + nestedGreater);\n        int boxed = new Box(42).get();\n        if (boxed != 42) throw new AssertionError(\"Box.get: \" + boxed);\n        int caller = Caller.answer();\n        if (caller != 42) throw new AssertionError(\"Caller.answer: \" + caller);\n        int generated = Caller.makeBox(42).get();\n        if (generated != 42) throw new AssertionError(\"Caller.makeBox: \" + generated);\n        System.out.println(\"Calculator.add=\" + calculator);\n        System.out.println(\"Calculator.max=\" + maxForward + \",\" + maxReverse + \",\" + maxEqual);\n        System.out.println(\"Calculator.sumTo=\" + sumTen + \",\" + sumZero + \",\" + sumOne);\n        System.out.println(\"Calculator.nested=\" + nestedZero + \",\" + nestedLess + \",\" + nestedEqual + \",\" + nestedGreater);\n        System.out.println(\"Box.get=\" + boxed);\n        System.out.println(\"Caller.answer=\" + caller);\n        System.out.println(\"Caller.makeBox=\" + generated);\n    }\n}\n",
+        r#"public final class GeneratedClassesHarness {
+    public static void main(String[] args) {
+        int calculator = Calculator.add(20, 22);
+        if (calculator != 42) throw new AssertionError("Calculator.add: " + calculator);
+        Calculator.discard();
+        int maxForward = Calculator.max(20, 22);
+        int maxReverse = Calculator.max(22, 20);
+        int maxEqual = Calculator.max(22, 22);
+        if (maxForward != 22 || maxReverse != 22 || maxEqual != 22) throw new AssertionError("Calculator.max: " + maxForward + ", " + maxReverse + ", " + maxEqual);
+        int sumTen = Calculator.sumTo(10);
+        int sumZero = Calculator.sumTo(0);
+        int sumOne = Calculator.sumTo(1);
+        if (sumTen != 55 || sumZero != 0 || sumOne != 1) throw new AssertionError("Calculator.sumTo: " + sumTen + ", " + sumZero + ", " + sumOne);
+        int nestedZero = Calculator.nested(0, 1);
+        int nestedLess = Calculator.nested(1, 2);
+        int nestedEqual = Calculator.nested(2, 2);
+        int nestedGreater = Calculator.nested(3, 2);
+        if (nestedZero != 100 || nestedLess != 10 || nestedEqual != 1 || nestedGreater != 0) throw new AssertionError("Calculator.nested: " + nestedZero + ", " + nestedLess + ", " + nestedEqual + ", " + nestedGreater);
+        int boxed = new Box(42).get();
+        if (boxed != 42) throw new AssertionError("Box.get: " + boxed);
+        int caller = Caller.answer();
+        if (caller != 42) throw new AssertionError("Caller.answer: " + caller);
+        int generated = Caller.makeBox(42).get();
+        if (generated != 42) throw new AssertionError("Caller.makeBox: " + generated);
+        Caller.branchBox(0);
+        Caller.branchBox(1);
+        System.out.println("Calculator.add=" + calculator);
+        System.out.println("Calculator.max=" + maxForward + "," + maxReverse + "," + maxEqual);
+        System.out.println("Calculator.sumTo=" + sumTen + "," + sumZero + "," + sumOne);
+        System.out.println("Calculator.nested=" + nestedZero + "," + nestedLess + "," + nestedEqual + "," + nestedGreater);
+        System.out.println("Box.get=" + boxed);
+        System.out.println("Caller.answer=" + caller);
+        System.out.println("Caller.makeBox=" + generated);
+        System.out.println("Caller.branchBox=ok");
+    }
+}
+"#
     )
     .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
 
@@ -692,6 +778,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             &[
                 "public static int answer();",
                 "public static Box makeBox(int);",
+                "public static void branchBox(int);",
                 "invokestatic",
                 "stack=2, locals=0",
                 "bipush        20",
@@ -700,6 +787,9 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 "dup",
                 "invokespecial",
                 "stack=3, locals=1",
+                "StackMapTable: number_of_entries = 1",
+                "class Box",
+                "locals = [ int, class Box ]",
             ][..],
         ),
     ] {
@@ -767,7 +857,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     );
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
-        "Calculator.add=42\nCalculator.max=22,22,22\nCalculator.sumTo=55,0,1\nCalculator.nested=100,10,1,0\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42"
+        "Calculator.add=42\nCalculator.max=22,22,22\nCalculator.sumTo=55,0,1\nCalculator.nested=100,10,1,0\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42\nCaller.branchBox=ok"
     );
 }
 
