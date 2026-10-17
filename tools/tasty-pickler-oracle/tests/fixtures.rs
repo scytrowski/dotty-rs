@@ -33,6 +33,7 @@ fn independent_fixtures_match_normalized_snapshots() {
         "example/References",
         "example/Operations",
         "example/Multi",
+        "example/ParameterDecl",
     ] {
         let expected: Value = serde_json::from_slice(
             &fs::read(
@@ -113,6 +114,39 @@ fn parameter_order_and_owners_are_independent_of_names_and_empty_clauses() {
         .find(|n| n["tag"] == "TERMREFdirect")
         .unwrap();
     assert_eq!(parameter_ref["reference"]["target"], parameters[1]["id"]);
+}
+
+#[test]
+fn parameter_decl_pins_literal_rhs_and_ordered_int_parameter_trees() {
+    let snapshot = inspect(&fixture("example/ParameterDecl"), false).unwrap();
+    let method = named(&snapshot, "constant");
+    let parameters = nodes(&snapshot)
+        .iter()
+        .filter(|node| node["tag"] == "PARAM")
+        .collect::<Vec<_>>();
+    assert_eq!(parameters.len(), 2);
+    assert_eq!(
+        parameters
+            .iter()
+            .map(|parameter| parameter["name"]["utf8"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert!(
+        parameters
+            .iter()
+            .all(|parameter| parameter["owner"] == method["id"])
+    );
+    assert!(parameters.iter().all(|parameter| {
+        nodes(&snapshot).iter().any(|node| {
+            node["id"] == parameter["children"][0]
+                && node["tag"] == "IDENTtpt"
+                && node["name"] == json!({"utf8":"Int"})
+        })
+    }));
+    assert!(nodes(&snapshot).iter().any(|node| {
+        node["tag"] == "INTconst" && node["parent"] == method["id"] && node["value"] == 42
+    }));
 }
 
 #[test]

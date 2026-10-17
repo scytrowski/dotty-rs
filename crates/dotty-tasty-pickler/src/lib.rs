@@ -2,7 +2,7 @@
 //!
 //! This increment validates a public, ordinary top-level class in one explicit
 //! package, its default constructor and one or more Int-literal methods with no
-//! value clause or one explicit empty ordinary clause.
+//! value clause, one explicit empty clause, or one plain Int-parameter clause.
 //! [`EncodingContext`] projects names, types and canonical references into owned
 //! wire fragments. [`ValidatedPicklePlan::declaration_skeleton`] assembles a
 //! structurally validated, explicitly incomplete declaration document.

@@ -208,13 +208,37 @@ impl ValidatedPicklePlan<'_, '_> {
         let mut bodies = Vec::new();
         for method in p.methods {
             let name = context.intern_name(symbol(self, method.symbol)?.name)?;
-            let result = context.int_type_syntax()?;
             // Preserve the source distinction: no clause has no marker; one
             // explicit empty clause has EMPTYCLAUSE before the result type.
             let mut fields = vec![AstField::Nat(name)];
             if method.parameter_clauses.len() == 1 {
-                fields.push(AstField::Tree(marker(&mut context, EMPTYCLAUSE_TAG)?));
+                let parameters = &method.parameter_clauses[0];
+                if parameters.is_empty() {
+                    fields.push(AstField::Tree(marker(&mut context, EMPTYCLAUSE_TAG)?));
+                } else {
+                    for &parameter in parameters {
+                        let parameter_name = context.intern_name(symbol(self, parameter)?.name)?;
+                        let parameter_type = context.int_type_syntax()?;
+                        context.bind_declaration(
+                            parameter,
+                            AstNode::Length {
+                                tag: PARAM_TAG,
+                                fields: vec![
+                                    AstField::Nat(parameter_name),
+                                    AstField::Tree(parameter_type),
+                                ],
+                            },
+                        )?;
+                        fields.push(AstField::Tree(context.declaration_label(parameter).ok_or(
+                            PickleError::Reference {
+                                symbol: parameter,
+                                reason: ReferenceError::NotRegistered,
+                            },
+                        )?));
+                    }
+                }
             }
+            let result = context.int_type_syntax()?;
             // No invented METHODtype payload, abstract modifier or substitute
             // for the method's real RHS.
             fields.push(AstField::Tree(result));
@@ -285,6 +309,11 @@ impl ValidatedPicklePlan<'_, '_> {
         for id in std::iter::once(p.class)
             .chain(std::iter::once(p.constructor.symbol))
             .chain(p.methods.iter().map(|m| m.symbol))
+            .chain(
+                p.methods
+                    .iter()
+                    .flat_map(|method| method.parameter_clauses.iter().flatten().copied()),
+            )
         {
             let label = context
                 .declaration_label(id)

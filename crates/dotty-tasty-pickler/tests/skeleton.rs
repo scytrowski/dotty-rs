@@ -11,6 +11,70 @@ fn emit(f: &Fixture) -> Result<DeclarationSkeleton, PickleError> {
     f.plan().validate()?.declaration_skeleton()
 }
 
+fn add_int_parameters(f: &mut Fixture) -> [dotty_core::SymbolId; 2] {
+    let method = f.methods[0].symbol;
+    let tree = f.methods[0].source_tree;
+    let TreeKind::DefDef(definition) = &f.source_ast.get(tree).kind else {
+        panic!()
+    };
+    let tpt = definition.tpt;
+    let mut symbols = Vec::new();
+    let mut trees = Vec::new();
+    for text in ["first", "second"] {
+        let name = dotty_core::TermName::new(f.store.names.intern(text));
+        let symbol = crate::support::source_symbol(
+            &mut f.store,
+            *name.as_name(),
+            SymbolKind::Parameter,
+            method,
+            f.source,
+            SymbolInfo::Complete(f.definitions.int),
+        );
+        let parameter = crate::support::node(
+            &mut f.source_ast,
+            TreeKind::ValDef(dotty_core::ast::ValDef {
+                name,
+                tpt,
+                rhs: None,
+                metadata: Default::default(),
+            }),
+        );
+        f.index.record_symbol(f.source, parameter, symbol).unwrap();
+        symbols.push(symbol);
+        trees.push(parameter);
+    }
+    let scope = f.store.scopes.alloc(dotty_core::Scope::new(Some(method)));
+    for &symbol in &symbols {
+        f.store
+            .scopes
+            .get_mut(scope)
+            .enter(f.store.symbols.get(symbol).name, symbol);
+    }
+    f.index.record_scope(method, scope).unwrap();
+    let TreeKind::DefDef(definition) = &mut f.source_ast.get_mut(tree).kind else {
+        panic!()
+    };
+    definition.value_param_clauses = vec![trees];
+    f.methods[0].parameter_clauses = vec![symbols.clone()];
+    let signature = f.store.types.alloc(Type::Method(dotty_core::MethodType {
+        params: symbols
+            .iter()
+            .map(|&symbol| dotty_core::MethodParam {
+                name: dotty_core::TermName::new(f.store.symbols.get(symbol).name.text()),
+                ty: f.definitions.int,
+                erased: false,
+                varargs: false,
+            })
+            .collect(),
+        result: f.definitions.int,
+        kind: dotty_core::MethodKind::Plain,
+    }));
+    f.store
+        .symbols
+        .set_info(method, SymbolInfo::Complete(signature));
+    [symbols[0], symbols[1]]
+}
+
 #[test]
 fn canonical_declarations_have_bound_addresses_and_explicitly_omitted_bodies() {
     let f = Fixture::new();
@@ -80,6 +144,61 @@ fn canonical_declarations_have_bound_addresses_and_explicitly_omitted_bodies() {
         }
     ));
     assert_eq!(f.snapshot(), before);
+}
+
+#[test]
+fn ordinary_int_parameters_are_bound_ordered_declarations_owned_by_the_method() {
+    let mut f = Fixture::new();
+    let parameters = add_int_parameters(&mut f);
+    let output = emit(&f).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.provisional_bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let method = output
+        .declarations()
+        .iter()
+        .find(|declaration| declaration.symbol == f.methods[0].symbol)
+        .unwrap();
+    let definition = index
+        .get(method.address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    assert_eq!(definition.clauses, []);
+    assert_eq!(definition.parameters.len(), 2);
+    assert_eq!(
+        definition
+            .parameters
+            .iter()
+            .map(|parameter| file.render_name(parameter.name()).unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+
+    for (parameter, expected_name) in parameters.iter().zip(["first", "second"]) {
+        let declaration = output
+            .declarations()
+            .iter()
+            .find(|declaration| declaration.symbol == *parameter)
+            .unwrap();
+        assert_eq!(declaration.owner, f.methods[0].symbol);
+        let raw = index.get_node(declaration.address).unwrap();
+        assert_eq!(raw.tag, PARAM_TAG);
+        let node = index
+            .get(declaration.address)
+            .unwrap()
+            .decode_parameter()
+            .unwrap();
+        assert_eq!(file.render_name(node.name()).unwrap(), expected_name);
+        let body = node.decode_body().unwrap();
+        assert!(matches!(
+            body.type_tree,
+            RawTree::NatAst {
+                tag: IDENTTPT_TAG,
+                ..
+            }
+        ));
+        assert!(body.tail.is_empty());
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

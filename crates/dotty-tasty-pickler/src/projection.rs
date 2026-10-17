@@ -132,6 +132,9 @@ impl<'a> EncodingContext<'a> {
         context.reserve_declaration(p.constructor.symbol)?;
         for method in p.methods {
             context.reserve_declaration(method.symbol)?;
+            for parameter in method.parameter_clauses.iter().flatten() {
+                context.reserve_declaration(*parameter)?;
+            }
         }
         Ok(context)
     }

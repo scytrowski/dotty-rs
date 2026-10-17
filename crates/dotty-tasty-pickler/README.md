@@ -12,10 +12,12 @@ owned; declarations carry explicitly ordered canonical IDs and exact body roots.
 `validate()` returns an immutable `ValidatedPicklePlan` or a structured
 `PickleError`, without allocating into compiler arenas or publishing artifacts.
 
-The first accepted shape is the oracle's ordinary public class in one explicit
-named package, implicit Object parent, default constructor and one parameterless
-method with a declared Int result and a typed Int literal. Clause boundaries are
-preserved in the input even though nonempty/empty-parens methods remain deferred.
+The accepted shape is the oracle's ordinary public class in one explicit named
+package, implicit Object parent, default constructor and one or more public
+methods with an Int result and typed Int-literal bodies. A method may have no
+value clause, one explicit empty clause, or one plain clause of ordinary Int
+parameters. Parameter IDs, ownership, source scope, types and order must agree
+across the source AST, semantic index and completed method signature.
 Source Int literals, including the parser's raw decimal, hexadecimal and binary
 whole-number nodes, must agree with the typed value. Raw spellings are checked
 against the name-byte limit before decoding; malformed whole numbers and
@@ -94,13 +96,12 @@ parent and the frozen oracle's `APPLY/SELECTin/NEW` shape. The default construct
 has EMPTYCLAUSE, direct Unit return syntax, no RHS and its provenance-required
 STABLE marker. Its semantic signature still returns the class. Ordinary methods
 are emitted in exact source order. A parameterless method has an Int IDENTtpt
-and no fabricated empty clause or METHODtype payload; one explicit empty value
-clause has EMPTYCLAUSE and requires a matching plain zero-parameter
-`Type::Method` signature. Complete output attaches each method's actual typed
-Int literal after its declared return syntax. Public visibility and empty
-modifier/annotation tails are checked from symbol records; other metadata is
-unsupported. Nonempty/multiple/contextual clauses, other bodies, and other
-class forms remain outside the validated v0 contract.
+and no fabricated empty clause or METHODtype payload; an explicit empty value
+clause has EMPTYCLAUSE; one nonempty plain Int clause emits ordered canonical
+PARAM declarations with Int type trees. Complete output attaches each method's
+actual typed Int literal after its declared return syntax. Public visibility
+and empty modifier/annotation tails are checked from symbol records; other
+metadata, parameter kinds and clause forms remain unsupported.
 
 The provisional document uses TastyFileBuilder with exact 28.9.0 version checks,
 ASTs and SOURCEFILEattr, and structural validation before returning bytes. Its
