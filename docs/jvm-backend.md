@@ -521,6 +521,25 @@ calls, same-class reference joins, and complete allocations in conditional
 arms. It checks generated `StackMapTable` attributes and exercises zero-, one-,
 and multi-iteration results with JDK `-Xverify:all`.
 
+`CounterControlFlow.scala` is the end-to-end reference-CFG fixture. Two
+independent lexer-to-backend sessions emit `Counter.class` and
+`CounterClient.class` in source order with byte-identical output. The test
+decodes both complete classfiles, checks major version 65, exact descriptors,
+field and invocation owners, and resolves every branch target to a frame. At
+the `incrementUntil` and `run` loop headers it resolves each `Object` frame
+entry through the actual constant pool and asserts the exact `Counter` and
+`CounterClient` local types. For allocations in `choose`, it checks each
+`new`/`dup`/argument/`invokespecial` sequence completes within one basic block.
+The JDK gate inspects `javap -c -v` output and runs zero-, one-, and
+multi-iteration loops, both allocation branches, and equal/over-limit starting
+values under `java -Xverify:all`.
+
+Multi-class compilation encodes every planned class in memory before staging or
+publishing output files, so semantic, codegen, and encoding failures publish no
+classes. If a filesystem write or rename fails during publication, cleanup and
+restoration of earlier files are best-effort; the batch is not an atomic OS
+filesystem transaction.
+
 `Counter.scala` runs through the same real frontend assembly with a canonical
 constructor parameter, private mutable `current:I`, and public `get`, `set`,
 and `increment` methods. `PrivateFields.scala` covers private final `I` and
