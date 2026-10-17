@@ -1,13 +1,15 @@
 //! Source semantic validation and type projection for Scala 3.9.0 TASTy.
 //!
 //! This increment validates a public, ordinary top-level class in one explicit
-//! package, its default constructor and one or more Int-literal methods with no
-//! value clause, one explicit empty clause, or one plain Int-parameter clause.
+//! package, its default constructor and Int-result methods with literals,
+//! formal references, same-class parameterless references, or bounded
+//! same-class one-Int-argument calls. Methods may have no value clause, one
+//! explicit empty clause, or one plain Int-parameter clause.
 //! [`EncodingContext`] projects names, types and canonical references into owned
 //! wire fragments. [`ValidatedPicklePlan::declaration_skeleton`] assembles a
 //! structurally validated, explicitly incomplete declaration document.
 //! [`ValidatedPicklePlan::pickle`] includes the actual typed Int RHS in an owned
-//! file. Independent Scala interoperability remains the #1195 gate.
+//! file. Independent Scala interoperability is checked by the pinned oracle.
 //! See `docs/tasty-pickler-design.md` and `docs/tasty-pickler-oracle.md`.
 //!
 //! All IDs, indices and arenas must originate in one compilation session. Core

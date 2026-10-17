@@ -247,10 +247,24 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "References.first() = 42", 42,
             ),
+            "example/Operations.tasty": (
+                "example.Operations", r"public int (use\(\)|propagate\(int\))", "OperationsRuntime.java",
+                """public final class OperationsRuntime {
+  public static void main(String[] args) {
+    example.Operations operations = new example.Operations();
+    int use = operations.use();
+    int propagated = operations.propagate(17);
+    if (use != 42) throw new AssertionError("Operations.use() = " + use);
+    if (propagated != 17) throw new AssertionError("Operations.propagate() = " + propagated);
+    System.out.println("Operations = " + use + ", " + propagated);
+  }
+}
+""", "Operations = 42, 17", 42,
+            ),
         }
         case = runtime_cases.get(relative.as_posix())
         if case is None:
-            raise RuntimeError("--runtime requires example/Answer, example/Parameters, or example/References")
+            raise RuntimeError("--runtime requires a supported example TASTy artifact")
         class_name, method_pattern, harness_name, harness_source, expected_output, expected_value = case
         javap = execute([toolchain.javap, "-classpath", compiled, class_name])
         if not re.search(method_pattern, javap):
