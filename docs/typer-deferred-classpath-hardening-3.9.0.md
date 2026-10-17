@@ -443,3 +443,10 @@ more than 153,000 resolver calls, so this checkpoint does not refresh the
 current completed-load depth or fanout limits. The prior p95 and fanout figures
 remain historical and must not be cited as measurements of the #1180 branch.
 See the [#1180 import report](typer-classpath-import-prefix-profile-1180-3.9.0.md).
+The follow-up targeted profile measured the first `tpd.scala` method at
+6,214 ms before and 3,546 ms after adding `LoadingSession` reverse indexes;
+member-lookup time fell from 4,939 ms to 2,797 ms for the same 512 requests.
+The full-corpus rerun after this optimization was stopped at 250 / 1,236 files
+after about 20 minutes and roughly 295,000 module-identity requests. No current
+p95, fanout, or deterministic full-corpus result is available; the previous
+limits remain historical.

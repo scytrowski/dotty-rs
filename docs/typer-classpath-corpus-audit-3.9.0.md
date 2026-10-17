@@ -165083,3 +165083,21 @@ recommend one bounded next sprint: compare source package declarations with
 classpath resources for the 31 unresolved target keys (1,063 weighted
 observations, 81 files, 393 blocker origins, and zero source-package registry
 hits). Keep those candidates unresolved until evidence supports them.
+
+### #1180 audit-cost follow-up (2026-10-17)
+
+The match-case probe path now uses `ClasspathSymbolResolver` directly during
+ordinary audits; it retains the detailed `AuditResolver` wrapper only when
+explicit per-file profiling is enabled. The wrapper's per-request observations
+were not consumed by match-case profiling. `LoadingSession` also indexes module
+identities by object and module-class `SymbolId`, including rollback, replacing
+repeated linear scans of the module table.
+
+A pinned diagnostic of the first `tpd.scala` method (512 module identity and
+512 member requests) measured 6,214 ms before the reverse indexes and 3,546 ms
+after them; measured member-lookup time fell from 4,939 ms to 2,797 ms. This is
+a targeted single-method measurement, not a corpus result. A subsequent full
+audit was stopped at 250 / 1,236 files after about 20 minutes and roughly
+295,000 module-identity requests. It produced no report or determinism result.
+Consequently the #1180 full-corpus and deferred-loading DoD gates remain
+unverified; the prior complete-load p95/fanout values remain historical.

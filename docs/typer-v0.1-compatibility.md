@@ -1725,3 +1725,12 @@ relative qualifier `core` selects package `dotty.tools.dotc.core`; the final
 `TypeNameNotFound` blocker, so this does not count as a fully typed method.
 The full weighted reconciliation and deterministic profile are recorded in
 the [#1180 checkpoint](typer-classpath-import-prefix-profile-1180-3.9.0.md).
+
+The later audit-cost follow-up bypasses discarded resolver-observation
+collection for ordinary match-case probes and uses rollback-aware reverse
+indexes for classpath module identities. A targeted `tpd.scala` method profile
+improved from 6,214 ms to 3,546 ms (512 member requests: 4,939 ms to 2,797 ms
+inside lookup). The full-corpus rerun stopped at 250 / 1,236 files after about
+20 minutes, so current corpus totals and deferred-load limits remain
+unverified; see the follow-up in
+[`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
