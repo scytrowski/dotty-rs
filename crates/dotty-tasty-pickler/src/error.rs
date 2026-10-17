@@ -79,6 +79,7 @@ pub enum UnsupportedFeature {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LimitKind {
     OwnerDepth,
+    ExpressionDepth,
     Items,
     NameBytes,
     Names,
@@ -120,6 +121,9 @@ pub enum PickleError {
         tree: TreeId<Untyped>,
     },
     InvalidTypedTree {
+        tree: TreeId<Typed>,
+    },
+    RepeatedExpression {
         tree: TreeId<Typed>,
     },
     IncompleteSymbol {

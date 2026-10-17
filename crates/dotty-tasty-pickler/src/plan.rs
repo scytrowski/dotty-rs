@@ -1,13 +1,18 @@
 use std::collections::HashSet;
 
-use dotty_core::ast::{AstArena, DefDef, Modifiers, NumberKind, Tree, TreeKind, UntypedNode};
+use dotty_core::ast::{
+    ApplyKind, AstArena, DefDef, Modifiers, NumberKind, Tree, TreeKind, UntypedNode,
+};
 use dotty_core::{
     Constant, Definitions, MethodKind, Name, NameId, Namespace, SemanticStore, SourceDefinition,
     SourceId, SourceSemanticIndex, SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo,
     SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type, TypeId, Typed, Untyped, Visibility,
 };
 
-use crate::{Builtin, LimitKind, PickleError, SourceRole, TypeRole, UnsupportedFeature};
+use crate::{
+    Builtin, LimitKind, PickleError, SourceRole, TypeRole, UnsupportedFeature,
+    bounded_expression_depth,
+};
 
 /// Owned source provenance supplied by the integration layer. Core stores only
 /// SourceId, not the filename or source-text length; those remain producer facts.
@@ -74,9 +79,11 @@ pub struct PicklePlan<'a> {
 }
 
 /// Budgets checked before traversing caller-controlled collections or chains.
+/// Expression recursion is capped at 256 for stack safety.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ValidationLimits {
     pub max_owner_depth: usize,
+    pub max_expression_depth: usize,
     pub max_items: usize,
     pub max_name_bytes: usize,
 }
@@ -85,9 +92,16 @@ impl Default for ValidationLimits {
     fn default() -> Self {
         Self {
             max_owner_depth: 256,
+            max_expression_depth: 256,
             max_items: 1_000_000,
             max_name_bytes: 4096,
         }
+    }
+}
+
+impl ValidationLimits {
+    fn expression_depth_limit(self) -> usize {
+        bounded_expression_depth(self.max_expression_depth)
     }
 }
 
@@ -824,6 +838,400 @@ impl<'a> Validator<'_, 'a> {
         Ok(())
     }
 
+    fn same_class_method_application_target(
+        &mut self,
+        target: SymbolId,
+        source_name: dotty_core::Name,
+        prefix: TypeId,
+        source_tree: TreeId<Untyped>,
+    ) -> Result<usize, PickleError> {
+        let p = self.plan;
+        let target_method = p
+            .methods
+            .iter()
+            .find(|candidate| candidate.symbol == target)
+            .ok_or(PickleError::Reference {
+                symbol: target,
+                reason: crate::ReferenceError::NotRegistered,
+            })?;
+        self.kind(target, SymbolKind::Method)?;
+        self.owner(target, Some(p.class))?;
+        let target_tree = self.source_tree(target_method.source_tree)?;
+        let TreeKind::DefDef(definition) = &target_tree.kind else {
+            return Err(PickleError::SourceShape {
+                tree: target_method.source_tree,
+                expected: SourceRole::Method,
+            });
+        };
+        if definition.name.as_name() != &source_name
+            || target_method.parameter_clauses.len() != 1
+            || target_method.parameter_clauses[0].is_empty()
+            || definition.value_param_clauses.len() != 1
+        {
+            return Err(PickleError::NameMismatch {
+                symbol: target,
+                tree: source_tree,
+            });
+        }
+        self.source_symbol(
+            target,
+            target_method.source_tree,
+            SymbolKind::Method,
+            *definition.name.as_name(),
+        )?;
+        self.metadata(&definition.metadata, target)?;
+        let ty = self.complete(target)?;
+        let Type::Method(signature) = self.ty(ty)? else {
+            return Err(PickleError::MalformedType {
+                ty,
+                role: TypeRole::Parameter,
+            });
+        };
+        if signature.kind != MethodKind::Plain
+            || signature.params.len() != target_method.parameter_clauses[0].len()
+            || signature.result != p.definitions.int
+        {
+            return Err(PickleError::MalformedType {
+                ty,
+                role: TypeRole::Parameter,
+            });
+        }
+        for (formal, &parameter) in signature
+            .params
+            .iter()
+            .zip(&target_method.parameter_clauses[0])
+        {
+            if formal.name.as_name() != &self.symbol(parameter)?.name
+                || formal.ty != p.definitions.int
+                || formal.erased
+                || formal.varargs
+                || self.complete(parameter)? != p.definitions.int
+            {
+                return Err(PickleError::MalformedType {
+                    ty,
+                    role: TypeRole::Parameter,
+                });
+            }
+        }
+        if !matches!(self.ty(prefix)?, Type::ThisType { class } if *class == p.class) {
+            return Err(PickleError::Reference {
+                symbol: target,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        Ok(signature.params.len())
+    }
+
+    fn validate_nested_application(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        current_method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        let expression_depth_limit = self.limits.expression_depth_limit();
+        if depth > expression_depth_limit {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: expression_depth_limit,
+            });
+        }
+        self.charge(1)?;
+        if !visited.insert(typed_id) {
+            return Err(PickleError::RepeatedExpression { tree: typed_id });
+        }
+        let p = self.plan;
+        let source_tree = self.source_tree(source_id)?;
+        let typed_tree = p
+            .typed_ast
+            .try_get(typed_id)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if p.typed_bindings.typed_at(p.source.id, source_id) != Some(typed_id) {
+            return Err(PickleError::BodyBinding {
+                source: p.source.id,
+                tree: source_id,
+                expected: typed_id,
+                actual: p.typed_bindings.typed_at(p.source.id, source_id),
+            });
+        }
+        self.span(source_tree.position)?;
+        self.span(typed_tree.position)?;
+        if let (Some(source), Some(typed)) = (source_tree.position, typed_tree.position)
+            && source != typed
+        {
+            return Err(PickleError::BodySpan { tree: typed_id });
+        }
+        let (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) =
+            (&source_tree.kind, &typed_tree.kind)
+        else {
+            return Err(PickleError::SourceShape {
+                tree: source_id,
+                expected: SourceRole::Body,
+            });
+        };
+        if source_apply.kind != ApplyKind::Regular
+            || typed_apply.kind != ApplyKind::Regular
+            || source_apply.args.is_empty()
+            || source_apply.args.len() != typed_apply.args.len()
+        {
+            return Err(self.unsupported(
+                UnsupportedFeature::BodyExpression,
+                Some(current_method.symbol),
+            ));
+        }
+        if !visited.insert(typed_apply.function) {
+            return Err(PickleError::RepeatedExpression {
+                tree: typed_apply.function,
+            });
+        }
+        let source_function = self.source_tree(source_apply.function)?;
+        let typed_function =
+            p.typed_ast
+                .try_get(typed_apply.function)
+                .ok_or(PickleError::InvalidTypedTree {
+                    tree: typed_apply.function,
+                })?;
+        self.span(source_function.position)?;
+        self.span(typed_function.position)?;
+        if let (Some(source), Some(typed)) = (source_function.position, typed_function.position)
+            && source != typed
+        {
+            return Err(PickleError::BodySpan {
+                tree: typed_apply.function,
+            });
+        }
+        let (name, _explicit_this) = match (&source_function.kind, &typed_function.kind) {
+            (TreeKind::Ident(source), TreeKind::Ident(typed))
+                if source.name == typed.name && source.backquoted == typed.backquoted =>
+            {
+                (source.name, false)
+            }
+            (TreeKind::Select(source), TreeKind::Select(typed))
+                if source.name == typed.name && source.backquoted == typed.backquoted =>
+            {
+                if !visited.insert(typed.qualifier) {
+                    return Err(PickleError::RepeatedExpression {
+                        tree: typed.qualifier,
+                    });
+                }
+                let source_qualifier = self.source_tree(source.qualifier)?;
+                let typed_qualifier =
+                    p.typed_ast
+                        .try_get(typed.qualifier)
+                        .ok_or(PickleError::InvalidTypedTree {
+                            tree: typed.qualifier,
+                        })?;
+                if !matches!(source_qualifier.kind, TreeKind::This(this) if this.qual.is_none())
+                    || !matches!(typed_qualifier.kind, TreeKind::This(this) if this.qual.is_none())
+                {
+                    return Err(self.unsupported(
+                        UnsupportedFeature::BodyExpression,
+                        Some(current_method.symbol),
+                    ));
+                }
+                if p.typed_bindings.typed_at(p.source.id, source.qualifier) != Some(typed.qualifier)
+                {
+                    return Err(PickleError::BodyBinding {
+                        source: p.source.id,
+                        tree: source.qualifier,
+                        expected: typed.qualifier,
+                        actual: p.typed_bindings.typed_at(p.source.id, source.qualifier),
+                    });
+                }
+                self.span(source_qualifier.position)?;
+                self.span(typed_qualifier.position)?;
+                if let (Some(source_span), Some(typed_span)) =
+                    (source_qualifier.position, typed_qualifier.position)
+                    && source_span != typed_span
+                {
+                    return Err(PickleError::BodySpan {
+                        tree: typed.qualifier,
+                    });
+                }
+                if !matches!(self.ty(typed_qualifier.ty)?, Type::ThisType { class } if *class == p.class)
+                {
+                    return Err(PickleError::Reference {
+                        symbol: current_method.symbol,
+                        reason: crate::ReferenceError::Owner,
+                    });
+                }
+                (source.name, true)
+            }
+            _ => {
+                return Err(PickleError::SourceShape {
+                    tree: source_apply.function,
+                    expected: SourceRole::Body,
+                });
+            }
+        };
+        if p.typed_bindings
+            .typed_at(p.source.id, source_apply.function)
+            != Some(typed_apply.function)
+        {
+            return Err(PickleError::BodyBinding {
+                source: p.source.id,
+                tree: source_apply.function,
+                expected: typed_apply.function,
+                actual: p
+                    .typed_bindings
+                    .typed_at(p.source.id, source_apply.function),
+            });
+        }
+        let Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(target),
+        } = self.ty(typed_function.ty)?
+        else {
+            return Err(PickleError::BodyType {
+                tree: typed_apply.function,
+                ty: typed_function.ty,
+            });
+        };
+        let count = self.same_class_method_application_target(
+            *target,
+            name,
+            *prefix,
+            source_apply.function,
+        )?;
+        if count != source_apply.args.len() {
+            return Err(PickleError::BodyType {
+                tree: typed_apply.function,
+                ty: typed_function.ty,
+            });
+        }
+        for (&source_arg, &typed_arg) in source_apply.args.iter().zip(&typed_apply.args) {
+            let source_argument = self.source_tree(source_arg)?;
+            let typed_argument = p
+                .typed_ast
+                .try_get(typed_arg)
+                .ok_or(PickleError::InvalidTypedTree { tree: typed_arg })?;
+            if matches!(source_argument.kind, TreeKind::Apply(_))
+                || matches!(typed_argument.kind, TreeKind::Apply(_))
+            {
+                self.validate_nested_application(
+                    source_arg,
+                    typed_arg,
+                    current_method,
+                    depth + 1,
+                    visited,
+                )?;
+                continue;
+            }
+            self.charge(1)?;
+            if !visited.insert(typed_arg) {
+                return Err(PickleError::RepeatedExpression { tree: typed_arg });
+            }
+            if p.typed_bindings.typed_at(p.source.id, source_arg) != Some(typed_arg) {
+                return Err(PickleError::BodyBinding {
+                    source: p.source.id,
+                    tree: source_arg,
+                    expected: typed_arg,
+                    actual: p.typed_bindings.typed_at(p.source.id, source_arg),
+                });
+            }
+            self.span(source_argument.position)?;
+            self.span(typed_argument.position)?;
+            if let (Some(source), Some(typed)) = (source_argument.position, typed_argument.position)
+                && source != typed
+            {
+                return Err(PickleError::BodySpan { tree: typed_arg });
+            }
+            match (&source_argument.kind, &typed_argument.kind) {
+                (TreeKind::Ident(source), TreeKind::Ident(typed))
+                    if source.name == typed.name && source.backquoted == typed.backquoted =>
+                {
+                    let Type::TermRef {
+                        prefix,
+                        target: TermRefTarget::Symbol(symbol),
+                    } = self.ty(typed_argument.ty)?
+                    else {
+                        return Err(PickleError::BodyType {
+                            tree: typed_arg,
+                            ty: typed_argument.ty,
+                        });
+                    };
+                    if !matches!(self.ty(*prefix)?, Type::NoPrefix) {
+                        return Err(PickleError::Reference {
+                            symbol: *symbol,
+                            reason: crate::ReferenceError::Owner,
+                        });
+                    }
+                    self.kind(*symbol, SymbolKind::Parameter)?;
+                    self.owner(*symbol, Some(current_method.symbol))?;
+                    if !current_method
+                        .parameter_clauses
+                        .iter()
+                        .flatten()
+                        .any(|parameter| parameter == symbol)
+                        || self.symbol(*symbol)?.name != source.name
+                        || self.complete(*symbol)? != p.definitions.int
+                    {
+                        return Err(PickleError::Reference {
+                            symbol: *symbol,
+                            reason: crate::ReferenceError::NotRegistered,
+                        });
+                    }
+                }
+                (TreeKind::Literal(source), TreeKind::Literal(typed))
+                    if source.value == typed.value
+                        && matches!((&typed.value, self.ty(typed_argument.ty)?), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value) =>
+                    {}
+                (
+                    TreeKind::PhaseSpecific(UntypedNode::Number(number)),
+                    TreeKind::Literal(typed),
+                ) => {
+                    let digits = self.name_text(number.text)?.replace('_', "");
+                    let value = match number.kind {
+                        NumberKind::Whole(10) => digits.parse::<i32>().ok(),
+                        NumberKind::Whole(radix @ (2 | 16)) => {
+                            let digits = if radix == 16 {
+                                digits
+                                    .strip_prefix("0x")
+                                    .or_else(|| digits.strip_prefix("0X"))
+                            } else {
+                                digits
+                                    .strip_prefix("0b")
+                                    .or_else(|| digits.strip_prefix("0B"))
+                            };
+                            digits
+                                .and_then(|digits| u32::from_str_radix(digits, radix).ok())
+                                .map(|bits| bits as i32)
+                        }
+                        _ => None,
+                    };
+                    if value
+                        != match typed.value {
+                            Constant::Int(value) => Some(value),
+                            _ => None,
+                        }
+                        || !matches!((value, self.ty(typed_argument.ty)?), (Some(value), Type::Constant(Constant::Int(type_value))) if value == *type_value)
+                    {
+                        return Err(PickleError::BodyType {
+                            tree: typed_arg,
+                            ty: typed_argument.ty,
+                        });
+                    }
+                }
+                _ => {
+                    return Err(PickleError::SourceShape {
+                        tree: source_arg,
+                        expected: SourceRole::Body,
+                    });
+                }
+            }
+        }
+        if typed_tree.ty != p.definitions.int
+            && !matches!(self.ty(typed_tree.ty)?, Type::Constant(Constant::Int(_)))
+        {
+            return Err(PickleError::BodyType {
+                tree: typed_id,
+                ty: typed_tree.ty,
+            });
+        }
+        Ok(())
+    }
+
     fn method(&mut self, method: &MethodPicklePlan) -> Result<(), PickleError> {
         self.charge(1)?;
         let p = self.plan;
@@ -1100,6 +1508,295 @@ impl<'a> Validator<'_, 'a> {
                     Constant::Int(value) => Some(value),
                     _ => None,
                 }
+            }
+            (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) => {
+                self.charge(1)?;
+                let mut visited = HashSet::from([body]);
+                if source_apply.kind != ApplyKind::Regular
+                    || typed_apply.kind != ApplyKind::Regular
+                    || source_apply.args.len() != typed_apply.args.len()
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                let source_function = self.source_tree(source_apply.function)?;
+                if !visited.insert(typed_apply.function) {
+                    return Err(PickleError::RepeatedExpression {
+                        tree: typed_apply.function,
+                    });
+                }
+                let typed_function = p.typed_ast.try_get(typed_apply.function).ok_or(
+                    PickleError::InvalidTypedTree {
+                        tree: typed_apply.function,
+                    },
+                )?;
+                let (name, explicit_this) = match (&source_function.kind, &typed_function.kind) {
+                    (TreeKind::Ident(source), TreeKind::Ident(typed))
+                        if source.name == typed.name =>
+                    {
+                        (source.name, false)
+                    }
+                    (TreeKind::Select(source), TreeKind::Select(typed))
+                        if source.name == typed.name =>
+                    {
+                        let qualifier = self.source_tree(source.qualifier)?;
+                        if !visited.insert(typed.qualifier) {
+                            return Err(PickleError::RepeatedExpression {
+                                tree: typed.qualifier,
+                            });
+                        }
+                        let typed_qualifier = p.typed_ast.try_get(typed.qualifier).ok_or(
+                            PickleError::InvalidTypedTree {
+                                tree: typed.qualifier,
+                            },
+                        )?;
+                        if !matches!(qualifier.kind, TreeKind::This(this) if this.qual.is_none())
+                            || !matches!(typed_qualifier.kind, TreeKind::This(this) if this.qual.is_none())
+                        {
+                            return Err(self.unsupported(
+                                UnsupportedFeature::BodyExpression,
+                                Some(method.symbol),
+                            ));
+                        }
+                        if p.typed_bindings.typed_at(p.source.id, source.qualifier)
+                            != Some(typed.qualifier)
+                        {
+                            return Err(PickleError::BodyBinding {
+                                source: p.source.id,
+                                tree: source.qualifier,
+                                expected: typed.qualifier,
+                                actual: p.typed_bindings.typed_at(p.source.id, source.qualifier),
+                            });
+                        }
+                        self.span(qualifier.position)?;
+                        self.span(typed_qualifier.position)?;
+                        if let (Some(source_span), Some(typed_span)) =
+                            (qualifier.position, typed_qualifier.position)
+                            && source_span != typed_span
+                        {
+                            return Err(PickleError::BodySpan {
+                                tree: typed.qualifier,
+                            });
+                        }
+                        if !matches!(self.ty(typed_qualifier.ty)?, Type::ThisType { class } if *class == p.class)
+                        {
+                            return Err(PickleError::Reference {
+                                symbol: method.symbol,
+                                reason: crate::ReferenceError::Owner,
+                            });
+                        }
+                        (source.name, true)
+                    }
+                    _ => {
+                        return Err(PickleError::SourceShape {
+                            tree: source_apply.function,
+                            expected: SourceRole::Body,
+                        });
+                    }
+                };
+                if p.typed_bindings
+                    .typed_at(p.source.id, source_apply.function)
+                    != Some(typed_apply.function)
+                {
+                    return Err(PickleError::BodyBinding {
+                        source: p.source.id,
+                        tree: source_apply.function,
+                        expected: typed_apply.function,
+                        actual: p
+                            .typed_bindings
+                            .typed_at(p.source.id, source_apply.function),
+                    });
+                }
+                let Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                } = self.ty(typed_function.ty)?
+                else {
+                    return Err(PickleError::BodyType {
+                        tree: typed_apply.function,
+                        ty: typed_function.ty,
+                    });
+                };
+                if !p
+                    .methods
+                    .iter()
+                    .any(|candidate| candidate.symbol == *target)
+                {
+                    return Err(PickleError::Reference {
+                        symbol: *target,
+                        reason: crate::ReferenceError::NotRegistered,
+                    });
+                }
+                let parameter_count = self.same_class_method_application_target(
+                    *target,
+                    name,
+                    *prefix,
+                    source_apply.function,
+                )?;
+                if source_apply.args.len() != parameter_count {
+                    return Err(PickleError::BodyType {
+                        tree: typed_apply.function,
+                        ty: typed_function.ty,
+                    });
+                }
+                if explicit_this
+                    && !matches!(self.ty(typed_function.ty)?, Type::TermRef { prefix, .. } if matches!(self.ty(*prefix)?, Type::ThisType { class } if *class == p.class))
+                {
+                    return Err(PickleError::Reference {
+                        symbol: *target,
+                        reason: crate::ReferenceError::Owner,
+                    });
+                }
+                for (&source_arg, &typed_arg) in source_apply.args.iter().zip(&typed_apply.args) {
+                    let source_argument = self.source_tree(source_arg)?;
+                    let typed_argument = p
+                        .typed_ast
+                        .try_get(typed_arg)
+                        .ok_or(PickleError::InvalidTypedTree { tree: typed_arg })?;
+                    if matches!(source_argument.kind, TreeKind::Apply(_))
+                        && matches!(typed_argument.kind, TreeKind::Apply(_))
+                    {
+                        self.validate_nested_application(
+                            source_arg,
+                            typed_arg,
+                            method,
+                            1,
+                            &mut visited,
+                        )?;
+                        continue;
+                    }
+                    self.charge(1)?;
+                    if !visited.insert(typed_arg) {
+                        return Err(PickleError::RepeatedExpression { tree: typed_arg });
+                    }
+                    if p.typed_bindings.typed_at(p.source.id, source_arg) != Some(typed_arg) {
+                        return Err(PickleError::BodyBinding {
+                            source: p.source.id,
+                            tree: source_arg,
+                            expected: typed_arg,
+                            actual: p.typed_bindings.typed_at(p.source.id, source_arg),
+                        });
+                    }
+                    self.span(source_argument.position)?;
+                    self.span(typed_argument.position)?;
+                    if let (Some(source), Some(typed)) =
+                        (source_argument.position, typed_argument.position)
+                        && source != typed
+                    {
+                        return Err(PickleError::BodySpan { tree: typed_arg });
+                    }
+                    match (&source_argument.kind, &typed_argument.kind) {
+                        (TreeKind::Ident(source), TreeKind::Ident(typed))
+                            if source.name == typed.name
+                                && source.backquoted == typed.backquoted =>
+                        {
+                            let Type::TermRef {
+                                target: TermRefTarget::Symbol(symbol),
+                                ..
+                            } = self.ty(typed_argument.ty)?
+                            else {
+                                return Err(PickleError::BodyType {
+                                    tree: typed_arg,
+                                    ty: typed_argument.ty,
+                                });
+                            };
+                            if !method
+                                .parameter_clauses
+                                .iter()
+                                .flatten()
+                                .any(|parameter| parameter == symbol)
+                            {
+                                return Err(PickleError::Reference {
+                                    symbol: *symbol,
+                                    reason: crate::ReferenceError::NotRegistered,
+                                });
+                            }
+                            if self.symbol(*symbol)?.name != source.name {
+                                return Err(PickleError::NameMismatch {
+                                    symbol: *symbol,
+                                    tree: source_arg,
+                                });
+                            }
+                        }
+                        (TreeKind::Literal(source), TreeKind::Literal(typed))
+                            if source.value == typed.value
+                                && matches!(typed.value, Constant::Int(_)) => {}
+                        (
+                            TreeKind::PhaseSpecific(UntypedNode::Number(number)),
+                            TreeKind::Literal(typed),
+                        ) => {
+                            let digits = self.name_text(number.text)?.replace('_', "");
+                            let value = match number.kind {
+                                NumberKind::Whole(10) => digits.parse::<i32>().ok(),
+                                NumberKind::Whole(radix @ (2 | 16)) => {
+                                    let digits = if radix == 16 {
+                                        digits
+                                            .strip_prefix("0x")
+                                            .or_else(|| digits.strip_prefix("0X"))
+                                    } else {
+                                        digits
+                                            .strip_prefix("0b")
+                                            .or_else(|| digits.strip_prefix("0B"))
+                                    };
+                                    digits
+                                        .and_then(|digits| u32::from_str_radix(digits, radix).ok())
+                                        .map(|bits| bits as i32)
+                                }
+                                _ => None,
+                            };
+                            if value
+                                != match typed.value {
+                                    Constant::Int(value) => Some(value),
+                                    _ => None,
+                                }
+                            {
+                                return Err(PickleError::BodyType {
+                                    tree: typed_arg,
+                                    ty: typed_argument.ty,
+                                });
+                            }
+                        }
+                        _ => {
+                            return Err(PickleError::SourceShape {
+                                tree: source_arg,
+                                expected: SourceRole::Body,
+                            });
+                        }
+                    }
+                    let argument_type = self.ty(typed_argument.ty)?;
+                    let valid_argument_type = match argument_type {
+                        Type::Constant(Constant::Int(_)) => true,
+                        Type::TermRef {
+                            prefix,
+                            target: TermRefTarget::Symbol(symbol),
+                        } => {
+                            if !matches!(self.ty(*prefix)?, Type::NoPrefix) {
+                                false
+                            } else {
+                                self.kind(*symbol, SymbolKind::Parameter)?;
+                                self.owner(*symbol, Some(method.symbol))?;
+                                self.complete(*symbol)? == p.definitions.int
+                            }
+                        }
+                        _ => typed_argument.ty == p.definitions.int,
+                    };
+                    if !valid_argument_type {
+                        return Err(PickleError::BodyType {
+                            tree: typed_arg,
+                            ty: typed_argument.ty,
+                        });
+                    }
+                }
+                if node.ty != p.definitions.int
+                    && !matches!(self.ty(node.ty)?, Type::Constant(Constant::Int(_)))
+                {
+                    return Err(PickleError::BodyType {
+                        tree: body,
+                        ty: node.ty,
+                    });
+                }
+                None
             }
             (TreeKind::PhaseSpecific(UntypedNode::Number(number)), TreeKind::Literal(literal)) => {
                 if !matches!((&literal.value, body_type), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value)
