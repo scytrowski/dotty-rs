@@ -4524,6 +4524,7 @@ struct BaselineImportAttempt {
     baseline_attribution: String,
     baseline_import_tree: String,
     qualifier_segments: String,
+    context_package: String,
     first_failing_segment: String,
     evidence_category: String,
     target_key: String,
@@ -12590,6 +12591,7 @@ fn baseline_import_blocker_attempts(
             baseline_attribution: attribution.to_owned(),
             baseline_import_tree: fields[3].to_owned(),
             qualifier_segments: fields[6].to_owned(),
+            context_package: fields[8].to_owned(),
             first_failing_segment: fields[13].to_owned(),
             evidence_category,
             target_key: fields[16].to_owned(),
@@ -12666,12 +12668,28 @@ fn reconcile_import_prefix_observations(
             .unwrap_or_else(|| "<unknown>".to_owned());
 
         let request_prefix = format!("{}#tree={}::", baseline.file, baseline.blocker_origin_tree);
+        let rooted_qualifier = baseline.qualifier_segments.starts_with("_root_.");
+        let package_chain = if rooted_qualifier || baseline.context_package.starts_with('<') {
+            Vec::new()
+        } else {
+            vec![baseline.context_package.clone()]
+        };
+        let qualifier = baseline
+            .qualifier_segments
+            .split('.')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let matching_requests = resolver_requests
             .iter()
             .filter(|(method, _)| method.starts_with(&request_prefix))
             .flat_map(|(_, requests)| requests.iter())
             .filter(|request| {
-                resolver_request_matches_qualifier(request, &baseline.qualifier_segments)
+                request_matches_lexical_qualifier(
+                    request,
+                    &qualifier,
+                    &package_chain,
+                    rooted_qualifier,
+                )
             })
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -12697,7 +12715,20 @@ fn reconcile_import_prefix_observations(
             .map(|(selector, target)| {
                 let exact_requests = matching_requests
                     .iter()
-                    .filter(|request| resolver_request_targets_exact_qualifier(request, target))
+                    .filter(|request| {
+                        let target = target.split('.').map(str::to_owned).collect::<Vec<_>>();
+                        request_matches_lexical_qualifier(
+                            request,
+                            &target,
+                            &package_chain,
+                            rooted_qualifier,
+                        ) && request_path_matches_exact_lexical_target(
+                            request,
+                            &target,
+                            &package_chain,
+                            rooted_qualifier,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 let resolved = exact_requests
                     .iter()
@@ -12725,6 +12756,32 @@ fn reconcile_import_prefix_observations(
             })
             .collect::<Vec<_>>();
         if wildcard_selector {
+            let qualifier = baseline
+                .qualifier_segments
+                .split('.')
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let qualifier_identities = matching_requests
+                .iter()
+                .filter(|request| {
+                    request_path_matches_exact_lexical_target(
+                        request,
+                        &qualifier,
+                        &package_chain,
+                        rooted_qualifier,
+                    )
+                })
+                .filter_map(|request| request.selected_identity.as_deref())
+                .collect::<BTreeSet<_>>();
+            if !qualifier_identities.is_empty() {
+                final_selector_outcomes.push(format!(
+                    "qualifier=resolved::{}",
+                    qualifier_identities
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("|")
+                ));
+            }
             final_selector_outcomes
                 .push("*=absent::wildcard import has no singular final selected symbol".to_owned());
         }
@@ -12775,14 +12832,17 @@ fn reconcile_import_prefix_observations(
                     current_blocker_origin.clone(),
                     matching_requests
                         .iter()
+                        .filter(|request| request.outcome == "package success")
                         .filter_map(|request| {
-                            request
-                                .materialized_prefix
-                                .as_deref()
-                                .map(|selected| (request.target.len(), selected))
+                            request.selected_identity.as_deref().map(|identity| {
+                                (
+                                    resolver_request_path(request).map_or(0, |path| path.len()),
+                                    identity,
+                                )
+                            })
                         })
                         .max_by_key(|(specificity, _)| *specificity)
-                        .map(|(_, selected)| selected)
+                        .map(|(_, identity)| identity)
                         .unwrap_or("-")
                         .to_owned(),
                 )
@@ -12825,34 +12885,6 @@ fn source_tree_index(key: &str) -> u32 {
         .expect("source tree key contains a numeric tree index")
 }
 
-fn resolver_request_matches_qualifier(
-    request: &ResolverRequestObservation,
-    qualifier: &str,
-) -> bool {
-    let qualifier = qualifier.strip_prefix("_root_.").unwrap_or(qualifier);
-    let normalized_target = request.target.replace('/', ".");
-    if request.outcome == "package success" {
-        return qualifier == normalized_target
-            || qualifier.starts_with(&format!("{normalized_target}."));
-    }
-    let Some(prefix) = request
-        .target
-        .strip_prefix("prefix=")
-        .and_then(|target| target.split("::").next())
-    else {
-        return false;
-    };
-    let Some(name) = request
-        .target
-        .split("::")
-        .find_map(|field| field.strip_prefix("name="))
-    else {
-        return false;
-    };
-    let selected = format!("{}.{}", prefix.replace('/', "."), name);
-    qualifier == selected || qualifier.starts_with(&format!("{selected}."))
-}
-
 fn resolver_request_targets_exact_qualifier(
     request: &ResolverRequestObservation,
     qualifier: &str,
@@ -12876,6 +12908,91 @@ fn resolver_request_targets_exact_qualifier(
         return false;
     };
     format!("{}.{}", prefix.replace('/', "."), name) == qualifier
+}
+
+fn request_matches_lexical_qualifier(
+    request: &ResolverRequestObservation,
+    qualifier: &[String],
+    lexical_package_chain: &[String],
+    rooted: bool,
+) -> bool {
+    let Some(request_path) = resolver_request_path(request) else {
+        return false;
+    };
+    lexical_qualifier_prefix_paths(qualifier, lexical_package_chain, rooted)
+        .iter()
+        .any(|candidate| candidate == &request_path)
+}
+
+fn resolver_request_path(request: &ResolverRequestObservation) -> Option<String> {
+    if request.outcome.starts_with("package ") {
+        let package_path = request.target.split("::").next()?;
+        return Some(package_path.replace('/', "."));
+    }
+    let prefix = request.target.strip_prefix("prefix=")?.split("::").next()?;
+    let name = request
+        .target
+        .split("::")
+        .find_map(|field| field.strip_prefix("name="))?;
+    Some(format!("{}.{}", prefix.replace('/', "."), name))
+}
+
+fn lexical_qualifier_prefix_paths(
+    qualifier: &[String],
+    lexical_package_chain: &[String],
+    rooted: bool,
+) -> Vec<String> {
+    let segments = if qualifier.first().map(String::as_str) == Some("_root_") {
+        &qualifier[1..]
+    } else {
+        qualifier
+    };
+    let mut prefixes = Vec::with_capacity(segments.len() * (lexical_package_chain.len() + 1));
+    if !rooted {
+        for package in lexical_package_chain {
+            if package.is_empty() || package.starts_with('<') {
+                continue;
+            }
+            for length in 1..=segments.len() {
+                prefixes.push(format!("{package}.{}", segments[..length].join(".")));
+            }
+        }
+    }
+    for length in 1..=segments.len() {
+        prefixes.push(segments[..length].join("."));
+    }
+    prefixes
+}
+
+fn request_path_matches_exact_lexical_target(
+    request: &ResolverRequestObservation,
+    qualifier: &[String],
+    lexical_package_chain: &[String],
+    rooted: bool,
+) -> bool {
+    let Some(request_path) = resolver_request_path(request) else {
+        return false;
+    };
+    let segments = if qualifier.first().map(String::as_str) == Some("_root_") {
+        &qualifier[1..]
+    } else {
+        qualifier
+    };
+    let relative_path = segments.join(".");
+    let mut candidates = Vec::with_capacity(lexical_package_chain.len() + 1);
+    if !rooted {
+        candidates.extend(lexical_package_chain.iter().map(|package| {
+            if package.is_empty() || package.starts_with('<') {
+                relative_path.clone()
+            } else {
+                format!("{package}.{relative_path}")
+            }
+        }));
+    }
+    candidates.push(relative_path);
+    candidates
+        .iter()
+        .any(|candidate| candidate == &request_path)
 }
 
 #[test]
@@ -12922,6 +13039,7 @@ fn frozen_import_reconciliation_preserves_original_provenance() {
         "compiler/Foo.scala#tree=30"
     );
     assert_eq!(baseline[0].qualifier_segments, "old.pkg");
+    assert_eq!(baseline[0].context_package, "pkg");
     assert_eq!(baseline[0].first_failing_segment, "old");
     assert_eq!(
         baseline[0].evidence_category,
@@ -12961,6 +13079,171 @@ fn final_import_identity_requires_an_exact_resolver_target() {
     assert_eq!(
         class.selected_identity.as_deref(),
         Some("kind=Class::origin=classfile::path=scala.collection.List")
+    );
+}
+
+#[test]
+fn relative_import_trace_matches_its_expanded_lexical_package_path() {
+    let package = ResolverRequestObservation {
+        target: "dotty.tools.dotc.core".to_owned(),
+        outcome: "package success".to_owned(),
+        cause: None,
+        materialized_prefix: Some(
+            "package=dotty/tools/dotc/core::owner=dotty/tools/dotc".to_owned(),
+        ),
+        selected_identity: Some(
+            "kind=Package::origin=tasty::path=dotty.tools.dotc.core".to_owned(),
+        ),
+        enclosing_attempt: "Resident.scala#tree=138::Resident.process".to_owned(),
+    };
+    let object = ResolverRequestObservation {
+        target: "prefix=dotty/tools/dotc/core::namespace=term::name=Contexts::space=Prefix"
+            .to_owned(),
+        outcome: "class member success".to_owned(),
+        cause: None,
+        materialized_prefix: Some(
+            "package=dotty/tools/dotc/core::owner=dotty/tools/dotc".to_owned(),
+        ),
+        selected_identity: Some(
+            "kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts".to_owned(),
+        ),
+        enclosing_attempt: "Resident.scala#tree=138::Resident.process".to_owned(),
+    };
+    let qualifier = ["core".to_owned(), "Contexts".to_owned()];
+    let lexical_chain = ["dotty.tools.dotc".to_owned(), "dotty.tools".to_owned()];
+
+    assert!(request_matches_lexical_qualifier(
+        &package,
+        &qualifier,
+        &lexical_chain,
+        false,
+    ));
+    assert!(request_matches_lexical_qualifier(
+        &object,
+        &qualifier,
+        &lexical_chain,
+        false,
+    ));
+    assert!(request_path_matches_exact_lexical_target(
+        &object,
+        &qualifier,
+        &lexical_chain,
+        false,
+    ));
+    assert!(!request_path_matches_exact_lexical_target(
+        &package,
+        &qualifier,
+        &lexical_chain,
+        false,
+    ));
+    assert!(!request_matches_lexical_qualifier(
+        &package,
+        &qualifier,
+        &["unrelated.scope".to_owned()],
+        false,
+    ));
+    assert!(!request_matches_lexical_qualifier(
+        &package,
+        &[
+            "_root_".to_owned(),
+            "core".to_owned(),
+            "Contexts".to_owned()
+        ],
+        &lexical_chain,
+        true,
+    ));
+}
+
+#[test]
+fn reconciliation_records_relative_package_and_object_qualifier_identities() {
+    let baseline_row = [
+        "Use.scala",
+        "Use.scala#tree=10",
+        "inherited:Use.scala#tree=20",
+        "Use.scala#tree=30",
+        "5",
+        "core.Contexts",
+        "core.Contexts",
+        "dotty.tools.dotc",
+        "dotty.tools.dotc",
+        "Term",
+        "missing",
+        "relative=found:Package@dotty.tools.dotc.core;enclosing=none;root=missing",
+        "-",
+        "core",
+        "resolve_package",
+        "Ok(None)::package unresolved::source-relative candidate",
+        "core::<first-segment-unresolved>",
+    ]
+    .join("\t");
+    let report = format!(
+        "import_prefix_observations:\n  observations=1\n  source_file\tmethod\tblocker_origin\timport_tree\tline\tqualifier_source\tqualifier_segments\tcontext_owner\tcontext_package\tnamespace\tsource_lookup\tsource_package_registry_lookup\tresolved_prefix\tfirst_failing_segment\trequest_kind\tresolver_outcome\ttarget_key\n  {baseline_row}\n"
+    );
+    let categories = BTreeMap::from([(
+        "core::<first-segment-unresolved>".to_owned(),
+        "source_relative_candidate".to_owned(),
+    )]);
+    let baseline = baseline_import_blocker_attempts(&report, &categories);
+    let package = ResolverRequestObservation {
+        target: "dotty.tools.dotc.core".to_owned(),
+        outcome: "package success".to_owned(),
+        cause: Some("direct package evidence".to_owned()),
+        materialized_prefix: Some("package=dotty/tools/dotc/core".to_owned()),
+        selected_identity: Some(
+            "kind=Package::origin=tasty::path=dotty.tools.dotc.core".to_owned(),
+        ),
+        enclosing_attempt: "Use.scala#tree=20::Use.method".to_owned(),
+    };
+    let object = ResolverRequestObservation {
+        target: "prefix=dotty/tools/dotc/core::namespace=term::name=Contexts::space=Prefix"
+            .to_owned(),
+        outcome: "class member success".to_owned(),
+        cause: Some("member selected".to_owned()),
+        materialized_prefix: Some("package=dotty/tools/dotc/core".to_owned()),
+        selected_identity: Some(
+            "kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts".to_owned(),
+        ),
+        enclosing_attempt: "Use.scala#tree=20::Use.method".to_owned(),
+    };
+    let requests = BTreeMap::from([(
+        "Use.scala#tree=20::Use.method".to_owned(),
+        vec![package, object],
+    )]);
+    let blockers = BTreeMap::from([(
+        "Use.scala#tree=10".to_owned(),
+        "TypeNameNotFound".to_owned(),
+    )]);
+    let attempts = BTreeSet::from([
+        "method=Use.scala#tree=10::site=Use.scala:1:1:method::attempt=Use.scala#tree=20::blocker=TypeNameNotFound::typed=false".to_owned(),
+    ]);
+    let selectors = BTreeMap::from([("Use.scala#tree=30".to_owned(), vec!["*".to_owned()])]);
+
+    let rows = reconcile_import_prefix_observations(
+        &baseline,
+        &[],
+        &blockers,
+        &attempts,
+        &selectors,
+        &requests,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].current_selected_identity,
+        "kind=Package::origin=tasty::path=dotty.tools.dotc.core"
+    );
+    assert!(rows[0].final_import_identity.contains(
+        "qualifier=resolved::kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts"
+    ));
+    assert!(
+        rows[0]
+            .final_import_identity
+            .contains("*=absent::wildcard import has no singular final selected symbol")
+    );
+    assert!(
+        rows[0]
+            .current_resolver_requests
+            .contains("target=dotty.tools.dotc.core::outcome=package success")
     );
 }
 
@@ -14803,9 +15086,14 @@ fn import_prefix_observation(
         (Some((context_id, _)), Some(name)) => source_scoped_lookup(index, store, context_id, name),
         _ => "unavailable".to_owned(),
     };
-    let request = trace
-        .iter()
-        .rfind(|request| request.cause.is_some() && request_matches_qualifier(request, qualifier));
+    let rooted = qualifier.first().is_some_and(|segment| segment == "_root_");
+    let lexical_package_chain = selected_context
+        .map(|(context_id, _)| source_context_package_chain(index, store, context_id))
+        .unwrap_or_default();
+    let request = trace.iter().rfind(|request| {
+        request.cause.is_some()
+            && request_matches_lexical_qualifier(request, qualifier, &lexical_package_chain, rooted)
+    });
     let target_key = request.map_or_else(
         || format!("{}::<no-matching-request>", qualifier.join(".")),
         |request| request.target.clone(),
@@ -14830,10 +15118,6 @@ fn import_prefix_observation(
     ]
     .concat()
     .join(".");
-    let rooted = qualifier.first().is_some_and(|segment| segment == "_root_");
-    let lexical_package_chain = selected_context
-        .map(|(context_id, _)| source_context_package_chain(index, store, context_id))
-        .unwrap_or_default();
     let relative_candidate = lexical_package_chain
         .first()
         .filter(|_| !rooted)
