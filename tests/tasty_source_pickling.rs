@@ -15,6 +15,7 @@ use dotty_typer::SourceTyper;
 
 const ANSWER: &str = include_str!("fixtures/tasty_pickler/Answer.scala");
 const PARAMETERS: &str = include_str!("fixtures/tasty_pickler/Parameters.scala");
+const OPERATIONS: &str = include_str!("fixtures/tasty_pickler/Operations.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct CanonicalIntResolver {
@@ -192,6 +193,152 @@ fn compile_source() -> Product {
     }
 }
 
+struct OperationsProduct {
+    bytes: Vec<u8>,
+    output: PickledTasty,
+    methods: Vec<(String, SymbolId)>,
+}
+
+fn compile_operations() -> OperationsProduct {
+    let source = SourceId::from_index(13);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(OPERATIONS).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let parsed = parse_compilation_unit(
+        SourceText::new(OPERATIONS).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Operations.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("namer rejected Operations fixture: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!()
+    };
+    let [class_tree] = package.stats.as_slice() else {
+        panic!("expected one source class")
+    };
+    let class = index.symbol_at(source, *class_tree).unwrap();
+    let TreeKind::TypeDef(class_def) = &parsed.ast.get(*class_tree).kind else {
+        panic!()
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+        panic!()
+    };
+    let constructor_tree = template.constructor;
+    let constructor = index.symbol_at(source, constructor_tree).unwrap();
+    let TreeKind::DefDef(constructor_def) = &parsed.ast.get(constructor_tree).kind else {
+        panic!()
+    };
+    let clauses = |definition: &DefDef<Untyped>| {
+        definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|tree| index.symbol_at(source, *tree).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let source_methods = template
+        .body
+        .iter()
+        .filter_map(|tree| match &parsed.ast.get(*tree).kind {
+            TreeKind::DefDef(definition) => Some((*tree, definition)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(class).unwrap();
+    typer.complete_symbol(constructor).unwrap();
+    let mut methods = Vec::with_capacity(source_methods.len());
+    let mut method_names = Vec::with_capacity(source_methods.len());
+    for (tree, definition) in source_methods {
+        let method = index.symbol_at(source, tree).unwrap();
+        let method_name = typer
+            .store()
+            .names
+            .resolve(definition.name.as_name().text())
+            .to_owned();
+        typer.complete_symbol(method).unwrap();
+        let context = typer.expression_context_for(method).unwrap();
+        let rhs = definition.rhs.expect("Operations methods have bodies");
+        let body = typer
+            .type_expression_expected(rhs, context, definitions.int)
+            .unwrap();
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(body));
+        methods.push(MethodPicklePlan {
+            symbol: method,
+            source_tree: tree,
+            parameter_clauses: clauses(definition),
+            body: Some(body),
+        });
+        method_names.push((method_name, method));
+    }
+    assert_eq!(
+        method_names
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["use", "identity", "first", "second", "zero"]
+    );
+    let bindings = |source, tree| typer.source_typed_index().get(source, tree);
+    let plan = PicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        typed_ast: typer.typed_ast(),
+        source_ast: &parsed.ast,
+        source_index: &index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source,
+            name: "Operations.scala".into(),
+        },
+        source_root: parsed.root,
+        class,
+        class_tree: *class_tree,
+        constructor: DefaultConstructorPlan {
+            symbol: constructor,
+            source_tree: constructor_tree,
+            parameter_clauses: clauses(constructor_def),
+        },
+        methods: &methods,
+    };
+    let output = plan.validate().unwrap().pickle().unwrap();
+    for method in &methods {
+        assert_eq!(output.body(method.symbol), method.body);
+    }
+    OperationsProduct {
+        bytes: output.bytes().to_vec(),
+        output,
+        methods: method_names,
+    }
+}
+
 fn semantic_and_wire_projection(product: &Product) {
     let file = TastyFile::parse_and_validate_scala_3_9(&product.bytes).unwrap();
     assert_eq!(
@@ -356,6 +503,197 @@ fn real_scala_source_produces_deterministic_semantic_tasty_and_roundtrips() {
         assert!(
             result.success(),
             "requested Scala interop/runtime gate failed"
+        );
+    }
+}
+
+#[test]
+fn operations_source_preserves_canonical_references_and_runs_from_fresh_scala_class() {
+    let first = compile_operations();
+    let second = compile_operations();
+    assert_eq!(first.bytes, second.bytes);
+
+    let file = TastyFile::parse_and_validate_scala_3_9(&first.bytes).unwrap();
+    assert_eq!(
+        (
+            file.header().major_version,
+            file.header().minor_version,
+            file.header().experimental_version
+        ),
+        (28, 9, 0)
+    );
+    assert_eq!(file.source_file().unwrap(), Some("Operations.scala"));
+    let addresses = file.ast_address_index().unwrap();
+    let class = first.output.declarations()[0].symbol;
+    let method_declarations = first
+        .output
+        .declarations()
+        .iter()
+        .filter(|declaration| declaration.owner == class)
+        .filter_map(|declaration| {
+            let body = addresses
+                .get(declaration.address)?
+                .decode_defdef_body()
+                .ok()?;
+            let name = file.render_name(body.name).ok()?;
+            (name != "<init>").then_some((name, *declaration, body))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        method_declarations
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["use", "identity", "first", "second", "zero"]
+    );
+    for ((name, symbol), (_, declaration, _)) in first.methods.iter().zip(&method_declarations) {
+        assert_eq!(
+            *symbol, declaration.symbol,
+            "canonical declaration for {name}"
+        );
+    }
+
+    let identity = method_declarations[1].1;
+    let identity_parameters = first
+        .output
+        .declarations()
+        .iter()
+        .filter(|declaration| declaration.owner == identity.symbol)
+        .collect::<Vec<_>>();
+    assert_eq!(identity_parameters.len(), 1);
+    let RawTree::Leaf(parameter_ref) = method_declarations[1].2.rhs.as_ref().unwrap() else {
+        panic!("identity RHS must be a direct reference to its formal")
+    };
+    assert_eq!(parameter_ref.tag, TERMREFDIRECT_TAG);
+    assert_eq!(
+        parameter_ref.ast_ref().unwrap().address,
+        identity_parameters[0].address
+    );
+
+    let RawTree::LengthNode(call_node) = method_declarations[0].2.rhs.as_ref().unwrap() else {
+        panic!("use RHS must be APPLY")
+    };
+    assert_eq!(call_node.tag, APPLY_TAG);
+    let call = call_node.decode_apply().unwrap();
+    let RawTree::LengthNode(select_node) = call.function else {
+        panic!("identity call function must be SELECTin")
+    };
+    let selected = select_node.decode_select_in().unwrap();
+    let call_receiver = selected.qualifier.decode_qual_this().unwrap();
+    let call_receiver_ident = call_receiver.child.decode_ident().unwrap();
+    let call_receiver_class = call_receiver_ident.type_tree.decode_reference().unwrap();
+    assert_eq!(
+        call_receiver_class.reference,
+        first.output.declarations()[0].address
+    );
+    assert!(matches!(
+        file.render_signed_name(selected.name).unwrap(),
+        Some(RenderedSignedName::Signed { original, signature })
+            if original == "identity"
+                && signature.result == "scala.Int"
+                && signature.parameters == [RenderedParamSig::TermParameter("scala.Int".into())]
+    ));
+    assert_eq!(call.arguments.len(), 1);
+    assert!(matches!(
+        call.arguments[0],
+        RawTree::Leaf(SimpleTerm {
+            tag: INTCONST_TAG,
+            value: TermValue::Int(42),
+            ..
+        })
+    ));
+
+    let first_select = method_declarations[2]
+        .2
+        .rhs
+        .as_ref()
+        .unwrap()
+        .decode_select()
+        .unwrap();
+    assert_eq!(file.render_name(first_select.name).unwrap(), "second");
+    let receiver = first_select.qualifier.decode_qual_this().unwrap();
+    let receiver_ident = receiver.child.decode_ident().unwrap();
+    let receiver_class = receiver_ident.type_tree.decode_reference().unwrap();
+    assert_eq!(
+        receiver_class.reference,
+        first.output.declarations()[0].address
+    );
+    assert_eq!(method_declarations[4].2.clauses, [EMPTYCLAUSE_TAG]);
+    assert!(matches!(
+        method_declarations[4].2.rhs,
+        Some(RawTree::Leaf(SimpleTerm {
+            tag: INTCONST_TAG,
+            value: TermValue::Int(0),
+            ..
+        }))
+    ));
+    assert_eq!(file.encode_validated().unwrap(), first.bytes);
+
+    let mut semantic_store = SemanticStore::new();
+    let semantic_definitions = Definitions::bootstrap(&mut semantic_store);
+    let int_symbol = semantic_store
+        .types
+        .get(semantic_definitions.int)
+        .reference_symbol()
+        .unwrap();
+    let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
+        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }));
+    let semantic_index = unpickler.enter_symbols().unwrap().clone();
+    let semantic_class = semantic_index
+        .symbol_at(first.output.declarations()[0].address)
+        .unwrap();
+    let semantic_identity = semantic_index.symbol_at(identity.address).unwrap();
+    let semantic_parameter = semantic_index
+        .symbol_at(identity_parameters[0].address)
+        .unwrap();
+    assert_eq!(
+        unpickler.symbol_state_at(identity.address).unwrap().0,
+        SymbolKind::Method
+    );
+    assert_eq!(
+        unpickler
+            .symbol_state_at(identity_parameters[0].address)
+            .unwrap()
+            .0,
+        SymbolKind::Parameter
+    );
+    let _ = unpickler.into_parts();
+    assert_eq!(
+        semantic_store.symbols.get(semantic_identity).owner,
+        Some(semantic_class)
+    );
+    assert_eq!(
+        semantic_store.symbols.get(semantic_parameter).owner,
+        Some(semantic_identity)
+    );
+    assert_eq!(
+        semantic_store
+            .names
+            .resolve(semantic_store.symbols.get(semantic_parameter).name.text()),
+        "x"
+    );
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("target"));
+        let candidate = target.join("issue-1244/generated/example/Operations.tasty");
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::write(&candidate, &first.bytes).unwrap();
+        let temporary = target.join("issue-1244/tmp");
+        fs::create_dir_all(&temporary).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg("--runtime")
+            .arg(&candidate)
+            .env("TMPDIR", temporary)
+            .status()
+            .expect("start explicitly requested Scala 3.9 Operations gate");
+        assert!(
+            result.success(),
+            "Operations Scala interoperability gate failed"
         );
     }
 }
