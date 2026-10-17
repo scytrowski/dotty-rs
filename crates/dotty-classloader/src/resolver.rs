@@ -1120,13 +1120,13 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         let Some(package) = store.symbols.get(object).owner else {
             return Ok(None);
         };
-        let Some(identity) = self
-            .session
-            .modules
-            .values()
-            .find(|identity| identity.object == object)
-        else {
+        let Some(name) = self.session.modules_by_object.get(&object) else {
             return Ok(None);
+        };
+        let Some(identity) = self.session.modules.get(name) else {
+            return Err(ResolutionError::Malformed {
+                reason: format!("module object {object:?} has no indexed module identity"),
+            });
         };
         self.validate_module_object(store, package, object)?;
         Ok(Some(identity.module_class))
@@ -1138,14 +1138,13 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
         module_class: SymbolId,
     ) -> Result<bool, ResolutionError> {
         self.transact(store, |resolver, store| {
-            let Some(identity) = resolver
-                .session
-                .modules
-                .values()
-                .find(|identity| identity.module_class == module_class)
-                .cloned()
-            else {
+            let Some(name) = resolver.session.modules_by_module_class.get(&module_class) else {
                 return Ok(None);
+            };
+            let Some(identity) = resolver.session.modules.get(name).cloned() else {
+                return Err(ResolutionError::Malformed {
+                    reason: format!("module class {module_class:?} has no indexed module identity"),
+                });
             };
             resolver.validate_module_object(
                 store,
