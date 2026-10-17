@@ -9768,8 +9768,9 @@ fn probe_supported_match_cases(
         .collect::<Vec<_>>();
 
     let packages = Packages::new();
+    let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
     let probe_metrics = Rc::new(RefCell::new(ResolverMetrics {
-        timing_enabled: std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some(),
+        timing_enabled: profile_timing,
         ..ResolverMetrics::default()
     }));
     let mut typer = SourceTyper::new(
@@ -9780,16 +9781,26 @@ fn probe_supported_match_cases(
         definitions,
         &packages,
     );
-    typer = typer.with_resolver(Box::new(AuditResolver {
-        inner: ClasspathSymbolResolver::new(
-            classpath.clone(),
-            definitions,
-            LoadingSession::with_packages(Packages::new()),
-        )
-        .with_load_profile_collection(),
-        metrics: Rc::clone(&probe_metrics),
-        class_path_probe: Some(classpath),
-    }));
+    let resolver = ClasspathSymbolResolver::new(
+        classpath.clone(),
+        definitions,
+        LoadingSession::with_packages(Packages::new()),
+    )
+    .with_load_profile_collection();
+    // Match probes only contribute typed-case outcomes. The detailed audit
+    // resolver records per-request target paths and classpath evidence, but
+    // those observations are discarded here; wrapping every resolver call
+    // made this verification pass substantially slower. Retain that wrapper
+    // only for explicit diagnostic profiles.
+    typer = if profile_timing {
+        typer.with_resolver(Box::new(AuditResolver {
+            inner: resolver,
+            metrics: Rc::clone(&probe_metrics),
+            class_path_probe: Some(classpath),
+        }))
+    } else {
+        typer.with_resolver(Box::new(resolver))
+    };
 
     let mut successes = [
         "wildcard",
