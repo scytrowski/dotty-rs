@@ -430,3 +430,25 @@ lookup, ambiguity diagnostics, and rollback. Candidates without source or
 classpath evidence should continue to remain unresolved. The frozen #1128
 profile remains unchanged; the full current corpus report and row sidecars are
 in [the generated audit](typer-classpath-corpus-audit-3.9.0.md).
+
+
+### #1180 import-profile performance checkpoint
+
+The pinned import-prefix profile ran twice with matching normalized output.
+Its 209 frozen import-bearing source files took 288.468 s and 288.037 s;
+selected source parse/name/type work consumed 285.981 s and 285.707 s, while
+reconciliation took about 0.3 s per run. This is not the deferred class-loading
+profile. The separate full-corpus run was stopped at 75 / 1,236 files after
+more than 153,000 resolver calls, so this checkpoint does not refresh the
+current completed-load depth or fanout limits. The prior p95 and fanout figures
+remain historical and must not be cited as measurements of the #1180 branch.
+See the [#1180 import report](typer-classpath-import-prefix-profile-1180-3.9.0.md).
+The follow-up targeted profile measured the first `tpd.scala` method at
+6,214 ms before and 3,546 ms after adding `LoadingSession` reverse indexes;
+member-lookup time fell from 4,939 ms to 2,797 ms for the same 512 requests.
+The full-corpus rerun after this optimization was stopped at 250 / 1,236 files
+after about 20 minutes and roughly 295,000 module-identity requests. The later
+#1180 follow-up completed two pinned full-corpus runs with byte-identical
+normalized reports and deferred-cohort sidecars; p95 completion depth was 0
+and maximum completed fanout was 9, within the issue limits of 6 and 16. Fresh
+current blocker counts and direct origins are in the [#1180 blocker sidecar](typer-classpath-corpus-audit-1180-current-blockers.tsv).

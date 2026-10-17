@@ -55,6 +55,26 @@ The expanded oracle run for this issue reported:
 scala=3.9.0 positive_imports=class,object,object_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate negative_imports=absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision,lexical_term_missing_member_no_root_fallback;root_fallback=success root_qualification=bypasses_relative_search;lexical_term_binding=normal_priority
 ```
 
+## Causal classpath probe
+
+`dotty_core_import_resolves_to_its_package_before_a_later_lookup_blocker` in
+`crates/dotty-typer/tests/package_prefix_parity.rs` runs a small Namer-to-
+SourceTyper case from `package dotty.tools.dotc` with `import core.Contexts`.
+Its traced classpath resolver records the request for
+`dotty.tools.dotc.core`; the imported `Contexts` type is then asserted to be a
+class whose owner is the exact package `SymbolId` returned for that request.
+Typing a reference to a nonexistent member on that imported value reaches the
+later `MemberNotFound` diagnostic, which distinguishes the resolved qualifier
+and imported class identity from the original first-segment failure.
+
+The classpath fixture supplies a minimal class-file stub at the real package
+and class path. The checked-in Scala 3.9.0 `Contexts.tasty` fixture is encoded
+as TASTy 28.8.0, while the classloader currently accepts 28.9.0, so it cannot
+serve as a loadable fixture here. This probe establishes the package and symbol
+identity chain for the dominant `core` prefix shape; it does not claim full
+typing coverage of the Scala compiler's `Contexts` implementation. It is a
+focused regression test and does not rerun the corpus audit.
+
 ## Preserved source evidence
 
 The frozen #1128 profile remains 2,394 weighted observations. Its historical

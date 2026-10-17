@@ -107,8 +107,15 @@ class ImportPrefixProfileTest(unittest.TestCase):
                 ("current", "a.b.ast.core", "missing"),
                 ("enclosing", "a.b.core", "found:Package"),
                 ("enclosing", "a.core", "missing"),
-                ("root", "<root>", "found:Package"),
+                ("root", "<root>", "missing"),
             ],
+        )
+        root_package = self.observation(
+            source_package_registry_lookup="relative=missing;enclosing=none;root=found:Package@dotty"
+        )
+        self.assertEqual(
+            ordered_source_package_candidates(root_package)[-1]["registry"],
+            "found:Package",
         )
         self.assertEqual(
             ordered_source_package_candidates(row)[-1]["next_segment_lookup"],
@@ -152,18 +159,34 @@ class ImportPrefixProfileTest(unittest.TestCase):
             combined = forward + render_lexical_candidate_evidence(
                 [core, ast],
                 roots,
-                "current-1132",
+                "current-1180",
                 families=families,
                 include_header=False,
+            )
+            current_core_only = render_lexical_candidate_evidence(
+                [core],
+                roots,
+                "current-1180",
+                families=families,
+                include_header=False,
+                allow_missing_families=True,
+            )
+            root_candidate = next(
+                candidate
+                for candidate in ordered_source_package_candidates(core)
+                if candidate["origin"] == "root"
             )
 
         self.assertEqual(forward, reverse)
         self.assertIn("frozen-1128\tast\ta.scala", forward)
         self.assertIn("a.b.core", forward)
         self.assertIn("source_classpath_overlap", forward)
-        self.assertNotIn("current-1132", forward)
+        self.assertNotIn("current-1180", forward)
         self.assertEqual(combined.count("snapshot\ttarget_family"), 1)
         self.assertIn("source_context_owners_in_priority_order", combined)
+        self.assertIn("current-1180\tcore\tz.scala", current_core_only)
+        self.assertNotIn("current-1180\tast\t", current_core_only)
+        self.assertEqual(root_candidate["registry"], "missing")
 
     def test_qualified_source_candidate_is_probed_in_classpath(self):
         with tempfile.TemporaryDirectory() as temporary:

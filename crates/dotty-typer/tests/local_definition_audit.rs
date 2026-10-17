@@ -23,12 +23,18 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ResolverMetrics {
+    timing_enabled: bool,
     current_file: String,
     current_method: String,
+    module_identity_inner_time: Duration,
+    module_completion_inner_time: Duration,
+    class_completion_inner_time: Duration,
+    member_lookup_inner_time: Duration,
+    package_lookup_inner_time: Duration,
     resolver_package_requests: usize,
     package_successes: usize,
     package_unresolved: usize,
@@ -625,7 +631,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &SemanticStore,
         object: SymbolId,
     ) -> Result<Option<SymbolId>, ResolutionError> {
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.inner.module_class_of_object(store, object);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().module_identity_inner_time += started.elapsed();
+        }
         let (source_file, enclosing_attempt) = {
             let mut metrics = self.metrics.borrow_mut();
             metrics.module_identity_resolver_calls += 1;
@@ -730,6 +740,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         module_class: SymbolId,
     ) -> Result<bool, ResolutionError> {
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let module_class_identity = if store.symbols.contains(module_class) {
             audit_binary_candidate(store, module_class)
                 .unwrap_or_else(|| "<unknown-module-class>".to_owned())
@@ -746,6 +757,9 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let object_origin = symbol_origin_category(store, module_class);
         let request = format!("module-completion::{module_class_identity}");
         let result = self.inner.complete_module_class(store, module_class);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().module_completion_inner_time += started.elapsed();
+        }
         let profiles = self.inner.take_load_profiles();
         let result_state = module_class_observed_state(store, module_class);
         let (outcome, error_category) = match &result {
@@ -795,12 +809,16 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         symbol: SymbolId,
     ) -> Result<bool, ResolutionError> {
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let request = if store.symbols.contains(symbol) {
             format!("completion::{}", audit_symbol_path(store, symbol))
         } else {
             "completion::unknown-symbol".to_owned()
         };
         let result = self.inner.complete_class(store, symbol);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().class_completion_inner_time += started.elapsed();
+        }
         let profiles = self.inner.take_load_profiles();
         let mut metrics = self.metrics.borrow_mut();
         let file = metrics.current_file.clone();
@@ -1027,7 +1045,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     .and_then(|id| audit_binary_candidate(store, id))
             })
             .flatten();
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.inner.resolve_member(store, request);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().member_lookup_inner_time += started.elapsed();
+        }
         let load_profiles = self.inner.take_load_profiles();
         let module_profile = self.inner.take_module_resolution_profile();
         // Profiles describe work performed even when Ok(None) rolls it back.
@@ -1209,6 +1231,14 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
             _ => None,
         };
+        trace_import_prefix_symbol_resolution(
+            &metrics,
+            "member",
+            &target_key,
+            &outcome,
+            result.as_ref().ok().and_then(|symbol| *symbol),
+            selected_identity.as_deref(),
+        );
         if !method.is_empty() {
             metrics
                 .resolver_requests_by_method
@@ -1392,7 +1422,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError> {
+        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.inner.resolve_package(store, path);
+        if let Some(started) = resolver_started {
+            self.metrics.borrow_mut().package_lookup_inner_time += started.elapsed();
+        }
         let mut metrics = self.metrics.borrow_mut();
         metrics.resolver_package_requests += 1;
         let (target, outcome, cause, materialized_prefix) = match &result {
@@ -1460,6 +1494,14 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
             _ => None,
         };
+        trace_import_prefix_symbol_resolution(
+            &metrics,
+            "package",
+            &target,
+            &outcome,
+            result.as_ref().ok().and_then(|symbol| *symbol),
+            selected_identity.as_deref(),
+        );
         if !metrics.current_method.is_empty() {
             let method = metrics.current_method.clone();
             metrics
@@ -1539,6 +1581,34 @@ fn audit_symbol_identity(store: &SemanticStore, symbol: SymbolId) -> String {
         "kind={kind}::origin={origin}::path={}",
         audit_symbol_path(store, symbol)
     )
+}
+
+fn trace_import_prefix_symbol_resolution(
+    metrics: &ResolverMetrics,
+    operation: &str,
+    target: &str,
+    outcome: &str,
+    symbol: Option<SymbolId>,
+    identity: Option<&str>,
+) {
+    if std::env::var_os("SCALA39_IMPORT_PREFIX_TRACE_IDS").is_none() {
+        return;
+    }
+    let order = metrics
+        .resolver_requests_by_method
+        .get(&metrics.current_method)
+        .map_or(0, Vec::len);
+    eprintln!(
+        "IMPORT_PREFIX_RESOLVER_TRACE source={} method={} order={} operation={} target={} outcome={} symbol_id={} identity={}",
+        metrics.current_file,
+        metrics.current_method,
+        order,
+        operation,
+        target,
+        outcome,
+        symbol.map_or_else(|| "-".to_owned(), |symbol| format!("{}", symbol.index())),
+        identity.unwrap_or("-")
+    );
 }
 
 fn symbol_info_label(info: dotty_core::SymbolInfo) -> &'static str {
@@ -1740,6 +1810,63 @@ struct ModuleAuditPath {
     include_object_class: bool,
 }
 
+struct PrefixOnlyPackagePath;
+
+type PackageLookupObservations = Rc<RefCell<Vec<(Vec<String>, bool)>>>;
+
+struct SharedResolverHandle<E: ClassPathEntry> {
+    resolver: Rc<RefCell<Option<ClasspathSymbolResolver<E>>>>,
+    package_results: PackageLookupObservations,
+}
+
+impl<E: ClassPathEntry> SymbolResolver for SharedResolverHandle<E> {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        self.resolver
+            .borrow()
+            .as_ref()
+            .expect("shared resolver is present")
+            .checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.resolver
+            .borrow_mut()
+            .as_mut()
+            .expect("shared resolver is present")
+            .rollback_to(store, checkpoint);
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.resolver
+            .borrow_mut()
+            .as_mut()
+            .expect("shared resolver is present")
+            .resolve_member(store, request)
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let result = self
+            .resolver
+            .borrow_mut()
+            .as_mut()
+            .expect("shared resolver is present")
+            .resolve_package(store, path)?;
+        self.package_results.borrow_mut().push((
+            path.iter().map(|segment| (*segment).to_owned()).collect(),
+            result.is_some(),
+        ));
+        Ok(result)
+    }
+}
+
 // Source.tasty and scala/package.tasty are the checked-in Scala 3.9.0 bytes
 // pinned by the fixture manifest. The few Java/collection dependencies below
 // are intentionally class stubs, matching the classloader fixture setup; the
@@ -1777,6 +1904,16 @@ impl ClassPathEntry for ModuleAuditPath {
 
     fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
         Ok(package == ["me", "cytrowski", "tastyfixtures", "semantic"])
+    }
+}
+
+impl ClassPathEntry for PrefixOnlyPackagePath {
+    fn find_class(&self, _name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        Ok(None)
+    }
+
+    fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+        Ok(matches!(package, ["external"] | ["external", "pkg"]))
     }
 }
 
@@ -2319,7 +2456,7 @@ fn audit_and_classpath_resolvers_match_for_real_scala_source_module() {
 
 #[test]
 fn source_expression_failure_rolls_back_module_before_successful_member_retry() {
-    let text = "object Audit { def use: Int = { scala.io.Source.stdin; true } }";
+    let text = "package app { object Audit { def use: Int = { scala.io.Source.stdin; true } } }";
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -2367,7 +2504,7 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         ..ResolverMetrics::default()
     }));
     let typer_packages = namer_packages.snapshot();
-    let resolver = AuditResolver {
+    let mut resolver = AuditResolver {
         inner: ClasspathSymbolResolver::new(
             ScalaSourceAuditPath,
             definitions,
@@ -2378,6 +2515,39 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         metrics: Rc::clone(&metrics),
         class_path_probe: None,
     };
+    let scala_io = resolver
+        .inner
+        .resolve_package(&mut store, &["scala", "io"])
+        .unwrap()
+        .expect("Scala 3.9 fixture contains scala.io");
+    let scala_io_prefix = store
+        .types
+        .alloc(Type::type_ref(definitions.no_prefix, scala_io));
+    let source_name = dotty_core::Name::new(store.names.intern("Source"), Namespace::Term);
+    let source_object = resolver
+        .inner
+        .resolve_member(
+            &mut store,
+            &MemberRequest {
+                prefix: scala_io_prefix,
+                name: source_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        )
+        .unwrap()
+        .expect("Scala 3.9 fixture contains scala.io.Source");
+    let source_module_class = resolver
+        .inner
+        .module_class_of_object(&store, source_object)
+        .unwrap()
+        .expect("Source has a canonical ModuleClass identity");
+    assert!(matches!(
+        store.symbols.get(source_module_class).info,
+        dotty_core::SymbolInfo::Missing
+    ));
+    let source_object_before = store.symbols.get(source_object).clone();
+    let source_module_before = store.symbols.get(source_module_class).clone();
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -2390,6 +2560,15 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
     let context = typer.expression_context_for(method).unwrap();
     let store_before = typer.store().checkpoint();
     let typed_before = typer.typed_ast().checkpoint();
+    let app_package = typer_packages.symbol(&["app"]).unwrap();
+    let app_scope = typer_packages.scope_of(app_package).unwrap();
+    let mut app_entries_before = typer
+        .store()
+        .scopes
+        .get(app_scope)
+        .entered_symbols()
+        .collect::<Vec<_>>();
+    app_entries_before.sort_by_key(|symbol| symbol.index());
 
     let error = typer
         .type_expression_expected(rhs, context, definitions.int)
@@ -2413,6 +2592,23 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         typer.source_typed_index().get(source, stdin_selection),
         None
     );
+    assert_eq!(
+        typer.store().symbols.get(source_object),
+        &source_object_before
+    );
+    assert_eq!(
+        typer.store().symbols.get(source_module_class),
+        &source_module_before,
+        "outer failure restores the pre-existing incomplete module shell"
+    );
+    let mut app_entries_after = typer
+        .store()
+        .scopes
+        .get(app_scope)
+        .entered_symbols()
+        .collect::<Vec<_>>();
+    app_entries_after.sort_by_key(|symbol| symbol.index());
+    assert_eq!(app_entries_after, app_entries_before);
 
     let typed_stdin = typer
         .type_expression(stdin_selection, context)
@@ -2432,6 +2628,11 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
     assert_eq!(
         typer.store().names.resolve(stdin_entry.name.text()),
         "stdin"
+    );
+    assert_eq!(
+        stdin_entry.owner,
+        Some(source_module_class),
+        "retry must use the same canonical ModuleClass shell"
     );
     assert_eq!(
         audit_symbol_path(typer.store(), stdin_entry.owner.unwrap()),
@@ -3048,6 +3249,99 @@ fn existing_module_member_rollback_snapshot(
         entry.kind,
         audit_symbol_path(store, entry.owner.unwrap())
     )
+}
+
+#[test]
+fn missing_external_import_member_rolls_back_temporary_package_materialization() {
+    let text = "import external.pkg.Missing\nval value: Missing = 1";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    let mut namer_packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "missing-external-import.scala",
+        &mut store,
+        &mut namer_packages,
+    )
+    .unwrap();
+    let (value, type_tree) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| match &node.kind {
+            TreeKind::ValDef(definition)
+                if store.names.resolve(definition.name.as_name().text()) == "value" =>
+            {
+                Some((index.symbol_at(source, tree).unwrap(), definition.tpt))
+            }
+            _ => None,
+        })
+        .expect("fixture contains the requested type projection");
+    let context = index.declaration_context_of(value).unwrap();
+    let packages = namer_packages.snapshot();
+    let resolver = ClasspathSymbolResolver::new(
+        PrefixOnlyPackagePath,
+        definitions,
+        LoadingSession::with_packages(namer_packages),
+    );
+    let resolver = Rc::new(RefCell::new(Some(resolver)));
+    let package_results = Rc::new(RefCell::new(Vec::new()));
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(SharedResolverHandle {
+        resolver: Rc::clone(&resolver),
+        package_results: Rc::clone(&package_results),
+    }));
+    let store_checkpoint = typer.store().checkpoint();
+
+    for _ in 0..2 {
+        assert!(matches!(
+            typer.type_of_tpt(type_tree, context),
+            Err(TyperError::TypeNameNotFound { name, tree_index, .. })
+                if typer.store().names.resolve(name.text()) == "Missing"
+                    && tree_index == type_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.source_type_index().type_at(source, type_tree), None);
+    }
+    assert!(package_results.borrow().iter().any(|(path, resolved)| {
+        path == &["external".to_owned(), "pkg".to_owned()] && *resolved
+    }));
+    assert!(
+        package_results
+            .borrow()
+            .iter()
+            .any(|(path, resolved)| { path == &["external".to_owned()] && *resolved })
+    );
+
+    drop(typer);
+    let resolver = resolver
+        .borrow_mut()
+        .take()
+        .expect("shared classpath resolver remains available after rollback");
+    let packages = resolver.into_session().into_packages();
+    assert!(
+        packages.symbol::<&str>(&[]).is_some(),
+        "source root survives"
+    );
+    assert!(packages.symbol(&["external"]).is_none());
+    assert!(packages.symbol(&["external", "pkg"]).is_none());
 }
 
 #[test]
@@ -4230,6 +4524,8 @@ struct BaselineImportAttempt {
     baseline_attribution: String,
     baseline_import_tree: String,
     qualifier_segments: String,
+    context_package: String,
+    lexical_package_chain: Vec<String>,
     first_failing_segment: String,
     evidence_category: String,
     target_key: String,
@@ -5753,6 +6049,7 @@ fn merge_counts<K: Ord>(target: &mut BTreeMap<K, usize>, source: BTreeMap<K, usi
 #[test]
 #[ignore = "run tools/typer-classpath-corpus-audit/run with the pinned Scala checkout and explicit JAVA_HOME"]
 fn pinned_scala39_local_definition_audit() {
+    let audit_started = Instant::now();
     let root = PathBuf::from(std::env::var_os("SCALA39_ROOT").expect("SCALA39_ROOT is required"));
     let revision = git_revision(&root);
     assert_eq!(
@@ -5760,9 +6057,23 @@ fn pinned_scala39_local_definition_audit() {
         "audit requires the repository's pinned Scala 3.9.0 source revision"
     );
     let classpath = audit_classpath_from_environment();
-    let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
+    let profile_files = std::env::var("DOTTY_AUDIT_PROFILE_FILES")
+        .ok()
+        .map(|files| files.split(',').map(str::to_owned).collect::<BTreeSet<_>>());
+    let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics {
+        timing_enabled: profile_files.is_some(),
+        ..ResolverMetrics::default()
+    }));
     let files = scala_files(&[root.join("library/src"), root.join("compiler/src")]);
+    let expected_files = profile_files.as_ref().map_or(files.len(), BTreeSet::len);
+    if let Some(profile_files) = &profile_files {
+        assert!(
+            !profile_files.is_empty(),
+            "profile file list must not be empty"
+        );
+    }
     let mut audit = Audit::default();
+    let mut processed_files = 0;
     for (index, file) in files.iter().enumerate() {
         if index % 25 == 0 {
             eprintln!("audited {index}/{} Scala files", files.len());
@@ -5772,6 +6083,13 @@ fn pinned_scala39_local_definition_audit() {
             .unwrap_or(file)
             .to_string_lossy()
             .replace('\\', "/");
+        if profile_files
+            .as_ref()
+            .is_some_and(|profile_files| !profile_files.contains(&relative))
+        {
+            continue;
+        }
+        processed_files += 1;
         let source = match fs::read_to_string(file) {
             Ok(source) => source,
             Err(_) => {
@@ -5787,6 +6105,20 @@ fn pinned_scala39_local_definition_audit() {
             classpath.clone(),
             Rc::clone(&resolver_metrics),
         ));
+    }
+
+    if let Some(profile_files) = profile_files {
+        assert_eq!(
+            processed_files,
+            profile_files.len(),
+            "every requested profile path must match a Scala source file"
+        );
+        eprintln!(
+            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} wall_ms={}",
+            audit_started.elapsed().as_millis()
+        );
+        print_resolver_metrics(&resolver_metrics.borrow());
+        return;
     }
 
     assert_eq!(
@@ -5810,8 +6142,8 @@ fn pinned_scala39_local_definition_audit() {
             .source_function_outcomes
             .get("type::Function::SymbolResolution")
             .map(|bucket| bucket.count),
-        Some(5),
-        "the current main baseline retains five ordinary function-type rows at SymbolResolution"
+        Some(6),
+        "#1180 moves ProtoTypes.isPoly from ImportQualifierNotFound to SymbolResolution"
     );
     assert_eq!(audit.source_function_method_outcomes.len(), 25);
     assert_eq!(IMPURE_FUNCTION_BASELINE.len(), 13);
@@ -6089,11 +6421,14 @@ fn pinned_scala39_local_definition_audit() {
             .count(),
         3
     );
-    assert!(audit.local_value_baseline_outcomes.iter().all(|outcome| {
-        outcome.observation.declaration_kind != "lazy val"
-            || (outcome.current_first_blocker == "ImportQualifierNotFound"
-                && !outcome.declaration_typed)
-    }));
+    assert!(
+        audit.local_value_baseline_outcomes.iter().all(|outcome| {
+            outcome.observation.declaration_kind != "lazy val"
+                || (outcome.current_first_blocker == "SymbolResolution"
+                    && !outcome.declaration_typed)
+        }),
+        "#1180 advances all three frozen lazy vals past import lookup to SymbolResolution"
+    );
     let remaining_generic_local_value_rows = audit
         .local_value_baseline_outcomes
         .iter()
@@ -6550,7 +6885,8 @@ fn pinned_scala39_import_prefix_typing_probe() {
     );
     let profile = fs::read_to_string(profile).expect("frozen #1128 profile should be readable");
     let baseline_target_categories = frozen_import_target_categories();
-    let baseline_rows = baseline_import_blocker_attempts(&profile, &baseline_target_categories);
+    let mut baseline_rows = baseline_import_blocker_attempts(&profile, &baseline_target_categories);
+    let selected_source_file = std::env::var("SCALA39_IMPORT_PREFIX_SOURCE_FILE").ok();
     assert_eq!(baseline_rows.len(), 2_394);
     assert!(baseline_rows.iter().all(|row| {
         !row.baseline_method.is_empty()
@@ -6611,13 +6947,34 @@ fn pinned_scala39_import_prefix_typing_probe() {
         methods_by_file.values().map(BTreeSet::len).sum::<usize>(),
         904
     );
+    if let Some(selected_file) = selected_source_file.as_deref() {
+        assert!(!Path::new(selected_file).is_absolute());
+        assert!(!selected_file.split('/').any(|part| part == ".."));
+        baseline_rows.retain(|row| row.file == selected_file);
+        assert!(
+            !baseline_rows.is_empty(),
+            "selected source has no frozen import-prefix rows: {selected_file}"
+        );
+        methods_by_file.retain(|file, _| file == selected_file);
+        assert_eq!(methods_by_file.len(), 1);
+        eprintln!(
+            "import-prefix single-source probe: file={selected_file}, frozen_rows={}",
+            baseline_rows.len()
+        );
+    }
     let stage_started = Instant::now();
     let classpath = audit_classpath_from_environment();
     let classpath_setup = stage_started.elapsed();
     let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
     let mut audit = Audit::default();
     let stage_started = Instant::now();
-    let source_package_paths = audit_source_package_inventory_for_roots(&root);
+    let source_package_paths = if let Some(selected_file) = selected_source_file.as_deref() {
+        let text = fs::read_to_string(root.join(selected_file))
+            .unwrap_or_else(|error| panic!("cannot read {selected_file}: {error}"));
+        audit_source_package_inventory(&text, selected_file)
+    } else {
+        audit_source_package_inventory_for_roots(&root)
+    };
     let package_inventory = stage_started.elapsed();
     let stage_started = Instant::now();
     for (index, (relative, method_trees)) in methods_by_file.iter().enumerate() {
@@ -6652,6 +7009,35 @@ fn pinned_scala39_import_prefix_typing_probe() {
     );
     let reconciliation_time = stage_started.elapsed();
     assert_eq!(reconciliation.len(), baseline_rows.len());
+    if selected_source_file.as_deref() == Some("compiler/src/dotty/tools/dotc/Resident.scala") {
+        assert_eq!(reconciliation.len(), 1);
+        let row = &reconciliation[0];
+        assert_eq!(
+            row.current_selected_identity,
+            "kind=Package::origin=synthetic::path=dotty.tools.dotc.core"
+        );
+        assert!(row.final_import_identity.contains(
+            "qualifier=resolved::kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts"
+        ));
+        let object_identities = metrics
+            .borrow()
+            .resolver_requests_by_method
+            .values()
+            .flatten()
+            .filter(|request| {
+                request.target.starts_with("prefix=dotty.tools.dotc.core::")
+                    && request.target.contains("::name=Contexts::")
+            })
+            .filter_map(|request| request.selected_identity.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            object_identities,
+            BTreeSet::from([
+                "kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts".to_owned()
+            ]),
+            "the pinned source-relative import must select the canonical TASTy object"
+        );
+    }
     let unresolved_baseline_rows = reconciliation
         .iter()
         .filter(|row| row.current_outcome.starts_with("ImportQualifierNotFound::"))
@@ -6671,13 +7057,13 @@ fn pinned_scala39_import_prefix_typing_probe() {
         reconciliation_time.as_millis(),
         audit_started.elapsed().as_millis()
     );
-    if unresolved_baseline_rows != 721 || advanced_baseline_rows != 1_673 {
-        println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
-        print_import_prefix_reconciliation(&reconciliation);
-        println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
+    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
+    print_import_prefix_reconciliation(&reconciliation);
+    println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
+    if selected_source_file.is_none() {
+        assert_eq!(unresolved_baseline_rows, 721);
+        assert_eq!(advanced_baseline_rows, 1_673);
     }
-    assert_eq!(unresolved_baseline_rows, 721);
-    assert_eq!(advanced_baseline_rows, 1_673);
     assert!(reconciliation.iter().all(|row| {
         row.current_method_typed == (row.current_method_blocker == "typed")
             && row.final_import_identity.starts_with("outcomes::")
@@ -6708,11 +7094,19 @@ fn pinned_scala39_import_prefix_typing_probe() {
             ))
         })
         .count();
-    assert_eq!(new_current_observations, 6);
+    if selected_source_file.is_none() {
+        assert_eq!(
+            new_current_observations, 342,
+            "newly exposed later blockers must remain distinct from frozen #1128 rows"
+        );
+    }
     assert!(reconciliation.iter().all(|row| {
         row.current_method_blocker != "not observed"
             && row.current_outcome != "unmatched current outcome"
     }));
+    if selected_source_file.is_some() {
+        return;
+    }
     let first_segment_observations = all_observations
         .iter()
         .filter(|row| {
@@ -6767,10 +7161,31 @@ fn pinned_scala39_import_prefix_typing_probe() {
     print_import_prefix_profile(&ImportPrefixProfile {
         observations: first_segment_observations,
     });
-    println!("baseline_observations=2394");
-    println!("baseline_files=209");
-    println!("baseline_targets=30");
-    println!("baseline_blocker_origins=904");
+    println!("baseline_observations={}", baseline_rows.len());
+    println!(
+        "baseline_files={}",
+        baseline_rows
+            .iter()
+            .map(|row| row.file.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    );
+    println!(
+        "baseline_targets={}",
+        baseline_rows
+            .iter()
+            .map(|row| row.target_key.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    );
+    println!(
+        "baseline_blocker_origins={}",
+        baseline_rows
+            .iter()
+            .map(|row| (row.file.as_str(), row.blocker_origin_tree))
+            .collect::<BTreeSet<_>>()
+            .len()
+    );
     let cache = classpath.cache_metrics();
     println!(
         "classpath_cache: class_lookups={} repeated_missing_class_lookups={} package_lookups={} repeated_package_lookups={}",
@@ -9356,6 +9771,11 @@ fn probe_supported_match_cases(
         .collect::<Vec<_>>();
 
     let packages = Packages::new();
+    let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
+    let probe_metrics = Rc::new(RefCell::new(ResolverMetrics {
+        timing_enabled: profile_timing,
+        ..ResolverMetrics::default()
+    }));
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -9364,16 +9784,26 @@ fn probe_supported_match_cases(
         definitions,
         &packages,
     );
-    typer = typer.with_resolver(Box::new(AuditResolver {
-        inner: ClasspathSymbolResolver::new(
-            classpath.clone(),
-            definitions,
-            LoadingSession::with_packages(Packages::new()),
-        )
-        .with_load_profile_collection(),
-        metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
-        class_path_probe: Some(classpath),
-    }));
+    let resolver = ClasspathSymbolResolver::new(
+        classpath.clone(),
+        definitions,
+        LoadingSession::with_packages(Packages::new()),
+    )
+    .with_load_profile_collection();
+    // Match probes only contribute typed-case outcomes. The detailed audit
+    // resolver records per-request target paths and classpath evidence, but
+    // those observations are discarded here; wrapping every resolver call
+    // made this verification pass substantially slower. Retain that wrapper
+    // only for explicit diagnostic profiles.
+    typer = if profile_timing {
+        typer.with_resolver(Box::new(AuditResolver {
+            inner: resolver,
+            metrics: Rc::clone(&probe_metrics),
+            class_path_probe: Some(classpath),
+        }))
+    } else {
+        typer.with_resolver(Box::new(resolver))
+    };
 
     let mut successes = [
         "wildcard",
@@ -9393,10 +9823,101 @@ fn probe_supported_match_cases(
     .into_iter()
     .map(|family| (family.to_owned(), 0))
     .collect::<BTreeMap<_, _>>();
+    let profile_probe_limit = std::env::var("DOTTY_AUDIT_PROFILE_MATCH_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    let probes = probes
+        .into_iter()
+        .take(if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+            profile_probe_limit.unwrap_or(usize::MAX)
+        } else {
+            usize::MAX
+        })
+        .collect::<Vec<_>>();
+    let mut method_contexts = HashMap::<SymbolId, dotty_typer::ExpressionContext>::new();
+    let mut selector_outcomes = HashMap::new();
+    let mut selector_keys = HashSet::new();
+    for (method, match_tree, _, _, _) in &probes {
+        let TreeKind::Match(matched) = &parsed.ast.get(*match_tree).kind else {
+            continue;
+        };
+        let key = (*method, matched.selector);
+        if !selector_keys.insert(key) {
+            continue;
+        }
+        let context = match method_contexts.get(method).copied() {
+            Some(context) => context,
+            None => match typer.expression_context_for(*method) {
+                Ok(context) => {
+                    method_contexts.insert(*method, context);
+                    context
+                }
+                Err(_) => continue,
+            },
+        };
+        let selector_started = Instant::now();
+        let resolver_calls_before = probe_metrics.borrow().module_identity_resolver_calls;
+        if let Err(error) = typer.type_expression(matched.selector, context) {
+            let error_name = typed_case_failure_label(
+                &error,
+                &parsed.ast,
+                &type_operator_spellings,
+                &typer.store().names,
+            );
+            let boundary = match &error {
+                TyperError::TypedPatternRuntimeTestDeferred { .. } => {
+                    Some("generic/erased or unsupported runtime test")
+                }
+                TyperError::TypedPatternRelationDeferred { .. } => {
+                    Some("unsupported typed-pattern relation")
+                }
+                TyperError::TypedPatternTypeMismatch { .. } => Some("typed-pattern type mismatch"),
+                TyperError::UnsupportedTypeTree { .. } => Some("unsupported type-tree projection"),
+                _ => None,
+            };
+            selector_outcomes.insert(key, (error_name, boundary));
+        }
+        if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+            let metrics = probe_metrics.borrow();
+            eprintln!(
+                "AUDIT_MATCH_SELECTOR file={path} elapsed_ms={} module_identity_calls={}",
+                selector_started.elapsed().as_millis(),
+                metrics
+                    .module_identity_resolver_calls
+                    .saturating_sub(resolver_calls_before)
+            );
+        }
+    }
     for (method, match_tree, family, guarded, protocol) in probes {
-        let outcome = typer
-            .expression_context_for(method)
-            .and_then(|context| typer.type_expression(match_tree, context));
+        let probe_started = Instant::now();
+        let resolver_calls_before = probe_metrics.borrow().module_identity_resolver_calls;
+        let TreeKind::Match(matched) = &parsed.ast.get(match_tree).kind else {
+            continue;
+        };
+        let selector_key = (method, matched.selector);
+        if let Some((error_name, boundary)) = selector_outcomes.get(&selector_key) {
+            record_typed_match_case_failure(profile, path, &family, error_name, *boundary);
+            continue;
+        }
+        // A method context owns a typer-local scope frame. Reusing the context
+        // avoids pushing the same method scope once for every match case (and
+        // growing the lookup chain throughout the audit).
+        let outcome = match method_contexts.get(&method).copied() {
+            Some(context) => typer.type_expression(match_tree, context),
+            None => typer
+                .expression_context_for(method)
+                .and_then(|context| typer.type_expression(match_tree, context)),
+        };
+        if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+            let metrics = probe_metrics.borrow();
+            eprintln!(
+                "AUDIT_MATCH_PROBE file={path} family={family} elapsed_ms={} module_identity_calls={}",
+                probe_started.elapsed().as_millis(),
+                metrics
+                    .module_identity_resolver_calls
+                    .saturating_sub(resolver_calls_before)
+            );
+        }
         match outcome {
             Ok(_) => {
                 let bucket = family_success_bucket(&family).to_owned();
@@ -9425,15 +9946,6 @@ fn probe_supported_match_cases(
                     &type_operator_spellings,
                     &typer.store().names,
                 );
-                *profile
-                    .typed_case_failures
-                    .entry(error_name.clone())
-                    .or_default() += 1;
-                profile
-                    .typed_case_failure_files
-                    .entry(error_name)
-                    .or_default()
-                    .insert(path.to_owned());
                 let boundary = match &error {
                     TyperError::TypedPatternRuntimeTestDeferred { .. } => {
                         Some("generic/erased or unsupported runtime test")
@@ -9449,18 +9961,61 @@ fn probe_supported_match_cases(
                     }
                     _ => None,
                 };
-                if family.starts_with("typed")
-                    && let Some(boundary) = boundary
-                {
-                    *profile
-                        .typed_pattern_boundaries
-                        .entry(boundary.to_owned())
-                        .or_default() += 1;
-                }
+                record_typed_match_case_failure(profile, path, &family, &error_name, boundary);
             }
         }
     }
     successes
+}
+
+fn record_typed_match_case_failure(
+    profile: &mut MatchProfile,
+    path: &str,
+    family: &str,
+    error_name: &str,
+    boundary: Option<&'static str>,
+) {
+    *profile
+        .typed_case_failures
+        .entry(error_name.to_owned())
+        .or_default() += 1;
+    profile
+        .typed_case_failure_files
+        .entry(error_name.to_owned())
+        .or_default()
+        .insert(path.to_owned());
+    if family.starts_with("typed")
+        && let Some(boundary) = boundary
+    {
+        *profile
+            .typed_pattern_boundaries
+            .entry(boundary.to_owned())
+            .or_default() += 1;
+    }
+}
+
+#[test]
+fn match_case_audit_reuses_selector_failure_for_every_case() {
+    let classpath = SharedClassPath::new(CompositeClassPath::new(vec![Box::new(
+        PrefixOnlyAuditEntry,
+    )]));
+    let mut profile = MatchProfile::default();
+    let successes = probe_supported_match_cases(
+        "object C { def f: Int = missing match { case 1 => 1; case _ => 2 } }",
+        "MatchSelectorFailure.scala",
+        classpath,
+        &mut profile,
+    );
+
+    assert_eq!(successes["literal"], 0);
+    assert_eq!(successes["wildcard"], 0);
+    assert_eq!(profile.typed_case_failures.values().sum::<usize>(), 2);
+    assert!(
+        profile
+            .typed_case_failure_files
+            .values()
+            .all(|files| files == &BTreeSet::from(["MatchSelectorFailure.scala".to_owned()]))
+    );
 }
 
 fn is_supported_case_family(family: &str) -> bool {
@@ -9573,15 +10128,31 @@ fn audit_source_inner_filtered(
     method_tree_filter: Option<&BTreeSet<u32>>,
     source_package_inventory: Option<&BTreeSet<String>>,
 ) -> Audit {
+    let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
+    let file_started = Instant::now();
+    let mut parse_time = Duration::ZERO;
+    let mut inventory_time = Duration::ZERO;
+    let mut namer_time = Duration::ZERO;
+    let mut typer_setup_time = Duration::ZERO;
+    let mut typing_time = Duration::ZERO;
     if let Some((_, metrics)) = &classpath {
         metrics.borrow_mut().current_file = path.to_owned();
     }
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
+    let stage_started = Instant::now();
     let scanner = match ContextualScanner::new(text) {
         Ok(scanner) => scanner,
         Err(_) => {
+            if profile_timing {
+                parse_time = stage_started.elapsed();
+                eprintln!(
+                    "AUDIT_FILE_TIMING file={path} outcome=scanner_error parse_ms={} inventory_ms=0 namer_ms=0 typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                    parse_time.as_millis(),
+                    file_started.elapsed().as_millis()
+                );
+            }
             return Audit {
                 files_attempted: 1,
                 parser_failed_files: 1,
@@ -9595,6 +10166,14 @@ fn audit_source_inner_filtered(
         scanner,
         &mut store.names,
     );
+    if profile_timing {
+        parse_time = stage_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=parse ms={}",
+            parse_time.as_millis()
+        );
+    }
+    let stage_started = Instant::now();
     let mut audit = collect_local_nodes(&parsed.ast);
     if import_prefix_only {
         for (tree, node) in parsed.ast.iter() {
@@ -9643,7 +10222,15 @@ fn audit_source_inner_filtered(
         let failure = classify_parse_diagnostic(diagnostic.issue().code());
         *audit.parser_diagnostics.entry(failure.bucket).or_default() += 1;
     }
+    if profile_timing {
+        inventory_time = stage_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=ast_inventory ms={}",
+            inventory_time.as_millis()
+        );
+    }
     let mut packages = Packages::new();
+    let stage_started = Instant::now();
     let index = match name_compilation_unit(
         &parsed.ast,
         parsed.root,
@@ -9654,6 +10241,9 @@ fn audit_source_inner_filtered(
     ) {
         Ok(index) => index,
         Err(error) => {
+            if profile_timing {
+                namer_time = stage_started.elapsed();
+            }
             audit.namer_failed_files = 1;
             if audit.local_defdefs != 0 {
                 let failure = classify_namer_error(&error);
@@ -9661,12 +10251,40 @@ fn audit_source_inner_filtered(
                     record_failure(&mut audit, failure.clone(), path);
                 }
             }
+            if profile_timing {
+                eprintln!(
+                    "AUDIT_FILE_TIMING file={path} outcome=namer_error parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                    parse_time.as_millis(),
+                    inventory_time.as_millis(),
+                    namer_time.as_millis(),
+                    file_started.elapsed().as_millis()
+                );
+            }
             return audit;
         }
     };
+    if profile_timing {
+        namer_time = stage_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=namer ms={} local_definitions={} patdefs={}",
+            namer_time.as_millis(),
+            audit.local_defdefs,
+            audit.patdef_profile.total
+        );
+    }
     if !import_prefix_only && audit.local_defdefs == 0 && audit.patdef_profile.total == 0 {
+        if profile_timing {
+            eprintln!(
+                "AUDIT_FILE_TIMING file={path} outcome=no_local_definitions parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                parse_time.as_millis(),
+                inventory_time.as_millis(),
+                namer_time.as_millis(),
+                file_started.elapsed().as_millis()
+            );
+        }
         return audit;
     }
+    let typer_setup_started = Instant::now();
     let probe_classpath = classpath.as_ref().map(|(classpath, _)| classpath.clone());
 
     let root_methods = parsed
@@ -9682,12 +10300,19 @@ fn audit_source_inner_filtered(
             Some((method, tree, rhs, range))
         })
         .collect::<Vec<_>>();
-    let root_methods = method_tree_filter.map_or(root_methods.clone(), |allowed| {
+    let mut root_methods = method_tree_filter.map_or(root_methods.clone(), |allowed| {
         root_methods
             .into_iter()
             .filter(|(_, tree, _, _)| allowed.contains(&tree.index()))
             .collect()
     });
+    if profile_timing
+        && let Some(limit) = std::env::var("DOTTY_AUDIT_PROFILE_METHOD_LIMIT")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+    {
+        root_methods.truncate(limit);
+    }
 
     let local_method_trees = local_method_trees(&parsed.ast);
     let match_pattern_shapes = parsed
@@ -9722,18 +10347,30 @@ fn audit_source_inner_filtered(
     );
     let request_metrics = classpath.as_ref().map(|(_, metrics)| Rc::clone(metrics));
     if let (Some((classpath, metrics)), Some(packages)) = (classpath, resolver_packages) {
-        let resolver = ClasspathSymbolResolver::new(
+        let mut resolver = ClasspathSymbolResolver::new(
             classpath.clone(),
             definitions,
             LoadingSession::with_packages(packages),
         )
-        .with_load_profile_collection()
-        .with_module_resolution_profile_collection();
+        .with_load_profile_collection();
+        if !profile_timing
+            || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1")
+        {
+            resolver = resolver.with_module_resolution_profile_collection();
+        }
         typer = typer.with_resolver(Box::new(AuditResolver {
             inner: resolver,
             metrics,
             class_path_probe: Some(classpath),
         }));
+    }
+    if profile_timing {
+        typer_setup_time = typer_setup_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=typer_setup ms={} root_methods={}",
+            typer_setup_time.as_millis(),
+            root_methods.len()
+        );
     }
     let mut impure_projection_cache = BTreeMap::new();
     let mut root_failures = Vec::new();
@@ -9746,7 +10383,33 @@ fn audit_source_inner_filtered(
             .then(|| node.position.map(|position| position.span().range()))
             .flatten()
     }));
+    let typing_started = Instant::now();
     for (method, method_tree, rhs, range) in root_methods {
+        let method_started = Instant::now();
+        let method_label = profile_timing.then(|| audit_symbol_path(typer.store(), method));
+        let resolver_before = profile_timing.then(|| {
+            let metrics = request_metrics
+                .as_ref()
+                .expect("classpath profiling requires resolver metrics")
+                .borrow();
+            (
+                metrics.module_identity_resolver_calls,
+                metrics.module_completion_resolver_calls,
+                metrics.resolver_member_requests,
+                metrics.resolver_package_requests,
+                metrics.module_identity_inner_time,
+                metrics.module_completion_inner_time,
+                metrics.class_completion_inner_time,
+                metrics.member_lookup_inner_time,
+                metrics.package_lookup_inner_time,
+            )
+        });
+        if let Some(method_label) = &method_label {
+            eprintln!(
+                "AUDIT_METHOD_START file={path} tree={} method={method_label}",
+                method_tree.index()
+            );
+        }
         if let Some(metrics) = &request_metrics {
             metrics.borrow_mut().current_method = format!(
                 "{}#tree={}::{}",
@@ -9758,6 +10421,47 @@ fn audit_source_inner_filtered(
         let outcome = typer
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
+        if profile_timing {
+            eprintln!(
+                "AUDIT_METHOD_TIMING file={path} tree={} method={} elapsed_ms={}",
+                method_tree.index(),
+                method_label.as_deref().unwrap_or("<unknown>"),
+                method_started.elapsed().as_millis()
+            );
+            let metrics = request_metrics
+                .as_ref()
+                .expect("classpath profiling requires resolver metrics")
+                .borrow();
+            let before = resolver_before.expect("profiled resolver counters must be captured");
+            eprintln!(
+                "AUDIT_METHOD_RESOLVER file={path} tree={} module_identity_calls={} module_identity_inner_ms={} module_completion_calls={} module_completion_inner_ms={} class_completion_inner_ms={} member_calls={} member_inner_ms={} package_calls={} package_inner_ms={}",
+                method_tree.index(),
+                metrics.module_identity_resolver_calls - before.0,
+                metrics
+                    .module_identity_inner_time
+                    .saturating_sub(before.4)
+                    .as_millis(),
+                metrics.module_completion_resolver_calls - before.1,
+                metrics
+                    .module_completion_inner_time
+                    .saturating_sub(before.5)
+                    .as_millis(),
+                metrics
+                    .class_completion_inner_time
+                    .saturating_sub(before.6)
+                    .as_millis(),
+                metrics.resolver_member_requests - before.2,
+                metrics
+                    .member_lookup_inner_time
+                    .saturating_sub(before.7)
+                    .as_millis(),
+                metrics.resolver_package_requests - before.3,
+                metrics
+                    .package_lookup_inner_time
+                    .saturating_sub(before.8)
+                    .as_millis()
+            );
+        }
         if let Some(metrics) = &request_metrics {
             let mut metrics = metrics.borrow_mut();
             metrics.current_method.clear();
@@ -9883,6 +10587,14 @@ fn audit_source_inner_filtered(
         }
     }
 
+    if profile_timing {
+        typing_time = typing_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_PHASE file={path} phase=typing ms={}",
+            typing_time.as_millis()
+        );
+    }
+    let postprocess_started = Instant::now();
     for (tree, node) in parsed.ast.iter() {
         let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind else {
             continue;
@@ -10322,6 +11034,19 @@ fn audit_source_inner_filtered(
         }
     }
     if import_prefix_only {
+        if profile_timing {
+            let postprocess_time = postprocess_started.elapsed();
+            eprintln!(
+                "AUDIT_FILE_TIMING file={path} outcome=import_prefix parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} total_ms={}",
+                parse_time.as_millis(),
+                inventory_time.as_millis(),
+                namer_time.as_millis(),
+                typer_setup_time.as_millis(),
+                typing_time.as_millis(),
+                postprocess_time.as_millis(),
+                file_started.elapsed().as_millis()
+            );
+        }
         return audit;
     }
     collect_source_function_method_outcomes(
@@ -10342,6 +11067,19 @@ fn audit_source_inner_filtered(
         let successes =
             probe_supported_match_cases(text, path, classpath, &mut audit.match_profile);
         audit.match_profile.typed_case_successes = successes;
+    }
+    if profile_timing {
+        let postprocess_time = postprocess_started.elapsed();
+        eprintln!(
+            "AUDIT_FILE_TIMING file={path} outcome=complete parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} total_ms={}",
+            parse_time.as_millis(),
+            inventory_time.as_millis(),
+            namer_time.as_millis(),
+            typer_setup_time.as_millis(),
+            typing_time.as_millis(),
+            postprocess_time.as_millis(),
+            file_started.elapsed().as_millis()
+        );
     }
     audit
 }
@@ -11897,6 +12635,8 @@ fn baseline_import_blocker_attempts(
             baseline_attribution: attribution.to_owned(),
             baseline_import_tree: fields[3].to_owned(),
             qualifier_segments: fields[6].to_owned(),
+            context_package: fields[8].to_owned(),
+            lexical_package_chain: lexical_package_chain_from_evidence(fields[8], fields[11]),
             first_failing_segment: fields[13].to_owned(),
             evidence_category,
             target_key: fields[16].to_owned(),
@@ -11908,6 +12648,35 @@ fn baseline_import_blocker_attempts(
         "frozen profile row count matches its header"
     );
     rows
+}
+
+fn lexical_package_chain_from_evidence(context_package: &str, evidence: &str) -> Vec<String> {
+    let mut packages = Vec::new();
+    if !context_package.is_empty() && !context_package.starts_with('<') {
+        packages.push(context_package.to_owned());
+    }
+    let Some(enclosing) = evidence
+        .split(';')
+        .find_map(|part| part.strip_prefix("enclosing="))
+    else {
+        return packages;
+    };
+    if enclosing == "none" || enclosing.is_empty() {
+        return packages;
+    }
+    for context in enclosing.split(',') {
+        let Some((package, _)) = context.split_once('=') else {
+            continue;
+        };
+        if package.is_empty() || package == "none" || package == "root" || package.starts_with('<')
+        {
+            continue;
+        }
+        if !packages.iter().any(|existing| existing == package) {
+            packages.push(package.to_owned());
+        }
+    }
+    packages
 }
 
 fn reconcile_import_prefix_observations(
@@ -11973,12 +12742,28 @@ fn reconcile_import_prefix_observations(
             .unwrap_or_else(|| "<unknown>".to_owned());
 
         let request_prefix = format!("{}#tree={}::", baseline.file, baseline.blocker_origin_tree);
+        let rooted_qualifier = baseline.qualifier_segments.starts_with("_root_.");
+        let package_chain = if rooted_qualifier {
+            Vec::new()
+        } else {
+            baseline.lexical_package_chain.clone()
+        };
+        let qualifier = baseline
+            .qualifier_segments
+            .split('.')
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let matching_requests = resolver_requests
             .iter()
             .filter(|(method, _)| method.starts_with(&request_prefix))
             .flat_map(|(_, requests)| requests.iter())
             .filter(|request| {
-                resolver_request_matches_qualifier(request, &baseline.qualifier_segments)
+                request_matches_lexical_qualifier(
+                    request,
+                    &qualifier,
+                    &package_chain,
+                    rooted_qualifier,
+                )
             })
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -12004,7 +12789,20 @@ fn reconcile_import_prefix_observations(
             .map(|(selector, target)| {
                 let exact_requests = matching_requests
                     .iter()
-                    .filter(|request| resolver_request_targets_exact_qualifier(request, target))
+                    .filter(|request| {
+                        let target = target.split('.').map(str::to_owned).collect::<Vec<_>>();
+                        request_matches_lexical_qualifier(
+                            request,
+                            &target,
+                            &package_chain,
+                            rooted_qualifier,
+                        ) && request_path_matches_exact_lexical_target(
+                            request,
+                            &target,
+                            &package_chain,
+                            rooted_qualifier,
+                        )
+                    })
                     .collect::<Vec<_>>();
                 let resolved = exact_requests
                     .iter()
@@ -12032,6 +12830,32 @@ fn reconcile_import_prefix_observations(
             })
             .collect::<Vec<_>>();
         if wildcard_selector {
+            let qualifier = baseline
+                .qualifier_segments
+                .split('.')
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let qualifier_identities = matching_requests
+                .iter()
+                .filter(|request| {
+                    request_path_matches_exact_lexical_target(
+                        request,
+                        &qualifier,
+                        &package_chain,
+                        rooted_qualifier,
+                    )
+                })
+                .filter_map(|request| request.selected_identity.as_deref())
+                .collect::<BTreeSet<_>>();
+            if !qualifier_identities.is_empty() {
+                final_selector_outcomes.push(format!(
+                    "qualifier=resolved::{}",
+                    qualifier_identities
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("|")
+                ));
+            }
             final_selector_outcomes
                 .push("*=absent::wildcard import has no singular final selected symbol".to_owned());
         }
@@ -12082,14 +12906,17 @@ fn reconcile_import_prefix_observations(
                     current_blocker_origin.clone(),
                     matching_requests
                         .iter()
+                        .filter(|request| request.outcome == "package success")
                         .filter_map(|request| {
-                            request
-                                .materialized_prefix
-                                .as_deref()
-                                .map(|selected| (request.target.len(), selected))
+                            request.selected_identity.as_deref().map(|identity| {
+                                (
+                                    resolver_request_path(request).map_or(0, |path| path.len()),
+                                    identity,
+                                )
+                            })
                         })
                         .max_by_key(|(specificity, _)| *specificity)
-                        .map(|(_, selected)| selected)
+                        .map(|(_, identity)| identity)
                         .unwrap_or("-")
                         .to_owned(),
                 )
@@ -12132,34 +12959,6 @@ fn source_tree_index(key: &str) -> u32 {
         .expect("source tree key contains a numeric tree index")
 }
 
-fn resolver_request_matches_qualifier(
-    request: &ResolverRequestObservation,
-    qualifier: &str,
-) -> bool {
-    let qualifier = qualifier.strip_prefix("_root_.").unwrap_or(qualifier);
-    let normalized_target = request.target.replace('/', ".");
-    if request.outcome == "package success" {
-        return qualifier == normalized_target
-            || qualifier.starts_with(&format!("{normalized_target}."));
-    }
-    let Some(prefix) = request
-        .target
-        .strip_prefix("prefix=")
-        .and_then(|target| target.split("::").next())
-    else {
-        return false;
-    };
-    let Some(name) = request
-        .target
-        .split("::")
-        .find_map(|field| field.strip_prefix("name="))
-    else {
-        return false;
-    };
-    let selected = format!("{}.{}", prefix.replace('/', "."), name);
-    qualifier == selected || qualifier.starts_with(&format!("{selected}."))
-}
-
 fn resolver_request_targets_exact_qualifier(
     request: &ResolverRequestObservation,
     qualifier: &str,
@@ -12183,6 +12982,91 @@ fn resolver_request_targets_exact_qualifier(
         return false;
     };
     format!("{}.{}", prefix.replace('/', "."), name) == qualifier
+}
+
+fn request_matches_lexical_qualifier(
+    request: &ResolverRequestObservation,
+    qualifier: &[String],
+    lexical_package_chain: &[String],
+    rooted: bool,
+) -> bool {
+    let Some(request_path) = resolver_request_path(request) else {
+        return false;
+    };
+    lexical_qualifier_prefix_paths(qualifier, lexical_package_chain, rooted)
+        .iter()
+        .any(|candidate| candidate == &request_path)
+}
+
+fn resolver_request_path(request: &ResolverRequestObservation) -> Option<String> {
+    if request.outcome.starts_with("package ") {
+        let package_path = request.target.split("::").next()?;
+        return Some(package_path.replace('/', "."));
+    }
+    let prefix = request.target.strip_prefix("prefix=")?.split("::").next()?;
+    let name = request
+        .target
+        .split("::")
+        .find_map(|field| field.strip_prefix("name="))?;
+    Some(format!("{}.{}", prefix.replace('/', "."), name))
+}
+
+fn lexical_qualifier_prefix_paths(
+    qualifier: &[String],
+    lexical_package_chain: &[String],
+    rooted: bool,
+) -> Vec<String> {
+    let segments = if qualifier.first().map(String::as_str) == Some("_root_") {
+        &qualifier[1..]
+    } else {
+        qualifier
+    };
+    let mut prefixes = Vec::with_capacity(segments.len() * (lexical_package_chain.len() + 1));
+    if !rooted {
+        for package in lexical_package_chain {
+            if package.is_empty() || package.starts_with('<') {
+                continue;
+            }
+            for length in 1..=segments.len() {
+                prefixes.push(format!("{package}.{}", segments[..length].join(".")));
+            }
+        }
+    }
+    for length in 1..=segments.len() {
+        prefixes.push(segments[..length].join("."));
+    }
+    prefixes
+}
+
+fn request_path_matches_exact_lexical_target(
+    request: &ResolverRequestObservation,
+    qualifier: &[String],
+    lexical_package_chain: &[String],
+    rooted: bool,
+) -> bool {
+    let Some(request_path) = resolver_request_path(request) else {
+        return false;
+    };
+    let segments = if qualifier.first().map(String::as_str) == Some("_root_") {
+        &qualifier[1..]
+    } else {
+        qualifier
+    };
+    let relative_path = segments.join(".");
+    let mut candidates = Vec::with_capacity(lexical_package_chain.len() + 1);
+    if !rooted {
+        candidates.extend(lexical_package_chain.iter().map(|package| {
+            if package.is_empty() || package.starts_with('<') {
+                relative_path.clone()
+            } else {
+                format!("{package}.{relative_path}")
+            }
+        }));
+    }
+    candidates.push(relative_path);
+    candidates
+        .iter()
+        .any(|candidate| candidate == &request_path)
 }
 
 #[test]
@@ -12229,6 +13113,8 @@ fn frozen_import_reconciliation_preserves_original_provenance() {
         "compiler/Foo.scala#tree=30"
     );
     assert_eq!(baseline[0].qualifier_segments, "old.pkg");
+    assert_eq!(baseline[0].context_package, "pkg");
+    assert_eq!(baseline[0].lexical_package_chain, ["pkg"]);
     assert_eq!(baseline[0].first_failing_segment, "old");
     assert_eq!(
         baseline[0].evidence_category,
@@ -12268,6 +13154,186 @@ fn final_import_identity_requires_an_exact_resolver_target() {
     assert_eq!(
         class.selected_identity.as_deref(),
         Some("kind=Class::origin=classfile::path=scala.collection.List")
+    );
+}
+
+#[test]
+fn relative_import_trace_matches_its_expanded_lexical_package_path() {
+    let package = ResolverRequestObservation {
+        target: "dotty.tools.dotc.core".to_owned(),
+        outcome: "package success".to_owned(),
+        cause: None,
+        materialized_prefix: Some(
+            "package=dotty/tools/dotc/core::owner=dotty/tools/dotc".to_owned(),
+        ),
+        selected_identity: Some(
+            "kind=Package::origin=tasty::path=dotty.tools.dotc.core".to_owned(),
+        ),
+        enclosing_attempt: "Resident.scala#tree=138::Resident.process".to_owned(),
+    };
+    let object = ResolverRequestObservation {
+        target: "prefix=dotty/tools/dotc/core::namespace=term::name=Contexts::space=Prefix"
+            .to_owned(),
+        outcome: "class member success".to_owned(),
+        cause: None,
+        materialized_prefix: Some(
+            "package=dotty/tools/dotc/core::owner=dotty/tools/dotc".to_owned(),
+        ),
+        selected_identity: Some(
+            "kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts".to_owned(),
+        ),
+        enclosing_attempt: "Resident.scala#tree=138::Resident.process".to_owned(),
+    };
+    let qualifier = ["core".to_owned(), "Contexts".to_owned()];
+    let lexical_chain = ["dotty.tools.dotc".to_owned(), "dotty.tools".to_owned()];
+
+    assert!(request_matches_lexical_qualifier(
+        &package,
+        &qualifier,
+        &lexical_chain,
+        false,
+    ));
+    assert!(request_matches_lexical_qualifier(
+        &object,
+        &qualifier,
+        &lexical_chain,
+        false,
+    ));
+    assert!(request_path_matches_exact_lexical_target(
+        &object,
+        &qualifier,
+        &lexical_chain,
+        false,
+    ));
+    assert!(!request_path_matches_exact_lexical_target(
+        &package,
+        &qualifier,
+        &lexical_chain,
+        false,
+    ));
+    assert!(!request_matches_lexical_qualifier(
+        &package,
+        &qualifier,
+        &["unrelated.scope".to_owned()],
+        false,
+    ));
+    assert!(!request_matches_lexical_qualifier(
+        &package,
+        &[
+            "_root_".to_owned(),
+            "core".to_owned(),
+            "Contexts".to_owned()
+        ],
+        &lexical_chain,
+        true,
+    ));
+}
+
+#[test]
+fn reconciliation_records_relative_package_and_object_qualifier_identities() {
+    let baseline_row = [
+        "Use.scala",
+        "Use.scala#tree=10",
+        "inherited:Use.scala#tree=20",
+        "Use.scala#tree=30",
+        "5",
+        "core.Contexts",
+        "core.Contexts",
+        "dotty.tools.dotc",
+        "dotty.tools.dotc",
+        "Term",
+        "missing",
+        "relative=found:Package@dotty.tools.dotc.core;enclosing=dotty.tools=missing@dotty.tools.core;root=missing",
+        "-",
+        "core",
+        "resolve_package",
+        "Ok(None)::package unresolved::source-relative candidate",
+        "core::<first-segment-unresolved>",
+    ]
+    .join("\t");
+    let report = format!(
+        "import_prefix_observations:\n  observations=1\n  source_file\tmethod\tblocker_origin\timport_tree\tline\tqualifier_source\tqualifier_segments\tcontext_owner\tcontext_package\tnamespace\tsource_lookup\tsource_package_registry_lookup\tresolved_prefix\tfirst_failing_segment\trequest_kind\tresolver_outcome\ttarget_key\n  {baseline_row}\n"
+    );
+    let categories = BTreeMap::from([(
+        "core::<first-segment-unresolved>".to_owned(),
+        "source_relative_candidate".to_owned(),
+    )]);
+    let baseline = baseline_import_blocker_attempts(&report, &categories);
+    assert_eq!(
+        baseline[0].lexical_package_chain,
+        ["dotty.tools.dotc", "dotty.tools"]
+    );
+    let package = ResolverRequestObservation {
+        target: "dotty.tools.dotc.core".to_owned(),
+        outcome: "package success".to_owned(),
+        cause: Some("direct package evidence".to_owned()),
+        materialized_prefix: Some("package=dotty/tools/dotc/core".to_owned()),
+        selected_identity: Some(
+            "kind=Package::origin=tasty::path=dotty.tools.dotc.core".to_owned(),
+        ),
+        enclosing_attempt: "Use.scala#tree=20::Use.method".to_owned(),
+    };
+    let object = ResolverRequestObservation {
+        target: "prefix=dotty/tools/dotc/core::namespace=term::name=Contexts::space=Prefix"
+            .to_owned(),
+        outcome: "class member success".to_owned(),
+        cause: Some("member selected".to_owned()),
+        materialized_prefix: Some("package=dotty/tools/dotc/core".to_owned()),
+        selected_identity: Some(
+            "kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts".to_owned(),
+        ),
+        enclosing_attempt: "Use.scala#tree=20::Use.method".to_owned(),
+    };
+    let requests = BTreeMap::from([(
+        "Use.scala#tree=20::Use.method".to_owned(),
+        vec![package, object],
+    )]);
+    let blockers = BTreeMap::from([(
+        "Use.scala#tree=10".to_owned(),
+        "TypeNameNotFound".to_owned(),
+    )]);
+    let attempts = BTreeSet::from([
+        "method=Use.scala#tree=10::site=Use.scala:1:1:method::attempt=Use.scala#tree=20::blocker=TypeNameNotFound::typed=false".to_owned(),
+    ]);
+    let selectors = BTreeMap::from([("Use.scala#tree=30".to_owned(), vec!["*".to_owned()])]);
+
+    let rows = reconcile_import_prefix_observations(
+        &baseline,
+        &[],
+        &blockers,
+        &attempts,
+        &selectors,
+        &requests,
+    );
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].current_selected_identity,
+        "kind=Package::origin=tasty::path=dotty.tools.dotc.core"
+    );
+    assert!(rows[0].final_import_identity.contains(
+        "qualifier=resolved::kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts"
+    ));
+    assert!(
+        rows[0]
+            .final_import_identity
+            .contains("*=absent::wildcard import has no singular final selected symbol")
+    );
+    assert!(
+        rows[0]
+            .current_resolver_requests
+            .contains("target=dotty.tools.dotc.core::outcome=package success")
+    );
+}
+
+#[test]
+fn lexical_package_chain_does_not_invent_parents_for_dotted_packages() {
+    assert_eq!(
+        lexical_package_chain_from_evidence(
+            "example.deep.pkg",
+            "relative=missing@example.deep.pkg.member;enclosing=none;root=missing"
+        ),
+        ["example.deep.pkg"]
     );
 }
 
@@ -14110,9 +15176,14 @@ fn import_prefix_observation(
         (Some((context_id, _)), Some(name)) => source_scoped_lookup(index, store, context_id, name),
         _ => "unavailable".to_owned(),
     };
-    let request = trace
-        .iter()
-        .rfind(|request| request.cause.is_some() && request_matches_qualifier(request, qualifier));
+    let rooted = qualifier.first().is_some_and(|segment| segment == "_root_");
+    let lexical_package_chain = selected_context
+        .map(|(context_id, _)| source_context_package_chain(index, store, context_id))
+        .unwrap_or_default();
+    let request = trace.iter().rfind(|request| {
+        request.cause.is_some()
+            && request_matches_lexical_qualifier(request, qualifier, &lexical_package_chain, rooted)
+    });
     let target_key = request.map_or_else(
         || format!("{}::<no-matching-request>", qualifier.join(".")),
         |request| request.target.clone(),
@@ -14137,10 +15208,6 @@ fn import_prefix_observation(
     ]
     .concat()
     .join(".");
-    let rooted = qualifier.first().is_some_and(|segment| segment == "_root_");
-    let lexical_package_chain = selected_context
-        .map(|(context_id, _)| source_context_package_chain(index, store, context_id))
-        .unwrap_or_default();
     let relative_candidate = lexical_package_chain
         .first()
         .filter(|_| !rooted)

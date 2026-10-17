@@ -65,6 +65,8 @@ pub struct LoadingSession {
     pub(crate) identified: HashMap<BinaryName, SymbolId>,
     identified_order: Vec<BinaryName>,
     pub(crate) modules: HashMap<BinaryName, crate::loader::ModuleIdentity>,
+    pub(crate) modules_by_object: HashMap<SymbolId, BinaryName>,
+    pub(crate) modules_by_module_class: HashMap<SymbolId, BinaryName>,
     module_order: Vec<BinaryName>,
     pub(crate) resolved: HashMap<BinaryName, SymbolId>,
     resolved_order: Vec<BinaryName>,
@@ -112,6 +114,8 @@ impl LoadingSession {
             identified: HashMap::new(),
             identified_order: Vec::new(),
             modules: HashMap::new(),
+            modules_by_object: HashMap::new(),
+            modules_by_module_class: HashMap::new(),
             module_order: Vec::new(),
             resolved: HashMap::new(),
             resolved_order: Vec::new(),
@@ -158,9 +162,27 @@ impl LoadingSession {
         name: BinaryName,
         identity: crate::loader::ModuleIdentity,
     ) {
+        self.modules_by_object.insert(identity.object, name.clone());
+        self.modules_by_module_class
+            .insert(identity.module_class, name.clone());
         if self.modules.insert(name.clone(), identity).is_none() {
             self.module_order.push(name);
         }
+    }
+
+    pub(crate) fn module_for_object(
+        &self,
+        object: SymbolId,
+    ) -> Option<&crate::loader::ModuleIdentity> {
+        self.modules.get(self.modules_by_object.get(&object)?)
+    }
+
+    pub(crate) fn module_for_class(
+        &self,
+        module_class: SymbolId,
+    ) -> Option<&crate::loader::ModuleIdentity> {
+        self.modules
+            .get(self.modules_by_module_class.get(&module_class)?)
     }
 
     pub(crate) fn record_origin(&mut self, symbol: SymbolId, origin: ClassOrigin) {
@@ -195,7 +217,10 @@ impl LoadingSession {
         }
         while self.module_order.len() > checkpoint.modules {
             let name = self.module_order.pop().expect("length checked");
-            self.modules.remove(&name);
+            if let Some(identity) = self.modules.remove(&name) {
+                self.modules_by_object.remove(&identity.object);
+                self.modules_by_module_class.remove(&identity.module_class);
+            }
         }
         while self.resolved_order.len() > checkpoint.resolved {
             let name = self.resolved_order.pop().expect("length checked");
@@ -267,6 +292,40 @@ mod tests {
 
         assert_eq!(session.identified.get(&name), Some(&identity));
         assert_eq!(session.resolved.get(&name), Some(&identity));
+    }
+
+    #[test]
+    fn module_reverse_indexes_follow_cache_and_rollback() {
+        let mut store = SemanticStore::new();
+        let object = symbol(&mut store, "Module");
+        let module_class = symbol(&mut store, "Module$");
+        let name = BinaryName::from_internal("sample/Module");
+        let module_class_name = BinaryName::from_internal("sample/Module$");
+        let mut session = LoadingSession::new();
+        let checkpoint = session.checkpoint();
+
+        session.cache_module(
+            name.clone(),
+            crate::loader::ModuleIdentity {
+                object,
+                module_class,
+                companion_class: None,
+                object_name: name.clone(),
+                module_class_name,
+            },
+        );
+
+        assert_eq!(session.modules_by_object.get(&object), Some(&name));
+        assert_eq!(
+            session.modules_by_module_class.get(&module_class),
+            Some(&name)
+        );
+
+        session.rollback_to(&mut store, checkpoint);
+
+        assert!(session.modules.is_empty());
+        assert!(session.modules_by_object.is_empty());
+        assert!(session.modules_by_module_class.is_empty());
     }
 
     #[test]

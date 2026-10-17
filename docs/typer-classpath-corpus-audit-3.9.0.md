@@ -165056,3 +165056,103 @@ singleton_projection_baseline:
     compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4881 first_blocker=ImportQualifierNotFound
     compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4981 first_blocker=ImportQualifierNotFound
 ```
+
+
+## #1180 lexical package import checkpoint (2026-10-17)
+
+The pinned import-prefix audit and its full 2,394-row reconciliation completed
+twice. The normalized profiles, reconciliation and seven generated sidecars
+matched byte-for-byte. The corrected context-aware matcher records selected
+package identities for all 1,615 historically qualified rows. The pinned
+`Resident.scala` row resolves `core` to `dotty.tools.dotc.core`, selects the
+canonical TASTy Object `dotty.tools.dotc.core.Contexts`, then stops later at
+`TypeNameNotFound`. The complete method count remains 0 / 3,297.
+
+Each import-profile run took 288.468 s and 288.037 s. Source parse/name/type
+work took 285.981 s and 285.707 s; reconciliation took 303 ms and 305 ms.
+This isolates the dominant cost to selected source analysis, not report
+generation. See the [#1180 import-prefix report](typer-classpath-import-prefix-profile-1180-3.9.0.md)
+and its reconciliation and cohort sidecars.
+
+The separate full-corpus audit was started but stopped after 75 / 1,236 Scala
+files while processing more than 153,000 resolver calls. It produced neither
+a complete report nor a determinism result. This checkpoint therefore does not
+refresh full-corpus blocker totals or deferred-loading p95/fanout; those earlier
+values remain historical. Based on the refreshed import evidence alone,
+recommend one bounded next sprint: compare source package declarations with
+classpath resources for the 31 unresolved target keys (1,063 weighted
+observations, 81 files, 393 blocker origins, and zero source-package registry
+hits). Keep those candidates unresolved until evidence supports them.
+
+### #1180 audit-cost follow-up (2026-10-17)
+
+The match-case probe path now uses `ClasspathSymbolResolver` directly during
+ordinary audits; it retains the detailed `AuditResolver` wrapper only when
+explicit per-file profiling is enabled. The wrapper's per-request observations
+were not consumed by match-case profiling. `LoadingSession` also indexes module
+identities by object and module-class `SymbolId`, including rollback, replacing
+repeated linear scans of the module table.
+
+A pinned diagnostic of the first `tpd.scala` method (512 module identity and
+512 member requests) measured 6,214 ms before the reverse indexes and 3,546 ms
+after them; measured member-lookup time fell from 4,939 ms to 2,797 ms. This is
+a targeted single-method measurement, not a corpus result. A subsequent full
+audit was stopped at 250 / 1,236 files after about 20 minutes and roughly
+295,000 module-identity requests. It produced no report or determinism result.
+At that checkpoint, the #1180 full-corpus and deferred-loading DoD gates
+remained unverified; the prior complete-load p95/fanout values remained
+historical.
+
+### #1180 full-corpus completion (2026-10-17)
+
+After refreshing the audit invariants for the expected lexical-import blocker
+movements, two full pinned Scala 3.9.0 / JDK 21.0.8 runs passed. They covered
+all 1,236 source files, took 2,582.02 s and 2,595.04 s, and produced identical
+normalized reports and deferred-cohort TSVs. The full-corpus typed-local-method
+count remains 0 / 3,297.
+
+The deferred-loading gate passed on both runs: p95 dependency depth was 0
+(issue #1180 limit 6), maximum distinct fully completed classes per request
+was 9 (issue #1180 limit 16), and all 29 previously successful target keys
+were retained (182 current successful targets). The report's broader
+touched-class maximum is 53; that is a separate metric from the bounded
+fully-completed-class fanout.
+
+The lexical import changes move `ProtoTypes.isPoly` from
+`ImportQualifierNotFound` to `SymbolResolution`. They also move all three
+frozen local lazy-value observations to `SymbolResolution`; none is typed.
+These blocker movements explain the refreshed audit expectations and do not
+count as full-method success.
+
+### #1180 current blocker breakdown follow-up (2026-10-17)
+
+One additional local full-corpus run was completed to retain the current
+blocker totals after the two deterministic runs. It covered the same pinned
+1,236-file / 3,297-method input. The compact [current blocker sidecar](typer-classpath-corpus-audit-1180-current-blockers.tsv)
+records observations, files, distinct resolver targets by cause, and direct
+origins. A direct origin is a unique failed local-method attempt tree; the
+TASTy supertype row counts unique requested class roots separately from its
+repeated member-error observations.
+
+| Current first blocker | Observations | Files | Distinct direct origins |
+| --- | ---: | ---: | ---: |
+| `SymbolResolution` | 1,535 | 156 | 624 |
+| `ImportQualifierNotFound` | 1,220 | 93 | 457 |
+| `TypeNameNotFound` | 168 | 56 | 87 |
+| `TermNameNotFound` | 48 | 19 | 26 |
+| `MemberLookup` | 43 | 19 | 30 |
+| `ObjectModuleClassUnavailable` | 28 | 4 | 11 |
+| `AnonymousClassInstantiationDeferred` | 32 | 15 | 20 |
+
+`ImportQualifierNotFound` splits into 1,065 unresolved next-segment
+observations (82 files, 32 resolver target keys), 124 term/object materialization
+gaps (8 files, 5 target keys), and 31 observations without a matching failed
+resolver request (3 files, no target key). The separate import-prefix probe
+narrows the source-relative unresolved-prefix cohort to 1,063 observations in
+81 files / 31 target keys / 393 origins; those candidates had no matching
+source registry or configured classpath package evidence. The report records
+no `ImportQualifierNotFound` outcome for a package that resolved but whose
+selected member was missing; final selector outcomes remain counted separately
+in the import-prefix reconciliation. TASTy `UnresolvedSupertype` currently
+accounts for 5,411 member-error observations in 216 files across 42 requested
+class roots. Fully typed local methods remain 0 / 3,297.

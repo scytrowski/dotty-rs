@@ -8,15 +8,20 @@ usage() {
     cat <<'USAGE'
 Usage: tools/typer-classpath-corpus-audit/run [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --import-prefix-profile [--verify-determinism] [OUTPUT_PATH]
+       tools/typer-classpath-corpus-audit/run --import-prefix-profile --source-file RELATIVE_PATH
 
 By default, run the pinned audit once and write its report. Pass
---verify-determinism to run it twice and compare normalized output.
+--verify-determinism to run it twice and compare normalized output. Set
+DOTTY_AUDIT_TMP_ROOT to retain per-run logs and intermediate reports there.
+--source-file runs the import-prefix probe only for frozen observations in one
+Scala source file and prints its resolver trace without generating a cohort report.
 USAGE
 }
 
 verify_determinism=0
 import_prefix_profile=0
 output_path=""
+source_file=""
 while (($#)); do
     case "$1" in
         --verify-determinism)
@@ -24,6 +29,14 @@ while (($#)); do
             ;;
         --import-prefix-profile)
             import_prefix_profile=1
+            ;;
+        --source-file)
+            if (($# < 2)) || [[ -z "$2" ]]; then
+                usage >&2
+                exit 2
+            fi
+            source_file="$2"
+            shift
             ;;
         -h|--help)
             usage
@@ -43,6 +56,15 @@ while (($#)); do
     esac
     shift
 done
+
+if [[ -n "$source_file" && "$import_prefix_profile" != 1 ]]; then
+    printf '%s\n' '--source-file requires --import-prefix-profile' >&2
+    exit 2
+fi
+if [[ -n "$source_file" && "$verify_determinism" == 1 ]]; then
+    printf '%s\n' '--source-file is a one-run diagnostic and cannot be combined with --verify-determinism' >&2
+    exit 2
+fi
 
 scala_root="${SCALA39_ROOT:?set SCALA39_ROOT to the pinned Scala 3.9.0 checkout}"
 java_home="${JAVA_HOME:?set JAVA_HOME to the JDK used for this audit}"
@@ -88,6 +110,10 @@ export SCALA39_ROOT="$scala_root"
 export JAVA_HOME="$java_home"
 export SCALA39_JDK_RELEASE="$jdk_release"
 export SCALA39_CLASSPATH="$(IFS=:; printf '%s' "${scala_jars[*]}")"
+if [[ -n "$source_file" ]]; then
+    export SCALA39_IMPORT_PREFIX_SOURCE_FILE="$source_file"
+    export SCALA39_IMPORT_PREFIX_TRACE_IDS=1
+fi
 
 if [[ -z "$output_path" ]]; then
     if [[ "$import_prefix_profile" == 1 ]]; then
@@ -99,8 +125,14 @@ fi
 if [[ "$output_path" != /* ]]; then
     output_path="$repo_root/$output_path"
 fi
-tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
+if [[ -n "${DOTTY_AUDIT_TMP_ROOT:-}" ]]; then
+    mkdir -p "$DOTTY_AUDIT_TMP_ROOT"
+    tmp_dir="$(mktemp -d "$DOTTY_AUDIT_TMP_ROOT/run.XXXXXXXX")"
+    trap 'printf "audit intermediates retained at %s\n" "$tmp_dir" >&2' EXIT
+else
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' EXIT
+fi
 
 run_names=(first)
 if [[ "$verify_determinism" == 1 ]]; then
@@ -117,6 +149,10 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             cat "$tmp_dir/$run.log" >&2
             exit 1
         fi
+        if [[ -n "$source_file" ]]; then
+            cat "$tmp_dir/$run.log"
+            exit 0
+        fi
         sed -n '/^AUDIT_IMPORT_PREFIX_BEGIN$/,/^AUDIT_IMPORT_PREFIX_END$/p' "$tmp_dir/$run.log" \
             | sed '1d;$d' >"$tmp_dir/$run.profile"
         sed -n '/^AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN$/,/^AUDIT_IMPORT_PREFIX_RECONCILIATION_END$/p' "$tmp_dir/$run.log" \
@@ -131,6 +167,27 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             printf 'import-prefix reconciliation markers were missing\n' >&2
             exit 1
         fi
+        PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/import_prefix_profile.py" \
+            "$tmp_dir/$run.profile" \
+            --rows "$tmp_dir/$run.import-prefix-targets.tsv" \
+            --evidence "$tmp_dir/$run.import-prefix-evidence.tsv" \
+            --candidate-baseline "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md" \
+            --candidate-baseline-evidence "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0-import-prefix-classpath-evidence.tsv" \
+            --candidates "$tmp_dir/$run.lexical-package-candidates.tsv" \
+            --classpath "$SCALA39_CLASSPATH" \
+            --jdk-jmods "$java_home/jmods" \
+            --jdk-release "$jdk_release" >"$tmp_dir/$run.import-prefix-summary.txt"
+        PYTHONPATH="$script_dir" PYTHONDONTWRITEBYTECODE=1 \
+            python3 "$script_dir/reconcile_import_prefix_rows.py" \
+            --baseline "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md" \
+            --baseline-evidence "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0-import-prefix-classpath-evidence.tsv" \
+            --current-profile "$tmp_dir/$run.profile" \
+            --current-evidence "$tmp_dir/$run.import-prefix-evidence.tsv" \
+            --current-reconciliation "$tmp_dir/$run.reconciliation" \
+            --rows "$tmp_dir/$run.reconciliation-enriched.tsv" \
+            --qualified-cohort "$tmp_dir/$run.qualified-cohort.tsv" \
+            --summary "$tmp_dir/$run.qualified-cohort-summary.txt" \
+            2>/dev/null
         printf '%s ' "$run"
         sed -n '/^IMPORT_PREFIX_TIMING /p' "$tmp_dir/$run.log"
     done
@@ -145,26 +202,32 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             printf 'normalized import-prefix reconciliation was not deterministic\n' >&2
             exit 1
         fi
-        import_prefix_run_summary='Both normalized profiles matched byte-for-byte.'
+        for sidecar in \
+            import-prefix-targets.tsv \
+            import-prefix-evidence.tsv \
+            lexical-package-candidates.tsv \
+            import-prefix-summary.txt \
+            reconciliation-enriched.tsv \
+            qualified-cohort.tsv \
+            qualified-cohort-summary.txt; do
+            if ! cmp -s "$tmp_dir/first.$sidecar" "$tmp_dir/second.$sidecar"; then
+                diff -u "$tmp_dir/first.$sidecar" "$tmp_dir/second.$sidecar" >&2 || true
+                printf 'normalized import-prefix %s sidecar was not deterministic\n' "$sidecar" >&2
+                exit 1
+            fi
+        done
+        import_prefix_run_summary='Both normalized profiles, reconciliation, and generated sidecars matched byte-for-byte.'
     else
         import_prefix_run_summary='One profile run completed; determinism was not checked.'
     fi
-    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/import_prefix_profile.py" \
-        "$tmp_dir/first.profile" \
-        --rows "$tmp_dir/import-prefix-targets.tsv" \
-        --evidence "$tmp_dir/import-prefix-evidence.tsv" \
-        --candidate-baseline "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md" \
-        --candidate-baseline-evidence "$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0-import-prefix-classpath-evidence.tsv" \
-        --candidates "$tmp_dir/import-prefix-candidates.tsv" \
-        --classpath "$SCALA39_CLASSPATH" \
-        --jdk-jmods "$java_home/jmods" \
-        --jdk-release "$jdk_release" >"$tmp_dir/import-prefix-summary.txt"
     PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/scala39_import_oracle.py" \
         >"$tmp_dir/import-oracle.txt"
     prefix_targets_path="${output_path%.md}-import-prefix-targets.tsv"
     prefix_evidence_path="${output_path%.md}-import-prefix-classpath-evidence.tsv"
     prefix_candidates_path="${output_path%.md}-lexical-package-candidates.tsv"
     prefix_reconciliation_path="${output_path%.md}-reconciliation.tsv"
+    prefix_qualified_cohort_path="${output_path%.md}-qualified-cohort.tsv"
+    prefix_qualified_summary_path="${output_path%.md}-qualified-cohort-summary.txt"
     profile_field() {
         awk -F= -v wanted="$1" '$1 == wanted { print $2; exit }' "$tmp_dir/first.profile"
     }
@@ -181,6 +244,7 @@ if [[ "$import_prefix_profile" == 1 ]]; then
     reconciliation_advanced="$(profile_field reconciliation_advanced_rows)"
     new_current_observations="$(profile_field new_current_observations_outside_baseline)"
     reconciliation_with_evidence="$(profile_field reconciliation_rows_with_resolver_evidence)"
+    reconciliation_with_package_identity="$(awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "current_selected_package_identity") col = i; next } $col != "" && $col != "-" { count++ } END { print count + 0 }' "$tmp_dir/first.reconciliation-enriched.tsv")"
     reconciliation_final_resolved="$(awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "final_import_identity") col = i; next } { n = split($col, outcomes, ";"); for (j = 1; j <= n; j++) if (outcomes[j] ~ /=resolved::/) count++ } END { print count + 0 }' "$tmp_dir/first.reconciliation")"
     reconciliation_final_absent="$(awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "final_import_identity") col = i; next } { n = split($col, outcomes, ";"); for (j = 1; j <= n; j++) if (outcomes[j] ~ /=absent::/) count++ } END { print count + 0 }' "$tmp_dir/first.reconciliation")"
     reconciliation_method_typed="$(awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) if ($i == "current_method_typed") col = i; next } $col == "true" { count++ } END { print count + 0 }' "$tmp_dir/first.reconciliation")"
@@ -193,24 +257,31 @@ if [[ "$import_prefix_profile" == 1 ]]; then
     fi
     mkdir -p "$(dirname -- "$output_path")"
     {
-        printf '# #1132 current import-prefix reprofile\n\n'
-        printf 'The frozen [#1128 import-prefix profile](typer-classpath-import-prefix-profile-3.9.0.md) remains unchanged. This reprofile starts from its exact weighted source rows and blocker origins, then collects current resolver outcomes; it does not treat a moved first blocker as full-method success.\n\n'
+        printf '# #1180 lexical package import-prefix checkpoint\n\n'
+        printf 'The frozen [#1128 import-prefix profile](typer-classpath-import-prefix-profile-3.9.0.md) remains unchanged. This post-#1168–#1175 checkpoint starts from its exact weighted source rows and blocker origins, then collects current resolver outcomes; it does not treat a moved first blocker as full-method success.\n\n'
         printf '%s Inputs are pinned to Scala revision `%s`, Scala artifacts 3.9.0, and JDK %s. The full-audit typed-local-method denominator remains 3,297.\n\n' "$import_prefix_run_summary" "$revision" "$jdk_version"
         printf '## Frozen cohort reconciliation\n\n'
         printf '| Measure | Frozen #1128 | Current |\n| --- | ---: | ---: |\n'
         printf '| Weighted first-segment observations | %s | %s unresolved next-segment observations |\n' "$baseline_observations" "$current_unresolved"
-        printf '| Files | %s | %s |\n' "$baseline_files" "$(sed -n 's/^observations=[0-9]* files=\([0-9]*\).*/\1/p' "$tmp_dir/import-prefix-summary.txt" | head -1)"
-        printf '| Target keys | %s | %s |\n' "$baseline_targets" "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=\([0-9]*\).*/\1/p' "$tmp_dir/import-prefix-summary.txt" | head -1)"
-        printf '| Distinct blocker origins | %s | %s |\n\n' "$baseline_origins" "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=[0-9]* unique_blocker_origins=\([0-9]*\).*/\1/p' "$tmp_dir/import-prefix-summary.txt" | head -1)"
-        printf 'The exact frozen-row reconciliation contains `%s` rows: `%s` still fail with `ImportQualifierNotFound` at the same import tree, and `%s` have advanced to a later current method blocker. All `%s` advanced rows include a matching resolver request and selected package identity for the frozen qualifier. The row-level selector outcomes are separate from that package result: `%s` selectors have an observed final selected symbol and `%s` explicitly record absence. The full-method typed boolean is true for `%s` frozen rows. The separate unresolved-only view contains `%s` rows, including `%s` newly observed imports outside the frozen cohort. Across the selected roots there are `%s` unresolved-prefix observations, `%s` term/object materialization gaps, and `%s` without a matching failed resolver trace. The full local-method audit still types 0 / 3,297 methods; blocker movement is not full-method success.\n\n' "$reconciliation_rows" "$reconciliation_unresolved" "$reconciliation_advanced" "$reconciliation_with_evidence" "$reconciliation_final_resolved" "$reconciliation_final_absent" "$reconciliation_method_typed" "$current_unresolved" "$new_current_observations" "$current_import_failures" "$current_term_gaps" "$current_unmatched"
+        printf '| Files | %s | %s |\n' "$baseline_files" "$(sed -n 's/^observations=[0-9]* files=\([0-9]*\).*/\1/p' "$tmp_dir/first.import-prefix-summary.txt" | head -1)"
+        printf '| Target keys | %s | %s |\n' "$baseline_targets" "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=\([0-9]*\).*/\1/p' "$tmp_dir/first.import-prefix-summary.txt" | head -1)"
+        printf '| Distinct blocker origins | %s | %s |\n\n' "$baseline_origins" "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=[0-9]* unique_blocker_origins=\([0-9]*\).*/\1/p' "$tmp_dir/first.import-prefix-summary.txt" | head -1)"
+        printf 'The exact frozen-row reconciliation contains `%s` rows: `%s` still fail with `ImportQualifierNotFound` at the same import tree, and `%s` have advanced to a later current method blocker. Resolver traces matched the frozen qualifier in `%s` rows; `%s` rows also record a selected package identity. These are separate from final selector outcomes: `%s` selectors have an observed final selected symbol and `%s` have no exact singular selected symbol recorded (wildcards are not reduced to one symbol). The full-method typed boolean is true for `%s` frozen rows. The separate unresolved-only view contains `%s` rows, including `%s` newly observed imports outside the frozen cohort. Across the selected roots there are `%s` unresolved-prefix observations, `%s` term/object materialization gaps, and `%s` without a matching failed resolver trace. The #1132 full-corpus local-method baseline remains 0 / 3,297; this import-prefix profile does not refresh that full-corpus count.\n\n' "$reconciliation_rows" "$reconciliation_unresolved" "$reconciliation_advanced" "$reconciliation_with_evidence" "$reconciliation_with_package_identity" "$reconciliation_final_resolved" "$reconciliation_final_absent" "$reconciliation_method_typed" "$current_unresolved" "$new_current_observations" "$current_import_failures" "$current_term_gaps" "$current_unmatched"
+        printf '## Historical qualified-candidate cohort\n\n'
+        printf 'The frozen #1128 source-qualified cohort is joined independently from the remaining rows. It retains all 1,615 historically evidenced observations, with current package identity and member selection reported only when the audit observed them. A missing current identity is not treated as successful lexical resolution.\n\n'
+        cat "$tmp_dir/first.qualified-cohort-summary.txt"
+        printf '\nSee [`%s`](%s) for all 1,615 joined candidate rows, [`%s`](%s) for the full 2,394-row enriched reconciliation, and [`%s`](%s) for the standalone before/after target summary. The original source-package probe, ordered historical candidate evidence, current same-import probe, other failed import trees observed in the same method, final selector outcome, and full-method status remain separate columns.\n\n' \
+            "$(basename -- "$prefix_qualified_cohort_path")" "$(basename -- "$prefix_qualified_cohort_path")" \
+            "$(basename -- "$prefix_reconciliation_path")" "$(basename -- "$prefix_reconciliation_path")" \
+            "$(basename -- "$prefix_qualified_summary_path")" "$(basename -- "$prefix_qualified_summary_path")"
         printf '## Current evidence and next slice\n\n'
-        printf 'The source-package inventory still has `%s` registry hits among the unresolved observations, concentrated in five qualified targets with direct class/TASTy resources. The previously descendant-only `dotty` (19 observations) and `java` (39) targets no longer appear in the unresolved-prefix set; their blockers moved past package resolution. No direct resource exists at the bare first failing segment.\n\n' "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=[0-9]* unique_blocker_origins=[0-9]* direct=[0-9]* inherited=[0-9]* unknown_origins=[0-9]* root_qualified=[0-9]* source_relative_candidates=[0-9]* source_package_registry_hits=\([0-9]*\).*/\1/p' "$tmp_dir/import-prefix-summary.txt" | head -1)"
-        printf 'The grounded next slice is source-owned lexical package resolution for those qualified candidates. Preserve current-package precedence, `_root_` behavior, ambiguity errors, and rollback. Keep targets without source or classpath evidence unresolved.\n\n'
+        printf 'The current unresolved-prefix view has `%s` source-package registry hits across its 31 target keys. Separately, all 1,615 rows in the frozen historical qualified cohort now have a resolver request matched to the source-context candidate chain and a selected package identity recorded. For example, `Resident.scala` resolves `core` as `dotty.tools.dotc.core` and selects the canonical TASTy object `dotty.tools.dotc.core.Contexts`; the enclosing method still stops later at `TypeNameNotFound`, and a wildcard has no singular final member. Package resolution, final selector resolution, and full-method typing remain distinct outcomes.\n\n' "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=[0-9]* unique_blocker_origins=[0-9]* direct=[0-9]* inherited=[0-9]* unknown_origins=[0-9]* root_qualified=[0-9]* source_relative_candidates=[0-9]* source_package_registry_hits=\([0-9]*\).*/\1/p' "$tmp_dir/first.import-prefix-summary.txt" | head -1)"
+        printf 'Exactly one next sprint is recommended: B, verify source package declarations against classpath resources for the 31 unresolved target keys (1,063 weighted observations, 81 files, 393 blocker origins; zero source-package registry hits). This is larger than the previously measured unresolved-supertype cohort (212 errors / 51 files) and anonymous-class cohort (32 / 15 files), while avoiding guessed lexical parents. The full-corpus blocker and deferred-loading profiles have not been refreshed in this checkpoint, so their historical values are not presented as current.\n\n'
         printf '## Current selection and evidence summary\n\n```text\n'
-        cat "$tmp_dir/import-prefix-summary.txt" "$tmp_dir/import-oracle.txt"
+        cat "$tmp_dir/first.import-prefix-summary.txt" "$tmp_dir/import-oracle.txt"
         printf '```\n\n'
         printf 'Scala 3.9 oracle fixtures confirm that a package-relative path in the current package wins over a root path, root lookup succeeds when that relative path is absent, stacked package clauses expose their enclosing package scope to an import qualifier, and a single dotted package clause does not synthesize that parent scope. Intermediate packages can exist only through descendants, and a missing selected member remains an error after package resolution. An object/package same-name collision is rejected. The measured cohort has no root-qualified imports, no direct-resource resolver rejection, and no non-package first-segment or ambiguous resolver outcome; `_root_` behavior is covered by the separate oracle fixture. These findings do not promise that all imports or typer failures will be fixed.\n\n'
-        printf 'See [`%s`](%s) for the row-level reconciliation of every frozen observation, including its original method and attempted method, direct/inherited attribution, failed qualifier and segment, #1128 evidence category, current source selector, package-prefix result, final selected symbol or explicit absence, current blocker, and full-method typed boolean. The target and classpath TSVs below are separate unresolved-only views. See [`%s`](%s) for unresolved target keys, weighted observations, files, blocker origins, source lookups, and classifications. See [`%s`](%s) for direct and descendant resources, archive origin, directory-only evidence, and effective Multi-Release JAR versions. See [`%s`](%s) for representative lexical package candidates, source registry status, and pinned classpath evidence; frozen #1128 and current #1132 rows are labeled separately. Raw stable unresolved observation rows are included below.\n\n' \
+        printf 'See [`%s`](%s) for the row-level reconciliation of every frozen observation, including its original method and attempted method, direct/inherited attribution, failed qualifier and segment, #1128 evidence category, current source selector, package-prefix result, final selected symbol or explicit absence, current blocker, and full-method typed boolean. The target and classpath TSVs below are separate unresolved-only views. See [`%s`](%s) for unresolved target keys, weighted observations, files, blocker origins, source lookups, and classifications. See [`%s`](%s) for direct and descendant resources, archive origin, directory-only evidence, and effective Multi-Release JAR versions. See [`%s`](%s) for representative lexical package candidates, source registry status, and pinned classpath evidence; frozen #1128 and current #1180 rows are labeled separately. Raw stable unresolved observation rows are included below.\n\n' \
             "$(basename -- "$prefix_reconciliation_path")" "$(basename -- "$prefix_reconciliation_path")" \
             "$(basename -- "$prefix_targets_path")" "$(basename -- "$prefix_targets_path")" \
             "$(basename -- "$prefix_evidence_path")" "$(basename -- "$prefix_evidence_path")" \
@@ -219,12 +290,14 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         cat "$tmp_dir/first.profile"
         printf '```\n'
     } >"$output_path"
-    cp "$tmp_dir/import-prefix-targets.tsv" "$prefix_targets_path"
-    cp "$tmp_dir/import-prefix-evidence.tsv" "$prefix_evidence_path"
-    cp "$tmp_dir/import-prefix-candidates.tsv" "$prefix_candidates_path"
-    cp "$tmp_dir/first.reconciliation" "$prefix_reconciliation_path"
-    printf 'Wrote import-prefix profile to %s and TSVs to %s / %s / %s / %s\n' \
-        "$output_path" "$prefix_targets_path" "$prefix_evidence_path" "$prefix_candidates_path" "$prefix_reconciliation_path"
+    cp "$tmp_dir/first.import-prefix-targets.tsv" "$prefix_targets_path"
+    cp "$tmp_dir/first.import-prefix-evidence.tsv" "$prefix_evidence_path"
+    cp "$tmp_dir/first.lexical-package-candidates.tsv" "$prefix_candidates_path"
+    cp "$tmp_dir/first.reconciliation-enriched.tsv" "$prefix_reconciliation_path"
+    cp "$tmp_dir/first.qualified-cohort.tsv" "$prefix_qualified_cohort_path"
+    cp "$tmp_dir/first.qualified-cohort-summary.txt" "$prefix_qualified_summary_path"
+    printf 'Wrote import-prefix profile to %s and TSVs to %s / %s / %s / %s / %s / %s\n' \
+        "$output_path" "$prefix_targets_path" "$prefix_evidence_path" "$prefix_candidates_path" "$prefix_reconciliation_path" "$prefix_qualified_cohort_path" "$prefix_qualified_summary_path"
     exit 0
 fi
 for run in "${run_names[@]}"; do
@@ -253,7 +326,7 @@ if [[ "$verify_determinism" == 1 ]] \
 fi
 
 if [[ "$verify_determinism" == 1 ]]; then
-    audit_run_summary='two runs were compared byte-for-byte'
+    audit_run_summary='two normalized reports and their generated sidecars were compared byte-for-byte'
 else
     audit_run_summary='one run was completed; determinism was not checked'
 fi
@@ -295,6 +368,15 @@ mkdir -p "$(dirname -- "$output_path")"
 cohort_path="${output_path%.md}-deferred-cohorts.tsv"
 PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
     "$tmp_dir/first.report" --rows "$tmp_dir/cohorts.tsv" >"$tmp_dir/gate.txt"
+if [[ "$verify_determinism" == 1 ]]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
+        "$tmp_dir/second.report" --rows "$tmp_dir/second-cohorts.tsv" >"$tmp_dir/second-gate.txt"
+    if ! cmp -s "$tmp_dir/cohorts.tsv" "$tmp_dir/second-cohorts.tsv"; then
+        diff -u "$tmp_dir/cohorts.tsv" "$tmp_dir/second-cohorts.tsv" >&2 || true
+        printf 'deferred-cohort TSV sidecar was not deterministic\n' >&2
+        exit 1
+    fi
+fi
 module_profile_path="${output_path%.md}-package-term-profile.tsv"
 module_blockers_path="${output_path%.md}-package-term-first-blockers.tsv"
 frozen_module_profile="$repo_root/docs/typer-classpath-corpus-audit-3.9.0-package-term-profile.tsv"
@@ -318,6 +400,21 @@ module_reprofile_path="${output_path%.md}-object-module-reprofile.tsv"
 PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/object_module_reprofile.py" compare \
     "$frozen_object_module_blockers" "$tmp_dir/first.report" \
     --rows "$tmp_dir/object-module-reprofile.tsv" >"$tmp_dir/object-module-summary.txt"
+if [[ "$verify_determinism" == 1 ]]; then
+    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/object_module_reprofile.py" compare \
+        "$frozen_object_module_blockers" "$tmp_dir/second.report" \
+        --rows "$tmp_dir/second-object-module-reprofile.tsv" >"$tmp_dir/second-object-module-summary.txt"
+    if ! cmp -s "$tmp_dir/object-module-reprofile.tsv" "$tmp_dir/second-object-module-reprofile.tsv"; then
+        diff -u "$tmp_dir/object-module-reprofile.tsv" "$tmp_dir/second-object-module-reprofile.tsv" >&2 || true
+        printf 'object-module reprofile TSV sidecar was not deterministic\n' >&2
+        exit 1
+    fi
+    if ! cmp -s "$tmp_dir/object-module-summary.txt" "$tmp_dir/second-object-module-summary.txt"; then
+        diff -u "$tmp_dir/object-module-summary.txt" "$tmp_dir/second-object-module-summary.txt" >&2 || true
+        printf 'object-module summary sidecar was not deterministic\n' >&2
+        exit 1
+    fi
+fi
 if [[ "$module_reprofile_path" != "$frozen_object_module_blockers" ]]; then
     cp "$tmp_dir/object-module-reprofile.tsv" "$module_reprofile_path"
 fi
