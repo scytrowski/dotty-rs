@@ -269,10 +269,50 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         case = runtime_cases.get(relative.as_posix())
         if case is None:
             raise RuntimeError("--runtime requires a supported example TASTy artifact")
-        class_name, method_pattern, harness_name, harness_source, expected_output, expected_value = case
+        class_name = case[0]
         javap = execute([toolchain.javap, "-classpath", compiled, class_name])
-        if not re.search(method_pattern, javap):
-            raise RuntimeError(f"fresh class does not have the expected method: {javap}")
+        if relative.as_posix() == "example/Operations.tasty":
+            sprint_two_methods = (
+                r"public int use\(\)", r"public int identity\(int\)",
+                r"public int first\(\)", r"public int zero\(\)",
+            )
+            call_methods = (
+                r"public int use\(\)", r"public int propagate\(int\)",
+                r"public int picks\(\)", r"public int nested\(\)",
+            )
+            if all(re.search(pattern, javap) for pattern in sprint_two_methods):
+                scenario = "sprint-two"
+            elif all(re.search(pattern, javap) for pattern in call_methods):
+                scenario = "calls"
+            else:
+                raise RuntimeError(f"fresh Operations class matches no supported runtime profile: {javap}")
+        else:
+            _, method_pattern, *_ = case
+            if not re.search(method_pattern, javap):
+                raise RuntimeError(f"fresh class does not have the expected method: {javap}")
+            scenario = "standard"
+
+        if scenario == "calls":
+            harness_name = "OperationsCallsRuntime.java"
+            harness_source = """public final class OperationsCallsRuntime {
+  public static void main(String[] args) {
+    example.Operations operations = new example.Operations();
+    int use = operations.use();
+    int propagated = operations.propagate(17);
+    int picked = operations.picks();
+    int nested = operations.nested();
+    if (use != 42) throw new AssertionError("Operations.use() = " + use);
+    if (propagated != 17) throw new AssertionError("Operations.propagate(17) = " + propagated);
+    if (picked != 42) throw new AssertionError("Operations.picks() = " + picked);
+    if (nested != 42) throw new AssertionError("Operations.nested() = " + nested);
+    System.out.println("Operations = " + use + ", " + propagated + ", " + picked + ", " + nested);
+  }
+}
+"""
+            expected_output = "Operations = 42, 17, 42, 42"
+            expected_value = 42
+        else:
+            _, _, harness_name, harness_source, expected_output, expected_value = case
         harness = directory / harness_name
         harness.write_text(harness_source)
         execute([toolchain.javac, "-classpath", compiled, "-d", compiled, harness])
@@ -297,6 +337,7 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", truncated_output, truncated]),
                        "Scala rejects truncated producer output")
         result.update({"javap": True, "runtime_value": expected_value,
+                       "runtime_profile": scenario,
                        "rust_corrupt_rejection": True, "scala_corrupt_rejection": True,
                        "rust_truncated_rejection": True, "scala_truncated_rejection": True})
     return result

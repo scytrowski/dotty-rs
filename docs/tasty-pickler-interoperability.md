@@ -150,6 +150,12 @@ timeouts or compiler failures fail the explicitly enabled test; the default
 test remains independent of local Scala tooling and makes no claim of external
 acceptance.
 
+The shared oracle also recognizes the expanded Operations fixture emitted by
+the pickler crate's call-expression test. It runs the original `use`,
+`propagate(17)`, `picks`, and `nested` assertions for that shape, keeping the
+multi-argument and nested-call interoperability gate intact alongside this
+Sprint 2 profile.
+
 The existing focused pickler tests exercise malformed/foreign identities,
 source-to-typed binding mismatches, unsupported call shapes, and validation
 failures without publishing output. These remain complementary to the fresh
