@@ -19,6 +19,14 @@ def tree_index(key: str) -> str:
     return key.rsplit("#tree=", 1)[1]
 
 
+def same_import_first_segment_failure(baseline_row, current_observation):
+    return (
+        current_observation is not None
+        and current_observation["first_failing_segment"]
+        == baseline_row["first_failing_segment"]
+    )
+
+
 def candidate_evidence(row, evidence):
     result = []
     for candidate in ordered_source_package_candidates(row):
@@ -122,6 +130,9 @@ def reconcile(baseline, evidence, current_evidence, current_rows, reconciliation
             if current_observation
             else []
         )
+        same_first_segment_failure = same_import_first_segment_failure(
+            baseline_row, current_observation
+        )
         other_imports = [
             {
                 "import_tree": row["import_tree"],
@@ -131,8 +142,10 @@ def reconcile(baseline, evidence, current_evidence, current_rows, reconciliation
             for row in current_by_method.get(current_key[:2], [])
             if row["import_tree"] != baseline_row["import_tree"]
         ]
-        if current_observation:
+        if same_first_segment_failure:
             import_relation = "same_original_import_first_segment_failure"
+        elif current_observation:
+            import_relation = "same_import_different_first_failing_segment"
         elif joined["current_method_blocker"] != "ImportQualifierNotFound":
             import_relation = "current_first_blocker_is_not_import_qualifier_not_found"
         elif other_imports:
@@ -163,12 +176,14 @@ def reconcile(baseline, evidence, current_evidence, current_rows, reconciliation
             ),
             "current_candidate_observation_status": (
                 "observed_at_original_import"
+                if same_first_segment_failure
+                else "observed_at_original_import_with_different_first_failing_segment"
                 if current_observation
                 else "original_first_segment_failure_not_observed"
             ),
             "current_import_selectors": joined["current_import_selectors"],
             "current_same_import_first_segment_failure": str(
-                current_observation is not None
+                same_first_segment_failure
             ).lower(),
             "current_other_failed_imports_in_method": json.dumps(
                 other_imports, sort_keys=True, separators=(",", ":")
