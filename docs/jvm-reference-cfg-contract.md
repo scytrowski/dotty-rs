@@ -1,9 +1,8 @@
-# JVM reference CFG contract audit (Java 21)
+# JVM reference CFG contract (Java 21)
 
-This document pins the verifier contract for the next reference-aware CFG
-increment. It is a design and characterization audit only: it does not enable
-any new instructions or change the class-file/JVM lowering APIs. The source of
-truth is the Java SE 21 JVM Specification (JVMS 21), not a later release.
+This document records the verifier contract and enabled source subset for
+reference-bearing control-flow graphs. The source of truth is the Java SE 21
+JVM Specification (JVMS 21), not a later release.
 
 ## JVMS 21 rules used
 
@@ -32,7 +31,7 @@ ancestor, interface, `java/lang/Object`, or a common superclass. That is a
 conservative implementation restriction, not a claim that JVMS requires exact
 type equality.
 
-## Why the existing analysis is insufficient
+## Analysis boundaries
 
 `ValueKind::Reference` in `LinearCodeAnalyzer` records only a one-slot category.
 The linear analyzer uses it for `null`, `new`, `aload`/`astore`, fields, calls,
@@ -41,25 +40,26 @@ initialized from uninitialized references, track the PC of `new`, or validate
 that a constructor's owner matches the allocation. A passing linear-analysis
 result therefore is not evidence of verifier safety.
 
-`CfgCodeAnalyzer` has `FlowLocalState::{Top,Integer,Receiver}` and stores a
-`Vec<ValueKind>` for the operand stack. It rejects reference-producing and
-reference-consuming instructions before propagation. `Receiver` means the
-current instance placeholder; it is not a general reference value. Its
-integer-only stack join is safe only because all admitted stack values are
-integers. `StackMapFrameGenerator` can encode integer, top, and a supplied
-receiver class, but it cannot turn arbitrary reference names into
-`VerificationTypeInfo::Object` entries.
+`CfgCodeAnalyzer` tracks `Top`, integer, exact initialized class references,
+and allocation-site-specific uninitialized references. The operand stack
+requires exact compatible states at joins; locals with different incoming
+states degrade to `Top`. Ordinary instance methods seed local 0 with the exact
+emitting class, while branched constructors remain unsupported. The
+`StackMapFrameGenerator` maps every initialized class through a validated
+`CONSTANT_Class` index and emits `Object(index)` entries.
 
-The current constructor path in `ClassFileBuilder` rejects branched `<init>`
-bodies because it does not track the transition from `uninitializedThis` to
-initialized `this`. `dotty-jvm` also rejects reference-bearing source CFGs at
-its existing conservative guards. Keep those failures until a future issue
-implements and validates the state model below.
+The constructor path in `ClassFileBuilder` rejects branched `<init>` bodies
+because it does not track the transition from `uninitializedThis` to
+initialized `this`. The source backend enables only planned initialized
+references, primitive fields, primitive-result calls, and complete allocations
+that remain within one basic block. It still rejects public reference
+signatures, mutable reference locals, hierarchy joins, arrays, null, and
+branched constructors.
 
-## Proposed state model
+## Bounded state model
 
-Keep locals and operand stack as separate structures. A future abstract value
-must at minimum distinguish:
+Keep locals and operand stack as separate structures. The abstract value model
+distinguishes:
 
 | Abstract value | Meaning | Stack-map representation |
 | --- | --- | --- |
@@ -110,11 +110,10 @@ merge.
 
 ## Transfer and constant-pool checks
 
-The first implementation should add explicit owner/type checks to the transfer
-functions, rather than deriving a reference type from `ValueKind` or opcode
-category alone.
+Transfer functions check exact class and initialization state instead of
+deriving a reference type from `ValueKind` or opcode category alone.
 
-| Instruction family | Required transfer/check in the first subset |
+| Instruction family | Transfer/check in the supported subset |
 | --- | --- |
 | `aload` / `astore` | Load only an initialized exact-class local. Stores preserve the exact initialized class; reject unusable or uninitialized values. |
 | `dup` / `pop` | Preserve or discard the same abstract value; `dup` must retain one allocation-site identity, not initialize it. |
@@ -159,11 +158,10 @@ before that transition.
 ## Constant-pool and frame construction
 
 The class-file builder interns symbolic references before freezing the
-constant pool. A future reference-aware path must collect every class identity
-needed by branch frames, including identities not otherwise used by an
-instruction, and call the existing typed class interning API before
-`finish()`. It then resolves each internal name through that builder's
-name-to-index result and emits `VerificationTypeInfo::Object(cp_index)`.
+constant pool. Its reference-aware path collects every class identity needed
+by branch frames and interns them before `finish()`. It resolves each internal
+name through that builder's name-to-index result and emits
+`VerificationTypeInfo::Object(cp_index)`.
 Never predict indices, mutate/reorder a frozen pool, or intern a missing frame
 class after finalization.
 
@@ -181,48 +179,42 @@ typed representation in the format API is still required for later work.
 entries including a local frame entry `locals = [ class Counter ]`, the
 corresponding `CONSTANT_Class`, reference-bearing loop/local joins,
 current-instance and field/call instructions, and object construction in
-branches. The integration test runs it under `java -Xverify:all` and checks
-the observable values. This is a JDK 21 positive verifier oracle; it does not
-prove the repository's builder supports these methods.
+branches. The source integration test
+`planned_reference_operations_verify_across_if_while_and_short_circuit_cfgs`
+checks generated classfiles and runs representative methods under
+`java -Xverify:all` on JDK 21+.
 
-The class-file unit characterization pins the current failure boundary:
-`validate_flow_instruction` returns
-`UnsupportedFlowInstruction { kind: Reference }` for each currently excluded
-reference opcode before CFG type flow. This is a generic implementation
-boundary, not a claim that all malformed reference programs have already been
-diagnosed precisely. The linear analyzer may accept category-shaped invalid
-sequences because it is not a verifier; do not use its success as a positive
-test for any row below.
+The class-file unit tests exercise exact local/stack transfer, allocation
+tracking, owner checks, joins, and frame projection. The linear analyzer may
+accept category-shaped invalid sequences because it is not a verifier; do not
+use its success as a positive test for any reference-bearing method.
 
-| Case | Required future behavior | Current characterization |
+| Case | Required behavior | Evidence or explicit boundary |
 | --- | --- | --- |
-| `Counter` reference local through a loop header and join | Same `Initialized(Counter)` state at each compatible stack/local join; emit `Object(Counter)` frame entry | JVMS 21 oracle passes; repository CFG rejects reference opcodes |
-| Reference-bearing conditional and current `this` | Seed local 0 as emitting class; preserve exact receiver state at branch target | JVMS 21 oracle passes; no reference CFG acceptance |
-| `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner in this subset | JVMS 21 oracle passes; repository CFG rejects these opcodes |
-| Different initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to `Object` | Producers are rejected before repository CFG reaches the join |
-| Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Reference producers are rejected before local dataflow |
-| Wrong field/method/constructor owner | Typed owner mismatch before emission | `LinearCodeAnalyzer` has no class identity check; CFG rejects the opcode family |
-| Uninitialized local read or uninitialized object escape | Typed uninitialized-use error; never emit the class | Not modeled by the linear analyzer; CFG rejects reference operations |
-| Branch between `new` and matching constructor | Typed unsupported/uninitialized-on-edge error | CFG rejects `new` / `invokespecial` before edge transfer |
-| Wrong constructor owner for a `new` allocation | Typed allocation-owner mismatch | Not modeled by the linear analyzer; CFG rejects `invokespecial` |
+| `Counter` reference local through a loop header and join | Same `Initialized(Counter)` state at each compatible stack/local join; emit `Object(Counter)` frame entry | Covered by source integration and JDK `-Xverify:all` |
+| Reference-bearing conditional and current `this` | Seed local 0 as emitting class; preserve exact receiver state at branch target | Covered by field/call branch and loop cases under JDK verifier |
+| `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner in this subset | Covered by classfile analyzer tests and source integration |
+| Different initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to `Object` | Classfile analyzer regression tests |
+| Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
+| Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |
+| Uninitialized local read or uninitialized object escape | Typed uninitialized-use error; never emit the class | Classfile analyzer allocation regressions |
+| Branch between `new` and matching constructor | Typed unsupported/uninitialized-on-edge error | Classfile analyzer allocation regressions |
+| Wrong constructor owner for a `new` allocation | Typed allocation-owner mismatch | Classfile analyzer allocation regressions |
 | Missing, wrong-kind, or malformed CP `Class` entry | Existing typed constant-pool validation error; never manufacture a frame type | Builder/decoder validation remains the current boundary |
 | Branched constructor before `this`/super initialization | Keep rejected as unsupported constructor flow | `ClassFileBuilder` rejects branched `<init>` analysis |
 | Reference method parameter/result | Keep rejected by JVM source backend | Existing backend returns `UnsupportedJvmType` |
 
-No old negative tests should be removed to make future reference tests pass.
-When a later issue enables one row, replace only that row's obsolete rejection
-assertion with positive coverage and retain all adjacent negative cases.
+The backend converts only now-supported reference-CFG cases from negative to
+positive coverage. Remaining negative cases continue to pin exact-owner,
+definite-initialization, constructor-safety, and public descriptor boundaries.
 
 ## Ownership for follow-up work
 
-- The next class-file analyzer change owns the abstract reference values,
-  transfer checks, exact joins, and deterministic fixed-point policy.
-- The class-file builder/frame change owns pre-freeze class interning and
-  resolving internal names to real `VerificationTypeInfo::Object` indices.
-- A later bounded-control-flow backend issue owns the Scala `SymbolId` to
-  validated JVM internal-name mapping and enabling reference operations in
-  `dotty-jvm` only after class-file evidence exists.
-- A separate constructor-flow issue owns branched `<init>` and
-  `UninitializedThis`. General inheritance/interface merges, arrays, `null`,
-  reference signatures, exception-flow joins, and arbitrary uninitialized
-  values remain out of scope.
+- `dotty-classfile` owns JVM names, allocation sites, exact dataflow, constant
+  pool checks, and frame encoding; it does not depend on Scala symbols.
+- `dotty-jvm` maps validated plan identities to classfile names and emits only
+  the bounded source forms described above.
+- Branched `<init>` and `UninitializedThis` remain a separate constructor-flow
+  problem. General inheritance/interface merges, arrays, `null`, reference
+  signatures, exception-flow joins, and arbitrary uninitialized values remain
+  out of scope.

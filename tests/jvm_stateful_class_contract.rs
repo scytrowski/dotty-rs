@@ -1997,24 +1997,16 @@ fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() 
             }
 
             let (_, branch_method, _) = typed_body("branch");
-            assert!(matches!(
-                unit.lower_method_body(class, branch_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::JvmFieldWriteInUnsupportedControlFlow {
-                    method,
-                    field,
-                    ..
-                }) if method == branch_method && field == fields[0].field
-            ));
+            let branch_code = unit
+                .lower_method_body(class, branch_method, definitions)
+                .expect("current-instance field writes are supported in branches");
+            assert!(format!("{branch_code:?}").contains("operation: Put"));
 
             let (_, loop_method, _) = typed_body("loop");
-            assert!(matches!(
-                unit.lower_method_body(class, loop_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::JvmFieldWriteInUnsupportedControlFlow {
-                    method,
-                    field,
-                    ..
-                }) if method == loop_method && field == fields[0].field
-            ));
+            let loop_code = unit
+                .lower_method_body(class, loop_method, definitions)
+                .expect("current-instance field writes are supported in loops");
+            assert!(format!("{loop_code:?}").contains("operation: Put"));
 
             let (_, setter_method, _) = typed_body("setUnqualified");
             let mut no_fields = unit.classes[0].clone();
@@ -2049,7 +2041,7 @@ fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() 
 }
 
 #[test]
-fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_subset() {
+fn field_reads_follow_canonical_bindings_in_control_flow_and_fail_closed_elsewhere() {
     with_source(
         "class Current { private val current: Int = 5; private val hidden: Int = 6; private val flag: Boolean = true; def get(): Int = current; def shadow(current: Int): Int = current; def branch(flag: Boolean): Int = if (flag) current else 0; def shortCircuit(): Boolean = this.flag && true; def compared(): Boolean = this.current < 7; def select(other: Current): Int = other.current; def readHidden(): Int = hidden }\nclass Other { private val foreign: Int = 1; def read(): Int = this.foreign }",
         |ast, source, index, definitions, typer| {
@@ -2187,14 +2179,10 @@ fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_s
                 branch_parameters.clone(),
                 current_plan.clone(),
             );
-            assert!(matches!(
-                branch.lower_method_body(class, *branch_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
-                    method,
-                    field,
-                    ..
-                }) if method == *branch_method && field == current_id
-            ));
+            let branch_code = branch
+                .lower_method_body(class, *branch_method, definitions)
+                .expect("planned current-instance field reads are supported in branches");
+            assert!(format!("{branch_code:?}").contains("operation: Get"));
 
             let (_, short_circuit_method, short_circuit_body, _) = method("shortCircuit");
             let short_circuit = plan_for(
@@ -2203,14 +2191,10 @@ fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_s
                 Vec::new(),
                 vec![*current_field, *flag_field],
             );
-            assert!(matches!(
-                short_circuit.lower_method_body(class, *short_circuit_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
-                    method,
-                    field,
-                    ..
-                }) if method == *short_circuit_method && field == flag_field.field
-            ));
+            let short_circuit_code = short_circuit
+                .lower_method_body(class, *short_circuit_method, definitions)
+                .expect("planned Boolean field reads are supported in short-circuit flow");
+            assert!(format!("{short_circuit_code:?}").contains("operation: Get"));
 
             let (_, compared_method, compared_body, _) = method("compared");
             let compared = plan_for(
@@ -2220,17 +2204,9 @@ fn field_reads_follow_canonical_bindings_and_fail_closed_outside_the_supported_s
                 current_plan.clone(),
             );
             let compared_result = compared.lower_method_body(class, *compared_method, definitions);
-            assert!(
-                matches!(
-                    &compared_result,
-                    Err(dotty_jvm::JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
-                        method,
-                        field,
-                        ..
-                    }) if *method == *compared_method && *field == current_id
-                ),
-                "unexpected comparison result: {compared_result:?}"
-            );
+            let compared_code = compared_result
+                .expect("planned field reads are supported in relational conditions");
+            assert!(format!("{compared_code:?}").contains("operation: Get"));
 
             let (_, get_method, _, _) = method("get");
             let (_, _, select_body, _) = method("select");

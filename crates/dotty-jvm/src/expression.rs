@@ -149,11 +149,6 @@ struct JvmLoweringContext<'a> {
         &'a JvmClassMetadata,
         &'a [crate::JvmClassMetadata],
     )>,
-    control_flow_depth: usize,
-    first_field_read: Option<(TreeId<Typed>, SymbolId)>,
-    first_field_write: Option<(TreeId<Typed>, SymbolId)>,
-    first_object_creation: Option<TreeId<Typed>>,
-    first_reference_local: Option<TreeId<Typed>>,
     node_visits: usize,
 }
 
@@ -172,11 +167,6 @@ impl<'a> JvmLoweringContext<'a> {
             local_layout: None,
             initialized_locals: HashSet::new(),
             call_context: None,
-            control_flow_depth: 0,
-            first_field_read: None,
-            first_field_write: None,
-            first_object_creation: None,
-            first_reference_local: None,
             node_visits: 0,
         }
     }
@@ -261,9 +251,6 @@ pub(super) fn lower_method_body(
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
-    validate_field_access_control_flow(&context, &code)?;
-    validate_reference_local_control_flow(&context, &code)?;
-    validate_object_creation_control_flow(&context, &code)?;
     Ok(code)
 }
 
@@ -305,63 +292,10 @@ pub(super) fn lower_planned_method_body(
     context.call_context = Some((unit, class, &metadata));
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
     append_method_return(method, body, flow, &mut code)?;
-    validate_field_access_control_flow(&context, &code)?;
-    validate_reference_local_control_flow(&context, &code)?;
-    validate_object_creation_control_flow(&context, &code)?;
+    // Branched references are checked after all symbolic references have been
+    // staged in ClassFileBuilder. Its encode preflight analyzes CFG states and
+    // generates frames before `emit_class` returns or publishes the class.
     Ok(code)
-}
-
-fn validate_object_creation_control_flow(
-    context: &JvmLoweringContext<'_>,
-    code: &CodeBuilder,
-) -> Result<(), JvmCodegenError> {
-    if code.has_branches()
-        && let Some(tree) = context.first_object_creation
-    {
-        return Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
-            tree,
-            method: context.method.symbol(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_reference_local_control_flow(
-    context: &JvmLoweringContext<'_>,
-    code: &CodeBuilder,
-) -> Result<(), JvmCodegenError> {
-    if code.has_branches()
-        && let Some(tree) = context.first_reference_local
-    {
-        return Err(JvmCodegenError::ReferenceLocalInUnsupportedControlFlow {
-            tree,
-            method: context.method.symbol(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_field_access_control_flow(
-    context: &JvmLoweringContext<'_>,
-    code: &CodeBuilder,
-) -> Result<(), JvmCodegenError> {
-    if code.has_branches() {
-        if let Some((tree, field)) = context.first_field_write {
-            return Err(JvmCodegenError::JvmFieldWriteInUnsupportedControlFlow {
-                tree,
-                method: context.method.symbol(),
-                field,
-            });
-        }
-        if let Some((tree, field)) = context.first_field_read {
-            return Err(JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
-                tree,
-                method: context.method.symbol(),
-                field,
-            });
-        }
-    }
-    Ok(())
 }
 
 fn append_method_return(
@@ -466,7 +400,6 @@ fn lower_leaf(
                     });
                 }
                 if matches!(local.ty(), JvmType::Reference(_)) {
-                    context.first_reference_local.get_or_insert(tree_id);
                     code.aload(usize::from(local.slot())).map_err(|error| {
                         JvmCodegenError::CodeBuilder {
                             tree: tree_id,
@@ -692,14 +625,6 @@ fn emit_field_read(
             method: context.method.symbol(),
         });
     }
-    if context.control_flow_depth > 0 {
-        return Err(JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
-            tree: tree_id,
-            method: context.method.symbol(),
-            field,
-        });
-    }
-
     let field_symbol = context
         .store
         .symbols
@@ -789,7 +714,6 @@ fn emit_field_read(
         }
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
     };
-    context.first_field_read.get_or_insert((tree_id, field));
     code.aload(0)
         .and_then(|code| {
             code.getfield(
@@ -975,14 +899,6 @@ fn emit_field_assignment(
             method: context.method.symbol(),
         });
     }
-    if context.control_flow_depth > 0 {
-        return Err(JvmCodegenError::JvmFieldWriteInUnsupportedControlFlow {
-            tree: tree_id,
-            method: context.method.symbol(),
-            field,
-        });
-    }
-
     let field_symbol = context
         .store
         .symbols
@@ -1084,7 +1000,6 @@ fn emit_field_assignment(
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
     };
 
-    context.first_field_write.get_or_insert((tree_id, field));
     let Some(local_layout) = context.local_layout else {
         return Err(JvmCodegenError::JvmFieldWriteContextUnavailable {
             tree: tree_id,
@@ -1255,7 +1170,6 @@ fn emit_local_declaration(
     }
 
     if matches!(local.ty(), JvmType::Reference(_)) {
-        context.first_reference_local.get_or_insert(declaration);
         code.astore(usize::from(local.slot()))
             .map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: declaration,
@@ -1338,13 +1252,6 @@ fn block_value_type(
             });
         };
         let class_symbol = class.identity().symbol();
-        if context.control_flow_depth > 0 {
-            return Err(JvmCodegenError::JvmFieldReadInUnsupportedControlFlow {
-                tree,
-                method: context.method.symbol(),
-                field: *symbol,
-            });
-        }
         if context.store.symbols.get(*symbol).owner != Some(class_symbol) {
             return Err(JvmCodegenError::WrongOwner {
                 symbol: *symbol,
@@ -1518,12 +1425,6 @@ fn emit_apply(
         });
     };
 
-    if context.control_flow_depth > 0 {
-        return Err(JvmCodegenError::JvmCallInUnsupportedControlFlow {
-            tree: tree_id,
-            method: context.method.symbol(),
-        });
-    }
     let caller_class = class.identity().symbol();
     let caller_method = context.method.symbol();
     let target = unit.resolve_planned_instance_call(
@@ -1636,13 +1537,6 @@ fn emit_object_creation(
             method: context.method.symbol(),
         });
     };
-    if context.control_flow_depth > 0 {
-        return Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
-            tree: tree_id,
-            method: context.method.symbol(),
-        });
-    }
-
     let target = unit.resolve_constructor_call(
         class.identity().symbol(),
         context.method.symbol(),
@@ -1698,7 +1592,6 @@ fn emit_object_creation(
         tree: tree_id,
         error,
     })?;
-    context.first_object_creation.get_or_insert(tree_id);
     Ok(Flow::Value(target.result_type()))
 }
 
@@ -1929,10 +1822,7 @@ fn emit_short_circuit_boolean_intrinsic(
     })?;
 
     let initialized_on_skip = context.initialized_locals.clone();
-    context.control_flow_depth += 1;
-    let argument_flow = emit_expression(context, *argument, code, depth + 1);
-    context.control_flow_depth -= 1;
-    let argument_flow = argument_flow?;
+    let argument_flow = emit_expression(context, *argument, code, depth + 1)?;
     if argument_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
             tree: tree_id,
@@ -2231,10 +2121,7 @@ fn emit_if(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    context.control_flow_depth += 1;
-    let result = emit_if_body(context, tree_id, code, depth);
-    context.control_flow_depth -= 1;
-    result
+    emit_if_body(context, tree_id, code, depth)
 }
 
 fn emit_if_body(
@@ -2342,10 +2229,7 @@ fn emit_while(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    context.control_flow_depth += 1;
-    let result = emit_while_body(context, tree_id, code, depth);
-    context.control_flow_depth -= 1;
-    result
+    emit_while_body(context, tree_id, code, depth)
 }
 
 fn emit_while_body(
@@ -2480,7 +2364,7 @@ fn merge_if_flows(
             });
         }
     };
-    let expected = primitive_type(context.store, result_ty, context.definitions);
+    let expected = block_value_type(context, tree, result_ty, None)?;
     match merged {
         Flow::Value(found) if expected == Some(found) => Ok(Flow::Value(found)),
         Flow::Unit if is_unit_type(context.store, result_ty, context.definitions) => Ok(Flow::Unit),

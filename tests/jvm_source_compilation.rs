@@ -2146,17 +2146,6 @@ fn boolean_source_errors_and_user_defined_operators_keep_typed_failures() {
             )
         },
     );
-    assert_source_failure(
-        "short-circuit-reference-call",
-        "class ShortCircuitReferenceCall { def probe(): Boolean = false; def run(flag: Boolean): Boolean = flag && probe() }\n",
-        |failure| {
-            matches!(
-                failure,
-                PipelineFailure::Codegen(JvmCodegenError::JvmCallInUnsupportedControlFlow { .. })
-            )
-        },
-    );
-
     let output = TestOutputDirectory::new("user-defined-boolean-and");
     let error = compile_fixture("UserDefinedAnd.scala", output.path())
         .expect_err("same-spelled user Boolean operator is outside the classfile subset");
@@ -3029,7 +3018,7 @@ fn primitive_local_while_loops_have_verified_back_edges_and_zero_iteration_paths
 }
 
 #[test]
-fn while_loops_reject_invalid_conditions_and_calls_inside_control_flow() {
+fn while_loops_reject_invalid_conditions_and_verify_calls_inside_control_flow() {
     let invalid_output = TestOutputDirectory::new("invalid-while-condition");
     let invalid_condition = compile_source(
         "class InvalidWhile { def run(): Unit = { while 1 do () } }\n",
@@ -3041,30 +3030,22 @@ fn while_loops_reject_invalid_conditions_and_calls_inside_control_flow() {
     assert!(invalid_output.class_files().is_empty());
 
     let call_output = TestOutputDirectory::new("while-call-control-flow");
-    let call_error = compile_source(
+    let call = compile_source(
         "class WhileCall { def next(): Boolean = false; def run(flag: Boolean): Int = { var running = flag; while running do running = next(); 0 } }\n",
         "WhileCall.scala",
         call_output.path(),
     )
-    .unwrap_err();
-    assert!(matches!(
-        call_error,
-        PipelineFailure::Codegen(JvmCodegenError::JvmCallInUnsupportedControlFlow { .. })
-    ));
-    assert!(call_output.class_files().is_empty());
+    .expect("a planned same-class call is valid inside a primitive while CFG");
+    assert_eq!(call.class.internal_name(), "WhileCall");
 
     let branch_output = TestOutputDirectory::new("if-call-control-flow");
-    let branch_error = compile_source(
+    let branch = compile_source(
         "class IfCall { def identity(value: Int): Int = value; def run(flag: Boolean): Int = if flag then identity(1) else 0 }\n",
         "IfCall.scala",
         branch_output.path(),
     )
-    .unwrap_err();
-    assert!(matches!(
-        branch_error,
-        PipelineFailure::Codegen(JvmCodegenError::JvmCallInUnsupportedControlFlow { .. })
-    ));
-    assert!(branch_output.class_files().is_empty());
+    .expect("a planned same-class call is valid in an if branch");
+    assert_eq!(branch.class.internal_name(), "IfCall");
 }
 
 #[test]
@@ -3851,6 +3832,10 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(seed: Int)\nclass CounterClient:\n  def run(): Int = new Counter(true).get()\n",
         ),
         (
+            "branching-constructor-argument",
+            "class Counter(seed: Int):\n  def get(): Int = 1\nclass CounterClient:\n  def run(flag: Boolean): Int = new Counter(if flag then 1 else 2).get()\n",
+        ),
+        (
             "unplanned-object-class",
             "class CounterClient:\n  def run(): Int =\n    new Object()\n    1\n",
         ),
@@ -3859,16 +3844,12 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(seed: Int)\nclass CounterClient:\n  def make(): Counter = new Counter(1)\n",
         ),
         (
+            "reference-method-parameter",
+            "class Counter(seed: Int)\nclass CounterClient:\n  def use(counter: Counter): Int = 1\n",
+        ),
+        (
             "reference-var-reassignment",
             "class Counter(seed: Int)\nclass CounterClient:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    counter = new Counter(seed + 1)\n    counter.get()\n",
-        ),
-        (
-            "reference-if-result",
-            "class Counter(seed: Int):\n  def get(): Int = 1\nclass CounterClient:\n  def run(flag: Boolean, seed: Int): Int =\n    val counter = if flag then new Counter(seed) else new Counter(1)\n    counter.get()\n",
-        ),
-        (
-            "reference-while-result",
-            "class Counter(seed: Int)\nclass CounterClient:\n  def run(seed: Int): Int =\n    while false do new Counter(seed)\n    1\n",
         ),
     ];
     for (label, source) in cases {
@@ -3895,6 +3876,10 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                     ..
                 })
             ),
+            "branching-constructor-argument" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmConstructorArgument { .. })
+            ),
             "unplanned-object-class" => matches!(
                 &error,
                 PipelineFailure::Typer(TyperError::NewClassInfoUnavailable { .. })
@@ -3906,21 +3891,16 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                     ..
                 })
             ),
+            "reference-method-parameter" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType {
+                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                    ..
+                })
+            ),
             "reference-var-reassignment" => matches!(
                 &error,
                 PipelineFailure::Typer(TyperError::UnstableSelectionPrefix { .. })
-            ),
-            "reference-if-result" => matches!(
-                &error,
-                PipelineFailure::Codegen(
-                    JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow { .. }
-                )
-            ),
-            "reference-while-result" => matches!(
-                &error,
-                PipelineFailure::Codegen(
-                    JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow { .. }
-                )
             ),
             _ => unreachable!("all cases have an expected pipeline stage"),
         };
@@ -4168,7 +4148,7 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
 }
 
 #[test]
-fn reference_receiver_calls_reject_private_access_and_symbolic_branches() {
+fn reference_receiver_calls_keep_private_access_rejected_and_allow_verified_branches() {
     let private_output = TestOutputDirectory::new("private-cross-class-virtual-call");
     let private_result = compile_planned_constructor_source(
         "class Counter(seed: Int):\n  private def hidden(): Int = 9\nclass Client:\n  def run(seed: Int): Int = new Counter(seed).hidden()\n",
@@ -4193,17 +4173,95 @@ fn reference_receiver_calls_reject_private_access_and_symbolic_branches() {
         "class Counter(seed: Int):\n  def get(): Int = 42\nclass Client:\n  def run(flag: Boolean, seed: Int): Int =\n    val counter = new Counter(seed)\n    if flag then counter.get() else 0\n",
         branch_output.path(),
     );
+    let branch_artifacts =
+        branch_result.expect("planned reference local calls are verified inside an if branch");
     assert!(
-        matches!(
-            branch_result,
-            Err(PipelineFailure::Codegen(
-                JvmCodegenError::JvmCallInUnsupportedControlFlow { .. }
-                    | JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. }
-            ))
-        ),
-        "reference calls inside symbolic branches must fail closed, got {branch_result:?}"
+        branch_artifacts
+            .iter()
+            .any(|artifact| { artifact.class.internal_name() == "Client" })
     );
-    assert!(branch_output.class_files().is_empty());
+}
+
+#[test]
+fn planned_reference_operations_verify_across_if_while_and_short_circuit_cfgs() {
+    let output = TestOutputDirectory::new("planned-reference-control-flow");
+    let source = "class Counter(start: Int):\n  private var current: Int = start\n  private var enabled: Boolean = true\n  def incrementUntil(limit: Int): Int =\n    while current < limit do current = current + 1\n    current\n  def enabledUntil(limit: Int): Int =\n    while enabled && current < limit do current = current + 1\n    current\n  def setEnabled(flag: Boolean): Int =\n    if flag then enabled = true else enabled = false\n    if enabled then current else 0\n  def get(): Int = current\n  def increment(): Unit = current = current + 1\nclass CounterClient:\n  def run(limit: Int): Int =\n    val counter = new Counter(0)\n    while counter.get() < limit do counter.increment()\n    counter.get()\n  def choose(flag: Boolean): Int =\n    if flag then new Counter(1).get() else new Counter(2).get()\n  def chooseLocal(flag: Boolean): Int =\n    val counter = if flag then new Counter(5) else new Counter(6)\n    counter.get()\n  def ifIncrement(flag: Boolean): Int =\n    val counter = new Counter(0)\n    if flag then counter.increment() else counter.increment()\n    counter.get()\n  def runAnd(running: Boolean, limit: Int): Int =\n    val counter = new Counter(0)\n    while running && counter.get() < limit do counter.increment()\n    counter.get()\n";
+    let artifacts = compile_planned_constructor_source(source, output.path())
+        .expect("narrow planned reference operations should compose with verified CFGs");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Counter", "CounterClient"]
+    );
+
+    let counter_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Counter")
+        .unwrap();
+    let mut reader = Reader::new(counter_artifact.class.bytes());
+    let counter = ClassFile::decode(&mut reader).expect("decode Counter");
+    counter
+        .validate_references()
+        .expect("Counter field and method references are valid");
+    for method in ["incrementUntil", "enabledUntil", "setEnabled"] {
+        assert!(
+            has_stack_map_table(&counter, method),
+            "{method} must carry generated CFG frames"
+        );
+    }
+    let increment_until = emitted_method_code(&counter, "incrementUntil");
+    assert!(
+        increment_until.contains(&0xb4),
+        "loop reads the current field"
+    );
+    assert!(
+        increment_until.contains(&0xb5),
+        "loop writes the current field"
+    );
+    let set_enabled = emitted_method_code(&counter, "setEnabled");
+    assert!(
+        set_enabled.contains(&0xb5),
+        "if branches write the Boolean field"
+    );
+    assert!(set_enabled.contains(&0xb4), "if reads the Boolean field");
+
+    let client_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "CounterClient")
+        .unwrap();
+    let mut reader = Reader::new(client_artifact.class.bytes());
+    let client = ClassFile::decode(&mut reader).expect("decode CounterClient");
+    client
+        .validate_references()
+        .expect("CounterClient references are valid");
+    for method in ["run", "choose", "chooseLocal", "ifIncrement", "runAnd"] {
+        assert!(
+            has_stack_map_table(&client, method),
+            "{method} must carry generated CFG frames"
+        );
+    }
+    assert!(
+        stack_map_frame_pcs(&client, "run")
+            .windows(2)
+            .all(|frames| frames[0] < frames[1]),
+        "loop frame PCs must be strictly ordered"
+    );
+    assert_invocation_sequence(
+        &client,
+        emitted_method_code(&client, "run"),
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "Counter", "get", "()I"),
+            (0xb6, "Counter", "increment", "()V"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+
+    if require_jdk_or_skip() {
+        verify_reference_control_flow_with_jdk(output.path());
+    }
 }
 
 #[test]
@@ -4363,41 +4421,22 @@ fn locals_keep_distinct_planned_class_identities_in_one_method() {
 }
 
 #[test]
-fn reference_var_and_reference_local_cfg_fail_without_publishing_classfiles() {
-    for (label, source, expected) in [
-        (
-            "reference-var",
-            "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    42\n",
-            "mutable",
-        ),
-        (
-            "reference-cfg",
-            "class Counter(seed: Int)\nclass Client:\n  def run(flag: Boolean, seed: Int): Int =\n    val counter = new Counter(seed)\n    if flag then 1 else 2\n",
-            "cfg",
-        ),
-    ] {
-        let output = TestOutputDirectory::new(label);
-        let result = compile_planned_constructor_source(source, output.path());
-        match (expected, result) {
-            (
-                "mutable",
-                Err(PipelineFailure::Codegen(JvmCodegenError::UnsupportedMutableReferenceLocal {
-                    ..
-                })),
-            ) => {}
-            (
-                "cfg",
-                Err(PipelineFailure::Codegen(
-                    JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. },
-                )),
-            ) => {}
-            (expected, other) => panic!("expected {expected} rejection, got {other:?}"),
-        }
-        assert!(
-            output.class_files().is_empty(),
-            "failed {label} compilation published a partial classfile"
-        );
-    }
+fn mutable_reference_locals_remain_rejected_without_publishing_classfiles() {
+    let output = TestOutputDirectory::new("reference-var");
+    let result = compile_planned_constructor_source(
+        "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    42\n",
+        output.path(),
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::UnsupportedMutableReferenceLocal { .. }
+        ))
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "failed reference-var compilation must not publish a partial classfile"
+    );
 }
 
 #[test]
@@ -4729,18 +4768,6 @@ fn unsupported_real_field_and_constructor_sources_fail_without_artifacts() {
             )
         });
     }
-    assert_source_failure(
-        "field-read-in-branch",
-        "class BranchingField { private val current: Int = 1; def value(flag: Boolean): Int = if flag then current else current }",
-        |failure| {
-            matches!(
-                failure,
-                PipelineFailure::Codegen(
-                    JvmCodegenError::JvmFieldReadInUnsupportedControlFlow { .. }
-                )
-            )
-        },
-    );
 }
 
 fn assert_method_reference(
@@ -4987,6 +5014,46 @@ fn verify_counter_with_jdk(output_directory: &Path) {
         .output()
         .expect("start java verifier for Counter");
     assert!(java.status.success(), "java failed for Counter: {:?}", java);
+}
+
+fn verify_reference_control_flow_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 output path");
+    let harness = output_directory.join("ReferenceControlFlowHarness.java");
+    fs::write(
+        &harness,
+        "public final class ReferenceControlFlowHarness { public static void main(String[] args) { Counter counter = new Counter(0); if (counter.incrementUntil(3) != 3 || counter.incrementUntil(0) != 3) throw new AssertionError(\"field loop\"); if (counter.setEnabled(false) != 0 || counter.enabledUntil(8) != 3 || counter.setEnabled(true) != 3 || counter.enabledUntil(5) != 5) throw new AssertionError(\"Boolean field flow\"); CounterClient client = new CounterClient(); if (client.run(0) != 0 || client.run(1) != 1 || client.run(5) != 5) throw new AssertionError(\"reference local loop\"); if (client.choose(true) != 1 || client.choose(false) != 2 || client.chooseLocal(true) != 5 || client.chooseLocal(false) != 6) throw new AssertionError(\"branch allocations and exact join\"); if (client.ifIncrement(true) != 1 || client.ifIncrement(false) != 1) throw new AssertionError(\"branch calls\"); if (client.runAnd(false, 5) != 0 || client.runAnd(true, 4) != 4) throw new AssertionError(\"short-circuit reference loop\"); System.out.println(\"reference control flow ok\"); } }\n",
+    )
+    .expect("write reference control-flow harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness)
+        .output()
+        .expect("start javac for reference control-flow harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected reference control-flow harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "ReferenceControlFlowHarness",
+        ])
+        .output()
+        .expect("start JVM verifier for reference control-flow classes");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected reference control-flow classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "reference control flow ok"
+    );
 }
 
 fn verify_counter_objects_with_jdk(output_directory: &Path) {

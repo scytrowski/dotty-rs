@@ -5200,7 +5200,7 @@ fn rejects_unit_and_diverging_short_circuit_rhs_with_typed_errors() {
 }
 
 #[test]
-fn short_circuit_does_not_allow_ordinary_calls_inside_the_rhs_branch() {
+fn short_circuit_allows_verified_ordinary_calls_inside_the_rhs_branch() {
     let mut fixture = EmissionFixture::new(false);
     let boolean = fixture.definitions.boolean;
     let symbols = fixture
@@ -5208,7 +5208,7 @@ fn short_circuit_does_not_allow_ordinary_calls_inside_the_rhs_branch() {
         .boolean_primitive_operator_symbols(&fixture.store)
         .unwrap();
     let probe = add_call_target_method(&mut fixture, "probe", &[], boolean);
-    let caller = add_call_target_method(
+    let _caller = add_call_target_method(
         &mut fixture,
         "shortCircuitCall",
         &[("flag", boolean)],
@@ -5222,13 +5222,13 @@ fn short_circuit_does_not_allow_ordinary_calls_inside_the_rhs_branch() {
     let expression = typed_boolean_intrinsic_call(&mut fixture, symbols.and_then, flag, rhs);
     fixture.bodies[method_index] = expression;
 
-    assert_eq!(
-        fixture.emit().unwrap_err(),
-        JvmCodegenError::JvmCallInUnsupportedControlFlow {
-            tree: rhs,
-            method: caller,
-        }
-    );
+    let generated = fixture.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "shortCircuitCall");
+    assert!(code.contains(&0x99), "&& branches before its RHS call");
+    assert!(code.contains(&0xb6), "the approved call remains virtual");
+    assert!(code.contains(&0xac), "the Boolean result is returned");
 }
 
 #[test]
@@ -6265,7 +6265,7 @@ fn rejects_branching_constructor_arguments_before_allocating() {
 }
 
 #[test]
-fn rejects_any_branch_in_a_method_that_allocates_before_returning_code() {
+fn allows_branches_before_or_after_a_complete_allocation_sequence() {
     for allocation_after_branch in [false, true] {
         let mut fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
         let condition = fixture.ast.alloc(Tree {
@@ -6311,18 +6311,13 @@ fn rejects_any_branch_in_a_method_that_allocates_before_returning_code() {
             ty: fixture.definitions.int,
         });
         let unit = constructor_fixture_unit(&fixture, body);
-        assert!(matches!(
-            emit_class(&unit, fixture.class, &fixture.definitions),
-            Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
-                tree,
-                method,
-            }) if tree == fixture.apply && method == fixture.caller
-        ));
+        emit_class(&unit, fixture.class, &fixture.definitions)
+            .expect("a complete allocation sequence may coexist with verified branches");
     }
 }
 
 #[test]
-fn rejects_object_creation_inside_an_if_branch_before_emitting_it() {
+fn allows_same_class_allocations_in_if_branches_and_joins_exact_references() {
     let mut fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
     let condition = fixture.ast.alloc(Tree {
         kind: TreeKind::Literal(Literal {
@@ -6343,14 +6338,24 @@ fn rejects_object_creation_inside_an_if_branch_before_emitting_it() {
             target: TypeRefTarget::Symbol(fixture.class),
         }),
     });
-    let unit = constructor_fixture_unit(&fixture, conditional);
-    assert!(matches!(
-        emit_class(&unit, fixture.class, &fixture.definitions),
-        Err(JvmCodegenError::JvmObjectCreationInUnsupportedControlFlow {
-            tree,
-            method,
-        }) if tree == fixture.apply && method == fixture.caller
-    ));
+    let one = fixture.ast.alloc(Tree {
+        kind: TreeKind::Literal(Literal {
+            value: Constant::Int(1),
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let body = fixture.ast.alloc(Tree {
+        kind: TreeKind::Block(Block {
+            stats: vec![conditional],
+            expr: one,
+        }),
+        position: None,
+        ty: fixture.definitions.int,
+    });
+    let unit = constructor_fixture_unit(&fixture, body);
+    emit_class(&unit, fixture.class, &fixture.definitions)
+        .expect("both branches initialize the same exact class before their join");
 }
 
 #[test]
@@ -6649,7 +6654,7 @@ fn implicit_no_arg_resolution_rejects_unplanned_class_fields() {
 }
 
 #[test]
-fn rejects_calls_in_control_flow_branches_with_reference_frames() {
+fn emits_calls_in_control_flow_branches_with_reference_frames() {
     let mut fixture = EmissionFixture::new(false);
     let int_type = fixture.definitions.int;
     let identity =
@@ -6674,13 +6679,12 @@ fn rejects_calls_in_control_flow_branches_with_reference_frames() {
         ty: int_type,
     });
 
-    assert_eq!(
-        fixture.emit().unwrap_err(),
-        JvmCodegenError::JvmCallInUnsupportedControlFlow {
-            tree: then_call,
-            method: fixture.methods[1],
-        }
-    );
+    let generated = fixture.emit().unwrap();
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).unwrap();
+    let code = emitted_method_code(&class, "select");
+    assert!(code.contains(&0x99), "Boolean branch remains in the method");
+    assert_eq!(code.iter().filter(|opcode| **opcode == 0xb6).count(), 2);
 }
 
 #[test]
