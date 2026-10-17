@@ -91,6 +91,11 @@ are read-only; the lifetime-bound references keep the caller as the owner.
 
 ## Primitive descriptor subset
 
+Reference-valued method parameters and results remain excluded. The real
+source/typed-tree characterization, JVMS 21 descriptor and verifier contract,
+current rejection stages, and recommended follow-up sequence are recorded in
+[`jvm-reference-signatures.md`](jvm-reference-signatures.md).
+
 `JvmMethodPlan::descriptor` reads the method's completed `Type::Method` and the
 ordered parameter symbols from that plan. It supports one ordinary
 monomorphic parameter clause, `Definitions.int` (`I`), `Definitions.boolean`

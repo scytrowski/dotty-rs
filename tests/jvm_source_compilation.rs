@@ -6,7 +6,8 @@ use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader;
-use dotty_core::ast::{DefDef, Template, TreeKind, Untyped};
+use dotty_core::ast::{DefDef, Template, TreeKind, Typed, Untyped};
+use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolKind,
     TreeId, Visibility,
@@ -25,6 +26,9 @@ use dotty_parser::{ParseDiagnostic, parse_compilation_unit};
 use dotty_typer::{SourceTyper, TyperError};
 
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
+
+type SourceBatchObserver<'observer> =
+    dyn for<'a> FnMut(&JvmCompilationUnit<'a>, &Definitions) + 'observer;
 
 #[derive(Debug)]
 #[allow(dead_code)] // Retain typed stage failures so test panics report the exact pipeline error.
@@ -205,6 +209,24 @@ fn compile_source_batch(
     output_directory: &Path,
     source_id: SourceId,
     cardinality: SourceUnitCardinality,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    compile_source_batch_observed(
+        source_text,
+        source_file_name,
+        output_directory,
+        source_id,
+        cardinality,
+        None,
+    )
+}
+
+fn compile_source_batch_observed(
+    source_text: &str,
+    source_file_name: &str,
+    output_directory: &Path,
+    source_id: SourceId,
+    cardinality: SourceUnitCardinality,
+    mut observe: Option<&mut SourceBatchObserver<'_>>,
 ) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
     let source = SourceText::new(source_text)
         .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
@@ -454,12 +476,227 @@ fn compile_source_batch(
         typed_ast: typer.typed_ast(),
         classes: plans,
     };
+    if let Some(observe) = observe.as_mut() {
+        observe(&unit, &definitions);
+    }
     let mut generated = Vec::with_capacity(unit.classes.len());
     for plan in &unit.classes {
         generated
             .push(emit_class(&unit, plan.class, &definitions).map_err(PipelineFailure::Codegen)?);
     }
     publish_class_batch(output_directory, generated)
+}
+
+fn term_type_target(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> Option<SymbolId> {
+    match unit.store.types.get(ty) {
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => Some(*symbol),
+        _ => None,
+    }
+}
+
+fn audit_symbol_name(unit: &JvmCompilationUnit<'_>, symbol: SymbolId) -> String {
+    let info = unit.store.symbols.get(symbol);
+    let name = unit.store.names.resolve(info.name.text());
+    let name = if info.kind == SymbolKind::Package && name.is_empty() {
+        "<root>"
+    } else {
+        name
+    };
+    format!("{:?}:{name}", info.kind)
+}
+
+fn audit_prefix(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> String {
+    match unit.store.types.get(ty) {
+        Type::NoPrefix => "NoPrefix".to_owned(),
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } => format!("TypeRef({})", audit_symbol_name(unit, *symbol)),
+        Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } => format!("TermRef({})", audit_symbol_name(unit, *symbol)),
+        Type::ThisType { class } => format!("ThisType({})", audit_symbol_name(unit, *class)),
+        other => format!("{other:?}"),
+    }
+}
+
+fn audit_type_snapshot(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> String {
+    match unit.store.types.get(ty) {
+        Type::TypeRef { prefix, target } => {
+            let target = match target {
+                TypeRefTarget::Symbol(symbol) => audit_symbol_name(unit, *symbol),
+                TypeRefTarget::Name(name) => {
+                    unit.store.names.resolve(name.as_name().text()).to_owned()
+                }
+            };
+            format!(
+                "TypeRef(prefix={},target={target})",
+                audit_prefix(unit, *prefix)
+            )
+        }
+        Type::TermRef { prefix, target } => {
+            let target = match target {
+                TermRefTarget::Symbol(symbol) => audit_symbol_name(unit, *symbol),
+                TermRefTarget::Name(name) => {
+                    unit.store.names.resolve(name.as_name().text()).to_owned()
+                }
+            };
+            format!(
+                "TermRef(prefix={},target={target})",
+                audit_prefix(unit, *prefix)
+            )
+        }
+        Type::ThisType { class } => format!("ThisType({})", audit_symbol_name(unit, *class)),
+        other => format!("{other:?}"),
+    }
+}
+
+fn typed_source_shape(unit: &JvmCompilationUnit<'_>, tree: TreeId<Typed>) -> String {
+    let node = unit.typed_ast.get(tree);
+    let shape = match &node.kind {
+        TreeKind::Ident(ident) => {
+            let name = unit.store.names.resolve(ident.name.text());
+            let target = term_type_target(unit, node.ty)
+                .map(|symbol| audit_symbol_name(unit, symbol))
+                .unwrap_or_else(|| "?".to_owned());
+            format!("Ident({name}:{target})")
+        }
+        TreeKind::This(this) => format!(
+            "This({})",
+            this.qual.map_or_else(
+                || "_".to_owned(),
+                |name| { unit.store.names.resolve(name.text()).to_owned() }
+            )
+        ),
+        TreeKind::Select(select) => format!(
+            "Select({}, {})",
+            unit.store.names.resolve(select.name.text()),
+            typed_source_shape(unit, select.qualifier)
+        ),
+        TreeKind::Apply(application) => format!(
+            "Apply({}, [{}])",
+            typed_source_shape(unit, application.function),
+            application
+                .args
+                .iter()
+                .map(|argument| typed_source_shape(unit, *argument))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TreeKind::New(new) => format!("New({})", typed_source_shape(unit, new.tpt)),
+        TreeKind::If(conditional) => format!(
+            "If({}, {}, {})",
+            typed_source_shape(unit, conditional.cond),
+            typed_source_shape(unit, conditional.then_branch),
+            typed_source_shape(unit, conditional.else_branch)
+        ),
+        TreeKind::TypeTree(_) => "TypeTree".to_owned(),
+        TreeKind::Literal(_) => "Literal".to_owned(),
+        other => format!("{other:?}"),
+    };
+    format!("{shape}:{}", audit_type_snapshot(unit, node.ty))
+}
+
+#[test]
+fn reference_method_signature_audit_characterizes_real_typed_source() {
+    let source = "class Counter(start: Int):\n  def get(): Int = 1\n  def self(): Counter = this\n\nclass Client:\n  def pass(c: Counter): Counter = c\n  def make(n: Int): Counter = new Counter(n)\n  def read(c: Counter): Int = c.get()\n  def choose(flag: Boolean, a: Counter, b: Counter): Counter =\n    if flag then a else b\n";
+    let output = TestOutputDirectory::new("reference-signature-audit");
+    let mut observed = Vec::new();
+    let mut inspect = |unit: &JvmCompilationUnit<'_>, definitions: &Definitions| {
+        for class in &unit.classes {
+            let class_name = unit
+                .store
+                .names
+                .resolve(unit.store.symbols.get(class.class).name.text());
+            for method in &class.methods {
+                let method_name = unit
+                    .store
+                    .names
+                    .resolve(unit.store.symbols.get(method.method).name.text());
+                let signature = match unit.store.symbols.info(method.method) {
+                    dotty_core::SymbolInfo::Complete(signature) => *signature,
+                    other => panic!(
+                        "method {method_name} should have complete typed signature, got {other:?}"
+                    ),
+                };
+                let Type::Method(signature) = unit.store.types.get(signature) else {
+                    panic!("method {method_name} should have one plain typed method clause")
+                };
+                let params = signature
+                    .params
+                    .iter()
+                    .map(|parameter| {
+                        let name = unit.store.names.resolve(parameter.name.as_name().text());
+                        let target = audit_type_snapshot(unit, parameter.ty);
+                        format!("{name}:{target}")
+                    })
+                    .collect::<Vec<_>>();
+                let result = audit_type_snapshot(unit, signature.result);
+                let (descriptor_status, blocked_symbol) =
+                    match method.descriptor(unit.store, class.class, definitions) {
+                        Ok(descriptor) => (format!("accepted({})", descriptor.as_str()), None),
+                        Err(JvmCodegenError::UnsupportedJvmType { symbol, kind, .. }) => (
+                            format!("UnsupportedJvmType::{kind:?}"),
+                            Some(
+                                unit.store
+                                    .names
+                                    .resolve(unit.store.symbols.get(symbol).name.text())
+                                    .to_owned(),
+                            ),
+                        ),
+                        Err(other) => panic!(
+                            "unexpected descriptor audit result for {method_name}: {other:?}"
+                        ),
+                    };
+                let body = method
+                    .body
+                    .map(|body| typed_source_shape(unit, body))
+                    .unwrap_or_else(|| "<none>".to_owned());
+                let candidate_descriptor = match method_name {
+                    "get" => "()I",
+                    "pass" => "(LCounter;)LCounter;",
+                    "make" => "(I)LCounter;",
+                    "self" => "()LCounter;",
+                    "read" => "(LCounter;)I",
+                    "choose" => "(ZLCounter;LCounter;)LCounter;",
+                    _ => panic!("unexpected audit method {method_name}"),
+                };
+                observed.push(format!(
+                    "{class_name}.{method_name} | params=[{}] | result={result} | tree={body} | candidate={candidate_descriptor} | backend={descriptor_status}{}",
+                    params.join(", "),
+                    blocked_symbol.map_or_else(String::new, |symbol| format!("({symbol})")),
+                ));
+            }
+        }
+    };
+    let result = compile_source_batch_observed(
+        source,
+        "ReferenceSignatures.scala",
+        output.path(),
+        SourceId::from_index(1269),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut inspect),
+    );
+    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
+    assert!(
+        output.class_files().is_empty(),
+        "characterization failures publish no class files"
+    );
+    assert_eq!(
+        observed,
+        [
+            "Counter.get | params=[] | result=TypeRef(prefix=NoPrefix,target=Class:Int) | tree=Literal:Constant(Int(1)) | candidate=()I | backend=accepted(()I)",
+            "Counter.self | params=[] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=This(_):ThisType(Class:Counter) | candidate=()LCounter; | backend=UnsupportedJvmType::ReferenceClass(self)",
+            "Client.pass | params=[c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c) | candidate=(LCounter;)LCounter; | backend=UnsupportedJvmType::ReferenceClass(c)",
+            "Client.make | params=[n:TypeRef(prefix=NoPrefix,target=Class:Int)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Apply(Select(<init>, New(TypeTree:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TermRef(prefix=TypeRef(Class:Counter),target=Constructor:<init>), [Ident(n:Parameter:n):TermRef(prefix=NoPrefix,target=Parameter:n)]):TypeRef(prefix=NoPrefix,target=Class:Counter) | candidate=(I)LCounter; | backend=UnsupportedJvmType::ReferenceClass(make)",
+            "Client.read | params=[c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=NoPrefix,target=Class:Int) | tree=Apply(Select(get, Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c)):TermRef(prefix=TermRef(Parameter:c),target=Method:get), []):TypeRef(prefix=NoPrefix,target=Class:Int) | candidate=(LCounter;)I | backend=UnsupportedJvmType::ReferenceClass(c)",
+            "Client.choose | params=[flag:TypeRef(prefix=NoPrefix,target=Class:Boolean), a:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter), b:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=If(Ident(flag:Parameter:flag):TermRef(prefix=NoPrefix,target=Parameter:flag), Ident(a:Parameter:a):TermRef(prefix=NoPrefix,target=Parameter:a), Ident(b:Parameter:b):TermRef(prefix=NoPrefix,target=Parameter:b)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | candidate=(ZLCounter;LCounter;)LCounter; | backend=UnsupportedJvmType::ReferenceClass(a)",
+        ]
+    );
 }
 
 fn publish_class_batch(
@@ -3982,6 +4219,22 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(seed: Int)\nclass CounterClient:\n  def use(counter: Counter): Int = 1\n",
         ),
         (
+            "null-literal",
+            "class CounterClient:\n  def use(): Int = null\n",
+        ),
+        (
+            "array-method-parameter",
+            "class CounterClient:\n  def use(values: Array[Int]): Int = 1\n",
+        ),
+        (
+            "different-reference-join",
+            "class Counter(start: Int)\nclass Other(start: Int)\nclass CounterClient:\n  def choose(flag: Boolean): Int =\n    val selected = if flag then new Counter(1) else new Other(2)\n    1\n",
+        ),
+        (
+            "reference-constructor-argument",
+            "class Counter(start: Int)\nclass Box(counter: Counter)\nclass CounterClient:\n  def use(): Int = 1\n",
+        ),
+        (
             "reference-var-reassignment",
             "class Counter(seed: Int)\nclass CounterClient:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    counter = new Counter(seed + 1)\n    counter.get()\n",
         ),
@@ -4026,6 +4279,28 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                 })
             ),
             "reference-method-parameter" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType {
+                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                    ..
+                })
+            ),
+            "null-literal" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::NullLiteralTypingDeferred { .. })
+            ),
+            "array-method-parameter" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::TypeNameNotFound { .. })
+            ),
+            "different-reference-join" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmReferenceType {
+                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
+                    ..
+                })
+            ),
+            "reference-constructor-argument" => matches!(
                 &error,
                 PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType {
                     kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
