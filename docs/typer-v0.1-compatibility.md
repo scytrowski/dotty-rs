@@ -1712,3 +1712,27 @@ See the [#1073 corrected audit checkpoint](typer-classpath-corpus-audit-3.9.0.md
 and [append-only classpath comparison](typer-deferred-classpath-hardening-3.9.0.md#1073-post-parity-comparison-and-sprint-recommendation)
 for the independent metric definitions, limits, and single recommended next
 sprint. The two normalized pinned reports compared byte-for-byte.
+
+
+### #1180 lexical import resolution checkpoint
+
+Pinned Scala 3.9.0 regressions cover package candidate identity and precedence,
+stacked versus single-dotted package clauses, `_root_` lookup, final imported
+member selection and rollback/retry. In the real `Resident.scala` fixture, the
+relative qualifier `core` selects package `dotty.tools.dotc.core`; the final
+`Contexts` selection is the canonical TASTy Object at
+`dotty.tools.dotc.core.Contexts`. The method still has a later
+`TypeNameNotFound` blocker, so this does not count as a fully typed method.
+The full weighted reconciliation and deterministic profile are recorded in
+the [#1180 checkpoint](typer-classpath-import-prefix-profile-1180-3.9.0.md).
+
+The later audit-cost follow-up bypasses discarded resolver-observation
+collection for ordinary match-case probes and uses rollback-aware reverse
+indexes for classpath module identities. A targeted `tpd.scala` method profile
+improved from 6,214 ms to 3,546 ms (512 member requests: 4,939 ms to 2,797 ms
+inside lookup). The full-corpus rerun stopped at 250 / 1,236 files after about
+20 minutes at that checkpoint. A subsequent pair of full pinned runs completed
+all 1,236 files with identical normalized reports; typed methods remain
+0 / 3,297, and deferred-loading limits passed at p95 depth 0 / 70 and completed
+class fanout 9 / 524. See the completion report in
+[`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
