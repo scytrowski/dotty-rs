@@ -74,10 +74,10 @@ from the allocated slot. Local loads require the current method's validated
 layout, a completed supported semantic type, and a preceding store on every
 reachable path. Name-only references, foreign or unplanned locals, and reads before
 initialization return typed errors. Reference slots are supported only for
-initialized immutable locals of an exact planned class in straight-line method
-bodies; mutable reference locals and reference operations that require CFG
-frame merges remain typed errors. The classfile verifier and mandatory JDK
-gate check the emitted initialized-reference sequence.
+initialized immutable locals of an exact planned class. Their states may cross
+CFG edges when every read is definitely initialized and each stack join has
+the exact same class. Mutable reference locals and hierarchy merges remain
+typed errors. The classfile verifier and mandatory JDK gate check these paths.
 
 The initial plan subset accepts `SymbolKind::Class`, `SymbolKind::Method`, and
 `SymbolKind::Parameter`; other kinds return a structured unsupported-kind
@@ -135,15 +135,27 @@ identity must match the initializer's `Flow::Value`; read-before-store and
 mutable reference locals fail with typed errors. Reference values may be
 discarded as category-one block statements with `pop`, but cannot become
 method/constructor parameters or results, or field descriptors. Constructor
-reference arguments remain rejected. Methods that use reference local
-instructions and contain symbolic branches are rejected until CFG analysis
-tracks reference states.
+reference arguments remain rejected. Exact initialized references may stay
+live through `if` joins and `while` headers/back-edges. A reference stack join
+must have the same planned class on every incoming edge; different classes do
+not merge to `Object`. A local that is not initialized on every path becomes
+unusable, and a later read fails.
 
-The checked projection carries the class `SymbolId` through every local
-`Flow::Value` check. It does not track uninitialized objects: allocation is
-emitted only as `new`/`dup`/primitive arguments/`invokespecial`, and a local
-store can happen only after that call completes. The JDK verifier gate checks
-the emitted straight-line sequence.
+Allocation may occur in a branch or loop body only as one complete
+`new`/`dup`/branch-free primitive-argument/`invokespecial` sequence inside a
+basic block. The uninitialized object cannot cross a branch edge, enter a
+local, or escape to another operation. A completed allocation becomes the
+exact planned class identity. The classfile CFG analyzer and frame generator
+validate generated methods before class bytes are returned; malformed or
+unsupported states remain typed build errors.
+
+| Source shape | Planned JVM lowering | CFG/verifier rule |
+| --- | --- | --- |
+| Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
+| Private `Int`/`Boolean` field on current `this` | `aload(0)` with `getfield`/`putfield` | Exact current class and primitive descriptor; receiver/temp locals must merge safely |
+| Primitive-result call on `this`, `new C`, or immutable local `C` | Canonical `invokevirtual` target | Receiver class must equal planned owner; reference parameters/results stay unsupported |
+| Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
+| Different reference classes at a stack join | No classfile emitted | Typed exact-class merge error; no inferred `Object`/common parent |
 
 Object-construction typing, canonical constructor and receiver identity,
 uninitialized-reference verifier constraints, and the multi-class planning
@@ -168,9 +180,11 @@ once, then each argument once in source order, checks their stack flows against
 the selected descriptor, and emits one symbolic `invokevirtual` with the exact
 owner, name, and descriptor. The result leaves its primitive value on the
 stack or no value for `Unit`. The source typer accepts direct-new selection
-for ordinary method application. Reference receivers and object creation stay
-outside methods with symbolic branches until reference-aware frame analysis
-exists.
+for ordinary method application. Calls on exact planned reference receivers
+and completed allocations are also supported in `if`, `while`, and short-
+circuit branches. The target still comes from the canonical planned method
+symbol; external, inherited, interface, private cross-class, and other
+unplanned receivers remain rejected.
 
 ### Real-source object interaction gate
 
@@ -191,9 +205,9 @@ The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
 `DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the source integration test on JDK 21.
 Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
 reference method parameters/results, arbitrary classpath classes,
-reference-bearing branches/loops, mutable reference locals, and general
-reference-aware CFG frame merging unsupported. Reference-aware CFG lowering
-is the next required JVM backend increment.
+mutable reference locals, class-hierarchy joins, arrays, null, and branching
+constructor bodies unsupported. Reference operations remain restricted to
+exact classes and the verified primitive-result call subset.
 
 ## Canonical `Int` arithmetic
 
@@ -221,9 +235,9 @@ includes initialized integer locals updated by arithmetic assignments across
 multiple loop iterations, comparison conditions, nested Boolean branches, and
 `if` branches that return arithmetic values. Loop locals must be initialized
 before the loop; a local initialized only in the body is not assumed to exist
-on the zero-iteration exit. Calls with reference receivers remain unsupported
-in control-flow graphs because the current analyzer still models only
-integer-like stack states there. Universal equality operators `Any.==` and
+on the zero-iteration exit. Planned calls with exact reference receivers are
+supported when the CFG analyzer proves their initialized class states.
+Universal equality operators `Any.==` and
 `Any.!=` remain unsupported. JVM overflow, signed division/remainder, and division-by-zero
 behavior are preserved by emitting the corresponding JVM instruction without
 constant folding or prechecks.
@@ -234,7 +248,7 @@ checks arithmetic overflow, signed comparison boundaries, divide-by-zero
 exceptions, and repeated `sumTo` loop execution with `java -Xverify:all`.
 General Scala library lowering, Long/Float/Double, Java classpath loading,
 TASTy emission, the full Scala ABI, universal equality, and arbitrary
-reference-bearing calls inside branched CFGs remain outside this subset.
+reference-bearing calls remain outside this subset.
 
 ## Canonical Boolean intrinsic resolution
 
@@ -381,19 +395,21 @@ Unit method receives one trailing `return`; explicit returns remain terminal.
 The block's declared type is checked against its final expression flow.
 Planned method lowering supports initialized primitive `ValDef` statements,
 immutable reference `ValDef` statements initialized by validated object
-creation, assignments to initialized mutable primitive locals, and typed `While` loops
-with Boolean conditions. A loop evaluates its condition at the symbolic header
+creation, assignments to initialized mutable primitive locals, and typed
+`While` loops with Boolean conditions. A loop evaluates its condition at the symbolic header
 on every iteration, branches to its exit when false, and emits a back-edge only
 when the body can fall through. Unit bodies leave the stack empty; Int/Boolean
 body values are discarded once. The condition and body share the existing
-depth/node budgets and control-flow call restriction. Since a loop may execute
+depth/node budgets. Since a loop may execute
 zero times, initialization performed only in its body is not considered
 definite after the loop; the class-file CFG analyzer verifies header/back-edge
-local states and generates stack-map frames. Nested loops and integer-only
-`If`/`Block`/`Assign` bodies are supported when their verifier states merge.
-Same-class calls in loop control flow, reference-bearing states, `PatDef`, and
-general comparison/arithmetic remain unsupported. Standalone expression
-lowering and other unsupported stats return structured errors.
+local states and generates stack-map frames. Nested loops and `If`/`Block`/
+`Assign` bodies are supported when their verifier states merge. Exact planned
+reference locals, current-instance private primitive fields, planned calls on
+reference receivers, and complete branch-local allocations use the same CFG
+validation. `PatDef` and other unsupported stats return structured errors.
+Standalone expression lowering remains limited by its lack of a validated
+class plan and local layout.
 
 `JvmCompilationUnit::lower_method_body(class, method, definitions)` also lowers
 reads of fields in that class's validated field plan. A canonical unqualified
@@ -404,9 +420,9 @@ int-like `Int` or Boolean flow. Resolution uses the `TermRefTarget::Symbol`
 identity, the field owner, and its planned metadata; same-spelling parameters
 and locals keep their existing loads. Other receivers, fields absent from the
 plan, stale targets, and prefixes that do not identify the current instance
-return contextual errors. Field reads within `If`, `While`, or other branching
-CFG regions are rejected explicitly until the stack-map analyzer can track the
-temporary reference operand. Straight-line `Block` results may carry the type
+return contextual errors. Field reads and writes may occur in `If` and `While`;
+the current-instance receiver and temporary primitive locals are checked at
+branch targets and loop edges. Straight-line `Block` results may carry the type
 of a planned field into this same validated read path. Whole-class emission
 uses this lowering path for planned methods and emits no artifact if any
 method fails.
@@ -481,8 +497,7 @@ Java harnesses check all local-state results under `java -Xverify:all`.
 `Counter`, `Other`, and `Client` cover direct-new and immutable-local receivers,
 same-named methods owned by different classes, ordered primitive arguments,
 Boolean and Unit results, and private calls from the owning class. Negative
-source cases reject cross-class private access and reference calls inside
-symbolic branches without publishing class files.
+source cases reject cross-class private access without publishing class files.
 `BooleanControlFlow` exercises canonical short-circuit intrinsics through the
 source frontend in `if` and `while` conditions, nested eager/short-circuit
 expressions, Boolean local initialization and assignment, and side-effecting
@@ -498,6 +513,14 @@ and `StackMapTable`. The Java harness checks short-circuit versus eager
 divide-by-zero behavior, Boolean `==`/`!=` truth tables, and side-effect counts
 for short-circuit and strict operators.
 
+`planned_reference_operations_verify_across_if_while_and_short_circuit_cfgs`
+is the focused reference-CFG integration gate. It covers private Int/Boolean
+field reads and writes in branches and loops, immutable reference locals across
+loop edges, exact planned virtual calls in conditions and bodies, short-circuit
+calls, same-class reference joins, and complete allocations in conditional
+arms. It checks generated `StackMapTable` attributes and exercises zero-, one-,
+and multi-iteration results with JDK `-Xverify:all`.
+
 `Counter.scala` runs through the same real frontend assembly with a canonical
 constructor parameter, private mutable `current:I`, and public `get`, `set`,
 and `increment` methods. `PrivateFields.scala` covers private final `I` and
@@ -507,8 +530,7 @@ must match. Their decoded constructor descriptors, field flags and references,
 and method instructions are checked structurally; the JDK gate uses
 `javap -c -v` and Java harnesses under `-Xverify:all`. Negative real-source
 cases cover wrong initializer types, immutable assignment, unsupported
-constructor forms, and field reads inside branches; failed compilation must
-leave no class artifact. See
+constructor forms, and failed compilation without partial class artifacts. See
 [`jvm-stateful-class-contract.md`](jvm-stateful-class-contract.md).
 
 These fixtures test the bounded emitted class shape. They do not establish
@@ -516,8 +538,7 @@ Scala public accessor, bridge, or TASTy compatibility.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
 Negative source tests verify that field initialization, mutable reference
-locals, reference locals in branch-bearing methods, invalid while
-conditions, virtual calls inside branch control flow, private
+locals, invalid while conditions, reference method parameters/results, private
 construction, immutable-local assignment, missing local references, mismatched
 local initializers and assignments, Unit locals, deferred reference locals,
 pattern locals, and parser diagnostics fail at their actual pipeline stage
@@ -532,8 +553,9 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation --locked
 ```
 
 Without the JDK it still runs structural and negative checks and explicitly
-skips Java verification. Primitive arithmetic, relational operators, and
-general reference-bearing control-flow states remain deferred.
+skips Java verification. Reference method parameters/results, class-hierarchy
+joins, arrays, null, mutable reference locals, and branched constructors remain
+deferred.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
@@ -578,11 +600,11 @@ method-local `CodeBuilder`, so an error discards partial instructions. The
 classfile builder then validates reachable blocks, analyzes stack states,
 assembles labels, and writes `StackMapTable` frames.
 
-Calls inside an `If` expression are rejected with a typed error because the
-current classfile stack-map analyzer cannot represent their temporary
-reference receiver in that control-flow graph. Calls at ordinary expression
-roots, as arguments to other calls, and under supported local returns remain
-within the current subset when their stack flow is primitive or Unit.
+Calls inside `If`, `While`, and short-circuit expressions are allowed when
+their targets and receiver classes come from the validated plan and the
+classfile CFG accepts the resulting exact stack/local states. Calls at ordinary
+expression roots, as arguments to other calls, and under supported local
+returns follow the same receiver and result restrictions.
 
 `Return.from = Some(...)` is rejected. Non-intrinsic `Select`, `TypeApply`,
 `Match`, `Try`, `New`, closures, nested `DefDef`s, String/Long and other
