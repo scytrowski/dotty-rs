@@ -47,15 +47,38 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/debug
-            ~/.cache/coursier
+            .cache/coursier
           key: ${{ runner.os }}-typer-1180-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-typer-1180-
+
+      - name: Download pinned Scala 3.9.0 artifacts
+        env:
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/.cache/coursier/v1/https/repo1.maven.org/maven2
+        run: |
+          set -euo pipefail
+          while IFS= read -r artifact; do
+            destination="$COURSIER_MAVEN_ROOT/$artifact"
+            mkdir -p "$(dirname "$destination")"
+            curl --fail --location --silent --show-error \
+              "https://repo1.maven.org/maven2/$artifact" \
+              --output "$destination"
+          done <<'ARTIFACTS'
+          org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar
+          org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar
+          org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar
+          org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar
+          org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar
+          org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar
+          org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar
+          org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar
+          ARTIFACTS
 
       - name: Run pinned corpus audit twice
         env:
           SCALA39_ROOT: ${{ github.workspace }}/.worktrees/scala39-source
           SCALA39_JDK_RELEASE: "21"
+          COURSIER_MAVEN_ROOT: ${{ github.workspace }}/.cache/coursier/v1/https/repo1.maven.org/maven2
           DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}/typer-1180-audit-intermediates
         run: |
           tools/typer-classpath-corpus-audit/run --verify-determinism \
