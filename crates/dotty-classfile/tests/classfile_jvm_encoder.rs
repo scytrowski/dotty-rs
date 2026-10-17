@@ -510,6 +510,8 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
         .add_static_method("loopBox", "(ZLBox;)LBox;", |code| {
             let head = code.new_label()?;
             let done = code.new_label()?;
+            code.iconst(0)?;
+            code.istore(2)?;
             code.mark(head.clone())?;
             code.iload(0)?;
             code.ifeq(done.clone())?;
