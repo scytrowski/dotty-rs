@@ -6423,9 +6423,9 @@ fn pinned_scala39_local_definition_audit() {
     );
     assert!(audit.local_value_baseline_outcomes.iter().all(|outcome| {
         outcome.observation.declaration_kind != "lazy val"
-            || (outcome.current_first_blocker == "ImportQualifierNotFound"
+            || (outcome.current_first_blocker == "SymbolResolution"
                 && !outcome.declaration_typed)
-    }));
+    }), "#1180 advances all three frozen lazy vals past import lookup to SymbolResolution");
     let remaining_generic_local_value_rows = audit
         .local_value_baseline_outcomes
         .iter()
