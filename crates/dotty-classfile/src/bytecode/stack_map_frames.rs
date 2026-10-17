@@ -12,18 +12,21 @@ use super::assembler::AssembledCode;
 use super::stack_map::{FullFrame, StackMapTable, VerificationTypeInfo};
 use super::{
     BasicBlockId, BlockEntryState, CodeAnalysis, CodeElement, ControlFlowGraph, FlowAnalysis,
-    FlowLocalState, ValueKind,
+    FlowLocalState, FlowValue, ValueKind,
 };
 use crate::constant_pool::{ConstantPool, ConstantPoolIndex};
 use crate::encode_error::EncodeError;
 use std::collections::BTreeMap;
 use std::fmt;
 
-/// A verifier value that the integer-only flow model cannot safely encode.
+/// A verifier value that the current frame-generation path cannot encode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedStackMapState {
     /// The flow analyzer uses `Top` as a placeholder for an instance receiver.
     InstanceReceiver,
+    /// The flow analyzer retained an exact reference class, but this API does
+    /// not yet emit reference verification types.
+    ExactReference,
     /// The operand stack contains a value other than an integer.
     OperandStackValue(ValueKind),
 }
@@ -461,6 +464,10 @@ fn frame_from_state(
                     state: UnsupportedStackMapState::InstanceReceiver,
                 }),
             },
+            FlowLocalState::Object(_) => Err(StackMapFrameGenerationError::UnsupportedFlow {
+                block,
+                state: UnsupportedStackMapState::ExactReference,
+            }),
         })
         .collect::<Result<_, _>>()?;
     while locals.last() == Some(&VerificationTypeInfo::Top) {
@@ -471,10 +478,10 @@ fn frame_from_state(
         .operand_stack
         .iter()
         .map(|value| match value {
-            ValueKind::Int => Ok(VerificationTypeInfo::Integer),
-            unsupported => Err(StackMapFrameGenerationError::UnsupportedFlow {
+            FlowValue::Integer => Ok(VerificationTypeInfo::Integer),
+            FlowValue::Object(_) => Err(StackMapFrameGenerationError::UnsupportedFlow {
                 block,
-                state: UnsupportedStackMapState::OperandStackValue(*unsupported),
+                state: UnsupportedStackMapState::OperandStackValue(ValueKind::Reference),
             }),
         })
         .collect::<Result<Vec<_>, _>>()?;

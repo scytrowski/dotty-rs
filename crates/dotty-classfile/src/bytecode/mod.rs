@@ -4,8 +4,8 @@
 //! [`assembler::assemble`] encodes straight-line instructions, while
 //! [`assembler::assemble_labeled`] lays out and encodes symbolic branches.
 //! [`analysis::analyze`] computes straight-line `max_stack`/`max_locals`
-//! bounds; [`analysis::CfgCodeAnalyzer`] computes integer-only stack and local
-//! states over a [`control_flow::ControlFlowGraph`]. These APIs do not decode
+//! bounds; [`analysis::CfgCodeAnalyzer`] computes integer and exact initialized
+//! receiver-reference states over a [`control_flow::ControlFlowGraph`]. These APIs do not decode
 //! bytecode or perform general JVM verification or optimization. The linear
 //! assembler and analyzer continue to represent one ordered straight-line
 //! block. [`code_sequence`] models labels and a small branch family and
@@ -87,8 +87,9 @@ pub mod stack_map_frames;
 
 pub(crate) use analysis::analyze_validated;
 pub use analysis::{
-    AnalysisError, BlockEntryState, CfgCodeAnalyzer, CodeAnalysis, FlowAnalysis, FlowLocalState,
-    LinearCodeAnalyzer, UnsupportedFlowInstructionKind, ValueKind, analyze,
+    AnalysisError, BlockEntryState, CfgCodeAnalyzer, ClassIdentity, CodeAnalysis, FlowAnalysis,
+    FlowLocalState, FlowValue, LinearCodeAnalyzer, UnsupportedFlowInstructionKind, ValueKind,
+    analyze,
 };
 pub(crate) use assembler::assemble_validated;
 pub use assembler::{
