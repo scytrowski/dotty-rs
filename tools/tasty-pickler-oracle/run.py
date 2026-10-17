@@ -236,10 +236,21 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Parameters.pick() = 42", 42,
             ),
+            "example/References.tasty": (
+                "example.References", r"public int first\(\)", "ReferencesRuntime.java",
+                """public final class ReferencesRuntime {
+  public static void main(String[] args) {
+    int actual = new example.References().first();
+    if (actual != 42) throw new AssertionError("References.first() = " + actual);
+    System.out.println("References.first() = " + actual);
+  }
+}
+""", "References.first() = 42", 42,
+            ),
         }
         case = runtime_cases.get(relative.as_posix())
         if case is None:
-            raise RuntimeError("--runtime requires example/Answer or example/Parameters")
+            raise RuntimeError("--runtime requires example/Answer, example/Parameters, or example/References")
         class_name, method_pattern, harness_name, harness_source, expected_output, expected_value = case
         javap = execute([toolchain.javap, "-classpath", compiled, class_name])
         if not re.search(method_pattern, javap):

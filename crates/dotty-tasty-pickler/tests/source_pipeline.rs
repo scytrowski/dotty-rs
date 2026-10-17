@@ -13,6 +13,10 @@ const MULTI: &str = include_str!("../../../tests/fixtures/tasty_pickler/Multi.sc
 const PARAMETERS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Parameters.scala");
 const PARAMETER_DECL: &str =
     include_str!("../../../tests/fixtures/tasty_pickler/ParameterDecl.scala");
+const REFERENCES: &str = include_str!("../../../tests/fixtures/tasty_pickler/References.scala");
+const EXPLICIT_THIS_REFERENCES: &str =
+    "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
+const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 fn source_outputs(
     text: &str,
@@ -178,6 +182,7 @@ fn source_outputs_named(
             TreeKind::Literal(Literal {
                 value: Constant::Int(_)
             }) | TreeKind::Ident(_)
+                | TreeKind::Select(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
@@ -185,7 +190,7 @@ fn source_outputs_named(
         TreeKind::Literal(Literal {
             value: Constant::Int(value),
         }) => Some(*value),
-        TreeKind::Ident(_) => None,
+        TreeKind::Ident(_) | TreeKind::Select(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle()?;
@@ -212,6 +217,9 @@ fn source_outputs_named(
                 rhs.value,
                 dotty_tasty::tasty::TermValue::AstRef(_)
             ));
+        }
+        (None, Some(dotty_tasty::tasty::RawTree::NatAst { tag, .. })) => {
+            assert_eq!(tag, dotty_tasty::tasty::SELECT_TAG);
         }
         (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
     }
@@ -256,6 +264,97 @@ fn source_plan(
 fn actual_answer_source_hands_off_exact_canonical_symbols_and_typed_rhs() {
     let skeleton = source_plan(ANSWER, |_| {}).unwrap();
     assert_eq!(skeleton.intended_tasty_path(), "example/Answer.tasty");
+}
+
+#[test]
+fn same_class_forward_method_reference_is_a_named_select_and_deterministic() {
+    use dotty_tasty::tasty::*;
+
+    let (_, first) = source_outputs_named(REFERENCES, "References.scala", |_| {}).unwrap();
+    let (_, second) = source_outputs_named(REFERENCES, "References.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    let class = first.declarations()[0].symbol;
+    let first_method = first.declarations()[2];
+    let second_method = first.declarations()[3];
+    assert_eq!(first_method.owner, class);
+    assert_eq!(second_method.owner, class);
+
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let first_body = addresses
+        .get(first_method.address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let select = first_body.rhs.unwrap().decode_select().unwrap();
+    assert_eq!(select.tag, SELECT_TAG);
+    let receiver = select.qualifier.decode_qual_this().unwrap();
+    let class_syntax = receiver.child.decode_ident().unwrap();
+    let class_ref = class_syntax.type_tree.decode_reference().unwrap();
+    assert_eq!(class_ref.tag, TYPEREFSYMBOL_TAG);
+    assert_eq!(class_ref.reference, first.declarations()[0].address);
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1242/generated/example/References.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, first.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1242/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
+        assert!(
+            result.success(),
+            "requested References Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
+fn explicit_this_method_reference_preserves_the_verified_this_wire_shape() {
+    use dotty_tasty::tasty::*;
+
+    let (_, first) =
+        source_outputs_named(EXPLICIT_THIS_REFERENCES, "References.scala", |_| {}).unwrap();
+    let (_, second) =
+        source_outputs_named(EXPLICIT_THIS_REFERENCES, "References.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let first_body = addresses
+        .get(first.declarations()[2].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let select = first_body.rhs.unwrap().decode_select().unwrap();
+    let receiver = select.qualifier.decode_this().unwrap();
+    let class_ref = receiver.child.decode_reference().unwrap();
+    assert_eq!(class_ref.tag, TYPEREFSYMBOL_TAG);
+    assert_eq!(class_ref.reference, first.declarations()[0].address);
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate =
+            root.join("target/issue-1242/generated-explicit-this/example/References.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, first.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1242/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
+        assert!(
+            result.success(),
+            "explicit-this Scala interoperability gate failed"
+        );
+    }
 }
 
 #[test]

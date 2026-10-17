@@ -20,7 +20,7 @@ pub(crate) fn lower_expression(
     if let TreeKind::Ident(_) = &tree.kind {
         let Type::TermRef {
             prefix,
-            target: TermRefTarget::Symbol(parameter),
+            target: TermRefTarget::Symbol(target),
         } = store.types.try_get(tree.ty).ok_or(PickleError::BodyType {
             tree: root,
             ty: tree.ty,
@@ -31,19 +31,79 @@ pub(crate) fn lower_expression(
                 ty: tree.ty,
             });
         };
-        if !parameters.contains(parameter) {
+        if parameters.contains(target) {
+            if !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) {
+                return Err(PickleError::Reference {
+                    symbol: *target,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+            return context.local_reference(*target, None);
+        }
+        let class = store
+            .symbols
+            .contains(method)
+            .then(|| store.symbols.get(method).owner)
+            .flatten()
+            .ok_or(PickleError::InvalidSymbol { symbol: method })?;
+        if store.symbols.contains(*target)
+            && store.symbols.get(*target).kind == dotty_core::SymbolKind::Method
+            && store.symbols.get(*target).owner == Some(class)
+            && matches!(store.types.try_get(*prefix), Some(Type::ThisType { class: prefix_class }) if *prefix_class == class)
+        {
+            return context.same_class_method_select(class, *target);
+        }
+        if !parameters.contains(target) {
             return Err(PickleError::Reference {
-                symbol: *parameter,
+                symbol: *target,
                 reason: crate::ReferenceError::NotRegistered,
             });
         }
-        if !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) {
+        return context.local_reference(*target, None);
+    }
+    if let TreeKind::Select(selection) = &tree.kind {
+        let qualifier = ast
+            .try_get(selection.qualifier)
+            .ok_or(PickleError::InvalidTypedTree {
+                tree: selection.qualifier,
+            })?;
+        if !matches!(qualifier.kind, TreeKind::This(this) if this.qual.is_none()) {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            });
+        }
+        let Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(target),
+        } = store.types.try_get(tree.ty).ok_or(PickleError::BodyType {
+            tree: root,
+            ty: tree.ty,
+        })?
+        else {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: tree.ty,
+            });
+        };
+        let class = store
+            .symbols
+            .contains(method)
+            .then(|| store.symbols.get(method).owner)
+            .flatten()
+            .ok_or(PickleError::InvalidSymbol { symbol: method })?;
+        if !store.symbols.contains(*target)
+            || store.symbols.get(*target).kind != dotty_core::SymbolKind::Method
+            || store.symbols.get(*target).owner != Some(class)
+            || !matches!(store.types.try_get(*prefix), Some(Type::ThisType { class: prefix_class }) if *prefix_class == class)
+            || !matches!(store.types.try_get(qualifier.ty), Some(Type::ThisType { class: qualifier_class }) if *qualifier_class == class)
+        {
             return Err(PickleError::Reference {
-                symbol: *parameter,
+                symbol: *target,
                 reason: crate::ReferenceError::Owner,
             });
         }
-        return context.local_reference(*parameter, None);
+        return context.same_class_method_select_on_this(class, *target);
     }
     let TreeKind::Literal(literal) = &tree.kind else {
         return Err(PickleError::Unsupported {
