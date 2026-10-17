@@ -460,6 +460,91 @@ fn class_builder_accepts_prebuilt_symbolic_branch_code() {
 }
 
 #[test]
+fn stack_map_frames_preserve_exact_objects_in_locals_and_operand_stack() {
+    let mut builder = ClassFileBuilder::new(
+        "example/ReferenceFrames",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("branch", "(I)V", |code| {
+            let target = code.new_label()?;
+            code.new_object("example/Alpha")?;
+            code.dup()?;
+            code.invokespecial("example/Alpha", "<init>", "()V")?;
+            code.astore(1)?;
+            code.new_object("example/Beta")?;
+            code.dup()?;
+            code.invokespecial("example/Beta", "<init>", "()V")?;
+            code.astore(3)?;
+            code.aload(1)?;
+            code.iload(0)?;
+            code.ifeq(target.clone())?;
+            code.pop()?;
+            code.return_void()?;
+            code.mark(target)?;
+            code.pop()?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let method = method_named(&class_file, "branch");
+    let code = code_attribute(method);
+    assert_eq!((code.max_stack, code.max_locals), (2, 4));
+    let [Attribute::Other(stack_map)] = code.attributes.as_slice() else {
+        panic!("expected one StackMapTable, got {:?}", code.attributes);
+    };
+    let bytes = stack_map.bytes;
+    let mut cursor = 0;
+    assert_eq!(u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]), 1);
+    cursor += 2;
+    assert_eq!(bytes[cursor], 255);
+    cursor += 1;
+    cursor += 2; // offset_delta
+    assert_eq!(u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]), 4);
+    cursor += 2;
+    assert_eq!(bytes[cursor], 1); // Integer parameter
+    cursor += 1;
+    let alpha_index = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+        bytes[cursor + 1],
+        bytes[cursor + 2],
+    ]));
+    assert_eq!(bytes[cursor], 7);
+    cursor += 3;
+    assert_eq!(bytes[cursor], 0); // interior Top hole
+    cursor += 1;
+    let beta_index = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+        bytes[cursor + 1],
+        bytes[cursor + 2],
+    ]));
+    assert_eq!(bytes[cursor], 7);
+    cursor += 3;
+    assert_eq!(u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]), 1);
+    cursor += 2;
+    assert_eq!(bytes[cursor], 7); // exact object live on operand stack
+    let stack_alpha_index =
+        dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            bytes[cursor + 1],
+            bytes[cursor + 2],
+        ]));
+    assert_eq!(alpha_index, stack_alpha_index);
+    assert_eq!(
+        class_file.constant_pool.class_name(alpha_index),
+        Ok("example/Alpha")
+    );
+    assert_eq!(
+        class_file.constant_pool.class_name(beta_index),
+        Ok("example/Beta")
+    );
+}
+
+#[test]
 fn rejects_unreachable_blocks_before_automatic_stack_map_emission() {
     let mut builder = ClassFileBuilder::new(
         "example/UnreachableIntegerBlock",
@@ -814,6 +899,40 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
             dotty_classfile::bytecode::AnalysisError::WrongReturnOpcode {
                 expected: None,
                 actual: Some(dotty_classfile::bytecode::ValueKind::Int),
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
+fn rejects_branched_reference_return_until_result_type_is_checked() {
+    let mut builder = ClassFileBuilder::new(
+        "example/InvalidReferenceReturn",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("invalid", "()Ljava/lang/String;", |code| {
+            let target = code.new_label()?;
+            code.new_object("java/lang/Object")?;
+            code.dup()?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.goto(target.clone())?;
+            code.mark(target)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
+                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::Reference,
                 ..
             }
         ))

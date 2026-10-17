@@ -4,19 +4,19 @@
 //! [`generate_stack_map_frames`] only emits explicit frames for reachable
 //! branch targets. It keeps the initial frame at PC 0 implicit, deduplicates
 //! aliases to the same target, trims only trailing `Top` locals, and preserves
-//! the `CodeAnalysis` maxima for later Code-attribute integration. It does not
-//! infer object or category-two states, create a class-file attribute, or
-//! change the linear analyzer.
+//! the `CodeAnalysis` maxima for later Code-attribute integration. It encodes
+//! exact initialized object identities only when their class entries are
+//! supplied.
 
 use super::assembler::AssembledCode;
 use super::stack_map::{FullFrame, StackMapTable, VerificationTypeInfo};
 use super::{
-    BasicBlockId, BlockEntryState, CodeAnalysis, CodeElement, ControlFlowGraph, FlowAnalysis,
-    FlowLocalState, FlowValue, ValueKind,
+    BasicBlockId, BlockEntryState, ClassIdentity, CodeAnalysis, CodeElement, ControlFlowGraph,
+    FlowAnalysis, FlowLocalState, FlowValue, ValueKind,
 };
 use crate::constant_pool::{ConstantPool, ConstantPoolIndex};
 use crate::encode_error::EncodeError;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// A verifier value that the current frame-generation path cannot encode.
@@ -27,6 +27,8 @@ pub enum UnsupportedStackMapState {
     /// The flow analyzer retained an exact reference class, but this API does
     /// not yet emit reference verification types.
     ExactReference,
+    /// An uninitialized allocation reached a branch target.
+    UninitializedReference,
     /// The operand stack contains a value other than an integer.
     OperandStackValue(ValueKind),
 }
@@ -128,6 +130,22 @@ pub enum StackMapFrameGenerationError {
     },
     /// The generated frames failed the typed StackMapTable structural checks.
     InvalidStackMap(EncodeError),
+    /// An exact flow class has no entry in the precomputed frame-class map.
+    MissingClassEntry {
+        /// The target block requiring the entry.
+        block: BasicBlockId,
+        /// The exact class identity from CFG analysis.
+        class: String,
+    },
+    /// A frame-class map entry does not resolve to the expected class.
+    WrongClassEntry {
+        /// The target block requiring the entry.
+        block: BasicBlockId,
+        /// The exact class identity from CFG analysis.
+        class: String,
+        /// The invalid or mismatched constant-pool index.
+        index: ConstantPoolIndex,
+    },
 }
 
 impl fmt::Display for StackMapFrameGenerationError {
@@ -219,6 +237,21 @@ impl fmt::Display for StackMapFrameGenerationError {
                 block.index()
             ),
             Self::InvalidStackMap(error) => error.fmt(formatter),
+            Self::MissingClassEntry { block, class } => write!(
+                formatter,
+                "CFG block {} requires missing CONSTANT_Class entry for {class}",
+                block.index()
+            ),
+            Self::WrongClassEntry {
+                block,
+                class,
+                index,
+            } => write!(
+                formatter,
+                "CFG block {} maps class {class} to invalid or mismatched constant-pool entry {}",
+                block.index(),
+                index.0
+            ),
         }
     }
 }
@@ -242,9 +275,9 @@ pub struct GeneratedStackMapFrames {
 /// must come from `assemble_labeled` on the same immutable sequence revision.
 /// A private snapshot identity enforces this relationship. The method emits no frame at PC 0;
 /// loops back to PC 0 must preserve the analyzer's implicit initial state.
-/// Only integer stack values and integer/Top locals are representable through
-/// the public API. Class-file construction can additionally resolve a
-/// preserved instance receiver to its current-class type.
+/// Integer values, `Top`, exact initialized objects, and an explicitly
+/// resolved instance receiver are representable. Exact object identities need
+/// a precomputed class-entry map, supplied by class-file construction.
 /// No frame is synthesized for an unreachable target or for ordinary
 /// fallthrough blocks. The returned maxima are copied unchanged for a later
 /// explicit class-file integration.
@@ -253,7 +286,14 @@ pub fn generate_stack_map_frames(
     graph: &ControlFlowGraph,
     assembled: &AssembledCode,
 ) -> Result<GeneratedStackMapFrames, StackMapFrameGenerationError> {
-    generate_stack_map_frames_inner(flow, graph, assembled, &ConstantPool::default(), None)
+    generate_stack_map_frames_inner(
+        flow,
+        graph,
+        assembled,
+        &ConstantPool::default(),
+        None,
+        &BTreeMap::new(),
+    )
 }
 
 /// Generates stack-map frames while resolving an initialized instance receiver
@@ -266,8 +306,16 @@ pub(crate) fn generate_stack_map_frames_with_receiver(
     assembled: &AssembledCode,
     constant_pool: &ConstantPool,
     receiver_class: ConstantPoolIndex,
+    frame_classes: &BTreeMap<ClassIdentity, ConstantPoolIndex>,
 ) -> Result<GeneratedStackMapFrames, StackMapFrameGenerationError> {
-    generate_stack_map_frames_inner(flow, graph, assembled, constant_pool, Some(receiver_class))
+    generate_stack_map_frames_inner(
+        flow,
+        graph,
+        assembled,
+        constant_pool,
+        Some(receiver_class),
+        frame_classes,
+    )
 }
 
 fn generate_stack_map_frames_inner(
@@ -276,6 +324,7 @@ fn generate_stack_map_frames_inner(
     assembled: &AssembledCode,
     constant_pool: &ConstantPool,
     receiver_class: Option<ConstantPoolIndex>,
+    frame_classes: &BTreeMap<ClassIdentity, ConstantPoolIndex>,
 ) -> Result<GeneratedStackMapFrames, StackMapFrameGenerationError> {
     if !flow.shares_sequence_scope(graph.sequence_scope())
         || !assembled
@@ -390,8 +439,14 @@ fn generate_stack_map_frames_inner(
                     has_state: false,
                 },
             )?;
-            let mut frame =
-                frame_from_state(target_block_id, state, flow.is_static(), receiver_class)?;
+            let mut frame = frame_from_state(
+                target_block_id,
+                state,
+                flow.is_static(),
+                receiver_class,
+                frame_classes,
+                constant_pool,
+            )?;
             frame.pc = u32::try_from(label_offset).map_err(|_| {
                 StackMapFrameGenerationError::FrameOffsetOutOfRange {
                     offset: label_offset,
@@ -444,6 +499,8 @@ fn frame_from_state(
     state: &BlockEntryState,
     is_static: bool,
     receiver_class: Option<ConstantPoolIndex>,
+    frame_classes: &BTreeMap<ClassIdentity, ConstantPoolIndex>,
+    constant_pool: &ConstantPool,
 ) -> Result<FullFrame, StackMapFrameGenerationError> {
     if !is_static && state.locals.first() == Some(&FlowLocalState::Top) {
         return Err(StackMapFrameGenerationError::UnsupportedFlow {
@@ -458,16 +515,25 @@ fn frame_from_state(
             FlowLocalState::Top => Ok(VerificationTypeInfo::Top),
             FlowLocalState::Integer => Ok(VerificationTypeInfo::Integer),
             FlowLocalState::Receiver => match receiver_class {
-                Some(class) => Ok(VerificationTypeInfo::Object(class)),
+                Some(class) if constant_pool.class_name(class).is_ok() => {
+                    Ok(VerificationTypeInfo::Object(class))
+                }
+                Some(class) => Err(StackMapFrameGenerationError::WrongClassEntry {
+                    block,
+                    class: "current-class receiver".to_owned(),
+                    index: class,
+                }),
                 None => Err(StackMapFrameGenerationError::UnsupportedFlow {
                     block,
                     state: UnsupportedStackMapState::InstanceReceiver,
                 }),
             },
-            FlowLocalState::Object(_) => Err(StackMapFrameGenerationError::UnsupportedFlow {
+            FlowLocalState::Object(class) => Ok(VerificationTypeInfo::Object(class_constant(
                 block,
-                state: UnsupportedStackMapState::ExactReference,
-            }),
+                class,
+                frame_classes,
+                constant_pool,
+            )?)),
         })
         .collect::<Result<_, _>>()?;
     while locals.last() == Some(&VerificationTypeInfo::Top) {
@@ -479,10 +545,12 @@ fn frame_from_state(
         .iter()
         .map(|value| match value {
             FlowValue::Integer => Ok(VerificationTypeInfo::Integer),
-            FlowValue::Object(_) => Err(StackMapFrameGenerationError::UnsupportedFlow {
+            FlowValue::Object(class) => Ok(VerificationTypeInfo::Object(class_constant(
                 block,
-                state: UnsupportedStackMapState::OperandStackValue(ValueKind::Reference),
-            }),
+                class,
+                frame_classes,
+                constant_pool,
+            )?)),
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -491,6 +559,48 @@ fn frame_from_state(
         locals,
         stack,
     })
+}
+
+fn class_constant(
+    block: BasicBlockId,
+    class: &ClassIdentity,
+    frame_classes: &BTreeMap<ClassIdentity, ConstantPoolIndex>,
+    constant_pool: &ConstantPool,
+) -> Result<ConstantPoolIndex, StackMapFrameGenerationError> {
+    let name = class.internal_name();
+    let index = frame_classes.get(class).copied().ok_or_else(|| {
+        StackMapFrameGenerationError::MissingClassEntry {
+            block,
+            class: name.to_owned(),
+        }
+    })?;
+    if constant_pool.class_name(index).ok() != Some(name) {
+        return Err(StackMapFrameGenerationError::WrongClassEntry {
+            block,
+            class: name.to_owned(),
+            index,
+        });
+    }
+    Ok(index)
+}
+
+/// Returns all exact class identities present in reachable incoming states in
+/// deterministic order, for interning before the constant pool is finalized.
+pub(crate) fn frame_class_identities(flow: &FlowAnalysis) -> BTreeSet<ClassIdentity> {
+    let mut names = BTreeSet::new();
+    for state in flow.block_entries().iter().flatten() {
+        for local in &state.locals {
+            if let FlowLocalState::Object(class) = local {
+                names.insert(class.clone());
+            }
+        }
+        for value in &state.operand_stack {
+            if let FlowValue::Object(class) = value {
+                names.insert(class.clone());
+            }
+        }
+    }
+    names
 }
 
 #[cfg(test)]
@@ -878,7 +988,7 @@ mod tests {
             .instruction(Instruction::IConst(SmallIntConstant::Zero))
             .branch(BranchInstruction::IfEq(target.clone()))
             .instruction(Instruction::Return)
-            .bind(target)
+            .bind(target.clone())
             .unwrap()
             .instruction(Instruction::Return);
 
@@ -888,9 +998,15 @@ mod tests {
         let graph = ControlFlowGraph::build(&sequence).unwrap();
         let flow = CfgCodeAnalyzer::analyze(&graph, "()V", false, &pool).unwrap();
         let assembled = assemble_labeled(&sequence, &pool).unwrap();
-        let generated =
-            generate_stack_map_frames_with_receiver(&flow, &graph, &assembled, &pool, this_class)
-                .unwrap();
+        let generated = generate_stack_map_frames_with_receiver(
+            &flow,
+            &graph,
+            &assembled,
+            &pool,
+            this_class,
+            &BTreeMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             generated.frames[0].locals,
@@ -899,5 +1015,195 @@ mod tests {
         table(generated)
             .encode_payload_with_layout(&pool, &assembled.bytes, &assembled.layout)
             .unwrap();
+    }
+
+    #[test]
+    fn emits_exact_object_types_for_local_holes_and_operand_stack() {
+        let mut builder = ConstantPoolBuilder::new();
+        let alpha = builder.class("example/Alpha").unwrap();
+        let beta = builder.class("example/Beta").unwrap();
+        let alpha_constructor = builder
+            .method_ref("example/Alpha", "<init>", "()V")
+            .unwrap();
+        let beta_constructor = builder.method_ref("example/Beta", "<init>", "()V").unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut sequence = CodeSequence::new();
+        let target = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::New(super::super::ClassReference::new(
+                super::super::ConstantPoolIndexOperand::new(alpha).unwrap(),
+            )))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(
+                super::super::SpecialMethodReference::new(
+                    super::super::ConstantPoolIndexOperand::new(alpha_constructor).unwrap(),
+                ),
+            ))
+            .instruction(Instruction::AStore(crate::bytecode::LocalIndex::new(2)))
+            .instruction(Instruction::New(super::super::ClassReference::new(
+                super::super::ConstantPoolIndexOperand::new(beta).unwrap(),
+            )))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(
+                super::super::SpecialMethodReference::new(
+                    super::super::ConstantPoolIndexOperand::new(beta_constructor).unwrap(),
+                ),
+            ))
+            .instruction(Instruction::AStore(crate::bytecode::LocalIndex::new(5)))
+            .instruction(Instruction::ALoad(crate::bytecode::LocalIndex::new(2)))
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .branch(BranchInstruction::IfEq(target.clone()))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return)
+            .bind(target)
+            .unwrap()
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "branchWithObjects",
+            "(I)V",
+            false,
+            &pool,
+            alpha,
+        )
+        .unwrap();
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        let frame_classes = frame_class_identities(&flow)
+            .into_iter()
+            .map(|identity| {
+                let index = match identity.internal_name() {
+                    "example/Alpha" => alpha,
+                    "example/Beta" => beta,
+                    other => panic!("unexpected flow class {other}"),
+                };
+                (identity, index)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let generated = generate_stack_map_frames_inner(
+            &flow,
+            &graph,
+            &assembled,
+            &pool,
+            Some(alpha),
+            &frame_classes,
+        )
+        .unwrap();
+
+        assert_eq!(generated.frames.len(), 1);
+        assert_eq!(
+            generated.frames[0].locals,
+            [
+                VerificationTypeInfo::Object(alpha),
+                VerificationTypeInfo::Integer,
+                VerificationTypeInfo::Object(alpha),
+                VerificationTypeInfo::Top,
+                VerificationTypeInfo::Top,
+                VerificationTypeInfo::Object(beta),
+            ]
+        );
+        assert_eq!(
+            generated.frames[0].stack,
+            [VerificationTypeInfo::Object(alpha)]
+        );
+        for verification in generated.frames[0]
+            .locals
+            .iter()
+            .chain(&generated.frames[0].stack)
+        {
+            if let VerificationTypeInfo::Object(index) = verification {
+                assert!(matches!(
+                    pool.get(*index),
+                    Some(crate::constant_pool::ConstantPoolEntry::Class { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn reports_missing_and_mismatched_frame_class_entries() {
+        let mut builder = ConstantPoolBuilder::new();
+        let alpha = builder.class("example/Alpha").unwrap();
+        let beta = builder.class("example/Beta").unwrap();
+        let integer = builder.integer(1).unwrap();
+        let constructor = builder
+            .method_ref("example/Alpha", "<init>", "()V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut sequence = CodeSequence::new();
+        let target = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::New(super::super::ClassReference::new(
+                super::super::ConstantPoolIndexOperand::new(alpha).unwrap(),
+            )))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(
+                super::super::SpecialMethodReference::new(
+                    super::super::ConstantPoolIndexOperand::new(constructor).unwrap(),
+                ),
+            ))
+            .instruction(Instruction::AStore(crate::bytecode::LocalIndex::new(2)))
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .branch(BranchInstruction::IfEq(target.clone()))
+            .instruction(Instruction::Return)
+            .bind(target.clone())
+            .unwrap()
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "missingFrameClass",
+            "(I)V",
+            false,
+            &pool,
+            alpha,
+        )
+        .unwrap();
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        let alpha_identity = frame_class_identities(&flow).into_iter().next().unwrap();
+
+        assert!(matches!(
+            generate_stack_map_frames_inner(
+                &flow,
+                &graph,
+                &assembled,
+                &pool,
+                Some(alpha),
+                &BTreeMap::new(),
+            ),
+            Err(StackMapFrameGenerationError::MissingClassEntry { class, .. })
+                if class == "example/Alpha"
+        ));
+        assert_eq!(
+            generate_stack_map_frames_inner(
+                &flow,
+                &graph,
+                &assembled,
+                &pool,
+                Some(alpha),
+                &BTreeMap::from([(alpha_identity.clone(), beta)]),
+            ),
+            Err(StackMapFrameGenerationError::WrongClassEntry {
+                block: graph.block_for_label(&target).unwrap(),
+                class: "example/Alpha".to_owned(),
+                index: beta,
+            })
+        );
+        assert!(matches!(
+            generate_stack_map_frames_inner(
+                &flow,
+                &graph,
+                &assembled,
+                &pool,
+                Some(alpha),
+                &BTreeMap::from([(alpha_identity, integer)]),
+            ),
+            Err(StackMapFrameGenerationError::WrongClassEntry { class, index, .. })
+                if class == "example/Alpha" && index == integer
+        ));
     }
 }

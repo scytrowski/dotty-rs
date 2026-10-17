@@ -1971,13 +1971,19 @@ impl FlowAnalysis {
 pub struct CfgCodeAnalyzer;
 
 impl CfgCodeAnalyzer {
-    pub(crate) fn validate_all_instructions(graph: &ControlFlowGraph) -> Result<(), AnalysisError> {
+    pub(crate) fn validate_all_instructions_with_references(
+        graph: &ControlFlowGraph,
+    ) -> Result<(), AnalysisError> {
         for block in graph.blocks() {
             for (offset, element) in block.instructions.iter().enumerate() {
                 let instruction_index = block.instruction_range.start + offset;
                 match element {
                     CodeElement::Instruction(instruction) => {
-                        validate_flow_instruction(instruction_index, *instruction)?;
+                        validate_flow_instruction_with_context(
+                            instruction_index,
+                            *instruction,
+                            true,
+                        )?;
                     }
                     CodeElement::Branch(_) => {}
                     CodeElement::Label(_) => {
@@ -2047,6 +2053,12 @@ impl CfgCodeAnalyzer {
         constant_pool
             .validate_for_encoding()
             .map_err(AnalysisError::InvalidConstantPool)?;
+        if is_static || method_name == "<init>" || method_name == "<clinit>" {
+            return Err(AnalysisError::InvalidInitializationContext {
+                is_static,
+                is_constructor: method_name == "<init>" || method_name == "<clinit>",
+            });
+        }
         Self::analyze_validated_with_current_class(
             graph,
             method_name,
@@ -2076,7 +2088,7 @@ impl CfgCodeAnalyzer {
         )
     }
 
-    fn analyze_validated_with_current_class(
+    pub(crate) fn analyze_validated_with_current_class(
         graph: &ControlFlowGraph,
         method_name: &str,
         method_descriptor: &str,
@@ -2084,8 +2096,8 @@ impl CfgCodeAnalyzer {
         constant_pool: &ConstantPool,
         current_class_index: Option<ConstantPoolIndex>,
     ) -> Result<FlowAnalysis, AnalysisError> {
-        let is_constructor = method_name == "<init>" || method_name == "<clinit>";
-        if current_class_index.is_some() && (is_static || is_constructor) {
+        let is_constructor = method_name == "<init>";
+        if current_class_index.is_some() && is_constructor {
             return Err(AnalysisError::InvalidInitializationContext {
                 is_static,
                 is_constructor,
@@ -2118,7 +2130,9 @@ impl CfgCodeAnalyzer {
         }
 
         let mut initial = Frame::new(&descriptor, is_static)?;
-        if let Some(class) = &current_class {
+        if let Some(class) = &current_class
+            && !is_static
+        {
             let Some(receiver) = initial.locals.first_mut() else {
                 return Err(AnalysisError::InvalidInitializationContext {
                     is_static,
@@ -2291,6 +2305,7 @@ impl CfgCodeAnalyzer {
     }
 }
 
+#[cfg(test)]
 fn validate_flow_instruction(
     instruction_index: usize,
     instruction: Instruction,

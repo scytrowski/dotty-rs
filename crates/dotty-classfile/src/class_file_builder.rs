@@ -52,6 +52,7 @@ use crate::encode_error::EncodeError;
 use crate::field::FieldInfo;
 use crate::method::MethodInfo;
 use crate::signature::{ClassSignature, FieldSignature, MethodSignature, SignatureError};
+use std::collections::BTreeMap;
 use std::fmt;
 
 const DEFAULT_SUPER_CLASS: &str = "java/lang/Object";
@@ -284,9 +285,10 @@ enum OwnedClassAttribute {
 /// resolves symbolic references, assembles instructions, and computes stack
 /// and local bounds before the constant pool is frozen. The analysis checks
 /// supported instruction categories and straight-line bounds. Branched code
-/// uses the integer-only CFG analyzer and emits `StackMapTable` frames for the
-/// supported class-file version 65+ subset and rejects unreachable blocks
-/// whose verifier state cannot be inferred; neither path is full JVM
+/// uses the bounded CFG analyzer, including exact initialized references, and
+/// emits `StackMapTable` frames for the supported class-file version 65+
+/// subset and rejects unreachable blocks whose verifier state cannot be
+/// inferred; neither path is full JVM
 /// verification. A typed-code closure commits its method only after the
 /// closure and label validation succeed; failures during final encoding return
 /// an error and produce no class bytes.
@@ -682,6 +684,46 @@ impl ClassFileBuilder {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Analyze branched code against a snapshot while the builder remains
+        // mutable. Exact reference classes needed by StackMapTable must be
+        // interned before the final pool is frozen; the append-only builder
+        // guarantees these indices remain stable afterward.
+        let preview_pool = pool_builder.clone().finish()?;
+        let mut frame_class_identities = std::collections::BTreeSet::new();
+        for (method, resolved) in self.methods.iter().zip(&resolved_code) {
+            let Some(ResolvedMethodCode::Branched(sequence)) = resolved else {
+                continue;
+            };
+            if method.name == "<init>" {
+                // Preserve the explicit constructor-frame guard below.
+                continue;
+            }
+            let graph =
+                ControlFlowGraph::build(sequence).map_err(ClassFileBuildError::ControlFlow)?;
+            CfgCodeAnalyzer::validate_all_instructions_with_references(&graph)
+                .map_err(ClassFileBuildError::Analysis)?;
+            let flow = CfgCodeAnalyzer::analyze_validated_with_current_class(
+                &graph,
+                &method.name,
+                &method.descriptor,
+                method.access_flags.is_static(),
+                &preview_pool,
+                Some(this_class),
+            )
+            .map_err(ClassFileBuildError::Analysis)?;
+            frame_class_identities.extend(
+                crate::bytecode::stack_map_frames::frame_class_identities(&flow),
+            );
+        }
+        let frame_classes = frame_class_identities
+            .into_iter()
+            .map(|identity| {
+                pool_builder
+                    .class(identity.internal_name())
+                    .map(|index| (identity, index))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+
         if self.methods.iter().any(|method| method.code.is_some()) {
             pool_builder.utf8("Code")?;
         }
@@ -769,13 +811,15 @@ impl ClassFileBuilder {
                             },
                         ));
                     }
-                    CfgCodeAnalyzer::validate_all_instructions(&graph)
+                    CfgCodeAnalyzer::validate_all_instructions_with_references(&graph)
                         .map_err(ClassFileBuildError::Analysis)?;
-                    let flow = CfgCodeAnalyzer::analyze_validated(
+                    let flow = CfgCodeAnalyzer::analyze_validated_with_current_class(
                         &graph,
+                        &method.name,
                         &method.descriptor,
                         method.access_flags.is_static(),
                         &constant_pool,
+                        Some(this_class),
                     )
                     .map_err(ClassFileBuildError::Analysis)?;
                     for (block, entry) in graph.blocks().iter().zip(flow.block_entries()) {
@@ -796,6 +840,7 @@ impl ClassFileBuilder {
                         &assembled,
                         &constant_pool,
                         this_class,
+                        &frame_classes,
                     )
                     .map_err(ClassFileBuildError::StackMapFrames)?;
                     let payload = StackMapTable {
