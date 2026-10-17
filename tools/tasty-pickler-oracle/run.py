@@ -248,18 +248,22 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 """, "References.first() = 42", 42,
             ),
             "example/Operations.tasty": (
-                "example.Operations", r"public int (use\(\)|propagate\(int\))", "OperationsRuntime.java",
+                "example.Operations", r"public int (use\(\)|propagate\(int\)|picks\(\)|nested\(\))", "OperationsRuntime.java",
                 """public final class OperationsRuntime {
   public static void main(String[] args) {
     example.Operations operations = new example.Operations();
     int use = operations.use();
     int propagated = operations.propagate(17);
+    int picked = operations.picks();
+    int nested = operations.nested();
     if (use != 42) throw new AssertionError("Operations.use() = " + use);
     if (propagated != 17) throw new AssertionError("Operations.propagate() = " + propagated);
-    System.out.println("Operations = " + use + ", " + propagated);
+    if (picked != 42) throw new AssertionError("Operations.picks() = " + picked);
+    if (nested != 42) throw new AssertionError("Operations.nested() = " + nested);
+    System.out.println("Operations = " + use + ", " + propagated + ", " + picked + ", " + nested);
   }
 }
-""", "Operations = 42, 17", 42,
+""", "Operations = 42, 17, 42, 42", 42,
             ),
         }
         case = runtime_cases.get(relative.as_posix())

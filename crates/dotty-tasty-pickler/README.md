@@ -17,7 +17,8 @@ The accepted shape is the oracle's ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
 methods with an Int result and either a typed Int literal, a reference to one
 of its own ordinary Int formals, an ordinary parameterless reference, or a
-single-clause one-Int-argument application of a canonical method of the same class.
+bounded recursive application of a canonical method of the same class with one
+plain clause of one or more Int parameters.
 Same-class method references derive their
 target from the typed `TermRef`, require a public declared Int method in the
 plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
@@ -36,8 +37,10 @@ declaration. Raw literal spellings are checked against the name-byte limit
 before decoding; malformed whole numbers and unsupported noninteger numbers
 yield typed errors.
 Call applications require the exact selected method's completed plain MethodType,
-one ordered Int parameter, Int result, and canonical Int argument. Type, context,
-default, varargs and multi-clause applications remain unsupported. The wire
+ordered Int parameters, Int result, and corresponding canonical Int arguments.
+Traversal is bounded by expression-depth and item limits and rejects repeated
+typed expression IDs. Type, context, default, varargs and multi-clause
+applications remain unsupported. The wire
 constructor's Unit return syntax is distinct from the semantic
 constructor's class-instance result.
 

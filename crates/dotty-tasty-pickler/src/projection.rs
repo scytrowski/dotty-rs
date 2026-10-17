@@ -12,6 +12,7 @@ use crate::{Builtin, LimitKind, PickleError, ReferenceError, ValidatedPicklePlan
 pub struct ProjectionLimits {
     pub max_type_depth: usize,
     pub max_owner_depth: usize,
+    pub max_expression_depth: usize,
     pub max_items: usize,
     pub max_names: usize,
     pub max_name_bytes: usize,
@@ -23,6 +24,7 @@ impl Default for ProjectionLimits {
         Self {
             max_type_depth: 256,
             max_owner_depth: 256,
+            max_expression_depth: 256,
             max_items: 1_000_000,
             max_names: 100_000,
             max_name_bytes: 4096,
@@ -36,7 +38,7 @@ enum NameKey {
     Utf8(String),
     Qualified(NameRef, NameRef),
     SignedEmpty(NameRef, NameRef),
-    SignedOne(NameRef, NameRef, i32),
+    SignedMany(NameRef, NameRef, Vec<i32>),
 }
 
 /// Owned wire result only; no semantic records are copied and no file is assembled.
@@ -292,10 +294,10 @@ impl<'a> EncodingContext<'a> {
                 result_signature: *result_signature,
                 parameter_signatures: vec![],
             },
-            NameKey::SignedOne(original, result_signature, parameter) => RawName::Signed {
+            NameKey::SignedMany(original, result_signature, parameters) => RawName::Signed {
                 original: *original,
                 result_signature: *result_signature,
-                parameter_signatures: vec![*parameter],
+                parameter_signatures: parameters.clone(),
             },
         };
         let reference = self.names.intern(raw).map_err(encoding)?;
@@ -596,14 +598,21 @@ impl<'a> EncodingContext<'a> {
         self.run(|c| c.same_class_method_select_inner(class, method, true))
     }
 
-    /// Lowers a verified one-Int-parameter method application target as SELECTin.
+    /// Lowers a verified plain Int method application target as SELECTin.
     pub(crate) fn same_class_method_select_in(
         &mut self,
         class: SymbolId,
         method: SymbolId,
         explicit_this: bool,
+        parameter_count: usize,
     ) -> Result<AstLabel, PickleError> {
         self.run(|c| {
+            if parameter_count > c.limits.max_items {
+                return Err(PickleError::LimitExceeded {
+                    kind: LimitKind::Items,
+                    limit: c.limits.max_items,
+                });
+            }
             let class_label = *c
                 .declarations
                 .get(&class)
@@ -632,10 +641,10 @@ impl<'a> EncodingContext<'a> {
                     kind: LimitKind::Names,
                     limit: i32::MAX as usize,
                 })?;
-            let signed_name = c.intern(NameKey::SignedOne(
+            let signed_name = c.intern(NameKey::SignedMany(
                 method_name,
                 int_signature,
-                parameter_signature,
+                vec![parameter_signature; parameter_count],
             ))?;
             let type_ref = c
                 .wire

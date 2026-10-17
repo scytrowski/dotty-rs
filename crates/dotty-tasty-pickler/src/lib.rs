@@ -3,7 +3,7 @@
 //! This increment validates a public, ordinary top-level class in one explicit
 //! package, its default constructor and Int-result methods with literals,
 //! formal references, same-class parameterless references, or bounded
-//! same-class one-Int-argument calls. Methods may have no value clause, one
+//! same-class calls with one plain Int clause. Methods may have no value clause, one
 //! explicit empty clause, or one plain Int-parameter clause.
 //! [`EncodingContext`] projects names, types and canonical references into owned
 //! wire fragments. [`ValidatedPicklePlan::declaration_skeleton`] assembles a

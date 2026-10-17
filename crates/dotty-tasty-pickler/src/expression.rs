@@ -1,12 +1,48 @@
 //! The frozen literal slice has no recursive expression edges.
 
+use std::collections::HashSet;
+
 use dotty_core::ast::{ApplyKind, TypedAst};
 use dotty_core::{Constant, SemanticStore, SymbolId, TermRefTarget, TreeId, TreeKind, Type, Typed};
 use dotty_tasty::tasty::{
     APPLY_TAG, AstField, AstLabel, AstNode, INTCONST_TAG, SimpleTerm, TermValue,
 };
 
-use crate::{EncodingContext, PickleError, UnsupportedFeature};
+use crate::{EncodingContext, LimitKind, PickleError, ProjectionLimits, UnsupportedFeature};
+
+struct ExpressionBudget {
+    max_depth: usize,
+    item_limit: usize,
+    remaining: usize,
+    visited: HashSet<TreeId<Typed>>,
+}
+
+struct ExpressionState<'a> {
+    depth: usize,
+    budget: &'a mut ExpressionBudget,
+}
+
+impl ExpressionBudget {
+    fn visit(&mut self, tree: TreeId<Typed>, depth: usize) -> Result<(), PickleError> {
+        if depth > self.max_depth {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: self.max_depth,
+            });
+        }
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or(PickleError::LimitExceeded {
+                kind: LimitKind::Items,
+                limit: self.item_limit,
+            })?;
+        if !self.visited.insert(tree) {
+            return Err(PickleError::RepeatedExpression { tree });
+        }
+        Ok(())
+    }
+}
 
 pub(crate) fn lower_expression(
     store: &SemanticStore,
@@ -14,13 +50,45 @@ pub(crate) fn lower_expression(
     root: TreeId<Typed>,
     method: SymbolId,
     parameters: &[SymbolId],
+    limits: ProjectionLimits,
     context: &mut EncodingContext<'_>,
 ) -> Result<AstLabel, PickleError> {
+    let mut budget = ExpressionBudget {
+        max_depth: limits.max_expression_depth,
+        item_limit: limits.max_items,
+        remaining: limits.max_items,
+        visited: HashSet::new(),
+    };
+    lower_expression_inner(
+        store,
+        ast,
+        root,
+        method,
+        parameters,
+        ExpressionState {
+            depth: 0,
+            budget: &mut budget,
+        },
+        context,
+    )
+}
+
+fn lower_expression_inner(
+    store: &SemanticStore,
+    ast: &TypedAst,
+    root: TreeId<Typed>,
+    method: SymbolId,
+    parameters: &[SymbolId],
+    state: ExpressionState<'_>,
+    context: &mut EncodingContext<'_>,
+) -> Result<AstLabel, PickleError> {
+    let ExpressionState { depth, budget } = state;
+    budget.visit(root, depth)?;
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
     if let TreeKind::Apply(application) = &tree.kind {
-        if application.kind != ApplyKind::Regular || application.args.len() != 1 {
+        if application.kind != ApplyKind::Regular || application.args.is_empty() {
             return Err(PickleError::Unsupported {
                 feature: UnsupportedFeature::BodyExpression,
                 symbol: Some(method),
@@ -31,6 +99,7 @@ pub(crate) fn lower_expression(
             .ok_or(PickleError::InvalidTypedTree {
                 tree: application.function,
             })?;
+        budget.visit(application.function, depth)?;
         let Type::TermRef {
             prefix,
             target: TermRefTarget::Symbol(target),
@@ -47,17 +116,10 @@ pub(crate) fn lower_expression(
                 ty: function.ty,
             });
         };
-        if matches!(
-            ast.try_get(application.args[0])
-                .map(|argument| &argument.kind),
-            Some(TreeKind::Apply(_))
-        ) {
-            return Err(PickleError::Unsupported {
-                feature: UnsupportedFeature::BodyExpression,
-                symbol: Some(method),
-            });
-        }
         let explicit_this = matches!(function.kind, TreeKind::Select(_));
+        if let TreeKind::Select(selection) = &function.kind {
+            budget.visit(selection.qualifier, depth)?;
+        }
         let class = store
             .symbols
             .get(method)
@@ -70,12 +132,38 @@ pub(crate) fn lower_expression(
                 reason: crate::ReferenceError::Owner,
             });
         }
-        let function_label = context.same_class_method_select_in(class, *target, explicit_this)?;
-        let argument =
-            lower_expression(store, ast, application.args[0], method, parameters, context)?;
+        let function_label = context.same_class_method_select_in(
+            class,
+            *target,
+            explicit_this,
+            application.args.len(),
+        )?;
+        let mut fields = vec![AstField::Tree(function_label)];
+        for &argument in &application.args {
+            let argument_depth = if matches!(
+                ast.try_get(argument).map(|argument| &argument.kind),
+                Some(TreeKind::Apply(_))
+            ) {
+                depth + 1
+            } else {
+                depth
+            };
+            fields.push(AstField::Tree(lower_expression_inner(
+                store,
+                ast,
+                argument,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: argument_depth,
+                    budget,
+                },
+                context,
+            )?));
+        }
         return context.wire_node(AstNode::Length {
             tag: APPLY_TAG,
-            fields: vec![AstField::Tree(function_label), AstField::Tree(argument)],
+            fields,
         });
     }
     if let TreeKind::Ident(_) = &tree.kind {

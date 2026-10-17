@@ -16,7 +16,7 @@ const PARAMETER_DECL: &str =
 const REFERENCES: &str = include_str!("../../../tests/fixtures/tasty_pickler/References.scala");
 const EXPLICIT_THIS_REFERENCES: &str =
     "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
-const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n";
+const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 fn source_outputs(
@@ -29,6 +29,15 @@ fn source_outputs(
 fn source_outputs_named(
     text: &str,
     source_name: &str,
+    edit: impl FnOnce(&mut PicklePlan<'_>),
+) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
+    source_outputs_named_with_limits(text, source_name, ValidationLimits::default(), edit)
+}
+
+fn source_outputs_named_with_limits(
+    text: &str,
+    source_name: &str,
+    validation_limits: ValidationLimits,
     edit: impl FnOnce(&mut PicklePlan<'_>),
 ) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
     let source = SourceId::from_index(7);
@@ -152,7 +161,7 @@ fn source_outputs_named(
         parsed.ast
     );
     let mark = typer.store().checkpoint();
-    let checked = plan.validate();
+    let checked = plan.validate_with_limits(validation_limits);
     assert_eq!(typer.store().checkpoint(), mark);
     assert_eq!(
         format!(
@@ -438,6 +447,67 @@ fn same_class_int_applications_preserve_selected_target_and_argument_order() {
     assert!(matches!(
         explicit_select.qualifier,
         RawTree::Ast { tag: THIS_TAG, .. }
+    ));
+
+    let picks_body = addresses
+        .get(first.declarations()[7].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(picks_node) = picks_body.rhs.unwrap() else {
+        panic!("expected APPLY")
+    };
+    let picks_call = picks_node.decode_apply().unwrap();
+    let RawTree::LengthNode(picks_select_node) = picks_call.function else {
+        panic!("expected SELECTin")
+    };
+    let picks_select = picks_select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        file.render_signed_name(picks_select.name).unwrap(),
+        Some(RenderedSignedName::Signed { original, signature })
+            if original == "pick"
+                && signature.result == "scala.Int"
+                && signature.parameters == [
+                    RenderedParamSig::TermParameter("scala.Int".into()),
+                    RenderedParamSig::TermParameter("scala.Int".into()),
+                ]
+    ));
+    assert_eq!(picks_call.arguments.len(), 2);
+    assert!(
+        matches!(picks_call.arguments[0], RawTree::Leaf(ref leaf) if leaf.tag == INTCONST_TAG && leaf.value == TermValue::Int(11))
+    );
+    assert!(
+        matches!(picks_call.arguments[1], RawTree::Leaf(ref leaf) if leaf.tag == INTCONST_TAG && leaf.value == TermValue::Int(42))
+    );
+
+    let nested_body = addresses
+        .get(first.declarations()[8].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(outer_node) = nested_body.rhs.unwrap() else {
+        panic!("expected outer APPLY")
+    };
+    let outer_call = outer_node.decode_apply().unwrap();
+    let RawTree::LengthNode(inner_node) = &outer_call.arguments[0] else {
+        panic!("expected nested APPLY")
+    };
+    assert_eq!(inner_node.tag, APPLY_TAG);
+
+    assert!(matches!(
+        source_outputs_named_with_limits(
+            OPERATIONS,
+            "Operations.scala",
+            ValidationLimits {
+                max_expression_depth: 0,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        ),
+        Err(PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0
+        })
     ));
 
     if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
