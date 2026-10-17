@@ -157,6 +157,27 @@ pub enum AnalysisError {
         /// Descriptor parser failure.
         error: DescriptorError,
     },
+    /// A CFG field access has a valid descriptor outside the supported `I`/`Z` subset.
+    UnsupportedFlowFieldType {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Constant-pool entry that owns the descriptor.
+        index: ConstantPoolIndex,
+    },
+    /// A field access needs an initialized reference with an exact class identity.
+    MissingExactReference {
+        /// Zero-based instruction position.
+        instruction: usize,
+    },
+    /// The exact receiver class differs from the owner named by the field reference.
+    FieldOwnerMismatch {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Owner named by the field reference.
+        expected: ClassIdentity,
+        /// Exact receiver class on the operand stack.
+        actual: ClassIdentity,
+    },
     /// A method reference contains a malformed method descriptor.
     InvalidReferencedMethodDescriptor {
         /// Zero-based instruction position.
@@ -386,6 +407,25 @@ impl fmt::Display for AnalysisError {
                 "instruction {instruction} field at constant-pool index {} has an invalid descriptor: {error}",
                 index.0
             ),
+            Self::UnsupportedFlowFieldType { instruction, index } => write!(
+                formatter,
+                "instruction {instruction} field at constant-pool index {} has a type outside the supported int/boolean subset",
+                index.0
+            ),
+            Self::MissingExactReference { instruction } => write!(
+                formatter,
+                "instruction {instruction} requires an initialized reference with an exact class identity"
+            ),
+            Self::FieldOwnerMismatch {
+                instruction,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} field owner {} does not match receiver class {}",
+                expected.internal_name(),
+                actual.internal_name()
+            ),
             Self::InvalidReferencedMethodDescriptor {
                 instruction,
                 index,
@@ -594,7 +634,13 @@ pub(crate) fn analyze_validated(
                 instruction: instruction_index,
             });
         }
-        frame.apply(instruction_index, instruction, &descriptor, constant_pool)?;
+        frame.apply(
+            instruction_index,
+            instruction,
+            &descriptor,
+            constant_pool,
+            None,
+        )?;
         returned = is_return(instruction);
     }
 
@@ -674,6 +720,7 @@ impl Frame {
         instruction: Instruction,
         method_descriptor: &MethodDescriptor,
         pool: &ConstantPool,
+        flow_current_class: Option<&ClassIdentity>,
     ) -> Result<(), AnalysisError> {
         match instruction {
             Instruction::AConstNull => self.push(instruction_index, ValueKind::Reference)?,
@@ -756,14 +803,28 @@ impl Frame {
                 self.stack_slots -= 1;
             }
             Instruction::GetField(reference) => {
-                let ty = self.field_type(instruction_index, reference, pool)?;
-                self.pop_expected(instruction_index, ValueKind::Reference)?;
-                self.push(instruction_index, value_kind(&ty))?;
+                if flow_current_class.is_some() {
+                    let (owner, ty) = self.flow_field_type(instruction_index, reference, pool)?;
+                    validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
+                    self.pop_field_receiver(instruction_index, &owner)?;
+                    self.push(instruction_index, ValueKind::Int)?;
+                } else {
+                    let ty = self.field_type(instruction_index, reference, pool)?;
+                    self.pop_expected(instruction_index, ValueKind::Reference)?;
+                    self.push(instruction_index, value_kind(&ty))?;
+                }
             }
             Instruction::PutField(reference) => {
-                let ty = self.field_type(instruction_index, reference, pool)?;
-                self.pop_expected(instruction_index, value_kind(&ty))?;
-                self.pop_expected(instruction_index, ValueKind::Reference)?;
+                if flow_current_class.is_some() {
+                    let (owner, ty) = self.flow_field_type(instruction_index, reference, pool)?;
+                    validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
+                    self.pop_expected(instruction_index, ValueKind::Int)?;
+                    self.pop_field_receiver(instruction_index, &owner)?;
+                } else {
+                    let ty = self.field_type(instruction_index, reference, pool)?;
+                    self.pop_expected(instruction_index, value_kind(&ty))?;
+                    self.pop_expected(instruction_index, ValueKind::Reference)?;
+                }
             }
             Instruction::GetStatic(reference) => {
                 let ty = self.field_type(instruction_index, reference, pool)?;
@@ -1039,6 +1100,79 @@ impl Frame {
             index,
             error,
         })
+    }
+
+    fn flow_field_type(
+        &self,
+        instruction: usize,
+        reference: FieldReference,
+        pool: &ConstantPool,
+    ) -> Result<(ClassIdentity, FieldType), AnalysisError> {
+        let (owner, _, ty) = self.field_reference(instruction, reference, pool)?;
+        Ok((owner, ty))
+    }
+
+    fn field_reference<'a>(
+        &self,
+        instruction: usize,
+        reference: FieldReference,
+        pool: &'a ConstantPool,
+    ) -> Result<(ClassIdentity, &'a str, FieldType), AnalysisError> {
+        let index = reference.index().get();
+        let entry = pool
+            .get(index)
+            .ok_or(AnalysisError::InvalidConstantPoolOperand {
+                instruction,
+                index,
+                expected: ConstantPoolOperandKind::FieldReference,
+            })?;
+        let (class_index, name_and_type_index) = match entry {
+            ConstantPoolEntry::Fieldref {
+                class_index,
+                name_and_type_index,
+            } => (*class_index, *name_and_type_index),
+            _ => {
+                return Err(AnalysisError::InvalidConstantPoolOperand {
+                    instruction,
+                    index,
+                    expected: ConstantPoolOperandKind::FieldReference,
+                });
+            }
+        };
+        let owner = pool
+            .class_name(class_index)
+            .map_err(|error| AnalysisError::InvalidConstantPoolReference { instruction, error })?;
+        if !is_valid_internal_name(owner) {
+            return Err(AnalysisError::InvalidClassName { index: class_index });
+        }
+        let (name, descriptor) = pool
+            .name_and_type(name_and_type_index)
+            .map_err(|error| AnalysisError::InvalidConstantPoolReference { instruction, error })?;
+        let ty = FieldType::parse(descriptor).map_err(|error| {
+            AnalysisError::InvalidFieldDescriptor {
+                instruction,
+                index,
+                error,
+            }
+        })?;
+        Ok((ClassIdentity(Arc::from(owner)), name, ty))
+    }
+
+    fn pop_field_receiver(
+        &mut self,
+        instruction: usize,
+        expected_owner: &ClassIdentity,
+    ) -> Result<(), AnalysisError> {
+        let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+        let actual = actual.ok_or(AnalysisError::MissingExactReference { instruction })?;
+        if actual != *expected_owner {
+            return Err(AnalysisError::FieldOwnerMismatch {
+                instruction,
+                expected: expected_owner.clone(),
+                actual,
+            });
+        }
+        Ok(())
     }
 
     fn ldc_kind(
@@ -1471,9 +1605,10 @@ impl CfgCodeAnalyzer {
     /// receiver type for a non-static, non-constructor method.
     ///
     /// The existing [`Self::analyze`] entry point retains its receiver
-    /// placeholder behavior. This context enables only `aload` and `astore`
-    /// reference moves; object creation, fields, calls and reference method
-    /// signatures remain unsupported.
+    /// placeholder behavior. This context enables exact initialized-reference
+    /// moves, `dup`/`pop`, and `getfield`/`putfield` for `int` and `boolean`
+    /// fields whose owner matches the exact receiver. Object creation, calls,
+    /// and reference field types remain unsupported.
     pub fn analyze_with_current_class(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -1653,9 +1788,13 @@ impl CfgCodeAnalyzer {
             for (offset, element) in block.instructions.iter().enumerate() {
                 let instruction_index = block.instruction_range.start + offset;
                 match element {
-                    CodeElement::Instruction(instruction) => {
-                        frame.apply(instruction_index, *instruction, &descriptor, constant_pool)?
-                    }
+                    CodeElement::Instruction(instruction) => frame.apply(
+                        instruction_index,
+                        *instruction,
+                        &descriptor,
+                        constant_pool,
+                        current_class.as_ref(),
+                    )?,
                     CodeElement::Branch(branch) => {
                         apply_branch(&mut frame, instruction_index, branch)?;
                     }
@@ -1756,7 +1895,13 @@ fn validate_flow_instruction_with_context(
             | Instruction::IReturn
             | Instruction::Ldc(LdcConstant::Integer(_))
     ) || (exact_references
-        && matches!(instruction, Instruction::ALoad(_) | Instruction::AStore(_)));
+        && matches!(
+            instruction,
+            Instruction::ALoad(_)
+                | Instruction::AStore(_)
+                | Instruction::GetField(_)
+                | Instruction::PutField(_)
+        ));
     if supported {
         return Ok(());
     }
@@ -1785,6 +1930,18 @@ fn validate_flow_instruction_with_context(
         instruction: instruction_index,
         kind,
     })
+}
+
+fn validate_flow_field_type(
+    instruction: usize,
+    index: ConstantPoolIndex,
+    ty: &FieldType,
+) -> Result<(), AnalysisError> {
+    if matches!(ty, FieldType::Int | FieldType::Boolean) {
+        Ok(())
+    } else {
+        Err(AnalysisError::UnsupportedFlowFieldType { instruction, index })
+    }
 }
 
 fn local_access(instruction: Instruction) -> Option<(LocalIndex, u8)> {
@@ -2178,6 +2335,199 @@ mod tests {
             FlowLocalState::Object(class_identity("example/LoopReceiver"))
         );
         assert!(loop_state.operand_stack.is_empty());
+    }
+
+    #[test]
+    fn analyzes_int_field_reads_and_writes_through_reference_local_loop() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let field = builder.field_ref("example/Counter", "count", "I").unwrap();
+        let pool = builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        let loop_head = sequence.new_label().unwrap();
+        let exit = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AStore(LocalIndex::new(1)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::GetField(FieldReference::new(operand(field))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::GetField(FieldReference::new(operand(field))))
+            .instruction(Instruction::Pop)
+            .bind(loop_head.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(field))))
+            .branch(BranchInstruction::IfEq(exit.clone()))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(field))))
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .instruction(Instruction::IAdd)
+            .instruction(Instruction::PutField(FieldReference::new(operand(field))))
+            .branch(BranchInstruction::Goto(loop_head.clone()))
+            .bind(exit)
+            .unwrap()
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "increment",
+            "()V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+
+        assert_eq!(flow.max_stack, 3);
+        assert_eq!(flow.max_locals, 2);
+        assert_eq!(
+            flow.entry_state(graph.block_for_label(&loop_head).unwrap())
+                .unwrap()
+                .locals[1],
+            FlowLocalState::Object(class_identity("example/Counter"))
+        );
+    }
+
+    #[test]
+    fn rejects_field_owner_type_and_receiver_mismatches_in_cfg() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let int_field = builder.field_ref("example/Counter", "count", "I").unwrap();
+        let boolean_field = builder
+            .field_ref("example/Counter", "enabled", "Z")
+            .unwrap();
+        let wrong_owner = builder.field_ref("example/Other", "count", "I").unwrap();
+        let long_field = builder.field_ref("example/Counter", "wide", "J").unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut wrong_owner_code = CodeSequence::new();
+        wrong_owner_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(
+                wrong_owner,
+            ))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let wrong_owner_graph = ControlFlowGraph::build(&wrong_owner_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_owner_graph,
+                "read",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::FieldOwnerMismatch {
+                instruction: 1,
+                expected: class_identity("example/Other"),
+                actual: class_identity("example/Counter"),
+            })
+        );
+
+        let mut boolean_code = CodeSequence::new();
+        boolean_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(
+                boolean_field,
+            ))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let boolean_graph = ControlFlowGraph::build(&boolean_code).unwrap();
+        assert!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &boolean_graph,
+                "readBoolean",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            )
+            .is_ok()
+        );
+
+        let mut unsupported_type_code = CodeSequence::new();
+        unsupported_type_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(
+                long_field,
+            ))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let unsupported_type_graph = ControlFlowGraph::build(&unsupported_type_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &unsupported_type_graph,
+                "read",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::UnsupportedFlowFieldType {
+                instruction: 1,
+                index: long_field,
+            })
+        );
+
+        let mut wrong_value_code = CodeSequence::new();
+        wrong_value_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                int_field,
+            ))))
+            .instruction(Instruction::Return);
+        let wrong_value_graph = ControlFlowGraph::build(&wrong_value_code).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_value_graph,
+                "write",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Int,
+                actual: ValueKind::Reference,
+            })
+        ));
+    }
+
+    #[test]
+    fn field_access_rejects_uninitialized_reference_local() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let field = builder.field_ref("example/Counter", "count", "I").unwrap();
+        let pool = builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        sequence
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(field))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &graph,
+                "read",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::UninitializedLocal {
+                instruction: 0,
+                index: 1,
+            })
+        );
     }
 
     #[test]
