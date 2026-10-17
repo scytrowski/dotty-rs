@@ -571,42 +571,67 @@ impl<'a> EncodingContext<'a> {
         self.run(|c| c.local_inner(symbol, prefix, 0))
     }
 
-    /// Lowers the frozen Scala 3.9 wire form for a same-class method selection:
-    /// `SELECT(name, QUALTHIS(IDENTtpt(class, TYPEREFsymbol(class, package))))`.
+    /// Lowers the frozen Scala 3.9 wire form for an unqualified same-class
+    /// method selection using `QUALTHIS` and the canonical class declaration.
     pub fn same_class_method_select(
         &mut self,
         class: SymbolId,
         method: SymbolId,
     ) -> Result<AstLabel, PickleError> {
-        self.run(|c| {
-            let class_label = *c
-                .declarations
-                .get(&class)
-                .ok_or(reference(class, ReferenceError::NotRegistered))?;
-            let record = c.symbol(class)?;
-            let method_record = c.symbol(method)?;
-            if record.kind != SymbolKind::Class
-                || method_record.kind != SymbolKind::Method
-                || method_record.owner != Some(class)
-            {
-                return Err(reference(method, ReferenceError::Owner));
-            }
-            c.local(method)?;
-            let package = record
-                .owner
-                .ok_or(reference(class, ReferenceError::Owner))?;
-            let package_ref = c.package_reference(package)?;
-            let class_name = c.utf8(c.text(record.name.text())?)?;
-            let method_name = c.utf8(c.text(method_record.name.text())?)?;
-            let type_ref = c
-                .wire
-                .push(AstNode::NatAst {
-                    tag: TYPEREFSYMBOL_TAG,
-                    value: AstOperand::Reference(class_label),
-                    child: package_ref,
+        self.run(|c| c.same_class_method_select_inner(class, method, false))
+    }
+
+    /// Lowers the same-class method selection with an explicit `this` receiver.
+    pub fn same_class_method_select_on_this(
+        &mut self,
+        class: SymbolId,
+        method: SymbolId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| c.same_class_method_select_inner(class, method, true))
+    }
+
+    fn same_class_method_select_inner(
+        &mut self,
+        class: SymbolId,
+        method: SymbolId,
+        explicit_this: bool,
+    ) -> Result<AstLabel, PickleError> {
+        let class_label = *self
+            .declarations
+            .get(&class)
+            .ok_or(reference(class, ReferenceError::NotRegistered))?;
+        let record = self.symbol(class)?;
+        let method_record = self.symbol(method)?;
+        if record.kind != SymbolKind::Class
+            || method_record.kind != SymbolKind::Method
+            || method_record.owner != Some(class)
+        {
+            return Err(reference(method, ReferenceError::Owner));
+        }
+        self.local(method)?;
+        let package = record
+            .owner
+            .ok_or(reference(class, ReferenceError::Owner))?;
+        let package_ref = self.package_reference(package)?;
+        let class_name = self.utf8(self.text(record.name.text())?)?;
+        let method_name = self.utf8(self.text(method_record.name.text())?)?;
+        let type_ref = self
+            .wire
+            .push(AstNode::NatAst {
+                tag: TYPEREFSYMBOL_TAG,
+                value: AstOperand::Reference(class_label),
+                child: package_ref,
+            })
+            .map_err(construction)?;
+        let receiver = if explicit_this {
+            self.wire
+                .push(AstNode::Ast {
+                    tag: THIS_TAG,
+                    child: type_ref,
                 })
-                .map_err(construction)?;
-            let class_syntax = c
+                .map_err(construction)?
+        } else {
+            let class_syntax = self
                 .wire
                 .push(AstNode::NatAst {
                     tag: IDENTTPT_TAG,
@@ -614,21 +639,20 @@ impl<'a> EncodingContext<'a> {
                     child: type_ref,
                 })
                 .map_err(construction)?;
-            let receiver = c
-                .wire
+            self.wire
                 .push(AstNode::Ast {
                     tag: QUALTHIS_TAG,
                     child: class_syntax,
                 })
-                .map_err(construction)?;
-            c.wire
-                .push(AstNode::NatAst {
-                    tag: SELECT_TAG,
-                    value: AstOperand::Nat(method_name),
-                    child: receiver,
-                })
-                .map_err(construction)
-        })
+                .map_err(construction)?
+        };
+        self.wire
+            .push(AstNode::NatAst {
+                tag: SELECT_TAG,
+                value: AstOperand::Nat(method_name),
+                child: receiver,
+            })
+            .map_err(construction)
     }
     fn check_prefix(&self, symbol: SymbolId, prefix: TypeId) -> Result<(), PickleError> {
         let owner = self.symbol(symbol)?.owner;

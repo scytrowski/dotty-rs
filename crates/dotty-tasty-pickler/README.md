@@ -20,7 +20,9 @@ of its own ordinary Int formals, or an ordinary parameterless reference to a
 canonical method of the same class. Same-class method references derive their
 target from the typed `TermRef`, require a public declared Int method in the
 plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
-`QUALTHIS` receiver; forward references do not create synthetic AST addresses.
+receiver. An unqualified reference uses `QUALTHIS`, while an explicit `this`
+selection preserves the oracle's `THIS(TYPEREFsymbol(...))` shape; forward
+references do not create synthetic AST addresses.
 A method may have no value clause, one explicit
 empty clause, or one plain clause of ordinary Int
 parameters. Parameter IDs, ownership, source scope, types and order must agree
