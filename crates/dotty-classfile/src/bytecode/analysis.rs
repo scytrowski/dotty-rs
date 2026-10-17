@@ -2,8 +2,9 @@
 //!
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
 //! [`CfgCodeAnalyzer`] propagates integer and exact initialized-class
-//! references across symbolic branches. Neither analyzer is a full JVM
-//! verifier, and neither produces stack-map frames.
+//! references across symbolic branches, including bounded primitive virtual
+//! calls. Neither analyzer is a full JVM verifier, and neither produces
+//! stack-map frames.
 
 use super::{
     BasicBlockId, BranchInstruction, ClassReference, CodeElement, ConstantPoolOperandKind,
@@ -187,6 +188,38 @@ pub enum AnalysisError {
         /// Descriptor parser failure.
         error: DescriptorError,
     },
+    /// A method reference has an invalid JVM method name or names a special method.
+    InvalidReferencedMethodName {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Constant-pool entry that owns the name.
+        index: ConstantPoolIndex,
+    },
+    /// An invocation parameter type is outside the supported `I`/`Z` subset.
+    UnsupportedFlowMethodParameter {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Zero-based parameter position in the method descriptor.
+        parameter: usize,
+        /// Unsupported parameter type.
+        actual: FieldType,
+    },
+    /// An invocation result type is outside the supported `I`/`Z`/`V` subset.
+    UnsupportedFlowMethodReturn {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Unsupported result type.
+        actual: FieldType,
+    },
+    /// The exact receiver class differs from the owner named by the method reference.
+    MethodOwnerMismatch {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Owner named by the method reference.
+        expected: ClassIdentity,
+        /// Exact receiver class on the operand stack.
+        actual: ClassIdentity,
+    },
     /// A local access extends past the maximum representable `max_locals`.
     LocalLimitExceeded {
         /// Zero-based instruction position.
@@ -251,7 +284,7 @@ pub enum AnalysisError {
     },
     /// The instruction sequence has no terminal return.
     MissingReturn,
-    /// The CFG analyzer encountered an instruction outside its integer-only subset.
+    /// The CFG analyzer encountered an instruction outside its supported subset.
     UnsupportedFlowInstruction {
         /// Zero-based instruction position.
         instruction: usize,
@@ -329,7 +362,7 @@ pub enum AnalysisError {
     },
 }
 
-/// Why an instruction is outside the integer-only CFG analysis subset.
+/// Why an instruction is outside the supported CFG analysis subset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedFlowInstructionKind {
     /// The instruction reads, writes, or creates a reference value.
@@ -434,6 +467,36 @@ impl fmt::Display for AnalysisError {
                 formatter,
                 "instruction {instruction} method at constant-pool index {} has an invalid descriptor: {error}",
                 index.0
+            ),
+            Self::InvalidReferencedMethodName { instruction, index } => write!(
+                formatter,
+                "instruction {instruction} method at constant-pool index {} has an invalid or special name",
+                index.0
+            ),
+            Self::UnsupportedFlowMethodParameter {
+                instruction,
+                parameter,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} method parameter {parameter} has unsupported CFG type {actual:?}"
+            ),
+            Self::UnsupportedFlowMethodReturn {
+                instruction,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} method result has unsupported CFG type {actual:?}"
+            ),
+            Self::MethodOwnerMismatch {
+                instruction,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} method owner {} does not match receiver class {}",
+                expected.internal_name(),
+                actual.internal_name()
             ),
             Self::LocalLimitExceeded {
                 instruction,
@@ -839,8 +902,20 @@ impl Frame {
                 self.invoke(instruction_index, &descriptor, false)?;
             }
             Instruction::InvokeVirtual(reference) => {
-                let descriptor = self.method_descriptor(instruction_index, reference, pool)?;
-                self.invoke(instruction_index, &descriptor, true)?;
+                if flow_current_class.is_some() {
+                    let (owner, name, descriptor) =
+                        self.virtual_method(instruction_index, reference, pool)?;
+                    validate_flow_virtual_signature(
+                        instruction_index,
+                        reference.index().get(),
+                        name,
+                        &descriptor,
+                    )?;
+                    self.invoke_virtual_flow(instruction_index, &descriptor, &owner)?;
+                } else {
+                    let descriptor = self.method_descriptor(instruction_index, reference, pool)?;
+                    self.invoke(instruction_index, &descriptor, true)?;
+                }
             }
             Instruction::InvokeSpecial(reference) => {
                 let descriptor = self.method_descriptor(instruction_index, reference, pool)?;
@@ -1339,6 +1414,86 @@ impl Frame {
         })
     }
 
+    fn virtual_method<'a>(
+        &self,
+        instruction: usize,
+        reference: VirtualMethodReference,
+        pool: &'a ConstantPool,
+    ) -> Result<(ClassIdentity, &'a str, MethodDescriptor), AnalysisError> {
+        let index = reference.index().get();
+        let entry = pool
+            .get(index)
+            .ok_or(AnalysisError::InvalidConstantPoolOperand {
+                instruction,
+                index,
+                expected: ConstantPoolOperandKind::VirtualMethodReference,
+            })?;
+        let (class_index, name_and_type_index) = match entry {
+            ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            } => (*class_index, *name_and_type_index),
+            _ => {
+                return Err(AnalysisError::InvalidConstantPoolOperand {
+                    instruction,
+                    index,
+                    expected: ConstantPoolOperandKind::VirtualMethodReference,
+                });
+            }
+        };
+        let owner = pool
+            .class_name(class_index)
+            .map_err(|error| AnalysisError::InvalidConstantPoolReference { instruction, error })?;
+        if !is_valid_internal_name(owner) {
+            return Err(AnalysisError::InvalidClassName { index: class_index });
+        }
+        let (name, raw_descriptor) = pool
+            .name_and_type(name_and_type_index)
+            .map_err(|error| AnalysisError::InvalidConstantPoolReference { instruction, error })?;
+        let descriptor = MethodDescriptor::parse(raw_descriptor).map_err(|error| {
+            AnalysisError::InvalidReferencedMethodDescriptor {
+                instruction,
+                index,
+                error,
+            }
+        })?;
+        Ok((ClassIdentity(Arc::from(owner)), name, descriptor))
+    }
+
+    fn invoke_virtual_flow(
+        &mut self,
+        instruction: usize,
+        descriptor: &MethodDescriptor,
+        expected_owner: &ClassIdentity,
+    ) -> Result<(), AnalysisError> {
+        check_parameter_slots(descriptor, true, Some(instruction))?;
+        for _parameter in descriptor.parameters.iter().rev() {
+            self.pop_expected(instruction, ValueKind::Int)?;
+        }
+        self.pop_method_receiver(instruction, expected_owner)?;
+        if descriptor.return_type.is_some() {
+            self.push(instruction, ValueKind::Int)?;
+        }
+        Ok(())
+    }
+
+    fn pop_method_receiver(
+        &mut self,
+        instruction: usize,
+        expected_owner: &ClassIdentity,
+    ) -> Result<(), AnalysisError> {
+        let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+        let actual = actual.ok_or(AnalysisError::MissingExactReference { instruction })?;
+        if actual != *expected_owner {
+            return Err(AnalysisError::MethodOwnerMismatch {
+                instruction,
+                expected: expected_owner.clone(),
+                actual,
+            });
+        }
+        Ok(())
+    }
+
     fn invoke(
         &mut self,
         instruction: usize,
@@ -1545,7 +1700,7 @@ impl FlowAnalysis {
 }
 
 /// Fixed-point stack and local analysis for integer CFGs with exact
-/// initialized receiver references.
+/// initialized receiver references and bounded primitive virtual calls.
 pub struct CfgCodeAnalyzer;
 
 impl CfgCodeAnalyzer {
@@ -1586,9 +1741,9 @@ impl CfgCodeAnalyzer {
     /// local loads/stores, `dup`, integer arithmetic/comparisons, gotos, and
     /// `return`/`ireturn`. Reference, category-two, floating-point, exception,
     /// and switch flows are not supported. Use
-    /// [`Self::analyze_with_current_class`] to enable exact `aload`/`astore`
-    /// moves of the initialized receiver. No byte offsets or stack-map frames
-    /// are produced.
+    /// [`Self::analyze_with_current_class`] to enable exact initialized
+    /// receiver moves, primitive field accesses, and primitive `invokevirtual`
+    /// calls. No byte offsets or stack-map frames are produced.
     pub fn analyze(
         graph: &ControlFlowGraph,
         method_descriptor: &str,
@@ -1606,9 +1761,11 @@ impl CfgCodeAnalyzer {
     ///
     /// The existing [`Self::analyze`] entry point retains its receiver
     /// placeholder behavior. This context enables exact initialized-reference
-    /// moves, `dup`/`pop`, and `getfield`/`putfield` for `int` and `boolean`
-    /// fields whose owner matches the exact receiver. Object creation, calls,
-    /// and reference field types remain unsupported.
+    /// moves, `dup`/`pop`, `getfield`/`putfield` for `int` and `boolean` fields,
+    /// and `invokevirtual` methods with `int`/`boolean` parameters and
+    /// `int`/`boolean`/`void` results. Field and method owners must match the
+    /// exact receiver. Object creation, other invocation kinds, and reference
+    /// field or method types remain unsupported.
     pub fn analyze_with_current_class(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -1901,6 +2058,7 @@ fn validate_flow_instruction_with_context(
                 | Instruction::AStore(_)
                 | Instruction::GetField(_)
                 | Instruction::PutField(_)
+                | Instruction::InvokeVirtual(_)
         ));
     if supported {
         return Ok(());
@@ -1942,6 +2100,41 @@ fn validate_flow_field_type(
     } else {
         Err(AnalysisError::UnsupportedFlowFieldType { instruction, index })
     }
+}
+
+fn validate_flow_virtual_signature(
+    instruction: usize,
+    index: ConstantPoolIndex,
+    name: &str,
+    descriptor: &MethodDescriptor,
+) -> Result<(), AnalysisError> {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|character| matches!(character, '.' | ';' | '[' | '/' | '<' | '>'))
+    {
+        return Err(AnalysisError::InvalidReferencedMethodName { instruction, index });
+    }
+    for (parameter, ty) in descriptor.parameters.iter().enumerate() {
+        if !matches!(ty, FieldType::Int | FieldType::Boolean) {
+            return Err(AnalysisError::UnsupportedFlowMethodParameter {
+                instruction,
+                parameter,
+                actual: ty.clone(),
+            });
+        }
+    }
+    if let Some(result) = descriptor
+        .return_type
+        .as_ref()
+        .filter(|result| !matches!(result, FieldType::Int | FieldType::Boolean))
+    {
+        return Err(AnalysisError::UnsupportedFlowMethodReturn {
+            instruction,
+            actual: result.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn local_access(instruction: Instruction) -> Option<(LocalIndex, u8)> {
@@ -2203,7 +2396,7 @@ mod tests {
     }
 
     #[test]
-    fn characterizes_reference_cfg_operations_as_unsupported_before_type_flow() {
+    fn characterizes_reference_cfg_operations_as_unsupported_without_class_context() {
         let mut builder = ConstantPoolBuilder::new();
         let class = builder.class("example/Counter").unwrap();
         let field = builder.field_ref("example/Counter", "value", "I").unwrap();
@@ -2217,9 +2410,9 @@ mod tests {
         let _pool = builder.finish().unwrap();
         let cp_index = |index| operand(index);
 
-        // These exact errors are the current boundary, not a verifier result:
-        // the CFG validates the opcode family before it can reason about class
-        // owners, allocation identities, or predecessor types.
+        // The context-free compatibility entry point does not infer object
+        // identities and continues to reject reference operations before type
+        // flow. `analyze_with_current_class` enables only its documented subset.
         let reference_operations = [
             Instruction::AConstNull,
             Instruction::ALoad(LocalIndex::new(0)),
@@ -2242,7 +2435,7 @@ mod tests {
                     instruction: 7,
                     kind: UnsupportedFlowInstructionKind::Reference,
                 }),
-                "current integer-only CFG rejection for {instruction:?}"
+                "context-free CFG rejection for {instruction:?}"
             );
         }
     }
@@ -2335,6 +2528,539 @@ mod tests {
             FlowLocalState::Object(class_identity("example/LoopReceiver"))
         );
         assert!(loop_state.operand_stack.is_empty());
+    }
+
+    #[test]
+    fn invokes_virtual_method_after_reference_local_branch_join() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let get = builder.method_ref("example/Counter", "get", "()I").unwrap();
+        let enabled = builder
+            .method_ref("example/Counter", "isEnabled", "()Z")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        let otherwise = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .branch(BranchInstruction::IfEq(otherwise.clone()))
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AStore(LocalIndex::new(2)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(otherwise)
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AStore(LocalIndex::new(2)))
+            .bind(join.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(get),
+            )))
+            .instruction(Instruction::IReturn);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "readAfterBranch",
+            "(Z)I",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+
+        let join_state = flow
+            .entry_state(graph.block_for_label(&join).unwrap())
+            .unwrap();
+        assert_eq!(
+            join_state.locals[2],
+            FlowLocalState::Object(class_identity("example/Counter"))
+        );
+        assert!(join_state.operand_stack.is_empty());
+        assert_eq!(flow.max_stack, 1);
+        assert_eq!(flow.max_locals, 3);
+
+        let mut boolean_sequence = CodeSequence::new();
+        boolean_sequence
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(enabled),
+            )))
+            .instruction(Instruction::IReturn);
+        let boolean_graph = ControlFlowGraph::build(&boolean_sequence).unwrap();
+        assert!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &boolean_graph,
+                "enabled",
+                "()Z",
+                false,
+                &pool,
+                class_index,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn invokes_virtual_method_on_loop_back_edge_and_void_call_leaves_empty_stack() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let increment = builder
+            .method_ref("example/Counter", "increment", "()I")
+            .unwrap();
+        let set = builder
+            .method_ref("example/Counter", "set", "(I)V")
+            .unwrap();
+        let set_flag = builder
+            .method_ref("example/Counter", "setFlag", "(Z)V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut loop_sequence = CodeSequence::new();
+        let loop_head = loop_sequence.new_label().unwrap();
+        let exit = loop_sequence.new_label().unwrap();
+        loop_sequence
+            .bind(loop_head.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(increment),
+            )))
+            .instruction(Instruction::IStore(LocalIndex::new(1)))
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .branch(BranchInstruction::IfEq(exit.clone()))
+            .branch(BranchInstruction::Goto(loop_head.clone()))
+            .bind(exit)
+            .unwrap()
+            .instruction(Instruction::Return);
+        let loop_graph = ControlFlowGraph::build(&loop_sequence).unwrap();
+        let loop_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &loop_graph,
+            "incrementUntilZero",
+            "()V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(loop_flow.max_stack, 1);
+        assert_eq!(loop_flow.max_locals, 2);
+        assert_eq!(
+            loop_flow
+                .entry_state(loop_graph.block_for_label(&loop_head).unwrap())
+                .unwrap()
+                .locals[0],
+            FlowLocalState::Object(class_identity("example/Counter"))
+        );
+
+        let mut void_sequence = CodeSequence::new();
+        let after_call = void_sequence.new_label().unwrap();
+        void_sequence
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(set),
+            )))
+            .branch(BranchInstruction::Goto(after_call.clone()))
+            .bind(after_call.clone())
+            .unwrap()
+            .instruction(Instruction::Return);
+        let void_graph = ControlFlowGraph::build(&void_sequence).unwrap();
+        let void_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &void_graph,
+            "setValue",
+            "(I)V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert!(
+            void_flow
+                .entry_state(void_graph.block_for_label(&after_call).unwrap())
+                .unwrap()
+                .operand_stack
+                .is_empty()
+        );
+        assert_eq!(void_flow.max_stack, 2);
+
+        let mut boolean_parameter_sequence = CodeSequence::new();
+        boolean_parameter_sequence
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(set_flag),
+            )))
+            .instruction(Instruction::Return);
+        let boolean_parameter_graph = ControlFlowGraph::build(&boolean_parameter_sequence).unwrap();
+        assert!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &boolean_parameter_graph,
+                "setFlag",
+                "(Z)V",
+                false,
+                &pool,
+                class_index,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rejects_virtual_method_owner_category_signature_and_reference_kinds() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let wrong_owner = builder.method_ref("example/Other", "get", "()I").unwrap();
+        let get = builder.method_ref("example/Counter", "get", "()I").unwrap();
+        let take_int = builder
+            .method_ref("example/Counter", "take", "(I)V")
+            .unwrap();
+        let too_many_parameters = builder
+            .method_ref(
+                "example/Counter",
+                "tooWide",
+                &format!("({})V", "I".repeat(255)),
+            )
+            .unwrap();
+        let reference_parameter = builder
+            .method_ref("example/Counter", "accept", "(Ljava/lang/String;)V")
+            .unwrap();
+        let byte_parameter = builder
+            .method_ref("example/Counter", "acceptByte", "(B)V")
+            .unwrap();
+        let long_result = builder
+            .method_ref("example/Counter", "wide", "()J")
+            .unwrap();
+        let reference_result = builder
+            .method_ref("example/Counter", "object", "()Ljava/lang/Object;")
+            .unwrap();
+        let constructor = builder
+            .method_ref("example/Counter", "<init>", "()V")
+            .unwrap();
+        let malformed = builder
+            .method_ref("example/Counter", "broken", "not-a-method")
+            .unwrap();
+        let interface_method = builder
+            .interface_method_ref("example/Counter", "get", "()I")
+            .unwrap();
+        let invalid_owner_index = builder.class("bad.name").unwrap();
+        let invalid_owner = builder.method_ref("bad.name", "get", "()I").unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut wrong_owner_code = CodeSequence::new();
+        wrong_owner_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(wrong_owner),
+            )))
+            .instruction(Instruction::IReturn);
+        let wrong_owner_graph = ControlFlowGraph::build(&wrong_owner_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_owner_graph,
+                "wrongOwner",
+                "()I",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::MethodOwnerMismatch {
+                instruction: 1,
+                expected: class_identity("example/Other"),
+                actual: class_identity("example/Counter"),
+            })
+        );
+
+        let mut missing_receiver_code = CodeSequence::new();
+        missing_receiver_code
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(get),
+            )))
+            .instruction(Instruction::IReturn);
+        let missing_receiver_graph = ControlFlowGraph::build(&missing_receiver_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &missing_receiver_graph,
+                "missingReceiver",
+                "()I",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackUnderflow {
+                instruction: 0,
+                needed: 1,
+                available: 0,
+            })
+        );
+
+        let mut too_many_parameters_code = CodeSequence::new();
+        too_many_parameters_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(too_many_parameters),
+            )))
+            .instruction(Instruction::Return);
+        let too_many_parameters_graph = ControlFlowGraph::build(&too_many_parameters_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &too_many_parameters_graph,
+                "tooManyParameters",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::TooManyMethodParameterSlots {
+                instruction: Some(1),
+                slots: 256,
+            })
+        );
+
+        let mut integer_receiver_code = CodeSequence::new();
+        integer_receiver_code
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(get),
+            )))
+            .instruction(Instruction::IReturn);
+        let integer_receiver_graph = ControlFlowGraph::build(&integer_receiver_code).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &integer_receiver_graph,
+                "integerReceiver",
+                "()I",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 1,
+                expected: ValueKind::Reference,
+                actual: ValueKind::Int,
+            })
+        ));
+
+        let mut wrong_argument_code = CodeSequence::new();
+        wrong_argument_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(take_int),
+            )))
+            .instruction(Instruction::Return);
+        let wrong_argument_graph = ControlFlowGraph::build(&wrong_argument_code).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_argument_graph,
+                "wrongArgument",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Int,
+                actual: ValueKind::Reference,
+            })
+        ));
+
+        let signature_cases = [
+            (
+                reference_parameter,
+                AnalysisError::UnsupportedFlowMethodParameter {
+                    instruction: 1,
+                    parameter: 0,
+                    actual: FieldType::Object("java/lang/String".to_owned()),
+                },
+            ),
+            (
+                long_result,
+                AnalysisError::UnsupportedFlowMethodReturn {
+                    instruction: 1,
+                    actual: FieldType::Long,
+                },
+            ),
+            (
+                reference_result,
+                AnalysisError::UnsupportedFlowMethodReturn {
+                    instruction: 1,
+                    actual: FieldType::Object("java/lang/Object".to_owned()),
+                },
+            ),
+            (
+                byte_parameter,
+                AnalysisError::UnsupportedFlowMethodParameter {
+                    instruction: 1,
+                    parameter: 0,
+                    actual: FieldType::Byte,
+                },
+            ),
+            (
+                constructor,
+                AnalysisError::InvalidReferencedMethodName {
+                    instruction: 1,
+                    index: constructor,
+                },
+            ),
+        ];
+        for (method, expected) in signature_cases {
+            let mut sequence = CodeSequence::new();
+            sequence
+                .instruction(Instruction::ALoad(LocalIndex::new(0)))
+                .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                    operand(method),
+                )))
+                .instruction(Instruction::Return);
+            let graph = ControlFlowGraph::build(&sequence).unwrap();
+            assert_eq!(
+                CfgCodeAnalyzer::analyze_with_current_class(
+                    &graph,
+                    "invalidSignature",
+                    "()V",
+                    false,
+                    &pool,
+                    class_index,
+                ),
+                Err(expected)
+            );
+        }
+
+        let mut malformed_code = CodeSequence::new();
+        malformed_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(malformed),
+            )))
+            .instruction(Instruction::Return);
+        let malformed_graph = ControlFlowGraph::build(&malformed_code).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &malformed_graph,
+                "malformedDescriptor",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::InvalidReferencedMethodDescriptor { index, .. }) if index == malformed
+        ));
+
+        let mut interface_code = CodeSequence::new();
+        interface_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(interface_method),
+            )))
+            .instruction(Instruction::IReturn);
+        let interface_graph = ControlFlowGraph::build(&interface_code).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &interface_graph,
+                "interfaceReference",
+                "()I",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::InvalidConstantPoolOperand {
+                instruction: 1,
+                expected: ConstantPoolOperandKind::VirtualMethodReference,
+                ..
+            })
+        ));
+
+        let mut invalid_owner_code = CodeSequence::new();
+        invalid_owner_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(invalid_owner),
+            )))
+            .instruction(Instruction::IReturn);
+        let invalid_owner_graph = ControlFlowGraph::build(&invalid_owner_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &invalid_owner_graph,
+                "invalidOwner",
+                "()I",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::InvalidClassName {
+                index: invalid_owner_index,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_uninitialized_and_top_reference_locals_as_virtual_receivers() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let get = builder.method_ref("example/Counter", "get", "()I").unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut uninitialized_code = CodeSequence::new();
+        uninitialized_code
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(get),
+            )))
+            .instruction(Instruction::IReturn);
+        let uninitialized_graph = ControlFlowGraph::build(&uninitialized_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &uninitialized_graph,
+                "uninitializedReceiver",
+                "()I",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::UninitializedLocal {
+                instruction: 0,
+                index: 1,
+            })
+        );
+
+        let mut top_code = CodeSequence::new();
+        let other = top_code.new_label().unwrap();
+        let join = top_code.new_label().unwrap();
+        top_code
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .branch(BranchInstruction::IfEq(other.clone()))
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .instruction(Instruction::IStore(LocalIndex::new(2)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(other)
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AStore(LocalIndex::new(2)))
+            .bind(join)
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(get),
+            )))
+            .instruction(Instruction::IReturn);
+        let top_graph = ControlFlowGraph::build(&top_code).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &top_graph,
+                "topReceiver",
+                "(Z)I",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::UninitializedLocal {
+                instruction: 7,
+                index: 2,
+            })
+        ));
     }
 
     #[test]
