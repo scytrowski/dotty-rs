@@ -1,8 +1,10 @@
 //! The frozen literal slice has no recursive expression edges.
 
-use dotty_core::ast::TypedAst;
+use dotty_core::ast::{ApplyKind, TypedAst};
 use dotty_core::{Constant, SemanticStore, SymbolId, TermRefTarget, TreeId, TreeKind, Type, Typed};
-use dotty_tasty::tasty::{AstLabel, AstNode, INTCONST_TAG, SimpleTerm, TermValue};
+use dotty_tasty::tasty::{
+    APPLY_TAG, AstField, AstLabel, AstNode, INTCONST_TAG, SimpleTerm, TermValue,
+};
 
 use crate::{EncodingContext, PickleError, UnsupportedFeature};
 
@@ -17,6 +19,65 @@ pub(crate) fn lower_expression(
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::Apply(application) = &tree.kind {
+        if application.kind != ApplyKind::Regular || application.args.len() != 1 {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            });
+        }
+        let function = ast
+            .try_get(application.function)
+            .ok_or(PickleError::InvalidTypedTree {
+                tree: application.function,
+            })?;
+        let Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(target),
+        } = store
+            .types
+            .try_get(function.ty)
+            .ok_or(PickleError::BodyType {
+                tree: application.function,
+                ty: function.ty,
+            })?
+        else {
+            return Err(PickleError::BodyType {
+                tree: application.function,
+                ty: function.ty,
+            });
+        };
+        if matches!(
+            ast.try_get(application.args[0])
+                .map(|argument| &argument.kind),
+            Some(TreeKind::Apply(_))
+        ) {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            });
+        }
+        let explicit_this = matches!(function.kind, TreeKind::Select(_));
+        let class = store
+            .symbols
+            .get(method)
+            .owner
+            .ok_or(PickleError::InvalidSymbol { symbol: method })?;
+        if !matches!(store.types.try_get(*prefix), Some(Type::ThisType { class: prefix_class }) if *prefix_class == class)
+        {
+            return Err(PickleError::Reference {
+                symbol: *target,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        let function_label = context.same_class_method_select_in(class, *target, explicit_this)?;
+        let argument =
+            lower_expression(store, ast, application.args[0], method, parameters, context)?;
+        return context.wire_node(AstNode::Length {
+            tag: APPLY_TAG,
+            fields: vec![AstField::Tree(function_label), AstField::Tree(argument)],
+        });
+    }
     if let TreeKind::Ident(_) = &tree.kind {
         let Type::TermRef {
             prefix,

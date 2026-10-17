@@ -16,6 +16,7 @@ const PARAMETER_DECL: &str =
 const REFERENCES: &str = include_str!("../../../tests/fixtures/tasty_pickler/References.scala");
 const EXPLICIT_THIS_REFERENCES: &str =
     "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
+const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 fn source_outputs(
@@ -183,6 +184,7 @@ fn source_outputs_named(
                 value: Constant::Int(_)
             }) | TreeKind::Ident(_)
                 | TreeKind::Select(_)
+                | TreeKind::Apply(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
@@ -190,7 +192,7 @@ fn source_outputs_named(
         TreeKind::Literal(Literal {
             value: Constant::Int(value),
         }) => Some(*value),
-        TreeKind::Ident(_) | TreeKind::Select(_) => None,
+        TreeKind::Ident(_) | TreeKind::Select(_) | TreeKind::Apply(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle()?;
@@ -220,6 +222,9 @@ fn source_outputs_named(
         }
         (None, Some(dotty_tasty::tasty::RawTree::NatAst { tag, .. })) => {
             assert_eq!(tag, dotty_tasty::tasty::SELECT_TAG);
+        }
+        (None, Some(dotty_tasty::tasty::RawTree::LengthNode(node))) => {
+            assert_eq!(node.tag, dotty_tasty::tasty::APPLY_TAG);
         }
         (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
     }
@@ -353,6 +358,104 @@ fn explicit_this_method_reference_preserves_the_verified_this_wire_shape() {
         assert!(
             result.success(),
             "explicit-this Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
+fn same_class_int_applications_preserve_selected_target_and_argument_order() {
+    use dotty_tasty::tasty::*;
+
+    let (_, first) = source_outputs_named(OPERATIONS, "Operations.scala", |_| {}).unwrap();
+    let (_, second) = source_outputs_named(OPERATIONS, "Operations.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let use_body = addresses
+        .get(first.declarations()[2].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(call_node) = use_body.rhs.unwrap() else {
+        panic!("expected APPLY")
+    };
+    let call = call_node.decode_apply().unwrap();
+    let RawTree::LengthNode(select_node) = call.function else {
+        panic!("expected SELECTin")
+    };
+    let select = select_node.decode_select_in().unwrap();
+    assert_eq!(select.tag, SELECTIN_TAG);
+    assert!(matches!(
+        file.render_signed_name(select.name).unwrap(),
+        Some(RenderedSignedName::Signed { original, signature })
+            if original == "identity"
+                && signature.result == "scala.Int"
+                && signature.parameters == [RenderedParamSig::TermParameter("scala.Int".into())]
+    ));
+    assert_eq!(call.arguments.len(), 1);
+    assert!(matches!(
+        call.arguments[0],
+        RawTree::Leaf(SimpleTerm {
+            tag: INTCONST_TAG,
+            value: TermValue::Int(42),
+            ..
+        })
+    ));
+
+    let propagate_body = addresses
+        .get(first.declarations()[4].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(propagate_node) = propagate_body.rhs.unwrap() else {
+        panic!("expected APPLY")
+    };
+    let propagate_call = propagate_node.decode_apply().unwrap();
+    let RawTree::LengthNode(propagate_select_node) = propagate_call.function else {
+        panic!("expected SELECTin")
+    };
+    let propagate_select = propagate_select_node.decode_select_in().unwrap();
+    assert!(
+        matches!(file.render_signed_name(propagate_select.name).unwrap(), Some(RenderedSignedName::Signed { original, .. }) if original == "identity")
+    );
+    assert_eq!(propagate_call.arguments.len(), 1);
+    assert!(
+        matches!(propagate_call.arguments[0], RawTree::Leaf(ref leaf) if leaf.tag == TERMREFDIRECT_TAG)
+    );
+    let explicit_body = addresses
+        .get(first.declarations()[5].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(explicit_call_node) = explicit_body.rhs.unwrap() else {
+        panic!("expected APPLY")
+    };
+    let explicit_call = explicit_call_node.decode_apply().unwrap();
+    let RawTree::LengthNode(explicit_select_node) = explicit_call.function else {
+        panic!("expected SELECTin")
+    };
+    let explicit_select = explicit_select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        explicit_select.qualifier,
+        RawTree::Ast { tag: THIS_TAG, .. }
+    ));
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1243/generated/example/Operations.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, first.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1243/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
+        assert!(
+            result.success(),
+            "Operations Scala interoperability gate failed"
         );
     }
 }
