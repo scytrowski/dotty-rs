@@ -5523,6 +5523,7 @@ fn verify_counter_control_flow_with_jdk(output_directory: &Path) {
         .args([
             "-c",
             "-v",
+            "-p",
             "-classpath",
             output_path,
             "Counter",
