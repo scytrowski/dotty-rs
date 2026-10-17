@@ -77,7 +77,8 @@ the relevant typed backend failures include:
 | Constructor symbol is not the source-proven primary constructor or has an unsupported source shape | `InvalidPrimaryConstructor { issue: SourceIdentity/SourceShape/... }` |
 | Target class has no plan in this unit | `MissingClassPlan` |
 | Abstract, generic, trait, object, nested, or otherwise unsupported class form | `UnsupportedJvmClass` |
-| Reference class appears in a public primitive-only method descriptor | `UnsupportedJvmType { kind: ReferenceClass }` |
+| Reference class appears in the store-only `JvmMethodPlan::descriptor` or a constructor signature | `UnsupportedJvmType { kind: ReferenceClass }` |
+| Exact planned reference appears in `JvmCompilationUnit::metadata` | Valid method descriptor metadata; class emission remains unsupported |
 | Call uses an arbitrary non-`this` selection in the current same-class resolver | `UnsupportedJvmCallShape { kind: NonThisReceiver }` |
 | Distinct class symbols have the same emitted internal name | `DuplicateJvmClassIdentity` |
 
