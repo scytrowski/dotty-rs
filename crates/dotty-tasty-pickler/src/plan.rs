@@ -4,7 +4,7 @@ use dotty_core::ast::{AstArena, DefDef, Modifiers, NumberKind, Tree, TreeKind, U
 use dotty_core::{
     Constant, Definitions, MethodKind, Name, NameId, Namespace, SemanticStore, SourceDefinition,
     SourceId, SourceSemanticIndex, SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo,
-    SymbolKind, SymbolOrigin, TreeId, Type, TypeId, Typed, Untyped, Visibility,
+    SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type, TypeId, Typed, Untyped, Visibility,
 };
 
 use crate::{Builtin, LimitKind, PickleError, SourceRole, TypeRole, UnsupportedFeature};
@@ -897,22 +897,79 @@ impl<'a> Validator<'_, 'a> {
             return Err(PickleError::BodySpan { tree: body });
         }
         let body_type = self.ty(node.ty)?;
-        let TreeKind::Literal(literal) = &node.kind else {
-            return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
-        };
-        if !matches!((&literal.value, body_type), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value)
-        {
-            return Err(PickleError::BodyType {
-                tree: body,
-                ty: node.ty,
-            });
-        }
-        let expected = match &source_rhs.kind {
-            TreeKind::Literal(source_literal) => match source_literal.value {
-                Constant::Int(value) => Some(value),
-                _ => None,
-            },
-            TreeKind::PhaseSpecific(UntypedNode::Number(number)) => {
+        let expected = match (&source_rhs.kind, &node.kind) {
+            (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) => {
+                if source_ident.name != typed_ident.name
+                    || source_ident.backquoted != typed_ident.backquoted
+                {
+                    return Err(PickleError::SourceShape {
+                        tree: rhs,
+                        expected: SourceRole::Body,
+                    });
+                }
+                let Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(parameter),
+                } = body_type
+                else {
+                    return Err(PickleError::BodyType {
+                        tree: body,
+                        ty: node.ty,
+                    });
+                };
+                self.kind(*parameter, SymbolKind::Parameter)?;
+                self.owner(*parameter, Some(method.symbol))?;
+                if !method
+                    .parameter_clauses
+                    .iter()
+                    .flatten()
+                    .any(|candidate| candidate == parameter)
+                {
+                    return Err(PickleError::Reference {
+                        symbol: *parameter,
+                        reason: crate::ReferenceError::NotRegistered,
+                    });
+                }
+                if self.symbol(*parameter)?.name != source_ident.name {
+                    return Err(PickleError::NameMismatch {
+                        symbol: *parameter,
+                        tree: rhs,
+                    });
+                }
+                if *prefix != p.definitions.no_prefix
+                    || !matches!(self.ty(*prefix)?, Type::NoPrefix)
+                {
+                    return Err(PickleError::Reference {
+                        symbol: *parameter,
+                        reason: crate::ReferenceError::Owner,
+                    });
+                }
+                if self.complete(*parameter)? != p.definitions.int {
+                    return Err(PickleError::UnsupportedTypeReference { ty: node.ty });
+                }
+                None
+            }
+            (TreeKind::Literal(source_literal), TreeKind::Literal(literal)) => {
+                if !matches!((&literal.value, body_type), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value)
+                {
+                    return Err(PickleError::BodyType {
+                        tree: body,
+                        ty: node.ty,
+                    });
+                }
+                match source_literal.value {
+                    Constant::Int(value) => Some(value),
+                    _ => None,
+                }
+            }
+            (TreeKind::PhaseSpecific(UntypedNode::Number(number)), TreeKind::Literal(literal)) => {
+                if !matches!((&literal.value, body_type), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value)
+                {
+                    return Err(PickleError::BodyType {
+                        tree: body,
+                        ty: node.ty,
+                    });
+                }
                 // Expression parsing retains unsuffixed integers as raw numbers.
                 // Bound the interned spelling before normalizing or decoding it.
                 let digits = self.name_text(number.text)?.replace('_', "");
@@ -945,17 +1002,35 @@ impl<'a> Validator<'_, 'a> {
                     expected: SourceRole::Body,
                 })?)
             }
-            _ => None,
+            (TreeKind::Ident(_), _) => {
+                return Err(PickleError::SourceShape {
+                    tree: rhs,
+                    expected: SourceRole::Body,
+                });
+            }
+            (_, _) => {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            }
         };
-        if let (Some(expected), Constant::Int(actual)) = (expected, &literal.value)
-            && expected != *actual
-        {
-            return Err(PickleError::BodySourceValue {
-                source_tree: rhs,
-                typed_tree: body,
-                expected,
-                actual: *actual,
-            });
+        if let Some(expected) = expected {
+            let TreeKind::Literal(literal) = &node.kind else {
+                return Err(PickleError::SourceShape {
+                    tree: rhs,
+                    expected: SourceRole::Body,
+                });
+            };
+            if let Constant::Int(actual) = &literal.value
+                && expected != *actual
+            {
+                return Err(PickleError::BodySourceValue {
+                    source_tree: rhs,
+                    typed_tree: body,
+                    expected,
+                    actual: *actual,
+                });
+            }
         }
         Ok(())
     }

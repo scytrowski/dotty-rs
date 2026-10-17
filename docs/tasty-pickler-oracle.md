@@ -36,8 +36,9 @@ Fixtures are under [`tests/fixtures/tasty_pickler/`](../tests/fixtures/tasty_pic
 
 Each source produces exactly one top-level `.tasty`. Adjacent `.class` files are
 generated in temporary compiler output but are not checked in or supplied to the
-standalone reader. The additional fixtures characterize grammar/ref distinctions;
-they do not broaden the minimal producer's supported language subset.
+standalone reader. The fixture set records both supported producer cases and
+broader grammar/reference observations; each implementation increment defines
+its own bounded input slice.
 
 The underlying rules were checked against the pinned upstream
 [`Pickler.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/transform/Pickler.scala),
@@ -135,10 +136,10 @@ constructor clauses/result syntax, return-type wrapper and actual literal RHS.
 | --- | --- |
 | Rust parser/validator | Target version and valid wire/reference structure within codec checks |
 | Snapshot / focused AST assertions | Exact observed structure and identities for these fixtures |
-| Semantic unpickler parity (future producer gate) | Normalized source-vs-decoded declaration/owner/type relationships; not typed-body reconstruction |
+| Source-to-pickler-to-unpickler identity test | Generated `TERMREFdirect` re-enters as a `TermRef` to the exact owned second formal; no typed AST body is reconstructed |
 | Independent decompiler | Scala reader can load/print the candidate; not full compilation |
 | Independent `-from-tasty` plus new output class | Scala compiler phases accepted this candidate, without an original class masking it |
-| Future #1195 runtime test | The class compiled from actual Rust output returns 42 |
+| Opt-in `--runtime` for `Answer` and `Parameters` | A class compiled from actual Rust output returns 42, including `Parameters.pick(11, 42)` |
 
 No encoder/decoder agreement or byte-for-byte fixture roundtrip substitutes for
 the independent compiler gate. Raw fixture SHA-256 values authenticate the checked-in

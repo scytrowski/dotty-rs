@@ -246,11 +246,18 @@ impl ValidatedPicklePlan<'_, '_> {
                 let body = method.body.ok_or(PickleError::MissingBody {
                     method: method.symbol,
                 })?;
+                let parameters = method
+                    .parameter_clauses
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>();
                 fields.push(AstField::Tree(crate::expression::lower_expression(
                     p.store,
                     p.typed_ast,
                     body,
                     method.symbol,
+                    &parameters,
                     &mut context,
                 )?));
             }

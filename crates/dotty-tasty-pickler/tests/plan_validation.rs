@@ -69,6 +69,21 @@ fn add_parameters(f: &mut Fixture) -> [SymbolId; 2] {
     [symbols[0], symbols[1]]
 }
 
+fn set_ident_body(f: &mut Fixture, name_symbol: SymbolId, target: SymbolId, prefix: TypeId) {
+    let name = f.store.symbols.get(name_symbol).name;
+    let ident = Ident {
+        name,
+        backquoted: false,
+    };
+    f.source_ast.get_mut(f.rhs).kind = TreeKind::Ident(ident);
+    let typed = f.typed_ast.get_mut(f.body);
+    typed.kind = TreeKind::Ident(ident);
+    typed.ty = f.store.types.alloc(Type::TermRef {
+        prefix,
+        target: TermRefTarget::Symbol(target),
+    });
+}
+
 #[test]
 fn one_plain_int_clause_validates_against_canonical_source_and_signature_order() {
     let mut f = Fixture::new();
@@ -186,6 +201,91 @@ fn parameter_scope_and_declared_int_type_are_required() {
             symbol: Some(first),
         })
     );
+}
+
+#[test]
+fn formal_identifier_identity_comes_from_its_typed_term_reference() {
+    let mut f = Fixture::new();
+    let [first, second] = add_parameters(&mut f);
+    let no_prefix = f.definitions.no_prefix;
+    set_ident_body(&mut f, second, second, no_prefix);
+    assert!(f.plan().validate().is_ok());
+
+    // A spelling match cannot override the semantic target selected by Tree::ty.
+    set_ident_body(&mut f, second, first, no_prefix);
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::NameMismatch {
+            symbol: first,
+            tree: f.rhs,
+        })
+    );
+
+    // The same spelling under another method is still a foreign declaration.
+    let other_name = TermName::new(f.store.names.intern("other"));
+    let other_method = support::source_symbol(
+        &mut f.store,
+        *other_name.as_name(),
+        SymbolKind::Method,
+        f.class,
+        f.source,
+        SymbolInfo::Complete(f.definitions.int),
+    );
+    let foreign_name = TermName::new(f.store.names.intern("second"));
+    let foreign = support::source_symbol(
+        &mut f.store,
+        *foreign_name.as_name(),
+        SymbolKind::Parameter,
+        other_method,
+        f.source,
+        SymbolInfo::Complete(f.definitions.int),
+    );
+    set_ident_body(&mut f, foreign, foreign, no_prefix);
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::Owner {
+            symbol: foreign,
+            expected: Some(f.methods[0].symbol),
+            actual: Some(other_method),
+        })
+    );
+
+    // An enclosing-class prefix cannot be erased into a direct local reference.
+    let this_prefix = f.store.types.alloc(Type::ThisType { class: f.class });
+    set_ident_body(&mut f, second, second, this_prefix);
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::Reference {
+            symbol: second,
+            reason: ReferenceError::Owner,
+        })
+    );
+
+    // A field, local, or module with the same spelling is not a formal.
+    for kind in [
+        SymbolKind::Field,
+        SymbolKind::Local,
+        SymbolKind::ModuleClass,
+    ] {
+        let name = TermName::new(f.store.names.intern("second"));
+        let symbol = support::source_symbol(
+            &mut f.store,
+            *name.as_name(),
+            kind,
+            f.methods[0].symbol,
+            f.source,
+            SymbolInfo::Complete(f.definitions.int),
+        );
+        set_ident_body(&mut f, symbol, symbol, no_prefix);
+        assert_eq!(
+            f.plan().validate().err(),
+            Some(PickleError::Kind {
+                symbol,
+                expected: SymbolKind::Parameter,
+                actual: kind,
+            })
+        );
+    }
 }
 
 #[test]

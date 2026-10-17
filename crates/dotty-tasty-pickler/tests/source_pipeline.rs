@@ -10,6 +10,7 @@ use std::process::Command;
 
 const ANSWER: &str = include_str!("../../../tests/fixtures/tasty_pickler/Answer.scala");
 const MULTI: &str = include_str!("../../../tests/fixtures/tasty_pickler/Multi.scala");
+const PARAMETERS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Parameters.scala");
 const PARAMETER_DECL: &str =
     include_str!("../../../tests/fixtures/tasty_pickler/ParameterDecl.scala");
 
@@ -176,15 +177,16 @@ fn source_outputs_named(
             typer.typed_ast().get(body).kind,
             TreeKind::Literal(Literal {
                 value: Constant::Int(_)
-            })
+            }) | TreeKind::Ident(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
-    let TreeKind::Literal(Literal {
-        value: Constant::Int(value),
-    }) = typer.typed_ast().get(body).kind
-    else {
-        panic!()
+    let expected_literal = match &typer.typed_ast().get(body).kind {
+        TreeKind::Literal(Literal {
+            value: Constant::Int(value),
+        }) => Some(*value),
+        TreeKind::Ident(_) => None,
+        other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle()?;
     for method in &methods {
@@ -199,11 +201,20 @@ fn source_outputs_named(
         .unwrap()
         .decode_defdef_body()
         .unwrap();
-    let Some(dotty_tasty::tasty::RawTree::Leaf(rhs)) = wire_method.rhs else {
-        panic!()
-    };
-    assert_eq!(rhs.tag, dotty_tasty::tasty::INTCONST_TAG);
-    assert_eq!(rhs.value, dotty_tasty::tasty::TermValue::Int(value));
+    match (expected_literal, wire_method.rhs) {
+        (Some(value), Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
+            assert_eq!(rhs.tag, dotty_tasty::tasty::INTCONST_TAG);
+            assert_eq!(rhs.value, dotty_tasty::tasty::TermValue::Int(value));
+        }
+        (None, Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
+            assert_eq!(rhs.tag, dotty_tasty::tasty::TERMREFDIRECT_TAG);
+            assert!(matches!(
+                rhs.value,
+                dotty_tasty::tasty::TermValue::AstRef(_)
+            ));
+        }
+        (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
+    }
     assert_eq!(complete.encode_validated().unwrap(), output.bytes());
     let skeleton = checked.declaration_skeleton()?;
     let file =
@@ -426,6 +437,81 @@ fn source_int_parameters_emit_ordered_canonical_param_declarations() {
         assert!(
             result.success(),
             "requested ParameterDecl Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
+fn source_parameter_ident_emits_a_direct_reference_to_its_exact_param_declaration() {
+    use dotty_tasty::tasty::*;
+
+    let (_, first) = source_outputs_named(PARAMETERS, "Parameters.scala", |_| {}).unwrap();
+    let (_, second) = source_outputs_named(PARAMETERS, "Parameters.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    assert_eq!(first.intended_tasty_path(), "example/Parameters.tasty");
+
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let address_index = file.ast_address_index().unwrap();
+    let pick = first
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            address_index
+                .get(declaration.address)
+                .and_then(|node| node.decode_defdef_body().ok())
+                .is_some_and(|body| file.render_name(body.name).ok().as_deref() == Some("pick"))
+        })
+        .unwrap();
+    let pick_body = address_index
+        .get(pick.address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let parameters = first
+        .declarations()
+        .iter()
+        .filter(|declaration| declaration.owner == pick.symbol)
+        .collect::<Vec<_>>();
+    assert_eq!(parameters.len(), 2);
+    assert!(parameters[0].address < parameters[1].address);
+    let names = parameters
+        .iter()
+        .map(|declaration| {
+            let parameter = address_index
+                .get(declaration.address)
+                .unwrap()
+                .decode_parameter()
+                .unwrap();
+            file.render_name(parameter.name()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["first", "second"]);
+    let Some(RawTree::Leaf(reference)) = pick_body.rhs else {
+        panic!("formal parameter RHS must be one direct reference leaf")
+    };
+    assert_eq!(reference.tag, TERMREFDIRECT_TAG);
+    assert_eq!(
+        reference.ast_ref().map(|reference| reference.address),
+        Some(parameters[1].address),
+        "the body must reference the second canonical PARAM declaration"
+    );
+
+    if std::env::var_os("DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1241/generated/example/Parameters.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, first.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1241/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
+        assert!(
+            result.success(),
+            "requested Parameters Scala interoperability gate failed"
         );
     }
 }

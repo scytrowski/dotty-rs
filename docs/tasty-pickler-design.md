@@ -212,13 +212,13 @@ It is compiler-generated, not evidence of a source annotation in the core store.
 
 ### Supported and deferred surface
 
-| Surface | First complete file (#1194/#1195) | Deferred / oracle-only |
+| Surface | Implemented complete file (#1194/#1195/#1241) | Deferred / oracle-only |
 | --- | --- | --- |
 | Unit/output boundary | One ordinary top-level class in explicit `package example`; one package-aligned `.tasty` per class | Default/nested packages, multiple classes, linked class/object outputs |
 | Class | Public, no type/value parameters, no self type, no fields, no explicit extends or initialization statements; exact canonical implicit Object parent | Traits, objects, companions, nesting, enums, arbitrary inheritance/constructors |
 | Method | One or more public ordinary monomorphic concrete methods, declared Int result, no clause, one explicit empty clause, or one plain clause of ordinary Int parameters | Multiple/curried/contextual/erased/repeated/defaulted clauses, abstract methods |
 | Signature/types | Int result and parameter types; canonical Int-literal RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
-| Body | Actual typed Int literal, including its value/type agreement | Calls, blocks, if/match, locals, functions, returns and all other expressions |
+| Body | Actual typed Int literal or a `TermRef` to a declared formal of the same method; literal value/type, source binding and parameter identity must agree | Calls, blocks, if/match, locals, functions, returns and all other expressions |
 | Metadata | Public/no extra source flags or annotations; required constructor marker; normalized source identity | General annotations/modifiers, full position/comment preservation, outline/best-effort/Java TASTy |
 
 An empty class is an oracle control, not an automatic broadening of the first
@@ -650,10 +650,11 @@ AGENTS.md checks. This audit changes documentation only; it does not regenerate
 baselines, introduce production dependencies, implement the pickler, or add
 modules/objects/generics/inline/macros/full source positions to the sprint.
 
-## Implemented complete literal-body producer (#1194)
+## Implemented complete literal and formal-reference bodies (#1194, #1241)
 
 `ValidatedPicklePlan::pickle()` now returns an owned `PickledTasty` for the frozen
-one-package/class/default-constructor/parameterless-Int-method slice.
+one-package/class/default-constructor/ordinary Int-method slice, including one
+plain Int formal clause.
 `pickle_with_limits(PickleLimits)` adds a whole-file size budget (16 MiB by
 default) to the existing semantic/name/type/wire budgets. It measures header,
 name-table and section framing plus payloads before the full-file encoder runs.
@@ -662,14 +663,17 @@ are `PickleError::LimitExceeded { kind: FileBytes, .. }`. No partial output is
 published on failure, and no compiler arena or source index is mutated.
 
 The small expression lowerer borrows the same `SemanticStore` and `TypedAst` and
-reads the exact validated method-plan `TreeId<Typed>`. The sole supported kind is
-`Literal(Int(n))`; its actual `Tree::ty` must be `Type::Constant(Int(n))`.
-The method's declared result remains canonical `Definitions.int`. In the pinned
-`TreePickler.pickleConstant` contract this becomes a single `INTconst n` after
-the method's Int return `IDENTtpt`. No expression type ascription, recursive
-wrapper, fake method tree or extra `METHODtype` is required. Other expression
-kinds fail explicitly without traversal or simplification, even cyclic malformed
-unsupported nodes. Existing source/typed root identity and span checks apply.
+reads the exact validated method-plan `TreeId<Typed>`. `Literal(Int(n))` retains
+its exact `Type::Constant(Int(n))` check and emits one `INTconst n`. A formal
+`Ident` resolves only from `Tree::ty = TermRef(Symbol(parameter))`; the target
+must be a live Int `Parameter` owned by that method and present in its canonical
+source clause. The source and typed identifier spellings are consistency checks,
+never a way to find a declaration. Its `TERMREFdirect` uses the reserved label
+for that exact `PARAM`, so layout resolves the reference to the final declaration
+address. Non-prefix formal references, same-spelled foreign parameters, fields,
+locals, modules and unsupported expressions fail with typed errors. Both body
+forms retain exact source/typed root binding and span checks, and preserve the
+method's canonical `Definitions.int` result.
 
 Complete and incomplete output share declaration/owner/reference assembly but
 remain distinct public results: `DeclarationSkeleton` still records omitted
@@ -692,8 +696,11 @@ re-encode/decode the generated file byte-for-byte. Real Lexer/Parser/Namer/Typer
 sessions pass existing `SourceTypedIndex` roots directly, including non-42 values
 and independent deterministic sessions. **These checks do not establish Scala
 compiler interoperability**; compilation of this Rust producer's output remains
-#1195. The earlier audit and sequencing sections describe historical decisions,
-not a requirement to keep the complete producer unimplemented.
+#1241. The earlier audit and sequencing sections describe historical decisions,
+not a requirement to keep the complete producer unimplemented. The opt-in Scala
+oracle gate independently compiles and executes the current `Answer` and
+`Parameters` producer outputs; it does not establish compatibility for other
+expression or declaration forms.
 
 ## Sprint 2 method, clause, parameter and reference contract (#1238)
 
