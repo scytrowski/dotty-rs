@@ -906,6 +906,40 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
 }
 
 #[test]
+fn rejects_branched_reference_return_until_result_type_is_checked() {
+    let mut builder = ClassFileBuilder::new(
+        "example/InvalidReferenceReturn",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("invalid", "()Ljava/lang/String;", |code| {
+            let target = code.new_label()?;
+            code.new_object("java/lang/Object")?;
+            code.dup()?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.goto(target.clone())?;
+            code.mark(target)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
+                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::Reference,
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
 fn class_builder_rejects_overflowing_short_branch_displacement() {
     let version = ClassFileVersion {
         major: 65,

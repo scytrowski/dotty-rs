@@ -2348,7 +2348,6 @@ fn validate_flow_instruction_with_context(
                 | Instruction::InvokeVirtual(_)
                 | Instruction::InvokeSpecial(_)
                 | Instruction::New(_)
-                | Instruction::AReturn
         ));
     if supported {
         return Ok(());
