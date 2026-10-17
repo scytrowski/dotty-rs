@@ -144,10 +144,11 @@ package tree. The pinned decompiler and `-from-tasty` compiler consume that file
 and write the class into a separate empty directory. `javap` checks the class,
 and a Java harness built against only that fresh output asserts `use() == 42`,
 `identity(17) == 17`, `first() == 7`, and `zero() == 0`. The runtime path also
-requires both the bounded Rust inspector and Scala compiler to reject a
-corrupted candidate. Missing tools, wrong revisions, unpinned JARs, timeouts or
-compiler failures fail the explicitly enabled test; the default test remains
-independent of local Scala tooling and makes no claim of external acceptance.
+requires both the bounded Rust inspector and Scala compiler to reject corrupted
+and truncated candidates. Missing tools, wrong revisions, unpinned JARs,
+timeouts or compiler failures fail the explicitly enabled test; the default
+test remains independent of local Scala tooling and makes no claim of external
+acceptance.
 
 The existing focused pickler tests exercise malformed/foreign identities,
 source-to-typed binding mismatches, unsupported call shapes, and validation

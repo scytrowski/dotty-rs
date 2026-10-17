@@ -289,8 +289,16 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         rejected.mkdir()
         expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", rejected, bad]),
                        "Scala rejects corrupted producer output")
+        truncated = directory / "truncated.tasty"
+        truncated.write_bytes(candidate.read_bytes()[:-1])
+        expect_failure(lambda: snapshot(binary, truncated), "Rust rejects truncated producer output")
+        truncated_output = directory / "truncated-output"
+        truncated_output.mkdir()
+        expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", truncated_output, truncated]),
+                       "Scala rejects truncated producer output")
         result.update({"javap": True, "runtime_value": expected_value,
-                       "rust_corrupt_rejection": True, "scala_corrupt_rejection": True})
+                       "rust_corrupt_rejection": True, "scala_corrupt_rejection": True,
+                       "rust_truncated_rejection": True, "scala_truncated_rejection": True})
     return result
 
 
