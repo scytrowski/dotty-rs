@@ -1,7 +1,7 @@
 //! The frozen literal slice has no recursive expression edges.
 
 use dotty_core::ast::TypedAst;
-use dotty_core::{Constant, SemanticStore, SymbolId, TreeId, TreeKind, Type, Typed};
+use dotty_core::{Constant, SemanticStore, SymbolId, TermRefTarget, TreeId, TreeKind, Type, Typed};
 use dotty_tasty::tasty::{AstLabel, AstNode, INTCONST_TAG, SimpleTerm, TermValue};
 
 use crate::{EncodingContext, PickleError, UnsupportedFeature};
@@ -11,11 +11,40 @@ pub(crate) fn lower_expression(
     ast: &TypedAst,
     root: TreeId<Typed>,
     method: SymbolId,
+    parameters: &[SymbolId],
     context: &mut EncodingContext<'_>,
 ) -> Result<AstLabel, PickleError> {
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::Ident(_) = &tree.kind {
+        let Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(parameter),
+        } = store.types.try_get(tree.ty).ok_or(PickleError::BodyType {
+            tree: root,
+            ty: tree.ty,
+        })?
+        else {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: tree.ty,
+            });
+        };
+        if !parameters.contains(parameter) {
+            return Err(PickleError::Reference {
+                symbol: *parameter,
+                reason: crate::ReferenceError::NotRegistered,
+            });
+        }
+        if !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) {
+            return Err(PickleError::Reference {
+                symbol: *parameter,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        return context.local_reference(*parameter, None);
+    }
     let TreeKind::Literal(literal) = &tree.kind else {
         return Err(PickleError::Unsupported {
             feature: UnsupportedFeature::BodyExpression,
