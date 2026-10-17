@@ -170,6 +170,21 @@ impl LoadingSession {
         }
     }
 
+    pub(crate) fn module_for_object(
+        &self,
+        object: SymbolId,
+    ) -> Option<&crate::loader::ModuleIdentity> {
+        self.modules.get(self.modules_by_object.get(&object)?)
+    }
+
+    pub(crate) fn module_for_class(
+        &self,
+        module_class: SymbolId,
+    ) -> Option<&crate::loader::ModuleIdentity> {
+        self.modules
+            .get(self.modules_by_module_class.get(&module_class)?)
+    }
+
     pub(crate) fn record_origin(&mut self, symbol: SymbolId, origin: ClassOrigin) {
         if self.origins.get(&symbol) == Some(&origin) {
             return;

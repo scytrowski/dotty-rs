@@ -172,17 +172,12 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             Type::TermRef {
                 target: dotty_core::TermRefTarget::Symbol(object),
                 ..
-            } => self
-                .session
-                .modules
-                .values()
-                .find(|identity| identity.object == *object)
-                .map(|identity| {
-                    (
-                        identity.module_class,
-                        identity.object_name.as_internal().to_owned(),
-                    )
-                }),
+            } => self.session.module_for_object(*object).map(|identity| {
+                (
+                    identity.module_class,
+                    identity.object_name.as_internal().to_owned(),
+                )
+            }),
             Type::TypeRef {
                 target: TypeRefTarget::Symbol(module_class),
                 ..
@@ -191,9 +186,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 class: module_class,
             } => self
                 .session
-                .modules
-                .values()
-                .find(|identity| identity.module_class == *module_class)
+                .module_for_class(*module_class)
                 .map(|identity| {
                     (
                         identity.module_class,
@@ -351,12 +344,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let malformed = || ResolutionError::Malformed {
             reason: format!("package term {object:?} is not a valid canonical module object"),
         };
-        let Some(identity) = self
-            .session
-            .modules
-            .values()
-            .find(|identity| identity.object == object)
-        else {
+        let Some(identity) = self.session.module_for_object(object) else {
             return Err(malformed());
         };
         if !store.symbols.contains(object)
@@ -567,13 +555,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             PrefixTarget::Class(class) => {
                 let mut scope = self.declaration_scope(store, class);
                 let module_identity = (store.symbols.get(class).kind == SymbolKind::ModuleClass)
-                    .then(|| {
-                        self.session
-                            .modules
-                            .values()
-                            .find(|identity| identity.module_class == class)
-                            .cloned()
-                    })
+                    .then(|| self.session.module_for_class(class).cloned())
                     .flatten();
                 if let Some(identity) = module_identity {
                     let package = store.symbols.get(identity.object).owner.ok_or_else(|| {
@@ -707,9 +689,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 self.validate_module_object(store, package, *object)?;
                 let identity = self
                     .session
-                    .modules
-                    .values()
-                    .find(|identity| identity.object == *object)
+                    .module_for_object(*object)
                     .expect("validated object has a module identity");
                 Ok(Some(PrefixTarget::Class(identity.module_class)))
             }
@@ -802,11 +782,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             PrefixTarget::Class(class)
                 if store.symbols.get(*class).kind == SymbolKind::ModuleClass =>
             {
-                self.session
-                    .modules
-                    .values()
-                    .find(|identity| identity.module_class == *class)
-                    .cloned()
+                self.session.module_for_class(*class).cloned()
             }
             _ => None,
         };
@@ -1218,8 +1194,7 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
             };
             self.session
                 .modules
-                .values()
-                .any(|identity| identity.object_name.as_internal() == internal)
+                .contains_key(&BinaryName::from_internal(internal))
         });
         let module_target = self.module_prefix_key(store, request);
         let module_info_before = module_target.as_ref().and_then(|(module_class, _)| {
