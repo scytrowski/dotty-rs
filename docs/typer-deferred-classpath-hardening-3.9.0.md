@@ -447,6 +447,8 @@ The follow-up targeted profile measured the first `tpd.scala` method at
 6,214 ms before and 3,546 ms after adding `LoadingSession` reverse indexes;
 member-lookup time fell from 4,939 ms to 2,797 ms for the same 512 requests.
 The full-corpus rerun after this optimization was stopped at 250 / 1,236 files
-after about 20 minutes and roughly 295,000 module-identity requests. No current
-p95, fanout, or deterministic full-corpus result is available; the previous
-limits remain historical.
+after about 20 minutes and roughly 295,000 module-identity requests. The later
+#1180 follow-up completed two pinned full-corpus runs with byte-identical
+normalized reports and deferred-cohort sidecars; p95 completion depth was 0
+and maximum completed fanout was 9, within the issue limits of 6 and 16. Fresh
+current blocker counts and direct origins are in the [#1180 blocker sidecar](typer-classpath-corpus-audit-1180-current-blockers.tsv).

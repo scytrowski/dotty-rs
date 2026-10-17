@@ -1,0 +1,11 @@
+blocker_or_population	observations	files	distinct_target_keys	distinct_direct_origins	notes
+ImportQualifierNotFound	1220	93	unresolved_segment=32;term_object_gap=5;unknown=0	457	Distinct targets are reported per resolver cause; do not sum into a unique union.
+ImportQualifierNotFound unresolved source-relative prefix view	1063	81	31	393	Separate import-prefix probe; candidates had no matching source registry or configured classpath package evidence.
+SymbolResolution	1535	156	554	624	Distinct targets from the multiple-failed-request cause group.
+TypeNameNotFound	168	56	direct_package=1;multiple_requests=217;unknown=0	87	Distinct targets are reported per resolver cause; groups may overlap.
+TermNameNotFound	48	19	multiple_requests=67;unknown=0	26	Distinct targets are reported per resolver cause.
+MemberLookup	43	19	multiple_requests=71;unknown=0	30	Distinct targets are reported per resolver cause.
+ObjectModuleClassUnavailable	28	4	0	11	No authoritative target identity was available for these semantic failures.
+AnonymousClassInstantiationDeferred	32	15	n/a	20	Semantic blocker; not a resolver target.
+TASTy UnresolvedSupertype	5411	216	42 requested roots	42	Member-error observations include repeated requests; roots are unique requested classes.
+typed_local_methods	0	-	-	-	Denominator remains 3297 local method definitions.

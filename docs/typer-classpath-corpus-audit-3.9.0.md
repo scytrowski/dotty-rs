@@ -165112,13 +165112,47 @@ normalized reports and deferred-cohort TSVs. The full-corpus typed-local-method
 count remains 0 / 3,297.
 
 The deferred-loading gate passed on both runs: p95 dependency depth was 0
-(limit 70), maximum distinct fully completed classes per request was 9
-(limit 524), and all 29 previously successful target keys were retained (182
-current successful targets). The report's broader touched-class maximum is 53;
-that is a separate metric from the bounded fully-completed-class fanout.
+(issue #1180 limit 6), maximum distinct fully completed classes per request
+was 9 (issue #1180 limit 16), and all 29 previously successful target keys
+were retained (182 current successful targets). The report's broader
+touched-class maximum is 53; that is a separate metric from the bounded
+fully-completed-class fanout.
 
 The lexical import changes move `ProtoTypes.isPoly` from
 `ImportQualifierNotFound` to `SymbolResolution`. They also move all three
 frozen local lazy-value observations to `SymbolResolution`; none is typed.
 These blocker movements explain the refreshed audit expectations and do not
 count as full-method success.
+
+### #1180 current blocker breakdown follow-up (2026-10-17)
+
+One additional local full-corpus run was completed to retain the current
+blocker totals after the two deterministic runs. It covered the same pinned
+1,236-file / 3,297-method input. The compact [current blocker sidecar](typer-classpath-corpus-audit-1180-current-blockers.tsv)
+records observations, files, distinct resolver targets by cause, and direct
+origins. A direct origin is a unique failed local-method attempt tree; the
+TASTy supertype row counts unique requested class roots separately from its
+repeated member-error observations.
+
+| Current first blocker | Observations | Files | Distinct direct origins |
+| --- | ---: | ---: | ---: |
+| `SymbolResolution` | 1,535 | 156 | 624 |
+| `ImportQualifierNotFound` | 1,220 | 93 | 457 |
+| `TypeNameNotFound` | 168 | 56 | 87 |
+| `TermNameNotFound` | 48 | 19 | 26 |
+| `MemberLookup` | 43 | 19 | 30 |
+| `ObjectModuleClassUnavailable` | 28 | 4 | 11 |
+| `AnonymousClassInstantiationDeferred` | 32 | 15 | 20 |
+
+`ImportQualifierNotFound` splits into 1,065 unresolved next-segment
+observations (82 files, 32 resolver target keys), 124 term/object materialization
+gaps (8 files, 5 target keys), and 31 observations without a matching failed
+resolver request (3 files, no target key). The separate import-prefix probe
+narrows the source-relative unresolved-prefix cohort to 1,063 observations in
+81 files / 31 target keys / 393 origins; those candidates had no matching
+source registry or configured classpath package evidence. The report records
+no `ImportQualifierNotFound` outcome for a package that resolved but whose
+selected member was missing; final selector outcomes remain counted separately
+in the import-prefix reconciliation. TASTy `UnresolvedSupertype` currently
+accounts for 5,411 member-error observations in 216 files across 42 requested
+class roots. Fully typed local methods remain 0 / 3,297.
