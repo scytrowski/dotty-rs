@@ -14,6 +14,7 @@ use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
 use dotty_typer::SourceTyper;
 
 const ANSWER: &str = include_str!("fixtures/tasty_pickler/Answer.scala");
+const PARAMETERS: &str = include_str!("fixtures/tasty_pickler/Parameters.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct CanonicalIntResolver {
@@ -357,4 +358,184 @@ fn real_scala_source_produces_deterministic_semantic_tasty_and_roundtrips() {
             "requested Scala interop/runtime gate failed"
         );
     }
+}
+
+#[test]
+fn generated_parameter_reference_unpickles_to_the_exact_owned_formal() {
+    let source = SourceId::from_index(12);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(PARAMETERS).unwrap();
+    let parsed = parse_compilation_unit(
+        SourceText::new(PARAMETERS).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Parameters.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("namer rejected Parameters fixture: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!()
+    };
+    let [class_tree] = package.stats.as_slice() else {
+        panic!("expected one class")
+    };
+    let class = index.symbol_at(source, *class_tree).unwrap();
+    let TreeKind::TypeDef(class_def) = &parsed.ast.get(*class_tree).kind else {
+        panic!()
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+        panic!()
+    };
+    let constructor_tree = template.constructor;
+    let constructor = index.symbol_at(source, constructor_tree).unwrap();
+    let TreeKind::DefDef(constructor_def) = &parsed.ast.get(constructor_tree).kind else {
+        panic!()
+    };
+    let clauses = |definition: &DefDef<Untyped>| {
+        definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|tree| index.symbol_at(source, *tree).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(class).unwrap();
+    typer.complete_symbol(constructor).unwrap();
+    let mut methods = Vec::new();
+    for &tree in &template.body {
+        let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
+            continue;
+        };
+        let method = index.symbol_at(source, tree).unwrap();
+        typer.complete_symbol(method).unwrap();
+        let context = typer.expression_context_for(method).unwrap();
+        let rhs = definition.rhs.expect("Parameters methods have bodies");
+        let body = typer
+            .type_expression_expected(rhs, context, definitions.int)
+            .unwrap();
+        methods.push(MethodPicklePlan {
+            symbol: method,
+            source_tree: tree,
+            parameter_clauses: clauses(definition),
+            body: Some(body),
+        });
+    }
+    let bindings = |source, tree| typer.source_typed_index().get(source, tree);
+    let plan = PicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        typed_ast: typer.typed_ast(),
+        source_ast: &parsed.ast,
+        source_index: &index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source,
+            name: "Parameters.scala".into(),
+        },
+        source_root: parsed.root,
+        class,
+        class_tree: *class_tree,
+        constructor: DefaultConstructorPlan {
+            symbol: constructor,
+            source_tree: constructor_tree,
+            parameter_clauses: clauses(constructor_def),
+        },
+        methods: &methods,
+    };
+    let output = plan.validate().unwrap().pickle().unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let declarations = output.declarations();
+    let pick = declarations
+        .iter()
+        .find(|declaration| {
+            addresses
+                .get(declaration.address)
+                .and_then(|node| node.decode_defdef_body().ok())
+                .is_some_and(|body| file.render_name(body.name).ok().as_deref() == Some("pick"))
+        })
+        .unwrap();
+    let pick_body = addresses
+        .get(pick.address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let Some(RawTree::Leaf(reference)) = pick_body.rhs.as_ref() else {
+        panic!("expected a direct formal reference")
+    };
+    let target_address = reference.ast_ref().unwrap().address;
+    let parameters = declarations
+        .iter()
+        .filter(|declaration| declaration.owner == pick.symbol)
+        .collect::<Vec<_>>();
+    assert_eq!(parameters.len(), 2);
+    assert_eq!(target_address, parameters[1].address);
+
+    let mut semantic_store = SemanticStore::new();
+    let semantic_definitions = Definitions::bootstrap(&mut semantic_store);
+    let int_symbol = semantic_store
+        .types
+        .get(semantic_definitions.int)
+        .reference_symbol()
+        .unwrap();
+    let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
+        .with_resolver(Box::new(CanonicalIntResolver { symbol: int_symbol }));
+    let semantic_index = unpickler.enter_symbols().unwrap().clone();
+    let method_symbol = semantic_index.symbol_at(pick.address).unwrap();
+    let target_symbol = semantic_index.symbol_at(target_address).unwrap();
+    assert_eq!(
+        unpickler.symbol_state_at(target_address).unwrap().0,
+        SymbolKind::Parameter
+    );
+    let body_address = addresses
+        .iter_tree_edges()
+        .find(|edge| {
+            edge.parent.offset == pick.address as usize && edge.child.tag == TERMREFDIRECT_TAG
+        })
+        .expect("method has a TERMREFdirect body edge")
+        .child
+        .offset as u32;
+    let reference_type = unpickler.unpickle_type(body_address).unwrap();
+    let _ = unpickler.into_parts();
+    assert!(matches!(semantic_store.types.get(reference_type),
+        Type::TermRef { target: TermRefTarget::Symbol(symbol), prefix }
+            if *symbol == target_symbol
+                && matches!(semantic_store.types.get(*prefix), Type::NoPrefix)));
+    assert_eq!(
+        semantic_store.symbols.get(target_symbol).owner,
+        Some(method_symbol)
+    );
+    assert_eq!(
+        semantic_store
+            .names
+            .resolve(semantic_store.symbols.get(target_symbol).name.text()),
+        "second"
+    );
 }

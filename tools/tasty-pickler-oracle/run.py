@@ -213,24 +213,44 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
               "rust_wire": True, "scala_decompile": True, "scala_from_tasty": True,
               "fresh_class": True, "adjacent_input_classfiles": False}
     if runtime:
-        if relative.as_posix() != "example/Answer.tasty":
-            raise RuntimeError("--runtime requires package example class Answer")
-        javap = execute([toolchain.javap, "-classpath", compiled, "example.Answer"])
-        if not re.search(r"public int value\(\)", javap):
-            raise RuntimeError(f"fresh class has no public int value() method: {javap}")
-        harness = directory / "AnswerRuntime.java"
-        harness.write_text("""public final class AnswerRuntime {
+        runtime_cases = {
+            "example/Answer.tasty": (
+                "example.Answer", r"public int value\(\)", "AnswerRuntime.java",
+                """public final class AnswerRuntime {
   public static void main(String[] args) {
     int actual = new example.Answer().value();
     if (actual != 42) throw new AssertionError("Answer.value() = " + actual);
     System.out.println("Answer.value() = " + actual);
   }
 }
-""")
+""", "Answer.value() = 42", 42,
+            ),
+            "example/Parameters.tasty": (
+                "example.Parameters", r"public int pick\(int, int\)", "ParametersRuntime.java",
+                """public final class ParametersRuntime {
+  public static void main(String[] args) {
+    int actual = new example.Parameters().pick(11, 42);
+    if (actual != 42) throw new AssertionError("Parameters.pick() = " + actual);
+    System.out.println("Parameters.pick() = " + actual);
+  }
+}
+""", "Parameters.pick() = 42", 42,
+            ),
+        }
+        case = runtime_cases.get(relative.as_posix())
+        if case is None:
+            raise RuntimeError("--runtime requires example/Answer or example/Parameters")
+        class_name, method_pattern, harness_name, harness_source, expected_output, expected_value = case
+        javap = execute([toolchain.javap, "-classpath", compiled, class_name])
+        if not re.search(method_pattern, javap):
+            raise RuntimeError(f"fresh class does not have the expected method: {javap}")
+        harness = directory / harness_name
+        harness.write_text(harness_source)
         execute([toolchain.javac, "-classpath", compiled, "-d", compiled, harness])
-        run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath", compiled, "AnswerRuntime"])
-        if "Answer.value() = 42" not in run:
-            raise RuntimeError(f"runtime harness did not confirm value 42: {run}")
+        runtime_class = harness.stem
+        run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath", compiled, runtime_class])
+        if expected_output not in run:
+            raise RuntimeError(f"runtime harness did not confirm {expected_output}: {run}")
         bad = directory / "corrupt.tasty"
         corrupt = bytearray(candidate.read_bytes())
         corrupt[0] ^= 1
@@ -240,7 +260,7 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         rejected.mkdir()
         expect_failure(lambda: toolchain.compiler(["-from-tasty", "-d", rejected, bad]),
                        "Scala rejects corrupted producer output")
-        result.update({"javap": True, "runtime_value": 42,
+        result.update({"javap": True, "runtime_value": expected_value,
                        "rust_corrupt_rejection": True, "scala_corrupt_rejection": True})
     return result
 

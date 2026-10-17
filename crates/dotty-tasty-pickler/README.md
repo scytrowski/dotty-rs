@@ -1,10 +1,11 @@
 # Source semantic TASTy pickler boundary
 
 This crate implements **read-only plan validation, semantic type/reference
-projection, declaration skeletons and complete literal-body files** for Scala
-3.9.0 TASTy (28.9.0). `ValidatedPicklePlan::pickle()` returns owned `PickledTasty`
+projection, declaration skeletons and complete literal or formal-reference
+bodies** for Scala 3.9.0 TASTy (28.9.0). `ValidatedPicklePlan::pickle()` returns owned `PickledTasty`
 bytes with the actual existing typed RHS. Independent Scala compilation of this
-producer's output remains the #1195 gate.
+producer's output is covered by the pinned opt-in oracle for the `Answer` and
+`Parameters` fixtures.
 
 `PicklePlan` borrows the canonical semantic store, Definitions, untyped/typed ASTs,
 source semantic index and a `SourceTypedBindings` provider. Source metadata is
@@ -14,14 +15,18 @@ owned; declarations carry explicitly ordered canonical IDs and exact body roots.
 
 The accepted shape is the oracle's ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
-methods with an Int result and typed Int-literal bodies. A method may have no
-value clause, one explicit empty clause, or one plain clause of ordinary Int
+methods with an Int result and either a typed Int literal or a reference to one
+of its own ordinary Int formals. A method may have no value clause, one explicit
+empty clause, or one plain clause of ordinary Int
 parameters. Parameter IDs, ownership, source scope, types and order must agree
 across the source AST, semantic index and completed method signature.
 Source Int literals, including the parser's raw decimal, hexadecimal and binary
-whole-number nodes, must agree with the typed value. Raw spellings are checked
-against the name-byte limit before decoding; malformed whole numbers and
-unsupported noninteger numbers yield typed errors.
+whole-number nodes, must agree with the typed value. A formal reference is
+resolved only from the typed `TermRef` target and must name a canonical parameter
+of that exact method; its emitted `TERMREFdirect` points to the bound `PARAM`
+declaration. Raw literal spellings are checked against the name-byte limit
+before decoding; malformed whole numbers and unsupported noninteger numbers
+yield typed errors.
 The wire constructor's Unit return syntax is distinct from the semantic
 constructor's class-instance result.
 
@@ -99,8 +104,8 @@ are emitted in exact source order. A parameterless method has an Int IDENTtpt
 and no fabricated empty clause or METHODtype payload; an explicit empty value
 clause has EMPTYCLAUSE; one nonempty plain Int clause emits ordered canonical
 PARAM declarations with Int type trees. Complete output attaches each method's
-actual typed Int literal after its declared return syntax. Public visibility
-and empty modifier/annotation tails are checked from symbol records; other
+actual typed Int literal or direct formal-reference root after its declared
+return syntax. Public visibility and empty modifier/annotation tails are checked from symbol records; other
 metadata, parameter kinds and clause forms remain unsupported.
 
 The provisional document uses TastyFileBuilder with exact 28.9.0 version checks,
@@ -109,8 +114,9 @@ tooling string says `incomplete declaration skeleton`, with a fixed diagnostic
 UUID. Positions, Comments and the compiler SourceFile annotation are omitted per
 the reduced-oracle contract. **These bytes are not a completed compiler artifact
 and carry no Scala interoperability claim.** The separate complete-file API
-adds real RHS emission; #1195 owns independent compilation. Tests compare canonicalized declarations against
-the frozen Scala Answer fixture, normalizing only the real method RHS, the
+adds real RHS emission. The opt-in oracle compiles/runs the `Answer` and
+`Parameters` outputs; other shapes remain unverified. Tests compare canonicalized
+declarations against the frozen Scala fixture, normalizing the real method RHS, the
 permitted SourceFile annotation omission, sharing layout and header/section data.
 
 Only `dotty-core` and `dotty-tasty` are normal dependencies. Frontend dependencies
@@ -152,4 +158,4 @@ the existing codec before full-file encoding; excess returns
 also apply, including wire depth and AST bytes. Assembly failures return no
 partial artifact and leave all borrowed semantic stores and arenas unchanged.
 Rust codec round trips and frozen structural/body comparisons are covered here;
-compiler interoperability is not claimed before #1195.
+the opt-in Scala oracle checks only the explicitly supported fixture cases.
