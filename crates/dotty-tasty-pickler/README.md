@@ -1,11 +1,11 @@
 # Source semantic TASTy pickler boundary
 
 This crate implements **read-only plan validation, semantic type/reference
-projection, declaration skeletons and complete literal or formal-reference
+projection, declaration skeletons and complete literal, formal-reference or same-class call
 bodies** for Scala 3.9.0 TASTy (28.9.0). `ValidatedPicklePlan::pickle()` returns owned `PickledTasty`
 bytes with the actual existing typed RHS. Independent Scala compilation of this
 producer's output is covered by the pinned opt-in oracle for the `Answer`,
-`Parameters` and same-class `References` fixtures.
+`Parameters`, same-class `References`, and `Operations` call fixtures.
 
 `PicklePlan` borrows the canonical semantic store, Definitions, untyped/typed ASTs,
 source semantic index and a `SourceTypedBindings` provider. Source metadata is
@@ -16,8 +16,10 @@ owned; declarations carry explicitly ordered canonical IDs and exact body roots.
 The accepted shape is the oracle's ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
 methods with an Int result and either a typed Int literal, a reference to one
-of its own ordinary Int formals, or an ordinary parameterless reference to a
-canonical method of the same class. Same-class method references derive their
+of its own ordinary Int formals, an ordinary parameterless reference, or a
+bounded recursive application of a canonical method of the same class with one
+plain clause of one or more Int parameters.
+Same-class method references derive their
 target from the typed `TermRef`, require a public declared Int method in the
 plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
 receiver. An unqualified reference uses `QUALTHIS`, while an explicit `this`
@@ -34,7 +36,12 @@ of that exact method; its emitted `TERMREFdirect` points to the bound `PARAM`
 declaration. Raw literal spellings are checked against the name-byte limit
 before decoding; malformed whole numbers and unsupported noninteger numbers
 yield typed errors.
-The wire constructor's Unit return syntax is distinct from the semantic
+Call applications require the exact selected method's completed plain MethodType,
+ordered Int parameters, Int result, and corresponding canonical Int arguments.
+Traversal is bounded by expression-depth and item limits and rejects repeated
+typed expression IDs. Type, context, default, varargs and multi-clause
+applications remain unsupported. The wire
+constructor's Unit return syntax is distinct from the semantic
 constructor's class-instance result.
 
 All IDs and binding providers must belong to the same compilation session.

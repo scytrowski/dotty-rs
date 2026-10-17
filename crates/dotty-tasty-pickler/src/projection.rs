@@ -12,6 +12,7 @@ use crate::{Builtin, LimitKind, PickleError, ReferenceError, ValidatedPicklePlan
 pub struct ProjectionLimits {
     pub max_type_depth: usize,
     pub max_owner_depth: usize,
+    pub max_expression_depth: usize,
     pub max_items: usize,
     pub max_names: usize,
     pub max_name_bytes: usize,
@@ -23,6 +24,7 @@ impl Default for ProjectionLimits {
         Self {
             max_type_depth: 256,
             max_owner_depth: 256,
+            max_expression_depth: 256,
             max_items: 1_000_000,
             max_names: 100_000,
             max_name_bytes: 4096,
@@ -36,6 +38,7 @@ enum NameKey {
     Utf8(String),
     Qualified(NameRef, NameRef),
     SignedEmpty(NameRef, NameRef),
+    SignedMany(NameRef, NameRef, Vec<i32>),
 }
 
 /// Owned wire result only; no semantic records are copied and no file is assembled.
@@ -290,6 +293,11 @@ impl<'a> EncodingContext<'a> {
                 original: *original,
                 result_signature: *result_signature,
                 parameter_signatures: vec![],
+            },
+            NameKey::SignedMany(original, result_signature, parameters) => RawName::Signed {
+                original: *original,
+                result_signature: *result_signature,
+                parameter_signatures: parameters.clone(),
             },
         };
         let reference = self.names.intern(raw).map_err(encoding)?;
@@ -588,6 +596,106 @@ impl<'a> EncodingContext<'a> {
         method: SymbolId,
     ) -> Result<AstLabel, PickleError> {
         self.run(|c| c.same_class_method_select_inner(class, method, true))
+    }
+
+    /// Lowers a verified plain Int method application target as SELECTin.
+    pub(crate) fn same_class_method_select_in(
+        &mut self,
+        class: SymbolId,
+        method: SymbolId,
+        explicit_this: bool,
+        parameter_count: usize,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            if parameter_count > c.limits.max_items {
+                return Err(PickleError::LimitExceeded {
+                    kind: LimitKind::Items,
+                    limit: c.limits.max_items,
+                });
+            }
+            let class_label = *c
+                .declarations
+                .get(&class)
+                .ok_or(reference(class, ReferenceError::NotRegistered))?;
+            let record = c.symbol(class)?;
+            let method_record = c.symbol(method)?;
+            if record.kind != SymbolKind::Class
+                || method_record.kind != SymbolKind::Method
+                || method_record.owner != Some(class)
+            {
+                return Err(reference(method, ReferenceError::Owner));
+            }
+            c.local(method)?;
+            let package = record
+                .owner
+                .ok_or(reference(class, ReferenceError::Owner))?;
+            let package_ref = c.package_reference(package)?;
+            let owner_package_ref = c.package_reference(package)?;
+            let class_name = c.utf8(c.text(record.name.text())?)?;
+            let method_name = c.utf8(c.text(method_record.name.text())?)?;
+            let scala = c.utf8("scala")?;
+            let int = c.utf8("Int")?;
+            let int_signature = c.intern(NameKey::Qualified(scala, int))?;
+            let parameter_signature =
+                i32::try_from(int_signature).map_err(|_| PickleError::LimitExceeded {
+                    kind: LimitKind::Names,
+                    limit: i32::MAX as usize,
+                })?;
+            let signed_name = c.intern(NameKey::SignedMany(
+                method_name,
+                int_signature,
+                vec![parameter_signature; parameter_count],
+            ))?;
+            let type_ref = c
+                .wire
+                .push(AstNode::NatAst {
+                    tag: TYPEREFSYMBOL_TAG,
+                    value: AstOperand::Reference(class_label),
+                    child: package_ref,
+                })
+                .map_err(construction)?;
+            let receiver = if explicit_this {
+                c.wire
+                    .push(AstNode::Ast {
+                        tag: THIS_TAG,
+                        child: type_ref,
+                    })
+                    .map_err(construction)?
+            } else {
+                let class_syntax = c
+                    .wire
+                    .push(AstNode::NatAst {
+                        tag: IDENTTPT_TAG,
+                        value: AstOperand::Nat(class_name),
+                        child: type_ref,
+                    })
+                    .map_err(construction)?;
+                c.wire
+                    .push(AstNode::Ast {
+                        tag: QUALTHIS_TAG,
+                        child: class_syntax,
+                    })
+                    .map_err(construction)?
+            };
+            let owner_type = c
+                .wire
+                .push(AstNode::NatAst {
+                    tag: TYPEREFSYMBOL_TAG,
+                    value: AstOperand::Reference(class_label),
+                    child: owner_package_ref,
+                })
+                .map_err(construction)?;
+            c.wire
+                .push(AstNode::Length {
+                    tag: SELECTIN_TAG,
+                    fields: vec![
+                        AstField::Nat(signed_name),
+                        AstField::Tree(receiver),
+                        AstField::Tree(owner_type),
+                    ],
+                })
+                .map_err(construction)
+        })
     }
 
     fn same_class_method_select_inner(

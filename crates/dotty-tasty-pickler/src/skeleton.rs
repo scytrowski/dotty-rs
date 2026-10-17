@@ -258,6 +258,7 @@ impl ValidatedPicklePlan<'_, '_> {
                     body,
                     method.symbol,
                     &parameters,
+                    limits,
                     &mut context,
                 )?));
             }
