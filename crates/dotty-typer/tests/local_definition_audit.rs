@@ -4525,6 +4525,7 @@ struct BaselineImportAttempt {
     baseline_import_tree: String,
     qualifier_segments: String,
     context_package: String,
+    lexical_package_chain: Vec<String>,
     first_failing_segment: String,
     evidence_category: String,
     target_key: String,
@@ -7005,6 +7006,35 @@ fn pinned_scala39_import_prefix_typing_probe() {
     );
     let reconciliation_time = stage_started.elapsed();
     assert_eq!(reconciliation.len(), baseline_rows.len());
+    if selected_source_file.as_deref() == Some("compiler/src/dotty/tools/dotc/Resident.scala") {
+        assert_eq!(reconciliation.len(), 1);
+        let row = &reconciliation[0];
+        assert_eq!(
+            row.current_selected_identity,
+            "kind=Package::origin=synthetic::path=dotty.tools.dotc.core"
+        );
+        assert!(row.final_import_identity.contains(
+            "qualifier=resolved::kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts"
+        ));
+        let object_identities = metrics
+            .borrow()
+            .resolver_requests_by_method
+            .values()
+            .flatten()
+            .filter(|request| {
+                request.target.starts_with("prefix=dotty.tools.dotc.core::")
+                    && request.target.contains("::name=Contexts::")
+            })
+            .filter_map(|request| request.selected_identity.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            object_identities,
+            BTreeSet::from([
+                "kind=Object::origin=tasty::path=dotty.tools.dotc.core.Contexts".to_owned()
+            ]),
+            "the pinned source-relative import must select the canonical TASTy object"
+        );
+    }
     let unresolved_baseline_rows = reconciliation
         .iter()
         .filter(|row| row.current_outcome.starts_with("ImportQualifierNotFound::"))
@@ -12592,6 +12622,7 @@ fn baseline_import_blocker_attempts(
             baseline_import_tree: fields[3].to_owned(),
             qualifier_segments: fields[6].to_owned(),
             context_package: fields[8].to_owned(),
+            lexical_package_chain: lexical_package_chain_from_evidence(fields[8], fields[11]),
             first_failing_segment: fields[13].to_owned(),
             evidence_category,
             target_key: fields[16].to_owned(),
@@ -12603,6 +12634,35 @@ fn baseline_import_blocker_attempts(
         "frozen profile row count matches its header"
     );
     rows
+}
+
+fn lexical_package_chain_from_evidence(context_package: &str, evidence: &str) -> Vec<String> {
+    let mut packages = Vec::new();
+    if !context_package.is_empty() && !context_package.starts_with('<') {
+        packages.push(context_package.to_owned());
+    }
+    let Some(enclosing) = evidence
+        .split(';')
+        .find_map(|part| part.strip_prefix("enclosing="))
+    else {
+        return packages;
+    };
+    if enclosing == "none" || enclosing.is_empty() {
+        return packages;
+    }
+    for context in enclosing.split(',') {
+        let Some((package, _)) = context.split_once('=') else {
+            continue;
+        };
+        if package.is_empty() || package == "none" || package == "root" || package.starts_with('<')
+        {
+            continue;
+        }
+        if !packages.iter().any(|existing| existing == package) {
+            packages.push(package.to_owned());
+        }
+    }
+    packages
 }
 
 fn reconcile_import_prefix_observations(
@@ -12669,10 +12729,10 @@ fn reconcile_import_prefix_observations(
 
         let request_prefix = format!("{}#tree={}::", baseline.file, baseline.blocker_origin_tree);
         let rooted_qualifier = baseline.qualifier_segments.starts_with("_root_.");
-        let package_chain = if rooted_qualifier || baseline.context_package.starts_with('<') {
+        let package_chain = if rooted_qualifier {
             Vec::new()
         } else {
-            vec![baseline.context_package.clone()]
+            baseline.lexical_package_chain.clone()
         };
         let qualifier = baseline
             .qualifier_segments
@@ -13040,6 +13100,7 @@ fn frozen_import_reconciliation_preserves_original_provenance() {
     );
     assert_eq!(baseline[0].qualifier_segments, "old.pkg");
     assert_eq!(baseline[0].context_package, "pkg");
+    assert_eq!(baseline[0].lexical_package_chain, ["pkg"]);
     assert_eq!(baseline[0].first_failing_segment, "old");
     assert_eq!(
         baseline[0].evidence_category,
@@ -13168,7 +13229,7 @@ fn reconciliation_records_relative_package_and_object_qualifier_identities() {
         "dotty.tools.dotc",
         "Term",
         "missing",
-        "relative=found:Package@dotty.tools.dotc.core;enclosing=none;root=missing",
+        "relative=found:Package@dotty.tools.dotc.core;enclosing=dotty.tools=missing@dotty.tools.core;root=missing",
         "-",
         "core",
         "resolve_package",
@@ -13184,6 +13245,10 @@ fn reconciliation_records_relative_package_and_object_qualifier_identities() {
         "source_relative_candidate".to_owned(),
     )]);
     let baseline = baseline_import_blocker_attempts(&report, &categories);
+    assert_eq!(
+        baseline[0].lexical_package_chain,
+        ["dotty.tools.dotc", "dotty.tools"]
+    );
     let package = ResolverRequestObservation {
         target: "dotty.tools.dotc.core".to_owned(),
         outcome: "package success".to_owned(),
@@ -13244,6 +13309,17 @@ fn reconciliation_records_relative_package_and_object_qualifier_identities() {
         rows[0]
             .current_resolver_requests
             .contains("target=dotty.tools.dotc.core::outcome=package success")
+    );
+}
+
+#[test]
+fn lexical_package_chain_does_not_invent_parents_for_dotted_packages() {
+    assert_eq!(
+        lexical_package_chain_from_evidence(
+            "example.deep.pkg",
+            "relative=missing@example.deep.pkg.member;enclosing=none;root=missing"
+        ),
+        ["example.deep.pkg"]
     );
 }
 
