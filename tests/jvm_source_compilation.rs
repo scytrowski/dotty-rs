@@ -116,6 +116,21 @@ fn compile_fixture(
     compile_source(&source, fixture_name, output_directory)
 }
 
+fn compile_fixture_classes(
+    fixture_name: &str,
+    output_directory: &Path,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    let fixture = fixture_path(fixture_name);
+    let source = fs::read_to_string(&fixture).map_err(PipelineFailure::Io)?;
+    compile_source_batch(
+        &source,
+        fixture_name,
+        output_directory,
+        SourceId::from_index(1253),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+}
+
 fn compile_source(
     source_text: &str,
     source_file_name: &str,
@@ -2390,6 +2405,125 @@ fn decode_full_frame_pcs(payload: &[u8]) -> Vec<usize> {
     pcs
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum StackMapVerificationType {
+    Top,
+    Integer,
+    Float,
+    Double,
+    Long,
+    Null,
+    UninitializedThis,
+    Object(String),
+    Uninitialized(usize),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedStackMapFrame {
+    pc: usize,
+    locals: Vec<StackMapVerificationType>,
+    stack: Vec<StackMapVerificationType>,
+}
+
+fn stack_map_frames(class: &ClassFile<'_>, method_name: &str) -> Vec<DecodedStackMapFrame> {
+    fn read_u2(payload: &[u8], offset: &mut usize) -> u16 {
+        let bytes = payload
+            .get(*offset..*offset + 2)
+            .expect("complete u2 in StackMapTable payload");
+        *offset += 2;
+        u16::from_be_bytes([bytes[0], bytes[1]])
+    }
+
+    fn read_verification_type(
+        class: &ClassFile<'_>,
+        payload: &[u8],
+        offset: &mut usize,
+    ) -> StackMapVerificationType {
+        let tag = *payload
+            .get(*offset)
+            .expect("verification_type_info tag in StackMapTable");
+        *offset += 1;
+        match tag {
+            0 => StackMapVerificationType::Top,
+            1 => StackMapVerificationType::Integer,
+            2 => StackMapVerificationType::Float,
+            3 => StackMapVerificationType::Double,
+            4 => StackMapVerificationType::Long,
+            5 => StackMapVerificationType::Null,
+            6 => StackMapVerificationType::UninitializedThis,
+            7 => {
+                let index = read_u2(payload, offset);
+                StackMapVerificationType::Object(
+                    class
+                        .constant_pool
+                        .class_name(ConstantPoolIndex(index))
+                        .expect("Object verification type names a class constant")
+                        .to_owned(),
+                )
+            }
+            8 => StackMapVerificationType::Uninitialized(usize::from(read_u2(payload, offset))),
+            _ => panic!("invalid verification_type_info tag {tag}"),
+        }
+    }
+
+    fn read_types(
+        class: &ClassFile<'_>,
+        payload: &[u8],
+        offset: &mut usize,
+        count: u16,
+    ) -> Vec<StackMapVerificationType> {
+        (0..count)
+            .map(|_| read_verification_type(class, payload, offset))
+            .collect()
+    }
+
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok(method_name))
+        .unwrap_or_else(|| panic!("missing method {method_name}"));
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("{method_name} should have one Code attribute");
+    };
+    let [Attribute::Other(stack_map)] = code
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            matches!(attribute, Attribute::Other(raw) if class.constant_pool.utf8(raw.name_index) == Ok("StackMapTable"))
+        })
+        .collect::<Vec<_>>()[..]
+    else {
+        panic!("{method_name} should have one StackMapTable");
+    };
+
+    let payload = stack_map.bytes;
+    let mut offset = 0;
+    let frame_count = read_u2(payload, &mut offset);
+    let mut previous_pc = -1i32;
+    let mut frames = Vec::with_capacity(usize::from(frame_count));
+    for _ in 0..frame_count {
+        let frame_type = *payload.get(offset).expect("frame_type in StackMapTable");
+        offset += 1;
+        assert_eq!(frame_type, 255, "backend emits explicit full_frame entries");
+        let delta = read_u2(payload, &mut offset);
+        let pc = previous_pc + i32::from(delta) + 1;
+        assert!(pc >= 0);
+        previous_pc = pc;
+        let local_count = read_u2(payload, &mut offset);
+        let locals = read_types(class, payload, &mut offset, local_count);
+        let stack_count = read_u2(payload, &mut offset);
+        let stack = read_types(class, payload, &mut offset, stack_count);
+        frames.push(DecodedStackMapFrame {
+            pc: usize::try_from(pc).expect("nonnegative StackMapTable PC"),
+            locals,
+            stack,
+        });
+    }
+    assert_eq!(offset, payload.len(), "StackMapTable has no trailing bytes");
+    assert!(frames.windows(2).all(|pair| pair[0].pc < pair[1].pc));
+    frames
+}
+
 fn verify_delegator_with_jdk(output_directory: &Path) {
     let output_path = output_directory.to_str().expect("UTF-8 temporary path");
     let javap = Command::new("javap")
@@ -4265,6 +4399,333 @@ fn planned_reference_operations_verify_across_if_while_and_short_circuit_cfgs() 
 }
 
 #[test]
+fn real_counter_control_flow_fixture_has_exact_frames_and_reproducible_classes() {
+    let first_output = TestOutputDirectory::new("counter-control-flow-first");
+    let second_output = TestOutputDirectory::new("counter-control-flow-second");
+    let first = compile_fixture_classes("CounterControlFlow.scala", first_output.path())
+        .expect("real Scala source runs through lexer, parser, namer, typer and JVM backend");
+    let second = compile_fixture_classes("CounterControlFlow.scala", second_output.path())
+        .expect("a fresh frontend session compiles the same source independently");
+    let names = first
+        .iter()
+        .map(|artifact| artifact.class.internal_name())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["Counter", "CounterClient"]);
+    assert_eq!(
+        second
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        names,
+        "classes retain source order in the independent session"
+    );
+    assert_eq!(first_output.class_files().len(), 2);
+    assert_eq!(second_output.class_files().len(), 2);
+    for (left, right) in first.iter().zip(&second) {
+        assert_eq!(
+            left.class.bytes(),
+            right.class.bytes(),
+            "{} class bytes are deterministic across independent frontend sessions",
+            left.class.internal_name()
+        );
+        assert_eq!(
+            fs::read(&left.path).expect("read published class file"),
+            left.class.bytes(),
+            "{} is published byte-for-byte from its validated in-memory class",
+            left.class.internal_name()
+        );
+    }
+
+    let mut reader = Reader::new(first[0].class.bytes());
+    let counter = ClassFile::decode(&mut reader).expect("fully decode Counter.class");
+    counter
+        .validate_references()
+        .expect("Counter constant pool validates");
+    assert_eq!(counter.version.major, 65);
+    assert_eq!(
+        counter.constant_pool.class_name(counter.this_class),
+        Ok("Counter")
+    );
+    assert_eq!(
+        counter.constant_pool.class_name(
+            counter
+                .super_class
+                .expect("ordinary class has Object superclass")
+        ),
+        Ok("java/lang/Object")
+    );
+    assert!(counter.access_flags.is_public());
+    assert!(!counter.access_flags.is_interface());
+    assert_eq!(counter.fields.len(), 1);
+    let field = &counter.fields[0];
+    assert_eq!(counter.constant_pool.utf8(field.name_index), Ok("current"));
+    assert_eq!(counter.constant_pool.utf8(field.descriptor_index), Ok("I"));
+    assert!(field.access_flags.is_private());
+    assert!(!field.access_flags.is_final());
+    assert!(
+        counter
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+    assert_eq!(
+        methods_with_descriptors(&counter),
+        [
+            ("<init>".to_owned(), "(I)V".to_owned()),
+            ("get".to_owned(), "()I".to_owned()),
+            ("increment".to_owned(), "()I".to_owned()),
+            ("incrementUntil".to_owned(), "(I)I".to_owned()),
+        ]
+    );
+
+    let increment_until = emitted_method_code(&counter, "incrementUntil");
+    let counter_targets = decode_branch_targets(increment_until);
+    assert!(
+        counter_targets
+            .iter()
+            .any(|(offset, _, target)| target < offset)
+    );
+    assert!(
+        counter_targets
+            .iter()
+            .any(|(offset, opcode, target)| *opcode == 0xa7 && target < offset)
+    );
+    assert!(
+        counter_targets
+            .iter()
+            .any(|(_, opcode, _)| (0x9f..=0xa4).contains(opcode))
+    );
+    let counter_ops = decode_subset_instructions(increment_until);
+    assert!(counter_ops.iter().any(|(_, opcode)| *opcode == 0x2a));
+    assert!(counter_ops.iter().any(|(_, opcode)| *opcode == 0x1b));
+    assert!(
+        counter_ops
+            .iter()
+            .any(|(_, opcode)| (0x36..=0x3a).contains(opcode) || (0x3b..=0x3e).contains(opcode))
+    );
+    assert_field_reference(&counter, increment_until, 0xb4, "Counter", "current", "I");
+    assert_field_reference(&counter, increment_until, 0xb5, "Counter", "current", "I");
+    let counter_frames = stack_map_frames(&counter, "incrementUntil");
+    let counter_frame_pcs = counter_frames
+        .iter()
+        .map(|frame| frame.pc)
+        .collect::<Vec<_>>();
+    assert!(
+        counter_targets
+            .iter()
+            .all(|(_, _, target)| counter_frame_pcs.contains(target))
+    );
+    let (_, _, counter_loop_header) = counter_targets
+        .iter()
+        .copied()
+        .find(|(offset, _, target)| target < offset)
+        .expect("Counter.incrementUntil has a loop back-edge");
+    let counter_loop_frame = counter_frames
+        .iter()
+        .find(|frame| frame.pc == counter_loop_header)
+        .expect("loop header has a full_frame entry");
+    assert_eq!(
+        counter_loop_frame.locals,
+        [
+            StackMapVerificationType::Object("Counter".to_owned()),
+            StackMapVerificationType::Integer,
+        ]
+    );
+    assert!(counter_loop_frame.stack.is_empty());
+
+    let mut reader = Reader::new(first[1].class.bytes());
+    let client = ClassFile::decode(&mut reader).expect("fully decode CounterClient.class");
+    client
+        .validate_references()
+        .expect("CounterClient constant pool validates");
+    assert_eq!(client.version.major, 65);
+    assert_eq!(
+        client.constant_pool.class_name(client.this_class),
+        Ok("CounterClient")
+    );
+    assert_eq!(
+        client.constant_pool.class_name(
+            client
+                .super_class
+                .expect("ordinary class has Object superclass")
+        ),
+        Ok("java/lang/Object")
+    );
+    assert!(client.access_flags.is_public());
+    assert!(!client.access_flags.is_interface());
+    assert!(client.fields.is_empty());
+    assert!(
+        client
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+    assert_eq!(
+        methods_with_descriptors(&client),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("run".to_owned(), "(I)I".to_owned()),
+            ("choose".to_owned(), "(Z)I".to_owned()),
+        ]
+    );
+
+    let run = emitted_method_code(&client, "run");
+    let run_instructions = decode_subset_instructions(run);
+    let run_targets = decode_branch_targets(run);
+    assert!(
+        run_targets
+            .iter()
+            .any(|(offset, _, target)| target < offset)
+    );
+    assert!(
+        run_targets
+            .iter()
+            .any(|(_, opcode, _)| (0x9f..=0xa4).contains(opcode))
+    );
+    let run_frames = stack_map_frames(&client, "run");
+    let run_frame_pcs = run_frames.iter().map(|frame| frame.pc).collect::<Vec<_>>();
+    assert!(
+        run_targets
+            .iter()
+            .all(|(_, _, target)| run_frame_pcs.contains(target))
+    );
+    let (_, _, run_loop_header) = run_targets
+        .iter()
+        .copied()
+        .find(|(offset, _, target)| target < offset)
+        .expect("CounterClient.run has a loop back-edge");
+    let run_loop_frame = run_frames
+        .iter()
+        .find(|frame| frame.pc == run_loop_header)
+        .expect("run loop header has a full_frame entry");
+    assert_eq!(
+        run_loop_frame.locals,
+        [
+            StackMapVerificationType::Object("CounterClient".to_owned()),
+            StackMapVerificationType::Integer,
+            StackMapVerificationType::Object("Counter".to_owned()),
+        ],
+        "the loop frame retains exact receiver, limit and initialized Counter locals"
+    );
+    assert!(run_loop_frame.stack.is_empty());
+    assert!(run_instructions.iter().any(|(_, opcode)| *opcode == 0x2c));
+    assert_invocation_sequence(
+        &client,
+        run,
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "Counter", "get", "()I"),
+            (0xb6, "Counter", "increment", "()I"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &client,
+        emitted_method_code(&client, "<init>"),
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+
+    let choose = emitted_method_code(&client, "choose");
+    let choose_instructions = decode_subset_instructions(choose);
+    assert!(
+        choose_instructions
+            .iter()
+            .any(|(_, opcode)| *opcode == 0x99)
+    );
+    let allocations = choose_instructions
+        .iter()
+        .filter_map(|(offset, opcode)| (*opcode == 0xbb).then_some(*offset))
+        .collect::<Vec<_>>();
+    assert_eq!(allocations.len(), 2);
+    let constructor_offsets = choose_instructions
+        .iter()
+        .filter_map(|(offset, opcode)| (*opcode == 0xb7).then_some(*offset))
+        .collect::<Vec<_>>();
+    assert_eq!(constructor_offsets.len(), 2);
+    for (allocation, constructor) in allocations.iter().zip(&constructor_offsets) {
+        let allocation_position = choose_instructions
+            .iter()
+            .position(|(offset, _)| offset == allocation)
+            .expect("find new instruction boundary");
+        let constructor_position = choose_instructions
+            .iter()
+            .position(|(offset, _)| offset == constructor)
+            .expect("find invokespecial instruction boundary");
+        assert_eq!(
+            choose_instructions[allocation_position..=constructor_position]
+                .iter()
+                .map(|(_, opcode)| *opcode)
+                .collect::<Vec<_>>(),
+            [0xbb, 0x59, 0x10, 0xb7],
+            "each branch completes new/dup/Int-argument/invokespecial in one block"
+        );
+        let class_index = u16::from_be_bytes([choose[allocation + 1], choose[allocation + 2]]);
+        let ConstantPoolEntry::Class { name_index } = client
+            .constant_pool
+            .get(ConstantPoolIndex(class_index))
+            .expect("new must reference CONSTANT_Class")
+        else {
+            panic!("new must reference a class constant");
+        };
+        assert_eq!(client.constant_pool.utf8(*name_index), Ok("Counter"));
+        assert!(constructor > allocation);
+        assert!(
+            choose_instructions
+                .iter()
+                .filter(|(offset, _)| *offset > *allocation && *offset < *constructor)
+                .all(|(_, opcode)| !matches!(*opcode, 0x99..=0xa7))
+        );
+        let method_index = u16::from_be_bytes([choose[constructor + 1], choose[constructor + 2]]);
+        let ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        } = client
+            .constant_pool
+            .get(ConstantPoolIndex(method_index))
+            .expect("invokespecial must reference CONSTANT_Methodref")
+        else {
+            panic!("constructor call must reference a method");
+        };
+        assert_eq!(client.constant_pool.class_name(*class_index), Ok("Counter"));
+        assert_eq!(
+            client.constant_pool.name_and_type(*name_and_type_index),
+            Ok(("<init>", "(I)V"))
+        );
+    }
+    assert_invocation_sequence(
+        &client,
+        choose,
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "Counter", "get", "()I"),
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    let choose_targets = decode_branch_targets(choose);
+    let choose_frames = stack_map_frames(&client, "choose");
+    let choose_frame_pcs = choose_frames
+        .iter()
+        .map(|frame| frame.pc)
+        .collect::<Vec<_>>();
+    assert!(
+        choose_targets
+            .iter()
+            .all(|(_, _, target)| choose_frame_pcs.contains(target))
+    );
+    assert!(choose_frames.iter().all(|frame| {
+        frame.locals.first() == Some(&StackMapVerificationType::Object("CounterClient".into()))
+    }));
+    assert!(choose_frames.iter().all(|frame| {
+        frame.stack.is_empty() || frame.stack == [StackMapVerificationType::Integer]
+    }));
+
+    if require_jdk_or_skip() {
+        verify_counter_control_flow_with_jdk(first_output.path());
+    }
+}
+
+#[test]
 fn immutable_reference_locals_use_canonical_slots_and_verify_on_the_jvm() {
     let output = TestOutputDirectory::new("reference-local");
     let artifacts = compile_planned_constructor_source(
@@ -5053,6 +5514,88 @@ fn verify_reference_control_flow_with_jdk(output_directory: &Path) {
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
         "reference control flow ok"
+    );
+}
+
+fn verify_counter_control_flow_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 output path");
+    let javap = Command::new("javap")
+        .args([
+            "-c",
+            "-v",
+            "-classpath",
+            output_path,
+            "Counter",
+            "CounterClient",
+        ])
+        .output()
+        .expect("start javap for Counter control-flow fixture");
+    assert!(
+        javap.status.success(),
+        "javap rejected Counter control-flow classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let output = String::from_utf8_lossy(&javap.stdout);
+    for evidence in [
+        "major version: 65",
+        "private int current",
+        "aload_0",
+        "getfield",
+        "putfield",
+        "iload_1",
+        "istore_",
+        "if_icmp",
+        "ifeq",
+        "goto",
+        "aload_2",
+        "invokevirtual",
+        "StackMapTable",
+        "Counter.\"<init>\":(I)V",
+        "Counter.get:()I",
+        "Counter.increment:()I",
+    ] {
+        assert!(
+            output.contains(evidence),
+            "javap output omitted {evidence:?}:\n{output}"
+        );
+    }
+
+    let harness = output_directory.join("CounterControlFlowHarness.java");
+    fs::write(
+        &harness,
+        "public final class CounterControlFlowHarness { public static void main(String[] args) { CounterClient client = new CounterClient(); if (client.run(0) != 0) throw new AssertionError(\"run zero\"); if (client.run(1) != 1) throw new AssertionError(\"run one\"); if (client.run(10) != 10) throw new AssertionError(\"run multiple\"); if (client.choose(true) != 10) throw new AssertionError(\"choose true\"); if (client.choose(false) != 20) throw new AssertionError(\"choose false\"); if (new Counter(2).incrementUntil(5) != 5) throw new AssertionError(\"increment to limit\"); if (new Counter(5).incrementUntil(5) != 5) throw new AssertionError(\"already at limit\"); if (new Counter(6).incrementUntil(3) != 6) throw new AssertionError(\"start over limit\"); System.out.println(\"counter control flow verified\"); } }\n",
+    )
+    .expect("write Counter control-flow Java harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness)
+        .output()
+        .expect("start javac for Counter control-flow harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected Counter control-flow harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "CounterControlFlowHarness",
+        ])
+        .output()
+        .expect("start JVM verifier for Counter control-flow classes");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected Counter control-flow classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "counter control flow verified"
     );
 }
 
