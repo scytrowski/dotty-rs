@@ -4,8 +4,8 @@ This crate implements **read-only plan validation, semantic type/reference
 projection, declaration skeletons and complete literal or formal-reference
 bodies** for Scala 3.9.0 TASTy (28.9.0). `ValidatedPicklePlan::pickle()` returns owned `PickledTasty`
 bytes with the actual existing typed RHS. Independent Scala compilation of this
-producer's output is covered by the pinned opt-in oracle for the `Answer` and
-`Parameters` fixtures.
+producer's output is covered by the pinned opt-in oracle for the `Answer`,
+`Parameters` and same-class `References` fixtures.
 
 `PicklePlan` borrows the canonical semantic store, Definitions, untyped/typed ASTs,
 source semantic index and a `SourceTypedBindings` provider. Source metadata is
@@ -15,8 +15,13 @@ owned; declarations carry explicitly ordered canonical IDs and exact body roots.
 
 The accepted shape is the oracle's ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
-methods with an Int result and either a typed Int literal or a reference to one
-of its own ordinary Int formals. A method may have no value clause, one explicit
+methods with an Int result and either a typed Int literal, a reference to one
+of its own ordinary Int formals, or an ordinary parameterless reference to a
+canonical method of the same class. Same-class method references derive their
+target from the typed `TermRef`, require a public declared Int method in the
+plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
+`QUALTHIS` receiver; forward references do not create synthetic AST addresses.
+A method may have no value clause, one explicit
 empty clause, or one plain clause of ordinary Int
 parameters. Parameter IDs, ownership, source scope, types and order must agree
 across the source AST, semantic index and completed method signature.
