@@ -114,3 +114,43 @@ files. The Rust unpickler does not yet resolve this file's external `scala.Int`
 return reference without a classpath resolver and does not reconstruct typed
 method bodies. Classfile-side TASTy linkage and richer source forms remain
 separate follow-up work.
+
+## Sprint 2 multi-method gate (issue #1244)
+
+The checked-in [`Operations.scala`](../tests/fixtures/tasty_pickler/Operations.scala)
+is also compiled without edits through the real Lexer → Parser → Namer → Typer
+pipeline. The root integration test hands the canonical class, constructor,
+method and parameter symbols to an immutable `PicklePlan`, and supplies each
+method's exact body root from the real `SourceTypedIndex`. It checks stable
+bytes across two fresh source sessions, TASTy 28.9.0 validation, source-order
+method declarations, the `identity` body reference to its exact formal, the
+`use` call's signed `identity(Int): Int` selection and literal argument, the
+forward `first` selection of `second`, and the explicit empty clause and zero
+literal for `zero()`. The semantic unpickler confirms the owner-qualified
+`identity` method and formal identities supported by its inverse.
+
+Run the focused integration and independent Scala runtime gate with:
+
+```sh
+SCALA39_ROOT=/tmp/scala3-3.9.0 \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+COURSIER_MAVEN_ROOT=/home/vdrake6/.cache/coursier/v1/https/repo1.maven.org/maven2 \
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+cargo test --test tasty_source_pickling operations_source_preserves_canonical_references_and_runs_from_fresh_scala_class --locked -- --nocapture
+```
+
+The test writes only the Rust-produced `Operations.tasty` into a fresh candidate
+package tree. The pinned decompiler and `-from-tasty` compiler consume that file
+and write the class into a separate empty directory. `javap` checks the class,
+and a Java harness built against only that fresh output asserts `use() == 42`,
+`identity(17) == 17`, `first() == 7`, and `zero() == 0`. The runtime path also
+requires both the bounded Rust inspector and Scala compiler to reject a
+corrupted candidate. Missing tools, wrong revisions, unpinned JARs, timeouts or
+compiler failures fail the explicitly enabled test; the default test remains
+independent of local Scala tooling and makes no claim of external acceptance.
+
+The existing focused pickler tests exercise malformed/foreign identities,
+source-to-typed binding mismatches, unsupported call shapes, and validation
+failures without publishing output. These remain complementary to the fresh
+compiler/runtime gate: that gate demonstrates acceptance and execution for the
+supported Operations subset, not broad Scala language compatibility.

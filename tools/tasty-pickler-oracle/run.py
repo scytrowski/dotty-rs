@@ -248,22 +248,22 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 """, "References.first() = 42", 42,
             ),
             "example/Operations.tasty": (
-                "example.Operations", r"public int (use\(\)|propagate\(int\)|picks\(\)|nested\(\))", "OperationsRuntime.java",
+                "example.Operations", r"public int (use\(\)|identity\(int\)|first\(\)|zero\(\))", "OperationsRuntime.java",
                 """public final class OperationsRuntime {
   public static void main(String[] args) {
     example.Operations operations = new example.Operations();
     int use = operations.use();
-    int propagated = operations.propagate(17);
-    int picked = operations.picks();
-    int nested = operations.nested();
+    int identity = operations.identity(17);
+    int first = operations.first();
+    int zero = operations.zero();
     if (use != 42) throw new AssertionError("Operations.use() = " + use);
-    if (propagated != 17) throw new AssertionError("Operations.propagate() = " + propagated);
-    if (picked != 42) throw new AssertionError("Operations.picks() = " + picked);
-    if (nested != 42) throw new AssertionError("Operations.nested() = " + nested);
-    System.out.println("Operations = " + use + ", " + propagated + ", " + picked + ", " + nested);
+    if (identity != 17) throw new AssertionError("Operations.identity(17) = " + identity);
+    if (first != 7) throw new AssertionError("Operations.first() = " + first);
+    if (zero != 0) throw new AssertionError("Operations.zero() = " + zero);
+    System.out.println("Operations = " + use + ", " + identity + ", " + first + ", " + zero);
   }
 }
-""", "Operations = 42, 17, 42, 42", 42,
+""", "Operations = 42, 17, 7, 0", 42,
             ),
         }
         case = runtime_cases.get(relative.as_posix())
