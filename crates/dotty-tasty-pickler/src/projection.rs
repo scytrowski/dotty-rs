@@ -7,7 +7,8 @@ use dotty_tasty::tasty::*;
 
 use crate::{Builtin, LimitKind, PickleError, ReferenceError, ValidatedPicklePlan};
 
-/// Budgets for semantic projection; type recursion also has a hard ceiling of 256.
+/// Budgets for semantic projection; type and expression recursion have hard
+/// ceilings of 256 for stack safety.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProjectionLimits {
     pub max_type_depth: usize,

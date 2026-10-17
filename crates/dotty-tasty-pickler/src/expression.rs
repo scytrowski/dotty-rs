@@ -8,7 +8,10 @@ use dotty_tasty::tasty::{
     APPLY_TAG, AstField, AstLabel, AstNode, INTCONST_TAG, SimpleTerm, TermValue,
 };
 
-use crate::{EncodingContext, LimitKind, PickleError, ProjectionLimits, UnsupportedFeature};
+use crate::{
+    EncodingContext, LimitKind, PickleError, ProjectionLimits, UnsupportedFeature,
+    bounded_expression_depth,
+};
 
 struct ExpressionBudget {
     max_depth: usize,
@@ -23,13 +26,18 @@ struct ExpressionState<'a> {
 }
 
 impl ExpressionBudget {
-    fn visit(&mut self, tree: TreeId<Typed>, depth: usize) -> Result<(), PickleError> {
+    fn check_depth(&self, depth: usize) -> Result<(), PickleError> {
         if depth > self.max_depth {
             return Err(PickleError::LimitExceeded {
                 kind: LimitKind::ExpressionDepth,
                 limit: self.max_depth,
             });
         }
+        Ok(())
+    }
+
+    fn visit(&mut self, tree: TreeId<Typed>, depth: usize) -> Result<(), PickleError> {
+        self.check_depth(depth)?;
         self.remaining = self
             .remaining
             .checked_sub(1)
@@ -54,7 +62,7 @@ pub(crate) fn lower_expression(
     context: &mut EncodingContext<'_>,
 ) -> Result<AstLabel, PickleError> {
     let mut budget = ExpressionBudget {
-        max_depth: limits.max_expression_depth,
+        max_depth: bounded_expression_depth(limits.max_expression_depth),
         item_limit: limits.max_items,
         remaining: limits.max_items,
         visited: HashSet::new(),
@@ -283,4 +291,27 @@ fn lower_expression_inner(
         }
     })?;
     context.wire_node(AstNode::Leaf(term))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::MAX_EXPRESSION_DEPTH;
+
+    #[test]
+    fn configured_expression_depth_cannot_raise_recursive_stack_ceiling() {
+        let budget = ExpressionBudget {
+            max_depth: bounded_expression_depth(usize::MAX),
+            item_limit: 1_000,
+            remaining: 1_000,
+            visited: HashSet::new(),
+        };
+        assert_eq!(
+            budget.check_depth(MAX_EXPRESSION_DEPTH + 1),
+            Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: MAX_EXPRESSION_DEPTH,
+            })
+        );
+    }
 }

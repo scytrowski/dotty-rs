@@ -9,7 +9,10 @@ use dotty_core::{
     SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type, TypeId, Typed, Untyped, Visibility,
 };
 
-use crate::{Builtin, LimitKind, PickleError, SourceRole, TypeRole, UnsupportedFeature};
+use crate::{
+    Builtin, LimitKind, PickleError, SourceRole, TypeRole, UnsupportedFeature,
+    bounded_expression_depth,
+};
 
 /// Owned source provenance supplied by the integration layer. Core stores only
 /// SourceId, not the filename or source-text length; those remain producer facts.
@@ -76,6 +79,7 @@ pub struct PicklePlan<'a> {
 }
 
 /// Budgets checked before traversing caller-controlled collections or chains.
+/// Expression recursion is capped at 256 for stack safety.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ValidationLimits {
     pub max_owner_depth: usize,
@@ -92,6 +96,12 @@ impl Default for ValidationLimits {
             max_items: 1_000_000,
             max_name_bytes: 4096,
         }
+    }
+}
+
+impl ValidationLimits {
+    fn expression_depth_limit(self) -> usize {
+        bounded_expression_depth(self.max_expression_depth)
     }
 }
 
@@ -920,10 +930,11 @@ impl<'a> Validator<'_, 'a> {
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
-        if depth > self.limits.max_expression_depth {
+        let expression_depth_limit = self.limits.expression_depth_limit();
+        if depth > expression_depth_limit {
             return Err(PickleError::LimitExceeded {
                 kind: LimitKind::ExpressionDepth,
-                limit: self.limits.max_expression_depth,
+                limit: expression_depth_limit,
             });
         }
         self.charge(1)?;

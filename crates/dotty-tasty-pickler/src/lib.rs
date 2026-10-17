@@ -26,6 +26,17 @@ mod plan;
 mod projection;
 mod skeleton;
 
+/// Hard ceiling for native recursive expression traversals.
+pub(crate) const MAX_EXPRESSION_DEPTH: usize = 256;
+
+pub(crate) const fn bounded_expression_depth(configured: usize) -> usize {
+    if configured < MAX_EXPRESSION_DEPTH {
+        configured
+    } else {
+        MAX_EXPRESSION_DEPTH
+    }
+}
+
 pub use error::{
     Builtin, LimitKind, PickleError, ReferenceError, SourceRole, TypeRole, UnsupportedFeature,
 };
