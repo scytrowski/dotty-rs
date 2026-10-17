@@ -165099,8 +165099,9 @@ after them; measured member-lookup time fell from 4,939 ms to 2,797 ms. This is
 a targeted single-method measurement, not a corpus result. A subsequent full
 audit was stopped at 250 / 1,236 files after about 20 minutes and roughly
 295,000 module-identity requests. It produced no report or determinism result.
-Consequently the #1180 full-corpus and deferred-loading DoD gates remain
-unverified; the prior complete-load p95/fanout values remain historical.
+At that checkpoint, the #1180 full-corpus and deferred-loading DoD gates
+remained unverified; the prior complete-load p95/fanout values remained
+historical.
 
 ### #1180 full-corpus completion (2026-10-17)
 
