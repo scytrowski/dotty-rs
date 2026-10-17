@@ -1278,8 +1278,9 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
         prefix: package_prefix,
         target: TypeRefTarget::Symbol(counter),
     });
+    let unsupported_prefix = fixture.store.types.alloc(Type::NoType);
     let wrong_prefix = fixture.store.types.alloc(Type::TypeRef {
-        prefix: fixture.definitions.no_prefix,
+        prefix: unsupported_prefix,
         target: TypeRefTarget::Symbol(counter),
     });
     let foreign_counter = add_reference_class(
@@ -1295,6 +1296,10 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
         prefix: package_prefix,
         target: TypeRefTarget::Symbol(foreign_counter),
     });
+    let no_prefix_signature = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
     let unit = fixture.unit();
     let identities = crate::identity::unit_class_identities(&unit).unwrap();
 
@@ -1307,7 +1312,7 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
         ),
         Ok(JvmType::Reference(counter))
     );
-    assert!(matches!(
+    assert_eq!(
         crate::reference::project_method_signature_type(
             unit.store,
             wrong_prefix,
@@ -1315,10 +1320,19 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
             &identities,
         ),
         Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: wrong_prefix,
             kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
-            ..
         })
-    ));
+    );
+    assert_eq!(
+        crate::reference::project_method_signature_type(
+            unit.store,
+            no_prefix_signature,
+            &fixture.definitions,
+            &identities,
+        ),
+        Ok(JvmType::Reference(counter))
+    );
     assert_eq!(
         crate::reference::project_method_signature_type(
             unit.store,

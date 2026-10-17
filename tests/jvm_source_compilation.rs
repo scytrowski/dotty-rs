@@ -613,7 +613,7 @@ fn typed_source_shape(unit: &JvmCompilationUnit<'_>, tree: TreeId<Typed>) -> Str
 
 #[test]
 fn reference_method_signature_audit_characterizes_real_typed_source() {
-    let source = "class Counter(start: Int):\n  def get(): Int = 1\n  def self(): Counter = this\n\nclass Client:\n  def pass(c: Counter): Counter = c\n  def make(n: Int): Counter = new Counter(n)\n  def read(c: Counter): Int = c.get()\n  def choose(flag: Boolean, a: Counter, b: Counter): Counter =\n    if flag then a else b\n  def mix(flag: Boolean, count: Int, c: Counter, tail: Boolean): Counter = c\n";
+    let source = "class Counter(start: Int):\n  def get(): Int = 1\n  def self(): Counter = this\n\nclass Client:\n  def pass(c: Counter): Counter = c\n  def make(n: Int) = new Counter(n)\n  def read(c: Counter): Int = c.get()\n  def choose(flag: Boolean, a: Counter, b: Counter): Counter =\n    if flag then a else b\n  def mix(flag: Boolean, count: Int, c: Counter, tail: Boolean): Counter = c\n";
     let output = TestOutputDirectory::new("reference-signature-audit");
     let mut observed = Vec::new();
     let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
@@ -639,6 +639,23 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
                 let Type::Method(signature) = unit.store.types.get(signature) else {
                     panic!("method {method_name} should have one plain typed method clause")
                 };
+                if method_name == "make" {
+                    let Type::TypeRef { prefix, target } = unit.store.types.get(signature.result)
+                    else {
+                        panic!("inferred make result should retain a canonical class TypeRef")
+                    };
+                    assert_eq!(*prefix, definitions.no_prefix);
+                    let TypeRefTarget::Symbol(result_class) = target else {
+                        panic!("inferred make result should target its exact class symbol")
+                    };
+                    assert!(unit.classes.iter().any(|plan| plan.class == *result_class));
+                    assert_eq!(
+                        unit.store
+                            .names
+                            .resolve(unit.store.symbols.get(*result_class).name.text()),
+                        "Counter"
+                    );
+                }
                 let params = signature
                     .params
                     .iter()
@@ -798,7 +815,7 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
             "Counter.get | params=[] | result=TypeRef(prefix=NoPrefix,target=Class:Int) | tree=Literal:Constant(Int(1)) | candidate=()I | backend=accepted(()I) | slots=[]",
             "Counter.self | params=[] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=This(_):ThisType(Class:Counter) | candidate=()LCounter; | backend=accepted(()LCounter;) | slots=[]",
             "Client.pass | params=[c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c) | candidate=(LCounter;)LCounter; | backend=accepted((LCounter;)LCounter;) | slots=[c:reference@1+1]",
-            "Client.make | params=[n:TypeRef(prefix=NoPrefix,target=Class:Int)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Apply(Select(<init>, New(TypeTree:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TermRef(prefix=TypeRef(Class:Counter),target=Constructor:<init>), [Ident(n:Parameter:n):TermRef(prefix=NoPrefix,target=Parameter:n)]):TypeRef(prefix=NoPrefix,target=Class:Counter) | candidate=(I)LCounter; | backend=accepted((I)LCounter;) | slots=[n:intlike@1+1]",
+            "Client.make | params=[n:TypeRef(prefix=NoPrefix,target=Class:Int)] | result=TypeRef(prefix=NoPrefix,target=Class:Counter) | tree=Apply(Select(<init>, New(TypeTree:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TermRef(prefix=TypeRef(Class:Counter),target=Constructor:<init>), [Ident(n:Parameter:n):TermRef(prefix=NoPrefix,target=Parameter:n)]):TypeRef(prefix=NoPrefix,target=Class:Counter) | candidate=(I)LCounter; | backend=accepted((I)LCounter;) | slots=[n:intlike@1+1]",
             "Client.read | params=[c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=NoPrefix,target=Class:Int) | tree=Apply(Select(get, Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c)):TermRef(prefix=TermRef(Parameter:c),target=Method:get), []):TypeRef(prefix=NoPrefix,target=Class:Int) | candidate=(LCounter;)I | backend=accepted((LCounter;)I) | slots=[c:reference@1+1]",
             "Client.choose | params=[flag:TypeRef(prefix=NoPrefix,target=Class:Boolean), a:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter), b:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=If(Ident(flag:Parameter:flag):TermRef(prefix=NoPrefix,target=Parameter:flag), Ident(a:Parameter:a):TermRef(prefix=NoPrefix,target=Parameter:a), Ident(b:Parameter:b):TermRef(prefix=NoPrefix,target=Parameter:b)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | candidate=(ZLCounter;LCounter;)LCounter; | backend=accepted((ZLCounter;LCounter;)LCounter;) | slots=[flag:intlike@1+1,a:reference@2+1,b:reference@3+1]",
             "Client.mix | params=[flag:TypeRef(prefix=NoPrefix,target=Class:Boolean), count:TypeRef(prefix=NoPrefix,target=Class:Int), c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter), tail:TypeRef(prefix=NoPrefix,target=Class:Boolean)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c) | candidate=(ZILCounter;Z)LCounter; | backend=accepted((ZILCounter;Z)LCounter;) | slots=[flag:intlike@1+1,count:intlike@2+1,c:reference@3+1,tail:intlike@4+1]",

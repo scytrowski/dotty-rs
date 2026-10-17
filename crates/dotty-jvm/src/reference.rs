@@ -69,8 +69,8 @@ pub(super) fn project_constructor_type(
 }
 
 /// Projects a method signature reference against identities already validated
-/// for the enclosing emission unit. The source TypeRef must retain the exact
-/// package owner of its target class.
+/// for the enclosing emission unit. The source TypeRef must use either the
+/// canonical no-prefix form or the exact package owner of its target class.
 pub(super) fn project_method_signature_type(
     store: &SemanticStore,
     ty: TypeId,
@@ -94,6 +94,8 @@ pub(super) fn project_method_signature_type(
         .contains(*class)
         .then(|| store.symbols.get(*class).owner)
         .flatten();
+    let canonical_no_prefix = *prefix == definitions.no_prefix
+        && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix));
     let canonical_package_prefix = matches!(
         store.types.try_get(*prefix),
         Some(Type::TypeRef {
@@ -105,7 +107,7 @@ pub(super) fn project_method_signature_type(
             && store.symbols.contains(*package)
             && store.symbols.get(*package).kind == SymbolKind::Package
     );
-    if !canonical_package_prefix {
+    if !canonical_no_prefix && !canonical_package_prefix {
         return Err(JvmCodegenError::UnsupportedJvmReferenceType {
             ty,
             kind: UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
