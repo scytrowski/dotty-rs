@@ -13,7 +13,7 @@ Both normalized profiles, reconciliation, and generated sidecars matched byte-fo
 | Target keys | 30 | 31 |
 | Distinct blocker origins | 904 | 393 |
 
-The exact frozen-row reconciliation contains `2394` rows: `721` still fail with `ImportQualifierNotFound` at the same import tree, and `1673` have advanced to a later current method blocker. Of those advanced rows, `58` include a matching resolver request and selected package identity for the frozen qualifier. Selector outcomes are tracked separately: `0` selectors have an observed final selected symbol and `2471` have no exact singular selected symbol recorded (wildcards are not reduced to one symbol). The full-method typed boolean is true for `0` frozen rows. The separate unresolved-only view contains `1063` rows, including `342` newly observed imports outside the frozen cohort. Across the selected roots there are `721` unresolved-prefix observations, `0` term/object materialization gaps, and `0` without a matching failed resolver trace. The full local-method audit still types 0 / 3,297 methods; blocker movement is not full-method success.
+The exact frozen-row reconciliation contains `2394` rows: `721` still fail with `ImportQualifierNotFound` at the same import tree, and `1673` have advanced to a later current method blocker. Resolver traces matched the frozen qualifier in `2394` rows; `1673` rows also record a selected package identity. Final selector outcomes are tracked separately: `1549` selectors have an observed final selected symbol and `2471` have no exact singular selected symbol recorded (wildcards are not reduced to one symbol). The full-method typed boolean is true for `0` frozen rows. The separate unresolved-only view contains `1063` rows, including `342` newly observed imports outside the frozen cohort. Across the selected roots there are `721` unresolved-prefix observations, `0` term/object materialization gaps, and `0` without a matching failed resolver trace. The #1132 full-corpus local-method baseline remains 0 / 3,297; this import-prefix profile does not refresh that full-corpus count.
 
 ## Historical qualified-candidate cohort
 
@@ -26,7 +26,7 @@ historical_qualified_blocker_origins=584
 current_same_original_import_first_segment_failures=0
 current_rows_with_other_failed_import_observations_in_method=339
 current_import_blocker_relations={"current_first_blocker_is_not_import_qualifier_not_found": 1276, "different_import_failure_observed_in_same_method": 339}
-current_selected_package_identity_observed=0
+current_selected_package_identity_observed=1615
 current_fully_typed_methods=0
 current_method_blockers={"ImportQualifierNotFound": 339, "LocalBlockDeclarationDeferred::type definition": 5, "MemberLookup": 2, "SymbolResolution": 1214, "TermNameNotFound": 19, "TypeNameNotFound": 33, "UnstableSelectionPrefix": 3}
 historical_qualified_target_list=ast,core,io,transform,util
@@ -34,19 +34,19 @@ historical_qualified_by_target={"ast": {"blocker_origins": 81, "files": 22, "obs
 
 | Target | Frozen rows | Files | Blocker origins | Same original prefix still failing | Other failed import observed in method | Package identity recorded | Fully typed |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `ast` | 212 | 22 | 81 | 0 | 2 | 0 | 0 |
-| `core` | 1329 | 106 | 490 | 0 | 337 | 0 | 0 |
-| `io` | 2 | 1 | 2 | 0 | 0 | 0 | 0 |
-| `transform` | 66 | 1 | 7 | 0 | 0 | 0 | 0 |
-| `util` | 6 | 3 | 4 | 0 | 0 | 0 | 0 |
+| `ast` | 212 | 22 | 81 | 0 | 2 | 212 | 0 |
+| `core` | 1329 | 106 | 490 | 0 | 337 | 1329 | 0 |
+| `io` | 2 | 1 | 2 | 0 | 0 | 2 | 0 |
+| `transform` | 66 | 1 | 7 | 0 | 0 | 66 | 0 |
+| `util` | 6 | 3 | 4 | 0 | 0 | 6 | 0 |
 
 See [`typer-classpath-import-prefix-profile-1180-3.9.0-qualified-cohort.tsv`](typer-classpath-import-prefix-profile-1180-3.9.0-qualified-cohort.tsv) for all 1,615 joined candidate rows, [`typer-classpath-import-prefix-profile-1180-3.9.0-reconciliation.tsv`](typer-classpath-import-prefix-profile-1180-3.9.0-reconciliation.tsv) for the full 2,394-row enriched reconciliation, and [`typer-classpath-import-prefix-profile-1180-3.9.0-qualified-cohort-summary.txt`](typer-classpath-import-prefix-profile-1180-3.9.0-qualified-cohort-summary.txt) for the standalone before/after target summary. The original source-package probe, ordered historical candidate evidence, current same-import probe, other failed import trees observed in the same method, final selector outcome, and full-method status remain separate columns.
 
 ## Current evidence and next slice
 
-The current unresolved-prefix view has `0` source-package registry hits across its 31 target keys. Separately, the frozen historical qualified cohort retains 1,615 rows with direct class/TASTy evidence at source-context candidates. None of those 1,615 rows has a current selected package identity recorded; their movement past the original first-segment failure is not, by itself, causal proof of lexical package resolution.
+The current unresolved-prefix view has `0` source-package registry hits across its 31 target keys. Separately, the frozen historical qualified cohort retains 1,615 rows with direct class/TASTy evidence at source-context candidates. All 1,615 rows now have a resolver request matched to the source-context candidate chain and a selected package identity recorded. For example, `Resident.scala` resolves `core` as `dotty.tools.dotc.core` and selects the canonical TASTy object `dotty.tools.dotc.core.Contexts`; the enclosing method still stops later at `TypeNameNotFound`, and a wildcard has no singular final member. Package resolution, final selector resolution, and full-method typing remain distinct outcomes.
 
-This checkpoint preserves current-package precedence, `_root_` behavior, ambiguity errors, and rollback evidence. It does not select a next sprint; the remaining DoD points need their own refreshed blocker and loading-performance evidence before that recommendation.
+Exactly one next sprint is recommended: B, verify source package declarations against classpath resources for the 31 unresolved target keys (1,063 weighted observations, 81 files, 393 blocker origins; zero source-package registry hits). This exceeds the previously measured unresolved-supertype cohort (212 errors / 51 files) and anonymous-class cohort (32 / 15 files), while avoiding guessed lexical parents. The full-corpus blocker and deferred-loading profiles have not been refreshed in this checkpoint, so their historical values are not presented as current.
 
 ## Current selection and evidence summary
 
@@ -1171,5 +1171,5 @@ reconciliation_rows=2394
 reconciliation_unresolved_rows=721
 reconciliation_advanced_rows=1673
 new_current_observations_outside_baseline=342
-reconciliation_rows_with_resolver_evidence=58
+reconciliation_rows_with_resolver_evidence=2394
 ```

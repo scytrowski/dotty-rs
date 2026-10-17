@@ -165056,3 +165056,30 @@ singleton_projection_baseline:
     compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4881 first_blocker=ImportQualifierNotFound
     compiler/src/dotty/tools/dotc/transform/CheckUnused.scala#tree=4981 first_blocker=ImportQualifierNotFound
 ```
+
+
+## #1180 lexical package import checkpoint (2026-10-17)
+
+The pinned import-prefix audit and its full 2,394-row reconciliation completed
+twice. The normalized profiles, reconciliation and seven generated sidecars
+matched byte-for-byte. The corrected context-aware matcher records selected
+package identities for all 1,615 historically qualified rows. The pinned
+`Resident.scala` row resolves `core` to `dotty.tools.dotc.core`, selects the
+canonical TASTy Object `dotty.tools.dotc.core.Contexts`, then stops later at
+`TypeNameNotFound`. The complete method count remains 0 / 3,297.
+
+Each import-profile run took 288.468 s and 288.037 s. Source parse/name/type
+work took 285.981 s and 285.707 s; reconciliation took 303 ms and 305 ms.
+This isolates the dominant cost to selected source analysis, not report
+generation. See the [#1180 import-prefix report](typer-classpath-import-prefix-profile-1180-3.9.0.md)
+and its reconciliation and cohort sidecars.
+
+The separate full-corpus audit was started but stopped after 75 / 1,236 Scala
+files while processing more than 153,000 resolver calls. It produced neither
+a complete report nor a determinism result. This checkpoint therefore does not
+refresh full-corpus blocker totals or deferred-loading p95/fanout; those earlier
+values remain historical. Based on the refreshed import evidence alone,
+recommend one bounded next sprint: compare source package declarations with
+classpath resources for the 31 unresolved target keys (1,063 weighted
+observations, 81 files, 393 blocker origins, and zero source-package registry
+hits). Keep those candidates unresolved until evidence supports them.
