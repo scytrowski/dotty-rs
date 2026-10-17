@@ -165101,3 +165101,23 @@ audit was stopped at 250 / 1,236 files after about 20 minutes and roughly
 295,000 module-identity requests. It produced no report or determinism result.
 Consequently the #1180 full-corpus and deferred-loading DoD gates remain
 unverified; the prior complete-load p95/fanout values remain historical.
+
+### #1180 full-corpus completion (2026-10-17)
+
+After refreshing the audit invariants for the expected lexical-import blocker
+movements, two full pinned Scala 3.9.0 / JDK 21.0.8 runs passed. They covered
+all 1,236 source files, took 2,582.02 s and 2,595.04 s, and produced identical
+normalized reports and deferred-cohort TSVs. The full-corpus typed-local-method
+count remains 0 / 3,297.
+
+The deferred-loading gate passed on both runs: p95 dependency depth was 0
+(limit 70), maximum distinct fully completed classes per request was 9
+(limit 524), and all 29 previously successful target keys were retained (182
+current successful targets). The report's broader touched-class maximum is 53;
+that is a separate metric from the bounded fully-completed-class fanout.
+
+The lexical import changes move `ProtoTypes.isPoly` from
+`ImportQualifierNotFound` to `SymbolResolution`. They also move all three
+frozen local lazy-value observations to `SymbolResolution`; none is typed.
+These blocker movements explain the refreshed audit expectations and do not
+count as full-method success.

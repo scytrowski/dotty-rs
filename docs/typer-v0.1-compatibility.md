@@ -1731,6 +1731,8 @@ collection for ordinary match-case probes and uses rollback-aware reverse
 indexes for classpath module identities. A targeted `tpd.scala` method profile
 improved from 6,214 ms to 3,546 ms (512 member requests: 4,939 ms to 2,797 ms
 inside lookup). The full-corpus rerun stopped at 250 / 1,236 files after about
-20 minutes, so current corpus totals and deferred-load limits remain
-unverified; see the follow-up in
+20 minutes at that checkpoint. A subsequent pair of full pinned runs completed
+all 1,236 files with identical normalized reports; typed methods remain
+0 / 3,297, and deferred-loading limits passed at p95 depth 0 / 70 and completed
+class fanout 9 / 524. See the completion report in
 [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
