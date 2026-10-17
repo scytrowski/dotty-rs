@@ -7,7 +7,7 @@ use dotty_core::symbols::{SymbolKind, SymbolOrigin};
 use dotty_core::types::{Type, TypeRefTarget};
 
 use crate::{
-    InvalidTypeReason, JvmCodegenError, JvmCompilationUnit, JvmType,
+    InvalidTypeReason, JvmClassIdentity, JvmCodegenError, JvmCompilationUnit, JvmType,
     UnsupportedJvmReferenceTypeKind,
 };
 
@@ -65,7 +65,63 @@ pub(super) fn project_constructor_type(
             kind: UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
         });
     }
-    project_class(unit, ty, *class, definitions, None)
+    project_class(Some(unit), unit.store, ty, *class, definitions, None, None)
+}
+
+/// Projects a method signature reference against identities already validated
+/// for the enclosing emission unit. The source TypeRef must use either the
+/// canonical no-prefix form or the exact package owner of its target class.
+pub(super) fn project_method_signature_type(
+    store: &SemanticStore,
+    ty: TypeId,
+    definitions: &Definitions,
+    class_identities: &[JvmClassIdentity],
+) -> Result<JvmType, JvmCodegenError> {
+    let Some(Type::TypeRef { prefix, target }) = store.types.try_get(ty) else {
+        return Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty,
+            kind: UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
+        });
+    };
+    let TypeRefTarget::Symbol(class) = target else {
+        return Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty,
+            kind: UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
+        });
+    };
+    let expected_package = store
+        .symbols
+        .contains(*class)
+        .then(|| store.symbols.get(*class).owner)
+        .flatten();
+    let canonical_no_prefix = *prefix == definitions.no_prefix
+        && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix));
+    let canonical_package_prefix = matches!(
+        store.types.try_get(*prefix),
+        Some(Type::TypeRef {
+            prefix: package_prefix,
+            target: TypeRefTarget::Symbol(package),
+        }) if *package_prefix == definitions.no_prefix
+            && matches!(store.types.try_get(*package_prefix), Some(Type::NoPrefix))
+            && Some(*package) == expected_package
+            && store.symbols.contains(*package)
+            && store.symbols.get(*package).kind == SymbolKind::Package
+    );
+    if !canonical_no_prefix && !canonical_package_prefix {
+        return Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty,
+            kind: UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+        });
+    }
+    project_class(
+        None,
+        store,
+        ty,
+        *class,
+        definitions,
+        None,
+        Some(class_identities),
+    )
 }
 
 fn project_type_with_metadata(
@@ -125,9 +181,15 @@ fn project_type_with_metadata(
                 }
             }
             match target {
-                TypeRefTarget::Symbol(class) => {
-                    project_class(unit, ty, *class, definitions, metadata)
-                }
+                TypeRefTarget::Symbol(class) => project_class(
+                    Some(unit),
+                    unit.store,
+                    ty,
+                    *class,
+                    definitions,
+                    metadata,
+                    None,
+                ),
                 _ => Err(JvmCodegenError::UnsupportedJvmReferenceType {
                     ty,
                     kind: UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
@@ -142,13 +204,14 @@ fn project_type_with_metadata(
 }
 
 fn project_class(
-    unit: &JvmCompilationUnit<'_>,
+    unit: Option<&JvmCompilationUnit<'_>>,
+    store: &SemanticStore,
     ty: TypeId,
     class: dotty_core::SymbolId,
     definitions: &Definitions,
     metadata: Option<&[crate::JvmClassMetadata]>,
+    class_identities: Option<&[JvmClassIdentity]>,
 ) -> Result<JvmType, JvmCodegenError> {
-    let store = unit.store;
     if !store.symbols.contains(class) {
         return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
     }
@@ -178,7 +241,9 @@ fn project_class(
             kind: UnsupportedJvmReferenceTypeKind::ObjectClass,
         });
     }
-    if !unit.classes.iter().any(|plan| plan.class == class) {
+    if class_identities.is_none()
+        && !unit.is_some_and(|unit| unit.classes.iter().any(|plan| plan.class == class))
+    {
         return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
     }
 
@@ -226,18 +291,27 @@ fn project_class(
     // Validate complete unit metadata when this is a public standalone
     // projection. Expression lowering supplies the metadata it already
     // validated when creating the local layout.
-    let generated_metadata;
-    let metadata = match metadata {
-        Some(metadata) => metadata,
-        None => {
-            generated_metadata = unit.metadata(definitions)?;
-            &generated_metadata
-        }
+    let is_planned = if let Some(class_identities) = class_identities {
+        class_identities
+            .iter()
+            .any(|identity| identity.symbol() == class)
+    } else {
+        let generated_metadata;
+        let metadata = match metadata {
+            Some(metadata) => metadata,
+            None => {
+                let Some(unit) = unit else {
+                    return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
+                };
+                generated_metadata = unit.metadata(definitions)?;
+                &generated_metadata
+            }
+        };
+        metadata
+            .iter()
+            .any(|class_metadata| class_metadata.identity().symbol() == class)
     };
-    if !metadata
-        .iter()
-        .any(|class_metadata| class_metadata.identity().symbol() == class)
-    {
+    if !is_planned {
         return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
     }
 

@@ -10,9 +10,9 @@ use dotty_core::types::{Constant, MethodKind, Type, TypeRefTarget};
 use std::collections::HashSet;
 
 use crate::{
-    InvalidTypeReason, JvmCodegenError, JvmMethodDescriptor, JvmMethodPlan, JvmReturnType, JvmType,
-    JvmValueCategory, PrimitiveBuiltin, UnsupportedJvmTypeKind, UnsupportedMethodParameterKind,
-    UnsupportedMethodShapeKind,
+    InvalidTypeReason, JvmClassIdentity, JvmCodegenError, JvmMethodDescriptor, JvmMethodPlan,
+    JvmReturnType, JvmType, JvmValueCategory, PrimitiveBuiltin, UnsupportedJvmTypeKind,
+    UnsupportedMethodParameterKind, UnsupportedMethodShapeKind,
 };
 
 #[derive(Clone, Copy)]
@@ -20,6 +20,12 @@ struct PrimitiveSymbols {
     int: SymbolId,
     boolean: SymbolId,
     unit: SymbolId,
+}
+
+#[derive(Clone, Copy)]
+struct ReferenceContext<'a> {
+    store: &'a SemanticStore,
+    class_identities: &'a [JvmClassIdentity],
 }
 
 pub(super) fn method_descriptor(
@@ -31,12 +37,43 @@ pub(super) fn method_descriptor(
     descriptor_for(plan, store, owner, definitions, false)
 }
 
+pub(super) fn method_descriptor_with_class_identities(
+    plan: &JvmMethodPlan,
+    store: &SemanticStore,
+    owner: SymbolId,
+    definitions: &Definitions,
+    class_identities: &[JvmClassIdentity],
+) -> Result<JvmMethodDescriptor, JvmCodegenError> {
+    descriptor_for_with_references(
+        plan,
+        store,
+        owner,
+        definitions,
+        false,
+        Some(ReferenceContext {
+            store,
+            class_identities,
+        }),
+    )
+}
+
 pub(super) fn descriptor_for(
     plan: &JvmMethodPlan,
     store: &SemanticStore,
     owner: SymbolId,
     definitions: &Definitions,
     constructor: bool,
+) -> Result<JvmMethodDescriptor, JvmCodegenError> {
+    descriptor_for_with_references(plan, store, owner, definitions, constructor, None)
+}
+
+fn descriptor_for_with_references(
+    plan: &JvmMethodPlan,
+    store: &SemanticStore,
+    owner: SymbolId,
+    definitions: &Definitions,
+    constructor: bool,
+    reference_context: Option<ReferenceContext<'_>>,
 ) -> Result<JvmMethodDescriptor, JvmCodegenError> {
     let class = store
         .symbols
@@ -195,14 +232,18 @@ pub(super) fn descriptor_for(
             method_param.ty,
             *parameter_id,
             plan.method,
+            definitions,
             &primitive_symbols,
+            reference_context,
         )?;
         let symbol_value_type = primitive_value_type(
             store,
             symbol_type,
             *parameter_id,
             plan.method,
+            definitions,
             &primitive_symbols,
+            reference_context,
         )?;
         if signature_type != symbol_value_type {
             return Err(JvmCodegenError::ParameterTypeMismatch {
@@ -225,7 +266,14 @@ pub(super) fn descriptor_for(
         }
         JvmReturnType::Void
     } else {
-        match primitive_result_type(store, method_type.result, plan.method, &primitive_symbols)? {
+        match primitive_result_type(
+            store,
+            method_type.result,
+            plan.method,
+            definitions,
+            &primitive_symbols,
+            reference_context,
+        )? {
             Some(ty) => JvmReturnType::Value(ty),
             None => JvmReturnType::Void,
         }
@@ -235,23 +283,15 @@ pub(super) fn descriptor_for(
         .iter()
         .enumerate()
         .map(|(index, ty)| {
-            ty.descriptor_char()
-                .ok_or(JvmCodegenError::ReferenceMethodDescriptorUnsupported {
-                    symbol: plan.parameters[index],
-                    ty: *ty,
-                })
+            descriptor_type(*ty, plan.parameters[index], plan.method, reference_context)
         })
-        .collect::<Result<String, _>>()?;
+        .collect::<Result<Vec<_>, _>>()?
+        .concat();
     let result_descriptor = match result {
-        JvmReturnType::Value(ty @ JvmType::Reference(_)) => {
-            return Err(JvmCodegenError::ReferenceMethodDescriptorUnsupported {
-                symbol: plan.method,
-                ty,
-            });
+        JvmReturnType::Value(ty) => {
+            descriptor_type(ty, plan.method, plan.method, reference_context)?
         }
-        JvmReturnType::Value(JvmType::Int) => "I",
-        JvmReturnType::Value(JvmType::Boolean) => "Z",
-        JvmReturnType::Void => "V",
+        JvmReturnType::Void => "V".to_owned(),
     };
     let descriptor_text = format!("({parameter_descriptor}){result_descriptor}");
     let parsed = MethodDescriptor::parse(&descriptor_text).map_err(|error| {
@@ -267,6 +307,34 @@ pub(super) fn descriptor_for(
         parameters,
         result,
     })
+}
+
+fn descriptor_type(
+    ty: JvmType,
+    symbol: SymbolId,
+    method: SymbolId,
+    context: Option<ReferenceContext<'_>>,
+) -> Result<String, JvmCodegenError> {
+    match ty {
+        JvmType::Int => Ok("I".to_owned()),
+        JvmType::Boolean => Ok("Z".to_owned()),
+        JvmType::Reference(class) => {
+            let Some(context) = context else {
+                return Err(JvmCodegenError::ReferenceMethodDescriptorUnsupported { symbol, ty });
+            };
+            let Some(identity) = context
+                .class_identities
+                .iter()
+                .find(|identity| identity.symbol() == class)
+            else {
+                return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
+            };
+            let descriptor = format!("L{};", identity.internal_name());
+            dotty_classfile::descriptor::FieldType::parse(&descriptor)
+                .map_err(|error| JvmCodegenError::InvalidGeneratedDescriptor { method, error })?;
+            Ok(descriptor)
+        }
+    }
 }
 
 fn complete_info(store: &SemanticStore, symbol: SymbolId) -> Result<TypeId, JvmCodegenError> {
@@ -320,7 +388,9 @@ fn primitive_value_type(
     ty: TypeId,
     symbol: SymbolId,
     method: SymbolId,
+    definitions: &Definitions,
     primitives: &PrimitiveSymbols,
+    reference_context: Option<ReferenceContext<'_>>,
 ) -> Result<JvmType, JvmCodegenError> {
     validate_semantic_type(store, symbol, ty)?;
     match store.types.try_get(ty) {
@@ -342,6 +412,22 @@ fn primitive_value_type(
             parameter: symbol,
             ty,
         }),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(target),
+            ..
+        }) if store.symbols.contains(*target)
+            && store.symbols.get(*target).kind == SymbolKind::Class =>
+        {
+            let Some(context) = reference_context else {
+                return Err(unsupported_type_error(store, symbol, ty));
+            };
+            crate::reference::project_method_signature_type(
+                context.store,
+                ty,
+                definitions,
+                context.class_identities,
+            )
+        }
         _ => Err(unsupported_type_error(store, symbol, ty)),
     }
 }
@@ -374,7 +460,9 @@ fn primitive_result_type(
     store: &SemanticStore,
     ty: TypeId,
     symbol: SymbolId,
+    definitions: &Definitions,
     primitives: &PrimitiveSymbols,
+    reference_context: Option<ReferenceContext<'_>>,
 ) -> Result<Option<JvmType>, JvmCodegenError> {
     validate_semantic_type(store, symbol, ty)?;
     if matches!(
@@ -393,7 +481,16 @@ fn primitive_result_type(
             kind: UnsupportedMethodShapeKind::NestedCurriedClause,
         });
     }
-    primitive_value_type(store, ty, symbol, symbol, primitives).map(Some)
+    primitive_value_type(
+        store,
+        ty,
+        symbol,
+        symbol,
+        definitions,
+        primitives,
+        reference_context,
+    )
+    .map(Some)
 }
 
 fn validate_semantic_type(

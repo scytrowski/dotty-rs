@@ -1,9 +1,10 @@
 # JVM reference method signature audit
 
-This is a characterization of the existing source-to-JVM path, not an
-implementation of reference-valued method descriptors. Candidate descriptors
-are valid JVM descriptors, but this backend increment deliberately rejects
-reference parameters and results before publishing any class file.
+This document records the source-to-JVM characterization and the descriptor
+metadata increment. `JvmCompilationUnit::metadata` now projects method
+parameters and results that reference exact planned classes. Reference-valued
+loads, calls, returns, and class emission remain unsupported, so the source
+compiler still fails closed before publishing class files.
 
 The audit is pinned to the Java Virtual Machine Specification, Java SE 21:
 [§4.3.2 Field Descriptors](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html#jvms-4.3.2),
@@ -18,11 +19,12 @@ and [§4.10.1.9 `areturn`](https://docs.oracle.com/javase/specs/jvms/se21/html/j
 `reference_method_signature_audit_characterizes_real_typed_source` in
 [`tests/jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs)
 runs these declarations through the repository's lexer, parser, namer, and
-`SourceTyper`, then asks the actual `JvmMethodPlan` for descriptor metadata.
-No typed tree is fabricated. `Counter.get(): Int` is accepted as `()I`; each
-reference-signature example fails during descriptor projection with
-`JvmCodegenError::UnsupportedJvmType { kind: ReferenceClass }`. The adapter
-does not publish class files after that failure.
+`SourceTyper`, then asks the unit-aware metadata projector for method
+descriptors. No typed tree is fabricated. `Counter.get(): Int` is accepted as
+`()I`, and each exact planned-class example receives its candidate descriptor.
+The standalone store-only `JvmMethodPlan::descriptor` still rejects reference
+types because that API has no validated emission-unit context. Full class
+emission remains disabled for these signatures and publishes no class files.
 
 For these root-package declarations, a declared source type `Counter` is
 `Type::TypeRef` targeting the canonical `Class:Counter` symbol with a
@@ -41,13 +43,14 @@ canonical `Constructor:<init>` symbol. Those paths carry enough identity for
 planned-call validation; lowering must not recover the receiver or owner from
 printed source names.
 
-| Source method | Candidate descriptor | Current result |
+| Source method | Unit metadata descriptor | Emission status |
 | --- | --- | --- |
-| `pass(c: Counter): Counter = c` | `(LCounter;)LCounter;` | Descriptor rejected at parameter `c` |
-| `make(n: Int): Counter = new Counter(n)` | `(I)LCounter;` | Descriptor rejected at result `make` |
-| `self(): Counter = this` in `Counter` | `()LCounter;` | Descriptor rejected at result `self`; typed `this` is `ThisType(Counter)` |
-| `read(c: Counter): Int = c.get()` | `(LCounter;)I` | Descriptor rejected at parameter `c`; typed receiver is `Ident(c)` |
-| `choose(flag: Boolean, a: Counter, b: Counter): Counter = if flag then a else b` | `(ZLCounter;LCounter;)LCounter;` | Descriptor rejected at first reference parameter `a`; typed branches both have the exact `Counter` type |
+| `pass(c: Counter): Counter = c` | `(LCounter;)LCounter;` | Metadata accepted; bytecode lowering remains unsupported |
+| `make(n: Int): Counter = new Counter(n)` | `(I)LCounter;` | Metadata accepted; bytecode lowering remains unsupported |
+| `self(): Counter = this` in `Counter` | `()LCounter;` | Metadata accepted; bytecode lowering remains unsupported; typed `this` is `ThisType(Counter)` |
+| `read(c: Counter): Int = c.get()` | `(LCounter;)I` | Metadata accepted; bytecode lowering remains unsupported; typed receiver is `Ident(c)` |
+| `choose(flag: Boolean, a: Counter, b: Counter): Counter = if flag then a else b` | `(ZLCounter;LCounter;)LCounter;` | Metadata accepted; bytecode lowering remains unsupported; branches both retain exact `Counter` |
+| `mix(flag: Boolean, count: Int, c: Counter, tail: Boolean): Counter` | `(ZILCounter;Z)LCounter;` | Mixed category-one slots are retained in source order |
 
 The JVM descriptor grammar accepts these forms: object types use `L` plus the
 internal class name plus `;`; method parameters are field descriptors, and a
@@ -56,7 +59,7 @@ limits include the implicit receiver slot. For a packaged class, the binary
 name is used, for example `Lp/Counter;`, rather than a source spelling or
 `java/lang/Object` fallback.
 
-## JVMS contract for a future implementation
+## JVMS behavior still needed for bytecode emission
 
 For an ordinary planned instance method `Client.read(c: Counter): Int`, the
 descriptor is `(LCounter;)I`. Local 0 is the implicit `Client` receiver and
@@ -94,7 +97,7 @@ prefix is missing.
 | Layer | Existing behavior | Work needed for reference signatures |
 | --- | --- | --- |
 | Parser / namer / typer | The audit fixture produces real canonical parameter, method, class, `This`, `Ident`, `Apply`, and `If` trees. Source `Counter` declarations retain a root-package `TypeRef` prefix. | Preserve these identities; do not manufacture or normalize trees to fit the backend. The current source Typer rejects `null` with `NullLiteralTypingDeferred`; it does not currently resolve source `Array` in this fixture (`TypeNameNotFound`). |
-| `dotty-jvm::descriptor` | `JvmType::Reference(SymbolId)` exists for bounded expression values and immutable locals, but `primitive_value_type` accepts only `Int`/`Boolean`; `primitive_result_type` accepts result-only `Unit`. `descriptor_char` returns no descriptor for references. | Resolve reference types from canonical semantic symbols and the validated same-batch class plans, validate source prefixes, construct `L<internal-name>;`, and keep ownership, arity, modifiers, parameter-symbol order, and the JVMS slot limit checks. |
+| `dotty-jvm::descriptor` | Unit metadata projects primitive types and exact planned-class references to checked JVM method descriptors. The standalone store-only `JvmMethodPlan::descriptor`, fields, and constructors remain primitive-only. | Keep canonical class identity, source package-prefix, owner, arity, modifiers, parameter-symbol order, and JVMS slot-limit validation. Do not enable reference-valued bytecode emission as part of descriptor projection. |
 | `dotty-jvm` expression and local lowering | Planned reference locals and primitive-result calls on `this`, `new C`, or an immutable local are supported. Parameters are emitted using `iload`; reference `Ident` parameters and `This` as a value are not yet lowered. `append_method_return` emits `ireturn` for all value results. | Map reference parameters to `aload`; map only a matching canonical `ThisType` to `aload_0`; preserve receiver-first call evaluation; add typed reference `Flow` and `areturn` with exact owner/result checks. |
 | Linear `dotty-classfile` analyzer | It parses full class-file descriptors and models values primarily by JVM category. Its generic invocation and return checks do not provide the planned exact source-class guarantees. | Make return and invocation checks descriptor-shaped and exact where class identity is available; preserve the generic bytecode crate's Scala independence. |
 | CFG `dotty-classfile` analyzer | `Frame::new` lays out descriptor parameters by category, but `CfgCodeAnalyzer::analyze_validated_with_current_class` then rejects every non-int parameter as `UnsupportedFlowParameter`. In class-aware flow, `invokevirtual` accepts only `I`/`Z` arguments and `I`/`Z`/`V` results; result transfer currently treats any permitted non-void result as int. CFG validation rejects `areturn` up front as `UnsupportedFlowInstruction { kind: Reference }`. The shared `Frame` transfer used by linear analysis checks only the reference category for `areturn`. | Seed reference parameters with exact `ClassIdentity`; pop call arguments against descriptor types in reverse order; push exact reference results; add descriptor-exact `areturn` checking before admitting it to CFG flow; retain fail-closed exact stack joins. |
@@ -145,24 +148,20 @@ generic erasure; boxing; and Scala ABI/TASTy changes. In particular,
 
 ## Recommended implementation sequence
 
-1. Add canonical signature projection for exact same-batch planned classes,
-   including validation of the source `TypeRef` package prefix. Keep field and
-   constructor signatures primitive-only.
-2. Initialize instance parameter metadata and slots from the projected
-   descriptor. Add `aload` parameter reads and exact `ThisType` value lowering;
-   carry exact reference state into CFG analysis and initial frames.
-3. Add reference method results, matching typed-body flow, `areturn`, and
+1. Add reference parameter reads and exact `ThisType` value lowering; carry
+   exact reference state into CFG analysis and initial frames.
+2. Add reference method results, matching typed-body flow, `areturn`, and
    descriptor-appropriate frame checks. Reject every unknown or mismatched
    class before emission.
-4. Extend planned virtual calls to reference parameters/results, popping
+3. Extend planned virtual calls to reference parameters/results, popping
    arguments in reverse descriptor order and checking exact receiver, owner,
    parameter, and result identities.
-5. Enable only same-exact-class reference `If` joins and their precise
+4. Enable only same-exact-class reference `If` joins and their precise
    `StackMapTable` frames. Keep different classes, uninitialized objects,
    external classes, hierarchy joins, reference fields, reference constructor
    arguments, arrays, and null rejected.
 
-The dependency order is `1 -> (2, 3) -> 4 -> 5`; steps 2 and 3 both depend on
-canonical signature identities from step 1. These increments should use real
-source integration fixtures plus class-file structural checks and JDK 21+
-`java -Xverify:all` before any reference-signature feature is enabled.
+The canonical method signature metadata and source package-prefix checks are
+implemented by #1270. Remaining bytecode work should use real-source fixtures,
+class-file structural checks, and JDK 21+ `java -Xverify:all` before a
+reference-valued signature can be emitted.

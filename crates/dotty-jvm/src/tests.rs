@@ -1266,6 +1266,87 @@ fn reference_projection_rejects_unplanned_stale_and_noncanonical_targets() {
 }
 
 #[test]
+fn method_signature_projection_requires_exact_class_and_package_identity() {
+    let mut fixture = ReferenceFixture::new();
+    let counter = fixture.classes[0];
+    let package = fixture.store.symbols.get(counter).owner.unwrap();
+    let package_prefix = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(package),
+    });
+    let counter_signature = fixture.store.types.alloc(Type::TypeRef {
+        prefix: package_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
+    let unsupported_prefix = fixture.store.types.alloc(Type::NoType);
+    let wrong_prefix = fixture.store.types.alloc(Type::TypeRef {
+        prefix: unsupported_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
+    let foreign_counter = add_reference_class(
+        &mut fixture.store,
+        package,
+        "Counter",
+        fixture.definitions.no_prefix,
+        fixture.definitions.object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    let foreign_signature = fixture.store.types.alloc(Type::TypeRef {
+        prefix: package_prefix,
+        target: TypeRefTarget::Symbol(foreign_counter),
+    });
+    let no_prefix_signature = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(counter),
+    });
+    let unit = fixture.unit();
+    let identities = crate::identity::unit_class_identities(&unit).unwrap();
+
+    assert_eq!(
+        crate::reference::project_method_signature_type(
+            unit.store,
+            counter_signature,
+            &fixture.definitions,
+            &identities,
+        ),
+        Ok(JvmType::Reference(counter))
+    );
+    assert_eq!(
+        crate::reference::project_method_signature_type(
+            unit.store,
+            wrong_prefix,
+            &fixture.definitions,
+            &identities,
+        ),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty: wrong_prefix,
+            kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+        })
+    );
+    assert_eq!(
+        crate::reference::project_method_signature_type(
+            unit.store,
+            no_prefix_signature,
+            &fixture.definitions,
+            &identities,
+        ),
+        Ok(JvmType::Reference(counter))
+    );
+    assert_eq!(
+        crate::reference::project_method_signature_type(
+            unit.store,
+            foreign_signature,
+            &fixture.definitions,
+            &identities,
+        ),
+        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+            class: foreign_counter,
+        })
+    );
+}
+
+#[test]
 fn reference_projection_rejects_external_anonymous_generic_and_inherited_classes() {
     let mut fixture = ReferenceFixture::new();
     let owner = fixture.store.symbols.get(fixture.classes[0]).owner.unwrap();

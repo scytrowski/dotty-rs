@@ -28,7 +28,7 @@ use dotty_typer::{SourceTyper, TyperError};
 const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
 
 type SourceBatchObserver<'observer> =
-    dyn for<'a> FnMut(&JvmCompilationUnit<'a>, &Definitions) + 'observer;
+    dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
 
 #[derive(Debug)]
 #[allow(dead_code)] // Retain typed stage failures so test panics report the exact pipeline error.
@@ -471,13 +471,13 @@ fn compile_source_batch_observed(
         });
     }
 
-    let unit = JvmCompilationUnit {
+    let mut unit = JvmCompilationUnit {
         store: typer.store(),
         typed_ast: typer.typed_ast(),
         classes: plans,
     };
     if let Some(observe) = observe.as_mut() {
-        observe(&unit, &definitions);
+        observe(&mut unit, &definitions);
     }
     let mut generated = Vec::with_capacity(unit.classes.len());
     for plan in &unit.classes {
@@ -491,6 +491,16 @@ fn term_type_target(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> Op
     match unit.store.types.get(ty) {
         Type::TermRef {
             target: TermRefTarget::Symbol(symbol),
+            ..
+        } => Some(*symbol),
+        _ => None,
+    }
+}
+
+fn audit_type_symbol(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> Option<SymbolId> {
+    match unit.store.types.get(ty) {
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
             ..
         } => Some(*symbol),
         _ => None,
@@ -603,10 +613,13 @@ fn typed_source_shape(unit: &JvmCompilationUnit<'_>, tree: TreeId<Typed>) -> Str
 
 #[test]
 fn reference_method_signature_audit_characterizes_real_typed_source() {
-    let source = "class Counter(start: Int):\n  def get(): Int = 1\n  def self(): Counter = this\n\nclass Client:\n  def pass(c: Counter): Counter = c\n  def make(n: Int): Counter = new Counter(n)\n  def read(c: Counter): Int = c.get()\n  def choose(flag: Boolean, a: Counter, b: Counter): Counter =\n    if flag then a else b\n";
+    let source = "class Counter(start: Int):\n  def get(): Int = 1\n  def self(): Counter = this\n\nclass Client:\n  def pass(c: Counter): Counter = c\n  def make(n: Int) = new Counter(n)\n  def read(c: Counter): Int = c.get()\n  def choose(flag: Boolean, a: Counter, b: Counter): Counter =\n    if flag then a else b\n  def mix(flag: Boolean, count: Int, c: Counter, tail: Boolean): Counter = c\n";
     let output = TestOutputDirectory::new("reference-signature-audit");
     let mut observed = Vec::new();
-    let mut inspect = |unit: &JvmCompilationUnit<'_>, definitions: &Definitions| {
+    let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        let metadata = unit
+            .metadata(definitions)
+            .expect("reference signatures in the validated unit produce metadata");
         for class in &unit.classes {
             let class_name = unit
                 .store
@@ -626,6 +639,23 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
                 let Type::Method(signature) = unit.store.types.get(signature) else {
                     panic!("method {method_name} should have one plain typed method clause")
                 };
+                if method_name == "make" {
+                    let Type::TypeRef { prefix, target } = unit.store.types.get(signature.result)
+                    else {
+                        panic!("inferred make result should retain a canonical class TypeRef")
+                    };
+                    assert_eq!(*prefix, definitions.no_prefix);
+                    let TypeRefTarget::Symbol(result_class) = target else {
+                        panic!("inferred make result should target its exact class symbol")
+                    };
+                    assert!(unit.classes.iter().any(|plan| plan.class == *result_class));
+                    assert_eq!(
+                        unit.store
+                            .names
+                            .resolve(unit.store.symbols.get(*result_class).name.text()),
+                        "Counter"
+                    );
+                }
                 let params = signature
                     .params
                     .iter()
@@ -636,22 +666,115 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
                     })
                     .collect::<Vec<_>>();
                 let result = audit_type_snapshot(unit, signature.result);
-                let (descriptor_status, blocked_symbol) =
-                    match method.descriptor(unit.store, class.class, definitions) {
-                        Ok(descriptor) => (format!("accepted({})", descriptor.as_str()), None),
-                        Err(JvmCodegenError::UnsupportedJvmType { symbol, kind, .. }) => (
-                            format!("UnsupportedJvmType::{kind:?}"),
-                            Some(
-                                unit.store
-                                    .names
-                                    .resolve(unit.store.symbols.get(symbol).name.text())
-                                    .to_owned(),
-                            ),
-                        ),
-                        Err(other) => panic!(
-                            "unexpected descriptor audit result for {method_name}: {other:?}"
-                        ),
-                    };
+                let class_metadata = metadata
+                    .iter()
+                    .find(|item| item.identity().symbol() == class.class)
+                    .expect("class metadata follows source class identity");
+                let method_metadata = class_metadata
+                    .methods()
+                    .iter()
+                    .find(|item| item.symbol() == method.method)
+                    .expect("method metadata follows canonical method identity");
+                let projected_parameters = signature
+                    .params
+                    .iter()
+                    .map(|parameter| match unit.store.types.get(parameter.ty) {
+                        Type::TypeRef {
+                            target: TypeRefTarget::Symbol(symbol),
+                            ..
+                        } if Some(*symbol) == audit_type_symbol(unit, definitions.int) => {
+                            dotty_jvm::JvmType::Int
+                        }
+                        Type::TypeRef {
+                            target: TypeRefTarget::Symbol(symbol),
+                            ..
+                        } if Some(*symbol) == audit_type_symbol(unit, definitions.boolean) => {
+                            dotty_jvm::JvmType::Boolean
+                        }
+                        Type::TypeRef {
+                            target: TypeRefTarget::Symbol(symbol),
+                            ..
+                        } => dotty_jvm::JvmType::Reference(*symbol),
+                        other => panic!("unexpected audit parameter type {other:?}"),
+                    })
+                    .collect::<Vec<_>>();
+                let projected_result = match unit.store.types.get(signature.result) {
+                    Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    } if Some(*symbol) == audit_type_symbol(unit, definitions.unit) => {
+                        dotty_jvm::JvmReturnType::Void
+                    }
+                    Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    } if Some(*symbol) == audit_type_symbol(unit, definitions.int) => {
+                        dotty_jvm::JvmReturnType::Value(dotty_jvm::JvmType::Int)
+                    }
+                    Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    } if Some(*symbol) == audit_type_symbol(unit, definitions.boolean) => {
+                        dotty_jvm::JvmReturnType::Value(dotty_jvm::JvmType::Boolean)
+                    }
+                    Type::TypeRef {
+                        target: TypeRefTarget::Symbol(symbol),
+                        ..
+                    } => dotty_jvm::JvmReturnType::Value(dotty_jvm::JvmType::Reference(*symbol)),
+                    other => panic!("unexpected audit result type {other:?}"),
+                };
+                assert_eq!(
+                    method_metadata
+                        .parameters()
+                        .iter()
+                        .map(|parameter| parameter.symbol())
+                        .collect::<Vec<_>>(),
+                    method.parameters,
+                    "metadata preserves canonical source parameter order"
+                );
+                assert_eq!(
+                    method_metadata.descriptor().parameters(),
+                    projected_parameters,
+                    "metadata preserves exact primitive/reference parameter types"
+                );
+                assert_eq!(method_metadata.descriptor().result(), projected_result);
+                if projected_parameters
+                    .iter()
+                    .any(|parameter| matches!(parameter, dotty_jvm::JvmType::Reference(_)))
+                    || matches!(
+                        method_metadata.descriptor().result(),
+                        dotty_jvm::JvmReturnType::Value(dotty_jvm::JvmType::Reference(_))
+                    )
+                {
+                    assert!(matches!(
+                        method.descriptor(unit.store, class.class, definitions),
+                        Err(JvmCodegenError::UnsupportedJvmType {
+                            kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                            ..
+                        })
+                    ));
+                }
+                let descriptor_status =
+                    format!("accepted({})", method_metadata.descriptor().as_str());
+                let parameter_slots = method_metadata
+                    .parameters()
+                    .iter()
+                    .map(|parameter| {
+                        let category = match parameter.ty().category() {
+                            dotty_jvm::JvmValueCategory::IntLike => "intlike",
+                            dotty_jvm::JvmValueCategory::Reference => "reference",
+                        };
+                        format!(
+                            "{}:{category}@{}+{}",
+                            unit.store
+                                .names
+                                .resolve(unit.store.symbols.get(parameter.symbol()).name.text()),
+                            parameter.slot(),
+                            parameter.width()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let body = method
                     .body
                     .map(|body| typed_source_shape(unit, body))
@@ -663,12 +786,12 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
                     "self" => "()LCounter;",
                     "read" => "(LCounter;)I",
                     "choose" => "(ZLCounter;LCounter;)LCounter;",
+                    "mix" => "(ZILCounter;Z)LCounter;",
                     _ => panic!("unexpected audit method {method_name}"),
                 };
                 observed.push(format!(
-                    "{class_name}.{method_name} | params=[{}] | result={result} | tree={body} | candidate={candidate_descriptor} | backend={descriptor_status}{}",
+                    "{class_name}.{method_name} | params=[{}] | result={result} | tree={body} | candidate={candidate_descriptor} | backend={descriptor_status} | slots=[{parameter_slots}]",
                     params.join(", "),
-                    blocked_symbol.map_or_else(String::new, |symbol| format!("({symbol})")),
                 ));
             }
         }
@@ -689,14 +812,241 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
     assert_eq!(
         observed,
         [
-            "Counter.get | params=[] | result=TypeRef(prefix=NoPrefix,target=Class:Int) | tree=Literal:Constant(Int(1)) | candidate=()I | backend=accepted(()I)",
-            "Counter.self | params=[] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=This(_):ThisType(Class:Counter) | candidate=()LCounter; | backend=UnsupportedJvmType::ReferenceClass(self)",
-            "Client.pass | params=[c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c) | candidate=(LCounter;)LCounter; | backend=UnsupportedJvmType::ReferenceClass(c)",
-            "Client.make | params=[n:TypeRef(prefix=NoPrefix,target=Class:Int)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Apply(Select(<init>, New(TypeTree:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TermRef(prefix=TypeRef(Class:Counter),target=Constructor:<init>), [Ident(n:Parameter:n):TermRef(prefix=NoPrefix,target=Parameter:n)]):TypeRef(prefix=NoPrefix,target=Class:Counter) | candidate=(I)LCounter; | backend=UnsupportedJvmType::ReferenceClass(make)",
-            "Client.read | params=[c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=NoPrefix,target=Class:Int) | tree=Apply(Select(get, Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c)):TermRef(prefix=TermRef(Parameter:c),target=Method:get), []):TypeRef(prefix=NoPrefix,target=Class:Int) | candidate=(LCounter;)I | backend=UnsupportedJvmType::ReferenceClass(c)",
-            "Client.choose | params=[flag:TypeRef(prefix=NoPrefix,target=Class:Boolean), a:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter), b:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=If(Ident(flag:Parameter:flag):TermRef(prefix=NoPrefix,target=Parameter:flag), Ident(a:Parameter:a):TermRef(prefix=NoPrefix,target=Parameter:a), Ident(b:Parameter:b):TermRef(prefix=NoPrefix,target=Parameter:b)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | candidate=(ZLCounter;LCounter;)LCounter; | backend=UnsupportedJvmType::ReferenceClass(a)",
+            "Counter.get | params=[] | result=TypeRef(prefix=NoPrefix,target=Class:Int) | tree=Literal:Constant(Int(1)) | candidate=()I | backend=accepted(()I) | slots=[]",
+            "Counter.self | params=[] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=This(_):ThisType(Class:Counter) | candidate=()LCounter; | backend=accepted(()LCounter;) | slots=[]",
+            "Client.pass | params=[c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c) | candidate=(LCounter;)LCounter; | backend=accepted((LCounter;)LCounter;) | slots=[c:reference@1+1]",
+            "Client.make | params=[n:TypeRef(prefix=NoPrefix,target=Class:Int)] | result=TypeRef(prefix=NoPrefix,target=Class:Counter) | tree=Apply(Select(<init>, New(TypeTree:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)):TermRef(prefix=TypeRef(Class:Counter),target=Constructor:<init>), [Ident(n:Parameter:n):TermRef(prefix=NoPrefix,target=Parameter:n)]):TypeRef(prefix=NoPrefix,target=Class:Counter) | candidate=(I)LCounter; | backend=accepted((I)LCounter;) | slots=[n:intlike@1+1]",
+            "Client.read | params=[c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=NoPrefix,target=Class:Int) | tree=Apply(Select(get, Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c)):TermRef(prefix=TermRef(Parameter:c),target=Method:get), []):TypeRef(prefix=NoPrefix,target=Class:Int) | candidate=(LCounter;)I | backend=accepted((LCounter;)I) | slots=[c:reference@1+1]",
+            "Client.choose | params=[flag:TypeRef(prefix=NoPrefix,target=Class:Boolean), a:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter), b:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=If(Ident(flag:Parameter:flag):TermRef(prefix=NoPrefix,target=Parameter:flag), Ident(a:Parameter:a):TermRef(prefix=NoPrefix,target=Parameter:a), Ident(b:Parameter:b):TermRef(prefix=NoPrefix,target=Parameter:b)):TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | candidate=(ZLCounter;LCounter;)LCounter; | backend=accepted((ZLCounter;LCounter;)LCounter;) | slots=[flag:intlike@1+1,a:reference@2+1,b:reference@3+1]",
+            "Client.mix | params=[flag:TypeRef(prefix=NoPrefix,target=Class:Boolean), count:TypeRef(prefix=NoPrefix,target=Class:Int), c:TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter), tail:TypeRef(prefix=NoPrefix,target=Class:Boolean)] | result=TypeRef(prefix=TypeRef(Package:<root>),target=Class:Counter) | tree=Ident(c:Parameter:c):TermRef(prefix=NoPrefix,target=Parameter:c) | candidate=(ZILCounter;Z)LCounter; | backend=accepted((ZILCounter;Z)LCounter;) | slots=[flag:intlike@1+1,count:intlike@2+1,c:reference@3+1,tail:intlike@4+1]",
         ]
     );
+}
+
+#[test]
+fn reference_method_descriptors_use_validated_package_internal_names() {
+    fn descriptor_in_independent_session(source_id: u32, label: &str) -> String {
+        let source = "package example.api\nclass Counter:\n  def pass(c: Counter): Counter = c\n";
+        let output = TestOutputDirectory::new(label);
+        let mut descriptor = None;
+        let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+            let class = unit
+                .classes
+                .iter()
+                .find(|class| {
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(class.class).name.text())
+                        == "Counter"
+                })
+                .expect("Counter plan");
+            let metadata = unit.metadata(definitions).expect("validated metadata");
+            let counter = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class.class)
+                .expect("Counter metadata");
+            assert_eq!(counter.identity().internal_name(), "example/api/Counter");
+            descriptor = Some(
+                counter
+                    .methods()
+                    .iter()
+                    .find(|method| method.name() == "pass")
+                    .expect("pass metadata")
+                    .descriptor()
+                    .as_str()
+                    .to_owned(),
+            );
+        };
+        let result = compile_source_batch_observed(
+            source,
+            "PackagedReferenceSignatures.scala",
+            output.path(),
+            SourceId::from_index(source_id),
+            SourceUnitCardinality::ExactlyOne,
+            Some(&mut inspect),
+        );
+        assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
+        assert!(output.class_files().is_empty());
+        descriptor.expect("projected packaged descriptor")
+    }
+
+    let first = descriptor_in_independent_session(1270, "packaged-reference-signature-a");
+    let second = descriptor_in_independent_session(1275, "packaged-reference-signature-b");
+    assert_eq!(first, "(Lexample/api/Counter;)Lexample/api/Counter;");
+    assert_eq!(second, first);
+}
+
+#[test]
+fn reference_method_descriptors_reject_canonical_classes_outside_the_unit() {
+    let source =
+        "class Counter:\n  def id(): Int = 1\nclass Client:\n  def pass(c: Counter): Counter = c\n";
+    let output = TestOutputDirectory::new("unplanned-reference-signature");
+    let mut projection_error = None;
+    let mut expected_class = None;
+    let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        let counter = unit
+            .classes
+            .iter()
+            .find(|class| {
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(class.class).name.text())
+                    == "Counter"
+            })
+            .expect("Counter plan")
+            .class;
+        expected_class = Some(counter);
+        unit.classes.retain(|class| class.class != counter);
+        projection_error = Some(unit.metadata(definitions).unwrap_err());
+    };
+    let result = compile_source_batch_observed(
+        source,
+        "UnplannedReferenceSignatures.scala",
+        output.path(),
+        SourceId::from_index(1271),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut inspect),
+    );
+    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
+    let counter = match projection_error {
+        Some(JvmCodegenError::ReferenceClassNotInJvmPlan { class }) => class,
+        other => panic!("expected canonical but unplanned class rejection, got {other:?}"),
+    };
+    assert_eq!(Some(counter), expected_class);
+    assert!(
+        !output.class_files().iter().any(|path| {
+            path.file_name().and_then(|name| name.to_str()) == Some("Counter.class")
+        })
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn reference_constructor_parameters_remain_outside_method_descriptor_support() {
+    let source =
+        "class Counter:\n  def id(): Int = 1\nclass Client(c: Counter):\n  def id(): Int = 1\n";
+    let output = TestOutputDirectory::new("reference-constructor-parameter");
+    let mut projection_error = None;
+    let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        projection_error = Some(unit.metadata(definitions).unwrap_err());
+    };
+    let result = compile_source_batch_observed(
+        source,
+        "ReferenceConstructorParameter.scala",
+        output.path(),
+        SourceId::from_index(1274),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut inspect),
+    );
+    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
+    assert!(matches!(
+        projection_error,
+        Some(JvmCodegenError::UnsupportedJvmType {
+            kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+            ..
+        })
+    ));
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn reference_method_descriptor_slots_include_mixed_parameters_and_receiver() {
+    fn source_with_parameter_count(count: usize) -> (String, String) {
+        let mut parameters = Vec::with_capacity(count);
+        let mut descriptor = String::new();
+        for index in 0..count {
+            let ty = match index % 3 {
+                0 => {
+                    descriptor.push('Z');
+                    "Boolean"
+                }
+                1 => {
+                    descriptor.push_str("LCounter;");
+                    "Counter"
+                }
+                _ => {
+                    descriptor.push('I');
+                    "Int"
+                }
+            };
+            parameters.push(format!("p{index}: {ty}"));
+        }
+        (
+            format!(
+                "class Counter:\n  def id(): Int = 1\nclass Client:\n  def slots({}): Unit = ()\n",
+                parameters.join(", ")
+            ),
+            format!("({descriptor})V"),
+        )
+    }
+
+    let (source, expected_descriptor) = source_with_parameter_count(254);
+    let output = TestOutputDirectory::new("reference-slot-boundary");
+    let mut projection = None;
+    let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        let metadata = unit.metadata(definitions).expect("254 instance slots fit");
+        let client = metadata
+            .iter()
+            .find(|class| {
+                unit.store.names.resolve(
+                    unit.store
+                        .symbols
+                        .get(class.identity().symbol())
+                        .name
+                        .text(),
+                ) == "Client"
+            })
+            .expect("Client metadata");
+        let method = client
+            .methods()
+            .iter()
+            .find(|method| method.name() == "slots")
+            .expect("slots metadata");
+        projection = Some((
+            method.descriptor().as_str().to_owned(),
+            method
+                .parameters()
+                .iter()
+                .map(|parameter| parameter.slot())
+                .collect::<Vec<_>>(),
+        ));
+    };
+    let result = compile_source_batch_observed(
+        &source,
+        "ReferenceSlotBoundary.scala",
+        output.path(),
+        SourceId::from_index(1272),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut inspect),
+    );
+    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
+    let (descriptor, slots) = projection.expect("unit metadata was inspected");
+    assert_eq!(descriptor, expected_descriptor);
+    assert_eq!(slots.len(), 254);
+    assert_eq!(slots.first(), Some(&1));
+    assert_eq!(slots.last(), Some(&254));
+    assert_eq!(output.class_files().len(), 0);
+
+    let (source, _) = source_with_parameter_count(255);
+    let output = TestOutputDirectory::new("reference-slot-overflow");
+    let mut projection_error = None;
+    let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        projection_error = Some(unit.metadata(definitions).unwrap_err());
+    };
+    let result = compile_source_batch_observed(
+        &source,
+        "ReferenceSlotOverflow.scala",
+        output.path(),
+        SourceId::from_index(1273),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut inspect),
+    );
+    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
+    assert!(matches!(
+        projection_error,
+        Some(JvmCodegenError::TooManyParameterSlots { slots: 256, .. })
+    ));
+    assert!(output.class_files().is_empty());
 }
 
 fn publish_class_batch(

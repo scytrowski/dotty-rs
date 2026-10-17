@@ -63,15 +63,17 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 ///
 /// `Int` and `Boolean` have distinct descriptor letters (`I` and `Z`) but
 /// both use the JVM's int-like category-one operand representation. References
-/// retain their exact planned class identity and are not descriptor types.
+/// retain their exact planned class identity. The unit-aware method metadata
+/// projector can encode those identities in method descriptors; field
+/// descriptors and the store-only method projector remain narrower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmType {
     Int,
     Boolean,
     /// A category-one reference to one exact class in a validated compilation unit.
     ///
-    /// This is an expression/local value representation only. Method and field
-    /// descriptors remain primitive-only in this backend slice.
+    /// Method descriptors preserve this exact identity only when the class is
+    /// in the validated emission unit. Field descriptors remain primitive-only.
     Reference(SymbolId),
 }
 
@@ -132,14 +134,14 @@ impl JvmLoweredExpression {
     }
 }
 
-/// Primitive JVM descriptor and value categories for one method signature.
+/// Validated JVM descriptor and value categories for one method signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmMethodDescriptor {
     descriptor: dotty_classfile::descriptor::MethodDescriptor,
     descriptor_text: String,
-    /// Primitive parameters in declaration order; references are not accepted.
+    /// Primitive and planned-reference parameters in declaration order.
     parameters: Vec<JvmType>,
-    /// Primitive result, or JVM `void` for Scala `Unit`.
+    /// Primitive or planned-reference result, or JVM `void` for Scala `Unit`.
     result: JvmReturnType,
 }
 
@@ -1341,7 +1343,7 @@ impl JvmClassPlan {
         store: &SemanticStore,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, None, definitions)
+        identity::class_metadata(self, store, None, definitions, None)
     }
 
     /// Derives class, field, and selected method metadata while validating
@@ -1352,7 +1354,7 @@ impl JvmClassPlan {
         typed_ast: &TypedAst,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, Some(typed_ast), definitions)
+        identity::class_metadata(self, store, Some(typed_ast), definitions, None)
     }
 }
 
@@ -1677,6 +1679,8 @@ impl JvmMethodPlan {
     /// before reading completed type information. The signature accepts one
     /// ordinary monomorphic parameter clause containing only `Int` and
     /// `Boolean`, with `Int`, `Boolean`, or result-only `Unit` as its result.
+    /// Exact reference descriptors require a validated `JvmCompilationUnit`
+    /// and are available through its `metadata` projection instead.
     pub fn descriptor(
         &self,
         store: &SemanticStore,
@@ -1693,8 +1697,8 @@ impl JvmCompilationUnit<'_> {
     ///
     /// This does not erase to `java/lang/Object`, follow aliases, or project
     /// external, generic, anonymous, inherited, or otherwise unsupported class
-    /// shapes. The result can describe expression/local values, but does not
-    /// enable reference method descriptors or bytecode lowering.
+    /// shapes. The result can describe expression/local values and unit-aware
+    /// method metadata, but it does not enable reference bytecode emission.
     pub fn reference_type(
         &self,
         ty: TypeId,

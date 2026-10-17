@@ -89,32 +89,44 @@ walk or validate references nested inside semantic types, since that is the
 responsibility of the canonical semantic model's producers. All operations
 are read-only; the lifetime-bound references keep the caller as the owner.
 
-## Primitive descriptor subset
+## Method descriptor projection
 
-Reference-valued method parameters and results remain excluded. The real
-source/typed-tree characterization, JVMS 21 descriptor and verifier contract,
-current rejection stages, and recommended follow-up sequence are recorded in
+`JvmCompilationUnit::metadata` supports method parameters and results that
+resolve to exact classes in its validated emission unit. It retains each
+canonical `SymbolId` and uses the class plan's validated internal name to build
+the JVM object descriptor. This increment projects descriptors and metadata
+only; bytecode loads, calls, returns, and class emission for reference-valued
+method signatures remain unsupported. The audit, verifier contract, and
+remaining implementation sequence are recorded in
 [`jvm-reference-signatures.md`](jvm-reference-signatures.md).
 
-`JvmMethodPlan::descriptor` reads the method's completed `Type::Method` and the
-ordered parameter symbols from that plan. It supports one ordinary
-monomorphic parameter clause, `Definitions.int` (`I`), `Definitions.boolean`
-(`Z`), and result-only `Definitions.unit` (`V`). Integer and Boolean singleton
-constants widen to their corresponding primitive descriptor without changing
-the source type arena. Int and Boolean both use the JVM int-like category-one
-operand representation, while their descriptors remain distinct.
+The unit-aware projection reads the method's completed `Type::Method` and the
+ordered parameter symbols from its plan. It supports one ordinary monomorphic
+parameter clause, `Definitions.int` (`I`), `Definitions.boolean` (`Z`), exact
+planned class references (`L<internal-name>;`), and result-only
+`Definitions.unit` (`V`). Integer and Boolean singleton constants widen to
+their corresponding primitive descriptor without changing the source type
+arena. Int and Boolean both use the JVM int-like category-one operand
+representation, while their descriptors remain distinct. The standalone
+store-only `JvmMethodPlan::descriptor` remains primitive-only because it has no
+validated emission-unit context.
 
 The descriptor path checks class/method/parameter kinds and ownership,
 completed semantic info, method/plan parameter counts, and agreement between
-each parameter symbol type and its method signature type. It counts the
-instance receiver toward the JVMS 255-slot limit; static methods do not add a
-receiver slot. The result is parsed by `dotty-classfile` before it is returned.
+each parameter symbol type and its method signature type. Reference types must
+be canonical `TypeRef`s to supported class symbols present in the same
+validated emission unit; package prefixes and internal names are checked
+against those symbols. Every accepted value occupies one slot. The descriptor
+path counts the instance receiver toward the JVMS 255-slot limit; static
+methods do not add a receiver slot. The result is parsed by `dotty-classfile`
+before it is returned.
 
 Polymorphic or curried methods, non-plain parameter clauses, aliases, type
-parameters, match/refined/union/intersection types, Scala objects, reference
-classes, arrays, by-name and repeated types, non-primitive constants, Unit
-parameters, erased parameters, and varargs are rejected with structured
-errors. Unknown types never fall back to `java/lang/Object`.
+parameters, match/refined/union/intersection types, Scala objects, arrays,
+by-name and repeated types, non-primitive constants, Unit parameters, erased
+parameters, and varargs are rejected with structured errors. Reference fields
+and primary constructor parameters remain primitive-only. Unknown types never
+fall back to `java/lang/Object`.
 
 No general Scala type erasure, reference boxing, Unit operand-stack
 representation, raw bytecode, source pipeline orchestration, TASTy integration,
