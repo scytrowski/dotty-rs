@@ -145,11 +145,32 @@ pub(super) fn class_identity(
     })
 }
 
+pub(super) fn unit_class_identities(
+    unit: &crate::JvmCompilationUnit<'_>,
+) -> Result<Vec<JvmClassIdentity>, JvmCodegenError> {
+    let mut identities = Vec::with_capacity(unit.classes.len());
+    let mut by_name = HashMap::<String, dotty_core::SymbolId>::new();
+    for plan in &unit.classes {
+        let identity = class_identity(unit.store, plan.class)?;
+        let name = identity.internal_name().to_owned();
+        if let Some(previous) = by_name.insert(name.clone(), identity.symbol()) {
+            return Err(JvmCodegenError::DuplicateJvmClassIdentity {
+                class: identity.symbol(),
+                previous,
+                internal_name: name,
+            });
+        }
+        identities.push(identity);
+    }
+    Ok(identities)
+}
+
 pub(super) fn class_metadata(
     plan: &crate::JvmClassPlan,
     store: &SemanticStore,
     typed_ast: Option<&dotty_core::ast::TypedAst>,
     definitions: &Definitions,
+    descriptor_context: Option<(&SemanticStore, &[JvmClassIdentity])>,
 ) -> Result<JvmClassMetadata, JvmCodegenError> {
     let identity = class_identity(store, plan.class)?;
     let mut fields = Vec::with_capacity(plan.fields.len());
@@ -182,7 +203,13 @@ pub(super) fn class_metadata(
     let mut identities = HashMap::<(String, String), dotty_core::SymbolId>::new();
 
     for method_plan in &plan.methods {
-        let method = method_metadata(method_plan, store, plan.class, definitions)?;
+        let method = method_metadata(
+            method_plan,
+            store,
+            plan.class,
+            definitions,
+            descriptor_context,
+        )?;
         let key = (
             method.name().to_owned(),
             method.descriptor().as_str().to_owned(),
@@ -441,19 +468,16 @@ pub(super) fn unit_metadata(
     unit: &crate::JvmCompilationUnit<'_>,
     definitions: &Definitions,
 ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
+    let class_identities = unit_class_identities(unit)?;
     let mut metadata = Vec::with_capacity(unit.classes.len());
-    let mut identities = HashMap::<String, dotty_core::SymbolId>::new();
     for class_plan in &unit.classes {
-        let class = class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
-        let internal_name = class.identity().internal_name().to_owned();
-        if let Some(previous) = identities.insert(internal_name.clone(), class.identity().symbol())
-        {
-            return Err(JvmCodegenError::DuplicateJvmClassIdentity {
-                class: class.identity().symbol(),
-                previous,
-                internal_name,
-            });
-        }
+        let class = class_metadata(
+            class_plan,
+            unit.store,
+            Some(unit.typed_ast),
+            definitions,
+            Some((unit.store, &class_identities)),
+        )?;
         metadata.push(class);
     }
     Ok(metadata)
@@ -464,10 +488,22 @@ fn method_metadata(
     store: &SemanticStore,
     owner: dotty_core::SymbolId,
     definitions: &Definitions,
+    descriptor_context: Option<(&SemanticStore, &[JvmClassIdentity])>,
 ) -> Result<JvmMethodMetadata, JvmCodegenError> {
     // Descriptor projection verifies canonical method/parameter ownership and
     // type correspondence before any output layout is constructed.
-    let descriptor = plan.descriptor(store, owner, definitions)?;
+    let descriptor = match descriptor_context {
+        Some((descriptor_store, class_identities)) => {
+            crate::descriptor::method_descriptor_with_class_identities(
+                plan,
+                descriptor_store,
+                owner,
+                definitions,
+                class_identities,
+            )?
+        }
+        None => plan.descriptor(store, owner, definitions)?,
+    };
     let method = store.symbols.get(plan.method);
     if !matches!(method.visibility, Visibility::Public | Visibility::Private) {
         return Err(JvmCodegenError::UnsupportedJvmVisibility {
