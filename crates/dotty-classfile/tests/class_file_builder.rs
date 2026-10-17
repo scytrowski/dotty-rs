@@ -545,6 +545,153 @@ fn stack_map_frames_preserve_exact_objects_in_locals_and_operand_stack() {
 }
 
 #[test]
+fn exact_reference_method_parameters_seed_linear_and_cfg_frames() {
+    let mut builder = ClassFileBuilder::new(
+        "example/ReferenceMethods",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("echo", "(Lexample/Counter;)Lexample/Counter;", |code| {
+            code.aload(0)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method(
+            "choose",
+            "(ZLexample/Counter;Lexample/Counter;)Lexample/Counter;",
+            |code| {
+                let otherwise = code.new_label()?;
+                code.iload(0)?;
+                code.ifeq(otherwise.clone())?;
+                code.aload(1)?;
+                code.areturn()?;
+                code.mark(otherwise)?;
+                code.aload(2)?;
+                code.areturn()?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    builder
+        .add_static_method("loop", "(ZLexample/Counter;)Lexample/Counter;", |code| {
+            let head = code.new_label()?;
+            let done = code.new_label()?;
+            code.mark(head.clone())?;
+            code.iload(0)?;
+            code.ifeq(done.clone())?;
+            code.iconst(0)?;
+            code.istore(0)?;
+            code.goto(head)?;
+            code.mark(done)?;
+            code.aload(1)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_instance_method("self", "()Lexample/ReferenceMethods;", |code| {
+            code.aload(0)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+
+    let echo = code_attribute(method_named(&class_file, "echo"));
+    assert_eq!(echo.code, [0x2a, 0xb0]);
+    assert!(echo.attributes.is_empty());
+
+    let choose = code_attribute(method_named(&class_file, "choose"));
+    let [Attribute::Other(choose_map)] = choose.attributes.as_slice() else {
+        panic!("reference CFG should produce a StackMapTable");
+    };
+    let frame = choose_map.bytes;
+    assert_eq!(&frame[..2], &[0, 1]);
+    assert_eq!(frame[2], 255);
+    let mut cursor = 5;
+    assert_eq!(u16::from_be_bytes([frame[cursor], frame[cursor + 1]]), 3);
+    cursor += 2;
+    assert_eq!(frame[cursor], 1);
+    cursor += 1;
+    for _ in 0..2 {
+        assert_eq!(frame[cursor], 7);
+        let index = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            frame[cursor + 1],
+            frame[cursor + 2],
+        ]));
+        assert_eq!(
+            class_file.constant_pool.class_name(index),
+            Ok("example/Counter")
+        );
+        cursor += 3;
+    }
+    assert_eq!(&frame[cursor..cursor + 2], &[0, 0]);
+    assert_eq!(cursor + 2, frame.len());
+
+    let loop_code = code_attribute(method_named(&class_file, "loop"));
+    let [Attribute::Other(loop_map)] = loop_code.attributes.as_slice() else {
+        panic!("reference loop should produce a StackMapTable");
+    };
+    assert_eq!(&loop_map.bytes[..2], &[0, 1]);
+    assert!(loop_map.bytes.contains(&7));
+
+    let self_method = method_named(&class_file, "self");
+    assert_eq!(
+        utf8(&class_file, self_method.descriptor_index),
+        "()Lexample/ReferenceMethods;"
+    );
+    assert_eq!(code_attribute(self_method).code, [0x2a, 0xb0]);
+}
+
+#[test]
+fn exact_reference_returns_reject_wrong_classes_and_uninitialized_values() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut wrong_class = ClassFileBuilder::new("example/WrongExactReturn", version).unwrap();
+    wrong_class
+        .add_static_method("wrong", "()Lexample/Other;", |code| {
+            code.new_object("example/Counter")?;
+            code.dup()?;
+            code.invokespecial("example/Counter", "<init>", "()V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        wrong_class.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::WrongExactReferenceReturn { .. }
+        ))
+    ));
+
+    let mut uninitialized =
+        ClassFileBuilder::new("example/UninitializedExactReturn", version).unwrap();
+    uninitialized
+        .add_static_method("wrong", "()Lexample/Counter;", |code| {
+            code.new_object("example/Counter")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        uninitialized.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::UninitializedReferenceUse { .. }
+        ))
+    ));
+}
+
+#[test]
 fn rejects_unreachable_blocks_before_automatic_stack_map_emission() {
     let mut builder = ClassFileBuilder::new(
         "example/UnreachableIntegerBlock",
@@ -906,7 +1053,7 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
 }
 
 #[test]
-fn rejects_branched_reference_return_until_result_type_is_checked() {
+fn rejects_branched_reference_return_with_an_exact_result_mismatch() {
     let mut builder = ClassFileBuilder::new(
         "example/InvalidReferenceReturn",
         ClassFileVersion {
@@ -931,10 +1078,7 @@ fn rejects_branched_reference_return_until_result_type_is_checked() {
     assert!(matches!(
         builder.encode(),
         Err(ClassFileBuildError::Analysis(
-            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
-                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::Reference,
-                ..
-            }
+            dotty_classfile::bytecode::AnalysisError::WrongExactReferenceReturn { .. }
         ))
     ));
 }
