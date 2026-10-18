@@ -6962,6 +6962,112 @@ fn rejects_different_exact_reference_classes_at_an_if_expression_join() {
 }
 
 #[test]
+fn reference_locals_initialized_only_in_a_branch_or_loop_are_not_definite_after_exit() {
+    let check = |inside_loop: bool| {
+        let mut fixture = EmissionFixture::new(false);
+        let class_type = fixture.store.types.alloc(Type::TypeRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(fixture.class),
+        });
+        let boolean_type = fixture.definitions.boolean;
+        add_call_target_method(
+            &mut fixture,
+            if inside_loop {
+                "readLoopOnlyReference"
+            } else {
+                "readBranchOnlyReference"
+            },
+            &[("condition", boolean_type)],
+            class_type,
+        );
+        let method_index = fixture.methods.len() - 1;
+        let condition_parameter = fixture.parameters[method_index][0];
+        let no_prefix = fixture.definitions.no_prefix;
+        let condition =
+            typed_method_ident_with_prefix(&mut fixture, condition_parameter, no_prefix);
+        let local = add_emission_local_symbol(
+            &mut fixture,
+            method_index,
+            "conditionalReference",
+            class_type,
+            false,
+            SymbolFlags::EMPTY,
+        );
+        let this_type = fixture.store.types.alloc(Type::ThisType {
+            class: fixture.class,
+        });
+        let initializer = fixture.ast.alloc(Tree {
+            kind: TreeKind::This(This { qual: None }),
+            position: None,
+            ty: this_type,
+        });
+        let declaration = add_emission_local_valdef(
+            &mut fixture,
+            method_index,
+            local,
+            class_type,
+            Some(initializer),
+        );
+        let unit_type = fixture.definitions.unit;
+        let unit_value = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Unit,
+            }),
+            position: None,
+            ty: unit_type,
+        });
+        let control = if inside_loop {
+            let loop_body = typed_block(&mut fixture, vec![declaration], unit_value, unit_type);
+            fixture.ast.alloc(Tree {
+                kind: TreeKind::While(dotty_core::ast::While {
+                    cond: condition,
+                    body: loop_body,
+                }),
+                position: None,
+                ty: unit_type,
+            })
+        } else {
+            let then_branch = typed_block(&mut fixture, vec![declaration], unit_value, unit_type);
+            let else_branch = fixture.ast.alloc(Tree {
+                kind: TreeKind::Literal(Literal {
+                    value: Constant::Unit,
+                }),
+                position: None,
+                ty: unit_type,
+            });
+            fixture.ast.alloc(Tree {
+                kind: TreeKind::If(dotty_core::ast::If {
+                    cond: condition,
+                    then_branch,
+                    else_branch,
+                }),
+                position: None,
+                ty: unit_type,
+            })
+        };
+        let read = typed_emission_symbol_ident(&mut fixture, local);
+        fixture.bodies[method_index] = typed_block(&mut fixture, vec![control], read, class_type);
+        let mut unit = fixture.unit();
+        unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+            declaration,
+            symbol: local,
+            mutable: false,
+        }];
+
+        assert_eq!(
+            emit_class(&unit, fixture.class, &fixture.definitions),
+            Err(JvmCodegenError::UninitializedLocalRead {
+                tree: read,
+                symbol: local
+            })
+        );
+    };
+
+    check(false);
+    check(true);
+}
+
+#[test]
 fn resolves_typed_constructor_application_to_canonical_metadata() {
     let fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
     let unit = JvmCompilationUnit {

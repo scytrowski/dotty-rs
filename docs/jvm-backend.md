@@ -550,7 +550,9 @@ through repeated loop iterations, methods return the exact reference selected
 by either `if` branch, and a reference-returning call can supply one branch.
 The test asserts exact `Object(Counter)` stack joins, parameter locals at loop
 back-edge frames, deterministic class bytes, and zero-, one-, and
-multi-iteration behavior under the JDK verifier.
+multi-iteration behavior under the JDK verifier. A typed-body regression also
+checks that reference locals initialized in only one branch or loop iteration
+remain unreadable after the join or loop exit.
 
 `CounterControlFlow.scala` is the end-to-end reference-CFG fixture. Two
 independent lexer-to-backend sessions emit `Counter.class` and

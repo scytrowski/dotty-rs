@@ -206,6 +206,7 @@ straight-line builder methods.
 | Reference parameter used as a call receiver through `while` back-edges | Preserve descriptor-seeded `Object(Counter)` in each loop-header local frame; leave no operand values at the header | Focused source integration and JDK `-Xverify:all` |
 | Exact reference-valued `if` result | Join only identical initialized classes and return with `areturn` | Source integration checks the `Object(Counter)` stack frame and JDK object identity |
 | Reference-returning call in an `if` arm | Preserve call result class through the exact branch stack join | Source integration and class-aware CFG analysis |
+| Reference local initialized only in one branch or loop body | Do not mark it definitely initialized after the join or zero-iteration exit; reject a later read | Typed-body `dotty-jvm` regression and class-aware local-state analysis |
 | Reference-bearing conditional and current `this` | Seed local 0 as emitting class; preserve exact receiver state at branch target | Covered by field/call branch and loop cases under JDK verifier |
 | `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner; virtual calls also check supported exact object arguments and results | Covered by classfile analyzer tests and JDK verifier gate |
 | Different initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to `Object` | Classfile analyzer regression tests |
