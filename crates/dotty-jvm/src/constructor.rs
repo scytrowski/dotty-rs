@@ -193,6 +193,7 @@ impl JvmPrimaryConstructorPlan {
         store: &SemanticStore,
         definitions: &Definitions,
         owner: SymbolId,
+        class_identities: Option<&[crate::JvmClassIdentity]>,
     ) -> Result<JvmConstructorMetadata, JvmCodegenError> {
         let fail = |issue| JvmCodegenError::InvalidPrimaryConstructor {
             constructor: self.constructor,
@@ -244,7 +245,18 @@ impl JvmPrimaryConstructorPlan {
             locals: Vec::new(),
             body: None,
         };
-        let descriptor = crate::descriptor::descriptor_for(&plan, store, owner, definitions, true)?;
+        let descriptor = match class_identities {
+            Some(class_identities) => {
+                crate::descriptor::constructor_descriptor_with_class_identities(
+                    &plan,
+                    store,
+                    owner,
+                    definitions,
+                    class_identities,
+                )?
+            }
+            None => crate::descriptor::descriptor_for(&plan, store, owner, definitions, true)?,
+        };
         let SymbolInfo::Complete(ty) = constructor.info else {
             unreachable!("descriptor validated info")
         };
@@ -260,13 +272,37 @@ impl JvmPrimaryConstructorPlan {
             .enumerate()
         {
             let parameter = store.symbols.get(*id);
+            let signature_type_matches = match (ty, store.types.try_get(signature_param.ty)) {
+                (
+                    crate::JvmType::Int,
+                    Some(dotty_core::Type::TypeRef {
+                        target: dotty_core::TypeRefTarget::Symbol(symbol),
+                        ..
+                    }),
+                ) => {
+                    matches!(store.types.try_get(definitions.int), Some(dotty_core::Type::TypeRef { target: dotty_core::TypeRefTarget::Symbol(int), .. }) if symbol == int)
+                }
+                (
+                    crate::JvmType::Boolean,
+                    Some(dotty_core::Type::TypeRef {
+                        target: dotty_core::TypeRefTarget::Symbol(symbol),
+                        ..
+                    }),
+                ) => {
+                    matches!(store.types.try_get(definitions.boolean), Some(dotty_core::Type::TypeRef { target: dotty_core::TypeRefTarget::Symbol(boolean), .. }) if symbol == boolean)
+                }
+                (
+                    crate::JvmType::Reference(class),
+                    Some(dotty_core::Type::TypeRef {
+                        target: dotty_core::TypeRefTarget::Symbol(symbol),
+                        ..
+                    }),
+                ) => *class == *symbol,
+                _ => false,
+            };
             if !parameter.flags.is_empty()
                 || parameter.name.text() != signature_param.name.as_name().text()
-                || ![
-                    store.types.try_get(definitions.int),
-                    store.types.try_get(definitions.boolean),
-                ]
-                .contains(&store.types.try_get(signature_param.ty))
+                || !signature_type_matches
             {
                 return Err(fail(JvmConstructorIssue::ParameterSignature));
             }
@@ -389,7 +425,7 @@ mod tests {
         let (mut store, definitions, plan) = fixture();
         let checkpoint = store.checkpoint();
         assert_eq!(
-            plan.metadata(&store, &definitions, plan.class)
+            plan.metadata(&store, &definitions, plan.class, None)
                 .unwrap()
                 .descriptor()
                 .as_str(),
@@ -399,7 +435,7 @@ mod tests {
         let original = store.symbols.get(plan.constructor).clone();
         store.symbols.get_mut(plan.constructor).owner = None;
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::SourceIdentity,
                 ..
@@ -408,7 +444,7 @@ mod tests {
         *store.symbols.get_mut(plan.constructor) = original.clone();
         store.symbols.get_mut(plan.constructor).kind = SymbolKind::Method;
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::SourceIdentity,
                 ..
@@ -417,7 +453,7 @@ mod tests {
         *store.symbols.get_mut(plan.constructor) = original.clone();
         store.symbols.get_mut(plan.constructor).visibility = Visibility::Private;
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::Visibility,
                 ..
@@ -431,7 +467,10 @@ mod tests {
             SymbolInfo::Complete(unfilled),
         ] {
             store.symbols.set_info(plan.constructor, info);
-            assert!(plan.metadata(&store, &definitions, plan.class).is_err());
+            assert!(
+                plan.metadata(&store, &definitions, plan.class, None)
+                    .is_err()
+            );
             let ast = dotty_core::ast::TypedAst::new();
             let unit = crate::JvmCompilationUnit {
                 store: &store,
@@ -460,7 +499,7 @@ mod tests {
             .symbols
             .set_info(plan.constructor, SymbolInfo::Complete(wrong_result));
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::ResultType,
                 ..
@@ -472,7 +511,7 @@ mod tests {
         let (mut store, definitions, mut plan) = fixture();
         plan.parameters.push(plan.class);
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::ParameterIdentity,
                 ..
@@ -502,13 +541,13 @@ mod tests {
         };
         plan.parameters.push(stale);
         assert_eq!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::UnknownParameter { parameter: stale })
         );
         plan.parameters.clear();
         plan.constructor = stale;
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::SourceIdentity,
                 ..
@@ -519,7 +558,7 @@ mod tests {
             .symbols
             .set_info(valid.class, SymbolInfo::Complete(definitions.int));
         assert!(matches!(
-            valid.metadata(&store, &definitions, valid.class),
+            valid.metadata(&store, &definitions, valid.class, None),
             Err(JvmCodegenError::InvalidJvmClassInfo { .. })
         ));
     }

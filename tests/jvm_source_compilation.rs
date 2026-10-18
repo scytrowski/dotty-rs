@@ -1071,13 +1071,33 @@ fn reference_method_descriptors_reject_canonical_classes_outside_the_unit() {
 }
 
 #[test]
-fn reference_constructor_parameters_remain_outside_method_descriptor_support() {
+fn reference_constructor_parameters_project_exact_unit_descriptors() {
     let source =
         "class Counter:\n  def id(): Int = 1\nclass Client(c: Counter):\n  def id(): Int = 1\n";
     let output = TestOutputDirectory::new("reference-constructor-parameter");
-    let mut projection_error = None;
+    let mut projection = None;
     let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
-        projection_error = Some(unit.metadata(definitions).unwrap_err());
+        let metadata = unit.metadata(definitions).unwrap();
+        let client = metadata
+            .iter()
+            .find(|metadata| {
+                unit.store.names.resolve(
+                    unit.store
+                        .symbols
+                        .get(metadata.identity().symbol())
+                        .name
+                        .text(),
+                ) == "Client"
+            })
+            .unwrap();
+        projection = Some(
+            client
+                .constructor()
+                .unwrap()
+                .descriptor()
+                .as_str()
+                .to_owned(),
+        );
     };
     let result = compile_source_batch_observed(
         source,
@@ -1087,15 +1107,9 @@ fn reference_constructor_parameters_remain_outside_method_descriptor_support() {
         SourceUnitCardinality::AtLeastTwo,
         Some(&mut inspect),
     );
-    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
-    assert!(matches!(
-        projection_error,
-        Some(JvmCodegenError::UnsupportedJvmType {
-            kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
-            ..
-        })
-    ));
-    assert!(output.class_files().is_empty());
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(projection.as_deref(), Some("(LCounter;)V"));
+    assert_eq!(output.class_files().len(), 2);
 }
 
 #[test]
@@ -4922,7 +4936,7 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
         ),
         (
             "reference-constructor-argument",
-            "class Counter(start: Int)\nclass Box(counter: Counter)\nclass CounterClient:\n  def use(): Int = 1\n",
+            "class Counter(start: Int)\nclass Box(counter: Counter)\nclass CounterClient:\n  def use(counter: Counter): Int =\n    new Box(counter)\n    1\n",
         ),
         (
             "reference-var-reassignment",
@@ -4998,10 +5012,7 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             ),
             "reference-constructor-argument" => matches!(
                 &error,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType {
-                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
-                    ..
-                })
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmConstructorArgument { .. })
             ),
             "reference-var-reassignment" => matches!(
                 &error,

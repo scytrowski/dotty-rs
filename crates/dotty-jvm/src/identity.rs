@@ -236,7 +236,8 @@ pub(super) fn class_metadata(
 
     let constructor = match &plan.initialization {
         crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
-            Some(constructor.metadata(store, definitions, plan.class)?)
+            let class_identities = descriptor_context.map(|(_, identities)| identities);
+            Some(constructor.metadata(store, definitions, plan.class, class_identities)?)
         }
         _ => None,
     };

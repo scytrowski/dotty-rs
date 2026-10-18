@@ -57,6 +57,26 @@ pub(super) fn method_descriptor_with_class_identities(
     )
 }
 
+pub(super) fn constructor_descriptor_with_class_identities(
+    plan: &JvmMethodPlan,
+    store: &SemanticStore,
+    owner: SymbolId,
+    definitions: &Definitions,
+    class_identities: &[JvmClassIdentity],
+) -> Result<JvmMethodDescriptor, JvmCodegenError> {
+    descriptor_for_with_references(
+        plan,
+        store,
+        owner,
+        definitions,
+        true,
+        Some(ReferenceContext {
+            store,
+            class_identities,
+        }),
+    )
+}
+
 pub(super) fn descriptor_for(
     plan: &JvmMethodPlan,
     store: &SemanticStore,

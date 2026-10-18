@@ -13,6 +13,11 @@ use crate::{
     JvmConstructorCallShapeError as ShapeError, JvmConstructorCallTarget, JvmMethodPlan, JvmType,
 };
 
+struct ConstructorReferenceContext<'a> {
+    definitions: &'a Definitions,
+    class_identities: &'a [crate::JvmClassIdentity],
+}
+
 pub(super) fn resolve(
     unit: &JvmCompilationUnit<'_>,
     caller_class: SymbolId,
@@ -21,6 +26,7 @@ pub(super) fn resolve(
     definitions: &Definitions,
 ) -> Result<JvmConstructorCallTarget, JvmCodegenError> {
     unit.validate()?;
+    let class_identities = crate::identity::unit_class_identities(unit)?;
     let caller_plan = unit
         .classes
         .iter()
@@ -196,13 +202,14 @@ pub(super) fn resolve(
     let mut argument_types = Vec::with_capacity(apply.args.len());
     for (argument, expected) in apply.args.iter().copied().zip(expected_arguments) {
         let argument_tree = tree(unit.store, unit.typed_ast, argument)?;
-        let found = primitive_argument_type(
+        let found = planned_argument_type(
             unit,
             caller_class,
             caller_method_plan,
             argument,
             argument_tree,
             definitions,
+            &class_identities,
         );
         if found != Some(*expected) {
             return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
@@ -236,7 +243,13 @@ fn approved_constructor(
 ) -> Result<(crate::JvmMethodDescriptor, MethodAccessFlags, String), JvmCodegenError> {
     match &class_plan.initialization {
         JvmClassInitializationPlan::PrimaryConstructor(plan) => {
-            let metadata = plan.metadata(unit.store, definitions, class_plan.class)?;
+            let Some(metadata) = class_metadata.constructor() else {
+                return Err(JvmCodegenError::JvmConstructorCallNotApproved {
+                    tree,
+                    constructor,
+                    class: class_plan.class,
+                });
+            };
             if plan.symbol() != constructor || metadata.symbol() != constructor {
                 return Err(JvmCodegenError::JvmConstructorCallNotApproved {
                     tree,
@@ -346,13 +359,14 @@ fn planned_result_class(
     }
 }
 
-fn primitive_argument_type(
+fn planned_argument_type(
     unit: &JvmCompilationUnit<'_>,
     caller_class: SymbolId,
     caller_method: &JvmMethodPlan,
     argument: TreeId<Typed>,
     argument_tree: &Tree<Typed>,
     definitions: &Definitions,
+    class_identities: &[crate::JvmClassIdentity],
 ) -> Option<JvmType> {
     let store = unit.store;
     if matches!(argument_tree.kind, TreeKind::Select(_))
@@ -385,15 +399,21 @@ fn primitive_argument_type(
         Type::TermRef {
             prefix,
             target: TermRefTarget::Symbol(symbol),
-        } => primitive_term_reference_type(
-            unit,
-            caller_class,
-            caller_method,
-            argument_tree,
-            *prefix,
-            *symbol,
-            definitions,
-        ),
+        } => {
+            let reference_context = ConstructorReferenceContext {
+                definitions,
+                class_identities,
+            };
+            primitive_term_reference_type(
+                unit,
+                caller_class,
+                caller_method,
+                argument_tree,
+                *prefix,
+                *symbol,
+                &reference_context,
+            )
+        }
         _ => None,
     }
 }
@@ -405,7 +425,7 @@ fn primitive_term_reference_type(
     argument_tree: &Tree<Typed>,
     prefix: dotty_core::TypeId,
     symbol: SymbolId,
-    definitions: &Definitions,
+    reference_context: &ConstructorReferenceContext<'_>,
 ) -> Option<JvmType> {
     let store = unit.store;
     let target = store
@@ -417,7 +437,7 @@ fn primitive_term_reference_type(
             target.owner == Some(caller_method.method)
                 && caller_method.parameters.contains(&symbol)
                 && is_ident_of(argument_tree, target.name)
-                && prefix == definitions.no_prefix
+                && prefix == reference_context.definitions.no_prefix
                 && matches!(store.types.try_get(prefix), Some(Type::NoPrefix))
         }
         SymbolKind::Local => {
@@ -427,7 +447,7 @@ fn primitive_term_reference_type(
                     .iter()
                     .any(|binding| binding.symbol == symbol)
                 && is_ident_of(argument_tree, target.name)
-                && prefix == definitions.no_prefix
+                && prefix == reference_context.definitions.no_prefix
                 && matches!(store.types.try_get(prefix), Some(Type::NoPrefix))
         }
         SymbolKind::Field => {
@@ -472,8 +492,45 @@ fn primitive_term_reference_type(
         SymbolInfo::Complete(ty) => ty,
         SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => return None,
     };
-    crate::descriptor::primitive_semantic_value_type(store, definitions, symbol, *semantic_type)
+    if target.kind == SymbolKind::Field {
+        crate::descriptor::primitive_semantic_value_type(
+            store,
+            reference_context.definitions,
+            symbol,
+            *semantic_type,
+        )
         .ok()
+    } else {
+        planned_term_value_type(
+            unit,
+            symbol,
+            *semantic_type,
+            reference_context.definitions,
+            reference_context.class_identities,
+        )
+    }
+}
+
+fn planned_term_value_type(
+    unit: &JvmCompilationUnit<'_>,
+    symbol: SymbolId,
+    ty: dotty_core::ids::TypeId,
+    definitions: &Definitions,
+    class_identities: &[crate::JvmClassIdentity],
+) -> Option<JvmType> {
+    match crate::descriptor::primitive_semantic_value_type(unit.store, definitions, symbol, ty) {
+        Ok(value_type) => Some(value_type),
+        Err(JvmCodegenError::UnsupportedJvmType { .. }) => {
+            crate::reference::project_method_signature_type(
+                unit.store,
+                ty,
+                definitions,
+                class_identities,
+            )
+            .ok()
+        }
+        Err(_) => None,
+    }
 }
 
 fn is_ident_of(tree: &Tree<Typed>, name: dotty_core::Name) -> bool {

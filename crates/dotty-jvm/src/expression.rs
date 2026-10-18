@@ -1660,6 +1660,18 @@ fn emit_object_creation(
         });
     }
 
+    if let Some(argument) = arguments
+        .iter()
+        .copied()
+        .zip(target.argument_types())
+        .find_map(|(argument, ty)| matches!(ty, JvmType::Reference(_)).then_some(argument))
+    {
+        return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
+            tree: tree_id,
+            argument,
+        });
+    }
+
     let mut budget = 0;
     for argument in arguments {
         validate_constructor_argument(context, tree_id, *argument, depth + 1, &mut budget)?;
