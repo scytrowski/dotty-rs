@@ -30,6 +30,8 @@ python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
 
 The report code checks that the repeated runs cover the same manifest paths and exact file/tree/method identities. It sorts timing tables by descending cost with stable file/tree tie-breakers. The opt-in test instrumentation is disabled unless `DOTTY_AUDIT_PROFILE_FILES` is set; normalized audit reports and determinism sidecars never include timers.
 
+To measure cold then warm input page-cache behavior in one serial invocation, add `--cold-inputs-first-run`. This option evicts only the selected Scala sources, pinned Scala JARs, and JDK `.jmod` inputs before the first run using `POSIX_FADV_DONTNEED`, then checks resident bytes with util-linux `fincore`. The second run records the resulting warm residency. It does not clear the system-wide page cache. The default profile command does not evict input files.
+
 ## Frozen measurement
 
 The [profile summary](typer-sequential-profile-3.9.0/index.md) and its TSV sidecars record two serial passes on the same five-file manifest, measured at dotty-rs commit `eafa385e508aa0eaa0710342b656d03d2df6acc0`.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import statistics
@@ -87,6 +88,47 @@ def cargo_target_cache_state(target_dir: Path) -> str:
     ) else "cold"
 
 
+def profile_input_paths(scala_root: Path, java_home: Path, artifact_root: Path, file_paths: list[str]) -> list[Path]:
+    paths = {scala_root / relative for relative in file_paths}
+    paths.update(artifact_root / item for item in (
+        "org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar",
+        "org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar",
+        "org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar",
+        "org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar",
+        "org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar",
+        "org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar",
+        "org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar",
+        "org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar",
+    ))
+    paths.update((java_home / "jmods").glob("*.jmod"))
+    return sorted(path.resolve() for path in paths if path.is_file())
+
+
+def resident_bytes(paths: list[Path]) -> int:
+    try:
+        completed = subprocess.run(
+            ["fincore", "--bytes", "--json", "--output", "RES,FILE", *(str(path) for path in paths)],
+            text=True, capture_output=True, check=False,
+        )
+    except FileNotFoundError:
+        fail("--cold-inputs-first-run requires util-linux fincore")
+    if completed.returncode:
+        fail("fincore could not measure profile input residency: " + completed.stderr.strip())
+    data = json.loads(completed.stdout)
+    return sum(int(row["res"]) for row in data["fincore"])
+
+
+def evict_input_pages(paths: list[Path]) -> None:
+    if not hasattr(os, "posix_fadvise") or not hasattr(os, "POSIX_FADV_DONTNEED"):
+        fail("--cold-inputs-first-run requires POSIX_FADV_DONTNEED support")
+    for path in paths:
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(descriptor, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(descriptor)
+
+
 def parse_run(log: str) -> dict:
     result: dict = {
         "files": {}, "methods": {}, "resolver": {}, "summary": {},
@@ -160,17 +202,19 @@ def percentile(values: list[float], p: float) -> float:
 
 
 def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_states: list[str],
+                 input_cache: list[dict],
                  file_paths: list[str], commit: str,
                  scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path) -> None:
     output_started_ns = time.monotonic_ns()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run-timings.tsv").write_text(
-        "run\tcargo_target_cache_state\tcargo_wall_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
+        "run\tcargo_target_cache_state\tinput_cache_mode\tinput_cache_before_resident_bytes\tinput_cache_after_evict_resident_bytes\tcargo_wall_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
         + "".join(
-            f"{i}\t{cache_state}\t{wall}\t{int(r['summary']['wall_ms'])}\t{wall-int(r['summary']['wall_ms'])}\t"
+            f"{i}\t{cache_state}\t{input_state['mode']}\t{input_state['before_bytes']}\t{input_state['after_evict_bytes']}\t"
+            f"{wall}\t{int(r['summary']['wall_ms'])}\t{wall-int(r['summary']['wall_ms'])}\t"
             f"{r['summary'].get('classpath_setup_ms', '0')}\t{r['summary'].get('file_discovery_ms', '0')}\t"
             f"{r['summary'].get('source_read_ms', '0')}\t{r['summary'].get('source_processing_and_merge_ms', r['summary'].get('source_audit_merge_ms', '0'))}\n"
-            for i, (r, wall, cache_state) in enumerate(zip(runs, run_walls, cache_states), 1)
+            for i, (r, wall, cache_state, input_state) in enumerate(zip(runs, run_walls, cache_states, input_cache), 1)
         ), encoding="utf-8")
 
     phase_totals: dict[str, int] = {}
@@ -278,6 +322,10 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 break
     except OSError:
         pass
+    input_cache_summary = ", ".join(
+        f"{index}={state['mode']} ({state['before_bytes']} bytes resident before)"
+        for index, state in enumerate(input_cache, 1)
+    )
     lines = [
         "# Sequential Typer corpus profile",
         "",
@@ -289,7 +337,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"- JDK: `{jdk_version}` at `{java_home}`",
         f"- Host: `{cpu_model}`, {mem_total} memory; build profile `test`; Cargo/test concurrency fixed at 1",
         f"- Manifest files: {len(file_paths)}; profiled method observations per run: {len(runs[0]['methods'])}; repetitions: {len(runs)}",
-        f"- Cargo target cache by repetition: {', '.join(f'{index}={state}' for index, state in enumerate(cache_states, 1))}. `cold` means no compiled local_definition_audit test binary existed in the selected target directory; OS page-cache state is not controlled or compared.",
+        f"- Cargo target cache by repetition: {', '.join(f'{index}={state}' for index, state in enumerate(cache_states, 1))}. `cold` means no compiled local_definition_audit test binary existed in the selected target directory.",
+        f"- Input page-cache measurements: {input_cache_summary}. Cold mode evicts only the selected Scala sources, pinned Scala JARs, and JDK jmods with POSIX_FADV_DONTNEED, then checks their resident bytes using `fincore`; it does not clear the system-wide cache.",
         "- `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup and harness/report-log overhead.",
         "- Classpath setup includes JDK module and Scala JAR adapter construction. No artifact decode timing is reported separately: class/module completion timers are inclusive at the resolver boundary.",
         "- Cache evidence: classloader profiles report completed-cache hits, full completions, identity shell creation/reuse, and hierarchy requests. They do not expose all lookup cache misses; those are not inferred.",
@@ -384,11 +433,14 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target/typer-sequential-profile")
     parser.add_argument("--summarize-existing", action="store_true", help="rebuild reports from run-N.log without rerunning the audit")
     parser.add_argument("--measured-commit", help="override source commit when summarizing saved logs")
+    parser.add_argument("--cold-inputs-first-run", action="store_true", help="evict selected Scala/JDK input pages before run 1 and measure residency with fincore")
     args = parser.parse_args()
     if not 1 <= args.runs <= 3:
         fail("--runs must be between 1 and 3 to keep the profile bounded")
     if args.measured_commit and not args.summarize_existing:
         fail("--measured-commit is only valid with --summarize-existing")
+    if args.cold_inputs_first_run and args.summarize_existing:
+        fail("--cold-inputs-first-run cannot be combined with --summarize-existing")
     scala_root = Path(os.environ.get("SCALA39_ROOT", ""))
     java_home = Path(os.environ.get("JAVA_HOME", ""))
     if not scala_root.is_dir() or not java_home.is_dir():
@@ -428,6 +480,7 @@ def main() -> int:
     results: list[dict] = []
     wall_times: list[int] = []
     cache_states: list[str] = []
+    input_cache: list[dict] = []
     if args.summarize_existing:
         import csv
         timing_path = out_dir / "run-timings.tsv"
@@ -441,12 +494,30 @@ def main() -> int:
                 results.append(parse_run(log_path.read_text(encoding="utf-8")))
                 wall_times.append(int(row["cargo_wall_ms"]))
                 cache_states.append(row.get("cargo_target_cache_state", "unknown"))
+                input_cache.append({
+                    "mode": row.get("input_cache_mode", "unmeasured"),
+                    "before_bytes": row.get("input_cache_before_resident_bytes", "unknown"),
+                    "after_evict_bytes": row.get("input_cache_after_evict_resident_bytes", "not_evicted"),
+                })
     else:
         target_dir = Path(env.get("CARGO_TARGET_DIR", REPO_ROOT / "target")).resolve()
+        inputs = profile_input_paths(scala_root, java_home, artifact_root, selected) if args.cold_inputs_first_run else []
         for index in range(1, args.runs + 1):
             print(f"starting serial profile run {index}/{args.runs}", flush=True)
             cache_state = cargo_target_cache_state(target_dir)
             cache_states.append(cache_state)
+            if inputs:
+                before_bytes = resident_bytes(inputs)
+                if index == 1:
+                    evict_input_pages(inputs)
+                    after_evict_bytes = resident_bytes(inputs)
+                    input_mode = "evicted" if after_evict_bytes == 0 else "partial-eviction"
+                else:
+                    after_evict_bytes = "not_evicted"
+                    input_mode = "warm-observed"
+                input_cache.append({"mode": input_mode, "before_bytes": before_bytes, "after_evict_bytes": after_evict_bytes})
+            else:
+                input_cache.append({"mode": "unmeasured", "before_bytes": "unknown", "after_evict_bytes": "not_evicted"})
             started = time.monotonic_ns()
             completed = subprocess.run(AUDIT_TEST, cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, check=False)
@@ -473,7 +544,7 @@ def main() -> int:
     commit = args.measured_commit or subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         fail("--measured-commit must be a full 40-character Git SHA")
-    write_report(out_dir, results, wall_times, cache_states, selected, commit, scala_root, java_home, match.group(1), artifact_root)
+    write_report(out_dir, results, wall_times, cache_states, input_cache, selected, commit, scala_root, java_home, match.group(1), artifact_root)
     print(f"profile report: {out_dir / 'summary.md'}")
     return 0
 

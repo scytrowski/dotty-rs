@@ -93,7 +93,8 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
                     Path(temporary),
                     [{"files": {}, "methods": {}, "resolver": {}, "summary": {"wall_ms": "0"}, "loads": {},
                       "resolver_counts": {}, "load_roots": []}],
-                    [0], ["cold"], [], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary),
+                    [0], ["cold"], [{"mode": "evicted", "before_bytes": 1024, "after_evict_bytes": 0}],
+                    [], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary),
                 )
 
             summary = (Path(temporary) / "summary.md").read_text()
