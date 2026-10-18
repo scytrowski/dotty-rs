@@ -831,7 +831,7 @@ pub enum JvmCodegenError {
     },
     /// Reference method descriptors are deliberately outside this subset.
     ReferenceMethodDescriptorUnsupported { symbol: SymbolId, ty: JvmType },
-    /// Reference-valued method bodies do not yet emit `areturn`.
+    /// Legacy error retained for callers that construct an unsupported descriptor directly.
     ReferenceMethodReturnUnsupported { method: SymbolId, ty: JvmType },
     /// The typed node is not yet part of the expression-lowering subset.
     UnsupportedTypedExpression {
@@ -931,7 +931,7 @@ pub enum JvmCodegenError {
         expected: JvmType,
         found: JvmExpressionFlow,
     },
-    /// Reference-valued arguments are not part of the current virtual-call subset.
+    /// Legacy error retained for API compatibility; planned virtual calls now validate references.
     ReferenceCallArgumentUnsupported {
         tree: TreeId<Typed>,
         method: SymbolId,
@@ -1282,6 +1282,8 @@ pub enum UnsupportedJvmCallShapeKind {
     NonCurrentThis,
     /// A selected member uses a qualified `this` expression.
     QualifiedThisReceiver,
+    /// A nested reference-call receiver points back to an active call tree.
+    RecursiveReceiver,
     /// The canonical term reference has a prefix outside this call subset.
     UnsupportedReceiverPrefix,
 }
@@ -1578,7 +1580,7 @@ pub fn lower_value_expression(
 
 /// Lowers one supported typed expression without appending a method epilogue.
 ///
-/// Integer/Boolean leaves and canonical Int/Boolean intrinsics, the `Unit`
+/// Integer/Boolean values, canonical Int/Boolean intrinsics, the `Unit`
 /// literal, ordered blocks, and nested `If`/local `Return` nodes are supported.
 /// Intrinsics resolve only by their canonical semantic symbols. `Value` leaves
 /// one correctly typed value on the JVM stack; `Unit` completes normally with
@@ -1802,9 +1804,10 @@ impl JvmCompilationUnit<'_> {
     }
 
     /// Lowers one explicitly planned method body using this unit's validated
-    /// class, field, and method metadata. This method-level path can lower
-    /// private primitive field reads and mutable field assignments; [`emit_class`]
-    /// installs only fields covered by a validated primary constructor.
+    /// class, field, and method metadata. This method-level path supports exact
+    /// planned reference values and can lower private primitive field reads
+    /// and mutable field assignments; [`emit_class`] installs only fields
+    /// covered by a validated primary constructor.
     pub fn lower_method_body(
         &self,
         class: SymbolId,
@@ -1855,13 +1858,13 @@ impl JvmCompilationUnit<'_> {
         constructor_initializers::lower(self, class, definitions)
     }
 
-    /// Resolves a typed ordinary call to a planned same-class virtual target.
+    /// Resolves a typed ordinary call to a planned virtual target.
     ///
     /// `call` must identify the complete typed `Apply` tree so the resolver can
     /// reject contextual application and validate the call result. Its
     /// function must be a canonical method reference in an `Ident` or a
-    /// `Select` whose receiver is the current class's `this`. Resolution uses
-    /// the selected method `SymbolId` and this unit's explicit emission plan;
+    /// `Select` whose receiver has an exact planned class identity. Resolution
+    /// uses the selected method `SymbolId` and this unit's explicit emission plan;
     /// it does not evaluate arguments, load a receiver, or emit instructions.
     pub fn resolve_same_class_call(
         &self,
@@ -1873,11 +1876,12 @@ impl JvmCompilationUnit<'_> {
         call_target::resolve_same_class_call(self, caller_class, caller_method, call, definitions)
     }
 
-    /// Resolves a typed instance call on `this`, a validated direct `new`, or
-    /// an immutable initialized local of an exact planned class.
+    /// Resolves a typed instance call on `this`, a reference parameter, a
+    /// validated direct `new`, an immutable initialized local, or a completed
+    /// reference-valued planned call with an exact planned class identity.
     ///
     /// The selected `TermRef` symbol, receiver class, owner declaration scope,
-    /// class/method plans, visibility, primitive descriptor, and call result
+    /// class/method plans, visibility, descriptor, and call result
     /// must all agree. This read-only resolver emits no instructions and does
     /// not validate argument flow; method-body lowering performs those checks
     /// while evaluating the receiver once before arguments in source order.

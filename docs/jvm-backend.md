@@ -95,9 +95,9 @@ are read-only; the lifetime-bound references keep the caller as the owner.
 resolve to exact classes in its validated emission unit. It retains each
 canonical `SymbolId` and uses the class plan's validated internal name to build
 the JVM object descriptor. Reference parameter identifiers and unqualified
-current `this` can now be loaded as exact reference values. Reference method
-returns and passing reference arguments to calls remain unsupported. The
-audit, verifier contract, and remaining implementation sequence are recorded in
+current `this` can be loaded as exact reference values. Method bodies also
+emit exact reference returns and planned `invokevirtual` calls with reference
+receivers, arguments, and results. The audit and verifier contract are recorded in
 [`jvm-reference-signatures.md`](jvm-reference-signatures.md).
 
 The unit-aware projection reads the method's completed `Type::Method` and the
@@ -150,12 +150,14 @@ References occupy one category-one slot and remain distinct from `Int`,
 read it by canonical local `SymbolId` with `aload`. A reference method
 parameter can also be read with `aload` from its descriptor-assigned slot, and
 unqualified `this` can be read with `aload_0` after its `ThisType` matches the
-current planned class. The local's checked class identity must match the
+current planned class. Exact planned references may be returned with `areturn`,
+passed to virtual calls, used as call results or receivers, and discarded with
+`pop`. The local's checked class identity must match the
 initializer's `Flow::Value`; read-before-store and mutable reference locals
 fail with typed errors. Reference values may be discarded as category-one
-block statements with `pop`. Planned reference method parameters are supported,
-but reference method results, call arguments, constructor parameters, and field
-descriptors remain unsupported. Constructor reference arguments remain
+block statements with `pop`. Planned reference parameters and results, plus
+reference virtual-call arguments and results, are supported. Constructor
+parameters and field descriptors remain primitive-only. Constructor reference arguments remain
 rejected. Exact initialized references may stay
 live through `if` joins and `while` headers/back-edges. A reference stack join
 must have the same planned class on every incoming edge; different classes do
@@ -174,7 +176,7 @@ unsupported states remain typed build errors.
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
 | Private `Int`/`Boolean` field on current `this` | `aload(0)` with `getfield`/`putfield` | Exact current class and primitive descriptor; receiver/temp locals must merge safely |
-| Primitive-result call on `this`, `new C`, or immutable local `C` | Canonical `invokevirtual` target | Receiver class must equal planned owner; reference call arguments and results stay unsupported |
+| Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver, argument, and result classes must exactly match planned descriptors |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
 | Different reference classes at a stack join | No classfile emitted | Typed exact-class merge error; no inferred `Object`/common parent |
@@ -190,18 +192,18 @@ contract records the verifier constraints that bound the emitted subset.
 `JvmCompilationUnit::resolve_planned_instance_call` resolves a typed regular
 `Apply(Select(receiver, method), args)` to the exact method symbol in the
 receiver class's plan and declaration scope. Receivers are current `this`, a
-validated direct `new C(args)`, or an immutable local whose checked class is
-the same planned class `C`. Public methods may be called across emitted
+validated direct `new C(args)`, an immutable local or parameter, or a completed
+planned call returning an exact reference class. Public methods may be called across emitted
 classes; plain private methods are callable only from their owning class.
 Qualified access, protected/package access, static and extension methods,
 bridges, traits, external classes, and name-only fallback are rejected.
 
-Method parameters and results use the existing primitive `Int`/`Boolean`
-subset, with `Unit` represented as JVM `void`. Lowering evaluates the receiver
+Method parameters and results use primitive `Int`/`Boolean`, exact planned
+references, and `Unit` represented as JVM `void`. Lowering evaluates the receiver
 once, then each argument once in source order, checks their stack flows against
 the selected descriptor, and emits one symbolic `invokevirtual` with the exact
-owner, name, and descriptor. The result leaves its primitive value on the
-stack or no value for `Unit`. The source typer accepts direct-new selection
+owner, name, and descriptor. Primitive and reference results leave their exact
+value on the stack; `Unit` leaves no value. The source typer accepts direct-new selection
 for ordinary method application. Calls on exact planned reference receivers
 and completed allocations are also supported in `if`, `while`, and short-
 circuit branches. The target still comes from the canonical planned method
@@ -226,10 +228,9 @@ and `independent() == 31` under `java -Xverify:all`.
 The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
 `DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the source integration test on JDK 21.
 Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
-reference method results and call arguments, arbitrary classpath classes,
-mutable reference locals, class-hierarchy joins, arrays, null, and branching
-constructor bodies unsupported. Reference operations remain restricted to
-exact classes and the verified primitive-result call subset.
+arbitrary classpath classes, mutable reference locals, class-hierarchy joins,
+arrays, null, and branching constructor bodies unsupported. Reference
+operations remain restricted to exact planned classes and verified calls.
 
 ## Canonical `Int` arithmetic
 
@@ -408,9 +409,9 @@ no local layout and return `MissingLocalBinding` for local references. Typed
 `Block` lowering evaluates supported stats from left to right, then
 lowers the final expression once. An unused Int/Boolean value is discarded
 with one `pop`; Unit already leaves an empty operand stack and needs no pop.
-The final value remains available to its parent expression or method return;
-reference-valued method results remain unsupported. Unused initialized
-references are discarded with one `pop`.
+The final value remains available to its parent expression or method return,
+including exact planned reference results. Unused initialized references are
+discarded with one `pop`.
 If a stat definitely returns, lowering stops there and omits the unreachable
 suffix, so dead instructions do not reach CFG analysis. A normally completing
 Unit method receives one trailing `return`; explicit returns remain terminal.
@@ -579,7 +580,7 @@ Scala public accessor, bridge, or TASTy compatibility.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
 Negative source tests verify that field initialization, mutable reference
-locals, invalid while conditions, reference method results and call arguments, private
+locals, invalid while conditions, wrong exact reference call values, private
 construction, immutable-local assignment, missing local references, mismatched
 local initializers and assignments, Unit locals, deferred reference locals,
 pattern locals, and parser diagnostics fail at their actual pipeline stage

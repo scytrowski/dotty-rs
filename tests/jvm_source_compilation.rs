@@ -804,11 +804,9 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
         SourceUnitCardinality::AtLeastTwo,
         Some(&mut inspect),
     );
-    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
-    assert!(
-        output.class_files().is_empty(),
-        "characterization failures publish no class files"
-    );
+    let artifacts = result.expect("reference signature audit source emits planned classes");
+    assert_eq!(artifacts.len(), 2);
+    assert_eq!(output.class_files().len(), 2);
     assert_eq!(
         observed,
         [
@@ -865,8 +863,9 @@ fn reference_method_descriptors_use_validated_package_internal_names() {
             SourceUnitCardinality::ExactlyOne,
             Some(&mut inspect),
         );
-        assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
-        assert!(output.class_files().is_empty());
+        let artifacts = result.expect("reference-returning method emits its class");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(output.class_files().len(), 1);
         descriptor.expect("projected packaged descriptor")
     }
 
@@ -993,7 +992,7 @@ fn reference_parameters_and_unqualified_this_lower_as_exact_values() {
 }
 
 #[test]
-fn reference_value_extensions_keep_exact_identity_and_call_argument_limits() {
+fn reference_value_extensions_keep_exact_identity_and_allow_reference_call_arguments() {
     let mismatch = "class Counter:\n  def value(): Int = 1\nclass Client:\n  def choose(flag: Boolean, counter: Counter): Int =\n    if flag then this else counter\n    1\n";
     let output = TestOutputDirectory::new("reference-value-identity-mismatch");
     let error = compile_source_classes(mismatch, "ReferenceIdentityMismatch.scala", output.path())
@@ -1005,21 +1004,25 @@ fn reference_value_extensions_keep_exact_identity_and_call_argument_limits() {
     assert!(output.class_files().is_empty());
 
     let reference_argument = "class Counter:\n  def value(): Int = 1\nclass Client:\n  def accept(counter: Counter): Int = 1\n  def pass(counter: Counter): Int = accept(counter)\n";
-    let output = TestOutputDirectory::new("reference-call-argument-remains-unsupported");
-    let error = compile_source_classes(
+    let output = TestOutputDirectory::new("reference-call-argument");
+    let artifacts = compile_source_classes(
         reference_argument,
         "ReferenceCallArgument.scala",
         output.path(),
     )
-    .expect_err("reference call arguments remain unsupported");
-    assert!(
-        matches!(
-            error,
-            PipelineFailure::Codegen(JvmCodegenError::ReferenceCallArgumentUnsupported { .. })
-        ),
-        "unexpected reference-argument failure: {error:?}"
-    );
-    assert!(output.class_files().is_empty());
+    .expect("an exact planned reference parameter may be forwarded to a virtual call");
+    assert_eq!(artifacts.len(), 2);
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .unwrap();
+    let class = decode_emitted_class(client);
+    class
+        .validate_references()
+        .expect("forwarded descriptor validates");
+    let pass = emitted_method_code(&class, "pass");
+    assert_opcode_sequence(pass, &[0x2a, 0x2b, 0xb6, 0xac]);
+    assert_invocation_sequence(&class, pass, &[(0xb6, "Client", "accept", "(LCounter;)I")]);
 }
 
 #[test]
@@ -3058,6 +3061,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0x80
             | 0x82
             | 0xac
+            | 0xb0
             | 0xb1 => 1,
             0x10 | 0x15 | 0x36 => 2,
             0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
@@ -4707,10 +4711,6 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class CounterClient:\n  def run(): Int =\n    new Object()\n    1\n",
         ),
         (
-            "reference-method-result",
-            "class Counter(seed: Int)\nclass CounterClient:\n  def make(): Counter = new Counter(1)\n",
-        ),
-        (
             "null-literal",
             "class CounterClient:\n  def use(): Int = null\n",
         ),
@@ -4762,10 +4762,6 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "unplanned-object-class" => matches!(
                 &error,
                 PipelineFailure::Typer(TyperError::NewClassInfoUnavailable { .. })
-            ),
-            "reference-method-result" => matches!(
-                &error,
-                PipelineFailure::Codegen(JvmCodegenError::ReferenceMethodReturnUnsupported { .. })
             ),
             "null-literal" => matches!(
                 &error,
@@ -5034,6 +5030,103 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
         assert_eq!(
             String::from_utf8_lossy(&java.stdout).trim(),
             "virtual calls ok"
+        );
+    }
+}
+
+#[test]
+fn reference_parameters_and_call_results_flow_through_virtual_calls() {
+    let output = TestOutputDirectory::new("reference-method-values");
+    let source = "class Counter(start: Int):\n  def create(value: Int): Counter = new Counter(value)\n  def passthrough(counter: Counter): Counter = counter\n  def self(): Counter = this\n  def read(counter: Counter): Int = counter.get()\n  def forward(counter: Counter): Counter = passthrough(counter)\n  def readCreated(value: Int): Int = read(create(value))\n  def get(): Int = 42\nclass Client:\n  def accept(counter: Counter): Counter = counter\n  def read(counter: Counter): Int = counter.get()\n";
+    let first = compile_source_classes(source, "ReferenceMethods.scala", output.path())
+        .expect("planned reference-valued methods and calls compile as one batch");
+    let second_output = TestOutputDirectory::new("reference-method-values-repeat");
+    let second = compile_source_classes(source, "ReferenceMethods.scala", second_output.path())
+        .expect("a fresh frontend session compiles reference-valued methods identically");
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Counter", "Client"]
+    );
+    assert_eq!(first.len(), second.len());
+    for (left, right) in first.iter().zip(&second) {
+        assert_eq!(left.class.bytes(), right.class.bytes());
+    }
+
+    let counter_artifact = first
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Counter")
+        .unwrap();
+    let mut reader = Reader::new(counter_artifact.class.bytes());
+    let counter = ClassFile::decode(&mut reader).expect("decode Counter");
+    counter
+        .validate_references()
+        .expect("Counter references validate");
+    assert_opcode_sequence(
+        emitted_method_code(&counter, "create"),
+        &[0xbb, 0x59, 0x1b, 0xb7, 0xb0],
+    );
+    assert_opcode_sequence(emitted_method_code(&counter, "passthrough"), &[0x2b, 0xb0]);
+    assert_opcode_sequence(emitted_method_code(&counter, "self"), &[0x2a, 0xb0]);
+    assert_opcode_sequence(emitted_method_code(&counter, "read"), &[0x2b, 0xb6, 0xac]);
+    assert_opcode_sequence(
+        emitted_method_code(&counter, "forward"),
+        &[0x2a, 0x2b, 0xb6, 0xb0],
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&counter, "readCreated"),
+        &[0x2a, 0x2a, 0x1b, 0xb6, 0xb6, 0xac],
+    );
+
+    let client_artifact = first
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .unwrap();
+    let mut reader = Reader::new(client_artifact.class.bytes());
+    let client = ClassFile::decode(&mut reader).expect("decode Client");
+    client
+        .validate_references()
+        .expect("Client references validate");
+
+    if require_jdk_or_skip() {
+        let harness = output.path().join("ReferenceMethodsHarness.java");
+        fs::write(
+            &harness,
+            "public final class ReferenceMethodsHarness { public static void main(String[] args) { Counter counter = new Counter(0); Client client = new Client(); if (counter.create(1).get() != 42 || counter.passthrough(counter).get() != 42 || counter.self().get() != 42 || counter.read(counter) != 42 || counter.forward(counter).get() != 42 || counter.readCreated(2) != 42) throw new AssertionError(\"Counter\"); if (client.read(counter) != 42 || client.accept(counter).get() != 42) throw new AssertionError(\"Client\"); System.out.println(\"reference methods verified\"); } }\n",
+        )
+        .expect("write reference-method verification harness");
+        let classpath = output.path().to_str().unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for reference methods");
+        assert!(
+            javac.status.success(),
+            "javac rejected reference-method harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "ReferenceMethodsHarness",
+            ])
+            .output()
+            .expect("start JVM verifier for reference methods");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected reference methods\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "reference methods verified"
         );
     }
 }
