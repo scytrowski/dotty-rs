@@ -6881,6 +6881,193 @@ fn allows_same_class_allocations_in_if_branches_and_joins_exact_references() {
 }
 
 #[test]
+fn rejects_different_exact_reference_classes_at_an_if_expression_join() {
+    let mut fixture = EmissionFixture::new(false);
+    let class_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(fixture.class),
+    });
+    let owner = fixture.store.symbols.get(fixture.class).owner.unwrap();
+    let no_prefix = fixture.definitions.no_prefix;
+    let object_type = fixture.definitions.object_type;
+    let other = add_reference_class(
+        &mut fixture.store,
+        owner,
+        "OtherReference",
+        no_prefix,
+        object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    let other_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: no_prefix,
+        target: TypeRefTarget::Symbol(other),
+    });
+    let declarations = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => panic!("fixture class info should be ClassInfo"),
+        },
+        _ => panic!("fixture class info should be complete"),
+    };
+    let (method, parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        "selectReference",
+        &[
+            ("condition", fixture.definitions.boolean),
+            ("other", other_type),
+        ],
+        class_type,
+    );
+    let no_prefix = fixture.definitions.no_prefix;
+    let condition = typed_method_ident_with_prefix(&mut fixture, parameters[0], no_prefix);
+    let other_value = typed_method_ident_with_prefix(&mut fixture, parameters[1], no_prefix);
+    let this_type = fixture.store.types.alloc(Type::ThisType {
+        class: fixture.class,
+    });
+    let current = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: this_type,
+    });
+    let body = fixture.ast.alloc(Tree {
+        kind: TreeKind::If(dotty_core::ast::If {
+            cond: condition,
+            then_branch: current,
+            else_branch: other_value,
+        }),
+        position: None,
+        ty: class_type,
+    });
+    fixture.methods.push(method);
+    fixture.parameters.push(parameters);
+    fixture.bodies.push(body);
+    let mut unit = fixture.unit();
+    unit.classes.push(JvmClassPlan {
+        class: other,
+        fields: Vec::new(),
+        methods: Vec::new(),
+        initialization: JvmClassInitializationPlan::ImplicitNoArg,
+    });
+
+    assert_eq!(
+        emit_class(&unit, fixture.class, &fixture.definitions),
+        Err(JvmCodegenError::ReferenceTypeMismatch {
+            expected: fixture.class,
+            found: other,
+        })
+    );
+}
+
+#[test]
+fn reference_locals_initialized_only_in_a_branch_or_loop_are_not_definite_after_exit() {
+    let check = |inside_loop: bool| {
+        let mut fixture = EmissionFixture::new(false);
+        let class_type = fixture.store.types.alloc(Type::TypeRef {
+            prefix: fixture.definitions.no_prefix,
+            target: TypeRefTarget::Symbol(fixture.class),
+        });
+        let boolean_type = fixture.definitions.boolean;
+        add_call_target_method(
+            &mut fixture,
+            if inside_loop {
+                "readLoopOnlyReference"
+            } else {
+                "readBranchOnlyReference"
+            },
+            &[("condition", boolean_type)],
+            class_type,
+        );
+        let method_index = fixture.methods.len() - 1;
+        let condition_parameter = fixture.parameters[method_index][0];
+        let no_prefix = fixture.definitions.no_prefix;
+        let condition =
+            typed_method_ident_with_prefix(&mut fixture, condition_parameter, no_prefix);
+        let local = add_emission_local_symbol(
+            &mut fixture,
+            method_index,
+            "conditionalReference",
+            class_type,
+            false,
+            SymbolFlags::EMPTY,
+        );
+        let this_type = fixture.store.types.alloc(Type::ThisType {
+            class: fixture.class,
+        });
+        let initializer = fixture.ast.alloc(Tree {
+            kind: TreeKind::This(This { qual: None }),
+            position: None,
+            ty: this_type,
+        });
+        let declaration = add_emission_local_valdef(
+            &mut fixture,
+            method_index,
+            local,
+            class_type,
+            Some(initializer),
+        );
+        let unit_type = fixture.definitions.unit;
+        let unit_value = fixture.ast.alloc(Tree {
+            kind: TreeKind::Literal(Literal {
+                value: Constant::Unit,
+            }),
+            position: None,
+            ty: unit_type,
+        });
+        let control = if inside_loop {
+            let loop_body = typed_block(&mut fixture, vec![declaration], unit_value, unit_type);
+            fixture.ast.alloc(Tree {
+                kind: TreeKind::While(dotty_core::ast::While {
+                    cond: condition,
+                    body: loop_body,
+                }),
+                position: None,
+                ty: unit_type,
+            })
+        } else {
+            let then_branch = typed_block(&mut fixture, vec![declaration], unit_value, unit_type);
+            let else_branch = fixture.ast.alloc(Tree {
+                kind: TreeKind::Literal(Literal {
+                    value: Constant::Unit,
+                }),
+                position: None,
+                ty: unit_type,
+            });
+            fixture.ast.alloc(Tree {
+                kind: TreeKind::If(dotty_core::ast::If {
+                    cond: condition,
+                    then_branch,
+                    else_branch,
+                }),
+                position: None,
+                ty: unit_type,
+            })
+        };
+        let read = typed_emission_symbol_ident(&mut fixture, local);
+        fixture.bodies[method_index] = typed_block(&mut fixture, vec![control], read, class_type);
+        let mut unit = fixture.unit();
+        unit.classes[0].methods[method_index].locals = vec![JvmLocalBinding {
+            declaration,
+            symbol: local,
+            mutable: false,
+        }];
+
+        assert_eq!(
+            emit_class(&unit, fixture.class, &fixture.definitions),
+            Err(JvmCodegenError::UninitializedLocalRead {
+                tree: read,
+                symbol: local
+            })
+        );
+    };
+
+    check(false);
+    check(true);
+}
+
+#[test]
 fn resolves_typed_constructor_application_to_canonical_metadata() {
     let fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
     let unit = JvmCompilationUnit {
