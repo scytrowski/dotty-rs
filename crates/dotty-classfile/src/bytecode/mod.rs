@@ -85,12 +85,12 @@ pub mod control_flow;
 pub mod stack_map;
 pub mod stack_map_frames;
 
-pub(crate) use analysis::analyze_validated;
 pub use analysis::{
     AnalysisError, BlockEntryState, CfgCodeAnalyzer, ClassIdentity, CodeAnalysis, FlowAnalysis,
     FlowLocalState, FlowValue, LinearCodeAnalyzer, UnsupportedFlowInstructionKind, ValueKind,
     analyze,
 };
+pub(crate) use analysis::{analyze_validated, analyze_validated_with_current_class};
 pub(crate) use assembler::assemble_validated;
 pub use assembler::{
     AssembleError, AssembledCode, CodeLayout, ConstantPoolOperandKind, assemble, assemble_labeled,

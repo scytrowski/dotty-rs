@@ -486,6 +486,59 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             Ok(())
         })
         .expect("branched reference-local construction succeeds");
+    caller
+        .add_static_method("echoBox", "(LBox;)LBox;", |code| {
+            code.aload(0)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .expect("linear exact reference parameter construction succeeds");
+    caller
+        .add_static_method("chooseBox", "(ZLBox;LBox;)LBox;", |code| {
+            let otherwise = code.new_label()?;
+            code.iload(0)?;
+            code.ifeq(otherwise.clone())?;
+            code.aload(1)?;
+            code.areturn()?;
+            code.mark(otherwise)?;
+            code.aload(2)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .expect("branched exact reference parameters construction succeeds");
+    caller
+        .add_static_method("loopBox", "(ZLBox;)LBox;", |code| {
+            let head = code.new_label()?;
+            let done = code.new_label()?;
+            code.iconst(0)?;
+            code.istore(2)?;
+            code.mark(head.clone())?;
+            code.iload(0)?;
+            code.ifeq(done.clone())?;
+            code.iconst(0)?;
+            code.istore(0)?;
+            code.goto(head)?;
+            code.mark(done)?;
+            code.aload(1)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .expect("loop exact reference parameter construction succeeds");
+    caller
+        .add_code_method("<init>", "()V", MethodAccessFlags(ACC_PUBLIC), |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    caller
+        .add_instance_method("self", "()LCaller;", |code| {
+            code.aload(0)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .expect("instance receiver has the exact current class type");
     let caller_bytes = caller
         .encode()
         .expect("Caller is generated through the typed builder");
@@ -610,7 +663,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let caller = decode_and_validate(&caller_bytes);
     assert_eq!(caller.version, version);
     assert_eq!(caller.access_flags.0, ACC_PUBLIC | ACC_SUPER);
-    assert_eq!(caller.methods.len(), 3);
+    assert_eq!(caller.methods.len(), 8);
     let answer = &caller.methods[0];
     assert_eq!(caller.constant_pool.utf8(answer.name_index), Ok("answer"));
     assert_eq!(
@@ -726,6 +779,13 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
         if (caller != 42) throw new AssertionError("Caller.answer: " + caller);
         int generated = Caller.makeBox(42).get();
         if (generated != 42) throw new AssertionError("Caller.makeBox: " + generated);
+        Box first = new Box(10);
+        Box second = new Box(20);
+        if (Caller.echoBox(first) != first) throw new AssertionError("Caller.echoBox");
+        if (Caller.chooseBox(true, first, second) != first || Caller.chooseBox(false, first, second) != second) throw new AssertionError("Caller.chooseBox");
+        if (Caller.loopBox(false, second) != second || Caller.loopBox(true, first) != first) throw new AssertionError("Caller.loopBox");
+        Caller instance = new Caller();
+        if (instance.self() != instance) throw new AssertionError("Caller.self");
         Caller.branchBox(0);
         Caller.branchBox(1);
         System.out.println("Calculator.add=" + calculator);

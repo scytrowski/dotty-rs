@@ -99,9 +99,9 @@ prefix is missing.
 | Parser / namer / typer | The audit fixture produces real canonical parameter, method, class, `This`, `Ident`, `Apply`, and `If` trees. Source `Counter` declarations retain a root-package `TypeRef` prefix. | Preserve these identities; do not manufacture or normalize trees to fit the backend. The current source Typer rejects `null` with `NullLiteralTypingDeferred`; it does not currently resolve source `Array` in this fixture (`TypeNameNotFound`). |
 | `dotty-jvm::descriptor` | Unit metadata projects primitive types and exact planned-class references to checked JVM method descriptors. The standalone store-only `JvmMethodPlan::descriptor`, fields, and constructors remain primitive-only. | Keep canonical class identity, source package-prefix, owner, arity, modifiers, parameter-symbol order, and JVMS slot-limit validation. Do not enable reference-valued bytecode emission as part of descriptor projection. |
 | `dotty-jvm` expression and local lowering | Planned reference locals and primitive-result calls on `this`, `new C`, or an immutable local are supported. Parameters are emitted using `iload`; reference `Ident` parameters and `This` as a value are not yet lowered. `append_method_return` emits `ireturn` for all value results. | Map reference parameters to `aload`; map only a matching canonical `ThisType` to `aload_0`; preserve receiver-first call evaluation; add typed reference `Flow` and `areturn` with exact owner/result checks. |
-| Linear `dotty-classfile` analyzer | It parses full class-file descriptors and models values primarily by JVM category. Its generic invocation and return checks do not provide the planned exact source-class guarantees. | Make return and invocation checks descriptor-shaped and exact where class identity is available; preserve the generic bytecode crate's Scala independence. |
-| CFG `dotty-classfile` analyzer | `Frame::new` lays out descriptor parameters by category, but `CfgCodeAnalyzer::analyze_validated_with_current_class` then rejects every non-int parameter as `UnsupportedFlowParameter`. In class-aware flow, `invokevirtual` accepts only `I`/`Z` arguments and `I`/`Z`/`V` results; result transfer currently treats any permitted non-void result as int. CFG validation rejects `areturn` up front as `UnsupportedFlowInstruction { kind: Reference }`. The shared `Frame` transfer used by linear analysis checks only the reference category for `areturn`. | Seed reference parameters with exact `ClassIdentity`; pop call arguments against descriptor types in reverse order; push exact reference results; add descriptor-exact `areturn` checking before admitting it to CFG flow; retain fail-closed exact stack joins. |
-| Class-file builder / frames | The builder interns exact classes discovered in analyzed flow before freezing the pool and serializes receiver/reference CFG frames. The initial frame is implicit from the descriptor, but the analyzer does not yet admit reference parameters. | Include descriptor-derived parameter classes in pre-interning and flow state; serialize matching initial and branch-target frames; continue to reject malformed or unsupported methods before bytes are returned. |
+| Linear `dotty-classfile` analyzer | Class-aware analysis seeds object parameters and the instance receiver with exact descriptor/current-class identities. In that mode, `areturn` requires an initialized exact object matching the declared result. The context-free analyzer retains category-only behavior. | Extend exact descriptor-shaped transfer to reference invocation arguments and results while preserving the generic bytecode crate's Scala independence. |
+| CFG `dotty-classfile` analyzer | Class-aware flow seeds object method parameters with exact `ClassIdentity`, retains exact stack joins, and checks `areturn` against the declared object result. `invokevirtual` transfer remains int-like/void only and does not yet model reference arguments or results. | Add descriptor-shaped invocation argument and result transfer; keep unsupported descriptor forms explicit and stack joins fail-closed. |
+| Class-file builder / frames | Linear and CFG methods with supported object descriptors pre-intern descriptor/current-class identities before the pool is frozen. Initial and branch-target frames preserve exact object types. Unsupported descriptor shapes and mismatched or uninitialized returns fail before bytes are returned. | Extend the pre-interned exact frame state when reference invocation results are implemented; retain verifier-backed coverage. |
 
 The class-file descriptor parser already accepts reference descriptors. That is
 wire-format support, not evidence that the Scala adapter, source expressions,
@@ -122,7 +122,7 @@ cargo test -p dotty-classfile --locked
 
 | Case | Current rejection |
 | --- | --- |
-| Reference parameter or result on an ordinary method | `dotty-jvm` descriptor stage: `UnsupportedJvmType::ReferenceClass`; no class file is published |
+| Reference parameter or result on an ordinary source method body | `dotty-jvm` bytecode lowering remains primitive-only; unit metadata can project exact planned-class descriptors, but source class emission still fails without reference-value lowering |
 | Reference constructor parameter | `dotty-jvm` constructor signature stage: `UnsupportedJvmType::ReferenceClass` |
 | `null` source expression | `dotty-typer`: `NullLiteralTypingDeferred` |
 | `Array[Int]` source parameter | `dotty-typer`: `TypeNameNotFound`; the JVM descriptor layer is not reached |
@@ -140,8 +140,9 @@ reject foreign, unresolved, or inconsistent symbols. They likewise do not
 fabricate a source typed tree in the source-to-JVM audit.
 
 Still excluded after this audit: reference fields; reference-valued
-constructor arguments; external or unplanned receiver classes; inheritance, interfaces,
-subtyping and hierarchy joins; `null`; arrays; mutable reference locals;
+constructor arguments; external or unplanned receiver classes; general
+inheritance, interfaces, subtyping and hierarchy joins (apart from the JVM rule
+that every reference is assignable to `java/lang/Object`); `null`; arrays; mutable reference locals;
 generic erasure; boxing; and Scala ABI/TASTy changes. In particular,
 `Type::Or`/`Type::And` or a printed class name must not be converted to
 `java/lang/Object`.
@@ -162,6 +163,7 @@ generic erasure; boxing; and Scala ABI/TASTy changes. In particular,
    arguments, arrays, and null rejected.
 
 The canonical method signature metadata and source package-prefix checks are
-implemented by #1270. Remaining bytecode work should use real-source fixtures,
-class-file structural checks, and JDK 21+ `java -Xverify:all` before a
-reference-valued signature can be emitted.
+implemented by #1270. Exact descriptor parameter seeding and reference-return
+verification in the class-file builder are implemented by #1271. Remaining
+bytecode work should use real-source fixtures, class-file structural checks,
+and JDK 21+ `java -Xverify:all` as each reference operation is added.

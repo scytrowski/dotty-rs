@@ -781,12 +781,39 @@ impl ClassFileBuilder {
                 ) => {
                     let bytes = crate::bytecode::assemble_validated(&instructions, &constant_pool)
                         .map_err(ClassFileBuildError::Assemble)?;
-                    let analysis = crate::bytecode::analyze_validated(
-                        &method.descriptor,
-                        method.access_flags.is_static(),
-                        &instructions,
-                        &constant_pool,
-                    )
+                    let descriptor = crate::descriptor::MethodDescriptor::parse(&method.descriptor)
+                        .map_err(AnalysisError::InvalidMethodDescriptor)
+                        .map_err(ClassFileBuildError::Analysis)?;
+                    let has_reference_descriptor = descriptor
+                        .parameters
+                        .iter()
+                        .chain(descriptor.return_type.iter())
+                        .any(|ty| {
+                            matches!(
+                                ty,
+                                crate::descriptor::FieldType::Object(_)
+                                    | crate::descriptor::FieldType::Array(_)
+                            )
+                        });
+                    let analysis = if !has_reference_descriptor
+                        || matches!(method.name.as_str(), "<init>" | "<clinit>")
+                    {
+                        crate::bytecode::analyze_validated(
+                            &method.descriptor,
+                            method.access_flags.is_static(),
+                            &instructions,
+                            &constant_pool,
+                        )
+                    } else {
+                        crate::bytecode::analyze_validated_with_current_class(
+                            &method.name,
+                            &method.descriptor,
+                            method.access_flags.is_static(),
+                            &instructions,
+                            &constant_pool,
+                            Some(this_class),
+                        )
+                    }
                     .map_err(ClassFileBuildError::Analysis)?;
                     Ok(Some(OwnedCode {
                         max_stack: analysis.max_stack,
