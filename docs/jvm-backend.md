@@ -125,8 +125,30 @@ Polymorphic or curried methods, non-plain parameter clauses, aliases, type
 parameters, match/refined/union/intersection types, Scala objects, arrays,
 by-name and repeated types, non-primitive constants, Unit parameters, erased
 parameters, and varargs are rejected with structured errors. Reference fields
-and primary constructor parameters remain primitive-only. Unknown types never
-fall back to `java/lang/Object`.
+and primary constructor parameters remain outside method-signature projection.
+Unknown types never fall back to `java/lang/Object`.
+
+## Private field metadata
+
+`JvmCompilationUnit::metadata` projects ordinary private `val` and `var`
+fields whose values are `Int`, `Boolean`, or an exact class planned in the
+same unit. Reference fields retain `JvmType::Reference(SymbolId)` and receive
+the descriptor built from that class identity's checked internal name. The
+metadata also retains the exact value type, so later stages do not need to
+recover it from descriptor text. Immutable vals use `ACC_PRIVATE | ACC_FINAL`;
+mutable vars use `ACC_PRIVATE`.
+
+A reference initializer must be a typed identifier for a parameter of a
+constructor owned by the field's class, and the parameter's exact class must
+match the declared field type. Classes absent from the compilation unit,
+`this`, arbitrary reference expressions, arrays, applied types, and
+`private[this]` remain unsupported. Reference metadata requires the complete
+unit; the standalone `JvmClassPlan::metadata_with_typed_ast` entry point stays
+primitive-only because it cannot prove that a referenced class is planned.
+
+This increment validates field metadata only. It does not emit constructor
+field writes or reference-valued initializer instructions. Constructor field
+initializer lowering remains limited to its documented primitive subset.
 
 No general Scala type erasure, reference boxing, Unit operand-stack
 representation, raw bytecode, source pipeline orchestration, TASTy integration,

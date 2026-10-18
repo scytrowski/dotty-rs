@@ -2955,7 +2955,182 @@ fn field_metadata_never_resolves_a_shadowing_local_by_name() {
 }
 
 #[test]
-fn field_metadata_rejects_reference_valued_fields() {
+fn field_metadata_projects_private_reference_fields_from_the_full_unit() {
+    with_source(
+        "class Counter {}\nclass Holder(initial: Counter) { private val original: Counter = initial; private var current: Counter = initial }",
+        |ast, source, index, definitions, typer| {
+            let counter = symbol_named(ast, index, source, typer, "Counter");
+            let holder = symbol_named(ast, index, source, typer, "Holder");
+            typer.complete_symbol(counter).unwrap();
+            typer.complete_symbol(holder).unwrap();
+
+            let mut fields = Vec::new();
+            for name in ["original", "current"] {
+                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(initializer),
+                });
+            }
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![
+                    JvmClassPlan {
+                        class: counter,
+                        methods: Vec::new(),
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    },
+                    JvmClassPlan {
+                        class: holder,
+                        methods: Vec::new(),
+                        fields,
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    },
+                ],
+            };
+            let metadata = unit.metadata(definitions).unwrap();
+            let fields = metadata[1].fields();
+            let counter_descriptor = format!("L{};", metadata[0].identity().internal_name());
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].name(), "original");
+            assert_eq!(fields[0].descriptor(), counter_descriptor);
+            assert_eq!(
+                fields[0].value_type(),
+                dotty_jvm::JvmType::Reference(counter)
+            );
+            assert!(fields[0].access_flags().is_private());
+            assert!(fields[0].access_flags().is_final());
+            assert_eq!(fields[1].name(), "current");
+            assert_eq!(fields[1].descriptor(), counter_descriptor);
+            assert_eq!(
+                fields[1].value_type(),
+                dotty_jvm::JvmType::Reference(counter)
+            );
+            assert!(fields[1].access_flags().is_private());
+            assert!(!fields[1].access_flags().is_final());
+
+            let standalone =
+                unit.classes[1].metadata_with_typed_ast(unit.store, unit.typed_ast, definitions);
+            assert!(matches!(
+                standalone,
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmType {
+                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                    ..
+                })
+            ));
+        },
+    );
+}
+
+#[test]
+fn field_metadata_rejects_a_reference_identifier_without_a_parameter_term_ref() {
+    with_source(
+        "class Counter {}\nclass Holder(initial: Counter) { private val item: Counter = initial }",
+        |ast, source, index, definitions, typer| {
+            let counter = symbol_named(ast, index, source, typer, "Counter");
+            let holder = symbol_named(ast, index, source, typer, "Holder");
+            typer.complete_symbol(counter).unwrap();
+            typer.complete_symbol(holder).unwrap();
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "item");
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+
+            let mut malformed_ast = dotty_core::ast::TypedAst::new();
+            let mut malformed_initializer_tree = typer.typed_ast().get(initializer).clone();
+            malformed_initializer_tree.ty = field_type;
+            let malformed_initializer = malformed_ast.alloc(malformed_initializer_tree);
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: &malformed_ast,
+                classes: vec![
+                    JvmClassPlan {
+                        class: counter,
+                        methods: Vec::new(),
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    },
+                    JvmClassPlan {
+                        class: holder,
+                        methods: Vec::new(),
+                        fields: vec![JvmFieldPlan {
+                            field,
+                            source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                            initializer: Some(malformed_initializer),
+                        }],
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    },
+                ],
+            };
+            assert_eq!(
+                unit.metadata(definitions),
+                Err(
+                    dotty_jvm::JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
+                        field,
+                        initializer: malformed_initializer,
+                        symbol: None,
+                    }
+                )
+            );
+        },
+    );
+}
+
+#[test]
+fn field_metadata_rejects_reference_fields_outside_the_unit_and_self_initialization() {
+    with_source(
+        "class Outside {}\nclass Holder(initial: Outside) { private val item: Outside = initial }",
+        |ast, source, index, definitions, typer| {
+            let outside = symbol_named(ast, index, source, typer, "Outside");
+            let holder = symbol_named(ast, index, source, typer, "Holder");
+            typer.complete_symbol(outside).unwrap();
+            typer.complete_symbol(holder).unwrap();
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "item");
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class: holder,
+                    methods: Vec::new(),
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(initializer),
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            };
+            assert_eq!(
+                unit.metadata(definitions),
+                Err(dotty_jvm::JvmCodegenError::ReferenceClassNotInJvmPlan { class: outside })
+            );
+        },
+    );
+
     with_source(
         "class References { private val self: References = this }",
         |ast, source, index, definitions, typer| {
@@ -2986,12 +3161,71 @@ fn field_metadata_rejects_reference_valued_fields() {
             };
             assert!(matches!(
                 unit.metadata(definitions),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmType {
-                    symbol,
-                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmReferenceType {
+                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
                     ..
-                }) if symbol == field
+                })
             ));
+        },
+    );
+}
+
+#[test]
+fn field_metadata_rejects_a_reference_initializer_with_another_class_identity() {
+    with_source(
+        "class Counter {}\nclass Other {}\nclass Holder(counter: Counter, other: Other) { private val first: Counter = counter; private val second: Other = other }",
+        |ast, source, index, definitions, typer| {
+            let counter = symbol_named(ast, index, source, typer, "Counter");
+            let other = symbol_named(ast, index, source, typer, "Other");
+            let holder = symbol_named(ast, index, source, typer, "Holder");
+            for class in [counter, other, holder] {
+                typer.complete_symbol(class).unwrap();
+            }
+            let (counter_field, _, _) = field_tree_and_rhs(ast, index, source, typer, "first");
+            let (other_field, _, other_rhs) =
+                field_tree_and_rhs(ast, index, source, typer, "second");
+            for field in [counter_field, other_field] {
+                typer.complete_symbol(field).unwrap();
+            }
+            let SymbolInfo::Complete(other_type) = typer.store().symbols.get(other_field).info
+            else {
+                panic!("Other field type should be complete");
+            };
+            let other_context = typer.field_initializer_context_for(other_field).unwrap();
+            let other_initializer = typer
+                .type_expression_expected(other_rhs, other_context, other_type)
+                .unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: [counter, other, holder]
+                    .into_iter()
+                    .map(|class| JvmClassPlan {
+                        class,
+                        methods: Vec::new(),
+                        fields: if class == holder {
+                            vec![JvmFieldPlan {
+                                field: counter_field,
+                                source_visibility:
+                                    dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                                initializer: Some(other_initializer),
+                            }]
+                        } else {
+                            Vec::new()
+                        },
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    })
+                    .collect(),
+            };
+            assert_eq!(
+                unit.metadata(definitions),
+                Err(dotty_jvm::JvmCodegenError::FieldInitializerTypeMismatch {
+                    field: counter_field,
+                    initializer: other_initializer,
+                    expected: dotty_jvm::JvmType::Reference(counter),
+                    found: Some(dotty_jvm::JvmType::Reference(other)),
+                })
+            );
         },
     );
 }

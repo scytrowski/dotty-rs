@@ -63,17 +63,13 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 ///
 /// `Int` and `Boolean` have distinct descriptor letters (`I` and `Z`) but
 /// both use the JVM's int-like category-one operand representation. References
-/// retain their exact planned class identity. The unit-aware method metadata
-/// projector can encode those identities in method descriptors; field
-/// descriptors and the store-only method projector remain narrower.
+/// retain their exact planned class identity. Unit-aware method and field
+/// metadata can encode those identities; store-only projectors remain narrower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmType {
     Int,
     Boolean,
     /// A category-one reference to one exact class in a validated compilation unit.
-    ///
-    /// Method descriptors preserve this exact identity only when the class is
-    /// in the validated emission unit. Field descriptors remain primitive-only.
     Reference(SymbolId),
 }
 
@@ -269,12 +265,13 @@ pub enum JvmFieldSourceVisibility {
     PrivateThis,
 }
 
-/// Validated JVM metadata for one private primitive instance field.
+/// Validated JVM metadata for one private primitive or exact-reference instance field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmFieldMetadata {
     symbol: SymbolId,
     name: String,
     descriptor: String,
+    value_type: JvmType,
     access_flags: dotty_classfile::access_flags::FieldAccessFlags,
     owner: SymbolId,
     initializer: TreeId<Typed>,
@@ -735,6 +732,12 @@ pub enum JvmCodegenError {
         initializer: TreeId<Typed>,
         expected: JvmType,
         found: Option<JvmType>,
+    },
+    /// A reference field initializer is not an identifier for a typed parameter.
+    UnsupportedJvmReferenceFieldInitializer {
+        field: SymbolId,
+        initializer: TreeId<Typed>,
+        symbol: Option<SymbolId>,
     },
     /// Constructor initializer lowering requires a validated primary constructor plan.
     ConstructorInitializerContextUnavailable { class: SymbolId },
@@ -1382,8 +1385,11 @@ impl JvmClassPlan {
         identity::class_metadata(self, store, None, definitions, None)
     }
 
-    /// Derives class, field, and selected method metadata while validating
-    /// each frontend-issued field/RHS binding against this exact typed AST.
+    /// Derives class, primitive-field, and selected method metadata while
+    /// validating each frontend-issued field/RHS binding against this exact
+    /// typed AST. Reference-valued fields require
+    /// [`JvmCompilationUnit::metadata`], which can prove that their classes
+    /// are planned in the same emission unit.
     pub fn metadata_with_typed_ast(
         &self,
         store: &SemanticStore,
@@ -1426,9 +1432,14 @@ impl JvmFieldMetadata {
         &self.name
     }
 
-    /// Exact primitive field descriptor (`I` or `Z`).
+    /// Exact JVM field descriptor (`I`, `Z`, or `L<planned-class>;`).
     pub fn descriptor(&self) -> &str {
         &self.descriptor
+    }
+
+    /// Exact semantic value type retained alongside the checked descriptor.
+    pub const fn value_type(&self) -> JvmType {
+        self.value_type
     }
 
     /// JVM access flags (`private`, with `final` for immutable Scala vals).
@@ -1764,7 +1775,7 @@ impl JvmCompilationUnit<'_> {
         }
     }
 
-    /// Projects all planned class identities and method metadata in plan order.
+    /// Projects all planned class, field, and method metadata in plan order.
     ///
     /// Duplicate JVM class names and duplicate `(method name, descriptor)`
     /// pairs are rejected before the metadata is returned.
