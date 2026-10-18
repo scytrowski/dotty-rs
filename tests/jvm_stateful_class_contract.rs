@@ -2,7 +2,9 @@ use dotty_classfile::access_flags::{ACC_PUBLIC, MethodAccessFlags};
 use dotty_classfile::class_file::ClassFileVersion;
 use dotty_classfile::class_file_builder::ClassFileBuilder;
 use dotty_classfile::reader::Reader;
-use dotty_core::ast::{Apply, ApplyKind, AstArena, Select, Tree, TreeKind, Typed, Untyped};
+use dotty_core::ast::{
+    Apply, ApplyKind, AstArena, Select, Tree, TreeKind, Typed, Untyped, VisibilitySyntax,
+};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolInfo,
     SymbolKind, TermRefTarget, TreeId, Type, Visibility,
@@ -151,6 +153,45 @@ fn field_tree_and_rhs(
         .unwrap_or_else(|| panic!("missing initialized field {name}"))
 }
 
+fn method_tree_and_rhs(
+    ast: &dotty_core::AstArena<Untyped>,
+    index: &dotty_namer::SourceSemanticIndex,
+    source: SourceId,
+    typer: &SourceTyper<'_>,
+    owner: SymbolId,
+    name: &str,
+) -> (SymbolId, TreeId<Untyped>, TreeId<Untyped>) {
+    ast.iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            let method = index.symbol_at(source, tree)?;
+            if typer.store().symbols.get(method).owner == Some(owner)
+                && typer
+                    .store()
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    == name
+            {
+                Some((method, tree, definition.rhs?))
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| panic!("missing method {name} on owner {owner:?}"))
+}
+
+fn complete_class_info(typer: &SourceTyper<'_>, class: SymbolId) -> dotty_core::types::ClassInfo {
+    let SymbolInfo::Complete(info_id) = typer.store().symbols.get(class).info else {
+        panic!("class symbol should have complete ClassInfo")
+    };
+    let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
+        panic!("class symbol info should be ClassInfo")
+    };
+    info.clone()
+}
+
 #[test]
 fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots() {
     with_source(
@@ -220,6 +261,383 @@ fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots()
             }
         },
     );
+}
+
+#[test]
+fn reference_fields_and_constructor_parameters_keep_real_source_identity() {
+    let source_text = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/jvm/ReferenceFieldsAndConstructors.scala"),
+    )
+    .expect("read reference field and constructor fixture");
+    with_source(&source_text, |ast, source, index, definitions, typer| {
+        let class = |name: &str| symbol_named(ast, index, source, typer, name);
+        let counter = class("Counter");
+        let holder = class("Holder");
+        let mutable_holder = class("MutableHolder");
+        let client = class("Client");
+        for owner in [counter, holder, mutable_holder, client] {
+            typer.complete_symbol(owner).unwrap();
+            let info = complete_class_info(typer, owner);
+            let scope = index
+                .scope_of(owner)
+                .expect("class declaration scope is indexed");
+            assert_eq!(info.class, owner);
+            assert_eq!(info.declarations, scope);
+            assert_eq!(typer.store().scopes.get(scope).owner, Some(owner));
+            assert_eq!(info.parents, [definitions.object_type]);
+        }
+
+        let fields = [
+            (holder, "ref", false, None),
+            (holder, "own", false, Some("this")),
+            (mutable_holder, "current", true, None),
+        ];
+        for (owner, name, mutable, expected_qualifier) in fields {
+            let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+            let symbol = typer.store().symbols.get(field);
+            assert_eq!(symbol.kind, SymbolKind::Field);
+            assert_eq!(symbol.owner, Some(owner));
+            assert_eq!(symbol.visibility, Visibility::Private);
+            assert_eq!(
+                symbol.flags.contains(SymbolFlags::MUTABLE),
+                mutable,
+                "field mutability for {name} comes from the real source declaration"
+            );
+            let TreeKind::ValDef(definition) = &ast.get(declaration).kind else {
+                panic!("field source node should be ValDef");
+            };
+            match definition.metadata.visibility {
+                Some(VisibilitySyntax::Private { qualifier }) => {
+                    assert_eq!(
+                        qualifier.map(|name| typer.store().names.resolve(name.text())),
+                        expected_qualifier,
+                        "retain the plain private vs private[this] source distinction"
+                    );
+                }
+                other => panic!("expected source private visibility, got {other:?}"),
+            }
+
+            let marker = format!("{name}: Counter");
+            let name_offset = source_text.find(&marker).unwrap() as u32;
+            let tree_span = ast
+                .get(declaration)
+                .position
+                .expect("field has source range");
+            assert_eq!(tree_span.source(), source);
+            let tree_range = tree_span.span().range();
+            assert!(tree_range.start() <= name_offset && name_offset < tree_range.end());
+            let symbol_span = symbol
+                .position
+                .expect("field symbol retains source position");
+            assert_eq!(symbol_span.source(), source);
+            let symbol_range = symbol_span.span().range();
+            assert!(symbol_range.start() <= name_offset && name_offset < symbol_range.end());
+
+            let scope = complete_class_info(typer, owner).declarations;
+            let field_name = symbol.name;
+            assert!(
+                typer
+                    .store()
+                    .scopes
+                    .get(scope)
+                    .lookup_all(&field_name)
+                    .contains(&field)
+            );
+
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("reference field type should be complete")
+            };
+            assert!(matches!(
+                typer.store().types.get(field_type),
+                Type::TypeRef {
+                    target: dotty_core::types::TypeRefTarget::Symbol(target),
+                    ..
+                } if *target == counter
+            ));
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let typed_rhs = typer
+                .type_expression_expected(rhs, context, field_type)
+                .expect("constructor parameter is a valid typed reference field initializer");
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
+            assert!(matches!(
+                typer.typed_ast().get(typed_rhs).kind,
+                TreeKind::Ident(_)
+            ));
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+                Type::TermRef {
+                    target: dotty_core::types::TermRefTarget::Symbol(_),
+                    ..
+                }
+            ));
+        }
+
+        let mut constructor_parameters = Vec::new();
+        for (parameter_index, (owner, parameter_name)) in
+            [(holder, "initial"), (mutable_holder, "initial")]
+                .into_iter()
+                .enumerate()
+        {
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    (index.symbol_at(source, tree) == Some(owner)).then_some((tree, node))
+                })
+                .map(|(tree, _)| tree)
+                .expect("class declaration tree");
+            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
+                panic!("class declaration is a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("class definition contains a Template");
+            };
+            let constructor = index
+                .symbol_at(source, template.constructor)
+                .expect("canonical primary constructor symbol");
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("primary constructor source node is DefDef");
+            };
+            let [parameter_tree] = constructor_definition.value_param_clauses[0].as_slice() else {
+                panic!("constructor has one source parameter");
+            };
+            let source_parameter = index
+                .symbol_at(source, *parameter_tree)
+                .expect("source parameter symbol");
+            let constructor_parameter = index
+                .derived_symbol_at(constructor, source, *parameter_tree)
+                .expect("constructor-owned parameter identity");
+            assert_eq!(
+                typer
+                    .store()
+                    .names
+                    .resolve(match &ast.get(*parameter_tree).kind {
+                        TreeKind::ValDef(parameter) => parameter.name.as_name().text(),
+                        _ => panic!("constructor parameter source is ValDef"),
+                    }),
+                parameter_name
+            );
+            assert_ne!(source_parameter, constructor_parameter);
+            assert_eq!(
+                typer.store().symbols.get(source_parameter).owner,
+                Some(owner)
+            );
+            assert_eq!(
+                typer.store().symbols.get(source_parameter).visibility,
+                Visibility::Private
+            );
+            assert_eq!(
+                typer.store().symbols.get(constructor_parameter).owner,
+                Some(constructor)
+            );
+            assert_eq!(
+                typer.store().symbols.get(constructor_parameter).kind,
+                SymbolKind::Parameter
+            );
+            assert_eq!(
+                typer.store().symbols.get(constructor_parameter).visibility,
+                Visibility::Public
+            );
+            constructor_parameters.push((owner, constructor_parameter));
+            let source_parameter_span = typer
+                .store()
+                .symbols
+                .get(source_parameter)
+                .position
+                .expect("source parameter retains source position");
+            let parameter_span = typer
+                .store()
+                .symbols
+                .get(constructor_parameter)
+                .position
+                .expect("constructor parameter retains source position");
+            assert_eq!(source_parameter_span.source(), source);
+            assert_eq!(parameter_span.source(), source);
+            assert_eq!(source_parameter_span.span(), parameter_span.span());
+            let parameter_offset = source_text
+                .match_indices("initial: Counter")
+                .nth(parameter_index)
+                .unwrap()
+                .0 as u32;
+            let parameter_range = parameter_span.span().range();
+            assert!(
+                parameter_range.start() <= parameter_offset
+                    && parameter_offset < parameter_range.end(),
+                "parameter source range {parameter_range:?} should cover offset {parameter_offset} for {owner:?}"
+            );
+
+            typer.complete_symbol(constructor).unwrap();
+            let SymbolInfo::Complete(constructor_type) =
+                typer.store().symbols.get(constructor).info
+            else {
+                panic!("constructor signature should be complete")
+            };
+            let Type::Method(signature) = typer.store().types.get(constructor_type) else {
+                panic!("constructor signature is a Method type")
+            };
+            assert_eq!(signature.params.len(), 1);
+            assert!(matches!(
+                typer.store().types.get(signature.params[0].ty),
+                Type::TypeRef {
+                    target: dotty_core::types::TypeRefTarget::Symbol(target),
+                    ..
+                } if *target == counter
+            ));
+        }
+
+        for (owner, field_name) in [
+            (holder, "ref"),
+            (holder, "own"),
+            (mutable_holder, "current"),
+        ] {
+            let (_, _, rhs) = field_tree_and_rhs(ast, index, source, typer, field_name);
+            let typed_rhs = typer
+                .source_typed_index()
+                .get(source, rhs)
+                .expect("reference field initializer was typed above");
+            let actual_parameter =
+                match typer.store().types.get(typer.typed_ast().get(typed_rhs).ty) {
+                    Type::TermRef {
+                        target: dotty_core::types::TermRefTarget::Symbol(parameter),
+                        ..
+                    } => *parameter,
+                    other => panic!("field initializer retains a parameter TermRef, got {other:?}"),
+                };
+            let expected_parameter = constructor_parameters
+                .iter()
+                .find_map(|(parameter_owner, parameter)| {
+                    (*parameter_owner == owner).then_some(*parameter)
+                })
+                .unwrap();
+            assert_eq!(actual_parameter, expected_parameter);
+        }
+
+        let (client_method, client_method_tree, construct_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, client, "construct");
+        typer.complete_symbol(client_method).unwrap();
+        let construct_context = typer.expression_context_for(client_method).unwrap();
+        let construct = typer
+            .type_expression(construct_rhs, construct_context)
+            .expect("Client.construct types a real new Holder(c) call");
+        let TreeKind::Apply(application) = &typer.typed_ast().get(construct).kind else {
+            panic!("new Holder(c) remains an application");
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("constructor function remains selected from the new type");
+        };
+        let constructor = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: dotty_core::types::TermRefTarget::Symbol(constructor),
+                ..
+            } => *constructor,
+            other => panic!("constructor selection keeps canonical TermRef, got {other:?}"),
+        };
+        assert_eq!(typer.store().symbols.get(constructor).owner, Some(holder));
+        assert_eq!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(construct).ty)
+                .reference_symbol(),
+            Some(holder)
+        );
+        assert_eq!(application.args.len(), 1);
+        let TreeKind::DefDef(client_definition) = &ast.get(client_method_tree).kind else {
+            panic!("Client.construct source node is a DefDef");
+        };
+        let [client_parameter_tree] = client_definition.value_param_clauses[0].as_slice() else {
+            panic!("Client.construct has one source parameter");
+        };
+        let client_parameter = index
+            .symbol_at(source, *client_parameter_tree)
+            .expect("Client.construct parameter has canonical identity");
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.args[0]).ty),
+            Type::TermRef {
+                target: dotty_core::types::TermRefTarget::Symbol(parameter),
+                ..
+            } if *parameter == client_parameter
+        ));
+        assert!(matches!(
+            typer.typed_ast().get(selection.qualifier).kind,
+            TreeKind::New(_)
+        ));
+
+        let (counter_get, _, _) = method_tree_and_rhs(ast, index, source, typer, counter, "get");
+        let (holder_read, _, holder_read_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, holder, "read");
+        typer.complete_symbol(counter_get).unwrap();
+        typer.complete_symbol(holder_read).unwrap();
+        let context = typer.expression_context_for(holder_read).unwrap();
+        let holder_read_typed = typer
+            .type_expression(holder_read_rhs, context)
+            .expect("immutable reference field selection ref.get() types");
+        let TreeKind::Apply(application) = &typer.typed_ast().get(holder_read_typed).kind else {
+            panic!("ref.get() remains an application")
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("ref.get() method selection retains its field receiver")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef {
+                target: dotty_core::types::TermRefTarget::Symbol(method),
+                ..
+            } if *method == counter_get
+        ));
+        assert!(matches!(
+            &typer.typed_ast().get(selection.qualifier).kind,
+            TreeKind::Ident(_)
+        ));
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(selection.qualifier).ty),
+            Type::TermRef {
+                target: dotty_core::types::TermRefTarget::Symbol(field),
+                ..
+            } if *field == field_tree_and_rhs(ast, index, source, typer, "ref").0
+        ));
+        assert_eq!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(holder_read_typed).ty),
+            typer.store().types.get(definitions.int)
+        );
+
+        for (owner, name) in [
+            (holder, "get"),
+            (mutable_holder, "get"),
+            (mutable_holder, "replace"),
+        ] {
+            let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, owner, name);
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            typer
+                .type_expression(rhs, context)
+                .unwrap_or_else(|error| panic!("{name} body should type from source: {error:?}"));
+        }
+
+        let (mutable_read, _, mutable_read_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, mutable_holder, "read");
+        typer.complete_symbol(mutable_read).unwrap();
+        let context = typer.expression_context_for(mutable_read).unwrap();
+        assert!(matches!(
+            typer.type_expression(mutable_read_rhs, context),
+            Err(dotty_typer::TyperError::UnstableSelectionPrefix {
+                source: error_source,
+                ..
+            }) if error_source == source
+        ));
+    });
 }
 
 #[test]
