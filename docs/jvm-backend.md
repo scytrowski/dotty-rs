@@ -544,6 +544,14 @@ calls, same-class reference joins, and complete allocations in conditional
 arms. It checks generated `StackMapTable` attributes and exercises zero-, one-,
 and multi-iteration results with JDK `-Xverify:all`.
 
+`reference_parameters_and_results_compose_with_if_and_while_control_flow`
+checks the method boundary cases directly: `Counter` parameters are receivers
+through repeated loop iterations, methods return the exact reference selected
+by either `if` branch, and a reference-returning call can supply one branch.
+The test asserts exact `Object(Counter)` stack joins, parameter locals at loop
+back-edge frames, deterministic class bytes, and zero-, one-, and
+multi-iteration behavior under the JDK verifier.
+
 `CounterControlFlow.scala` is the end-to-end reference-CFG fixture. Two
 independent lexer-to-backend sessions emit `Counter.class` and
 `CounterClient.class` in source order with byte-identical output. The test

@@ -52,9 +52,11 @@ The constructor path in `ClassFileBuilder` rejects branched `<init>` bodies
 because it does not track the transition from `uninitializedThis` to
 initialized `this`. Generic class-file analysis supports exact object
 parameters and results for `invokevirtual`, while the source backend enables
-only its separately planned subset. Source bytecode lowering still rejects
-public reference signatures, mutable reference locals, hierarchy joins,
-arrays, null, and branched constructors.
+only its separately planned subset. Source bytecode lowering supports exact
+planned reference parameters and results through `if`, `while`, and ordinary
+planned calls. It still rejects mutable reference locals, hierarchy joins,
+arrays, null, reference fields, reference constructor arguments, and branched
+constructors.
 
 ## Bounded state model
 
@@ -121,7 +123,7 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | `new` | Validate the `CONSTANT_Class`; push a fresh uninitialized allocation-site identity. |
 | `invokespecial <init>` | Consume only the matching uninitialized allocation and exact owner/descriptor. On normal completion rewrite all aliases of that allocation to `Initialized(owner)`. |
 | Integer instructions and branches | Preserve the existing integer transfer rules. Branch operands are int-like only; reference equality branches are out of scope. |
-| Returns | Preserve existing primitive/void checks. Reference returns remain unsupported for backend methods. |
+| Returns | Preserve primitive/void checks; `areturn` requires an initialized reference matching the exact planned result class. |
 
 Field and method constant-pool operands must be resolved to validated entry
 families, nested owner/class names, and parsed descriptors before transfer.
@@ -180,8 +182,16 @@ corresponding `CONSTANT_Class`, reference-bearing loop/local joins,
 current-instance and field/call instructions, and object construction in
 branches. The source integration test
 `planned_reference_operations_verify_across_if_while_and_short_circuit_cfgs`
-checks generated classfiles and runs representative methods under
+and `reference_parameters_and_results_compose_with_if_and_while_control_flow`
+check generated classfiles and run representative methods under
 `java -Xverify:all` on JDK 21+.
+
+The latter exercises `choose(flag, first, second): Counter`, whose exact
+reference result is selected from either `if` branch, a reference-returning
+call inside one branch, and loops whose `Counter` receiver comes from a
+reference parameter. Its frame assertions require `Object(Counter)` on the
+conditional operand stack and in the loop-header locals alongside primitive
+parameters.
 
 The class-file unit tests exercise exact local/stack transfer, allocation
 tracking, owner and argument checks, joins, and frame projection. The JDK
@@ -193,6 +203,9 @@ straight-line builder methods.
 | Case | Required behavior | Evidence or explicit boundary |
 | --- | --- | --- |
 | `Counter` reference local through a loop header and join | Same `Initialized(Counter)` state at each compatible stack/local join; emit `Object(Counter)` frame entry | Covered by source integration and JDK `-Xverify:all` |
+| Reference parameter used as a call receiver through `while` back-edges | Preserve descriptor-seeded `Object(Counter)` in each loop-header local frame; leave no operand values at the header | Focused source integration and JDK `-Xverify:all` |
+| Exact reference-valued `if` result | Join only identical initialized classes and return with `areturn` | Source integration checks the `Object(Counter)` stack frame and JDK object identity |
+| Reference-returning call in an `if` arm | Preserve call result class through the exact branch stack join | Source integration and class-aware CFG analysis |
 | Reference-bearing conditional and current `this` | Seed local 0 as emitting class; preserve exact receiver state at branch target | Covered by field/call branch and loop cases under JDK verifier |
 | `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner; virtual calls also check supported exact object arguments and results | Covered by classfile analyzer tests and JDK verifier gate |
 | Different initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to `Object` | Classfile analyzer regression tests |
@@ -203,11 +216,11 @@ straight-line builder methods.
 | Wrong constructor owner for a `new` allocation | Typed allocation-owner mismatch | Classfile analyzer allocation regressions |
 | Missing, wrong-kind, or malformed CP `Class` entry | Existing typed constant-pool validation error; never manufacture a frame type | Builder/decoder validation remains the current boundary |
 | Branched constructor before `this`/super initialization | Keep rejected as unsupported constructor flow | `ClassFileBuilder` rejects branched `<init>` analysis |
-| Reference method parameter/result | Keep rejected by JVM source backend | Existing backend returns `UnsupportedJvmType` |
+| Exact planned reference method parameter/result | Accept; seed parameter frames and require matching initialized `areturn` values | Source integration and mandatory JDK 21 verifier gate |
 
-The backend converts only now-supported reference-CFG cases from negative to
+The backend converts only exact planned reference-CFG cases from negative to
 positive coverage. Remaining negative cases continue to pin exact-owner,
-definite-initialization, constructor-safety, and public descriptor boundaries.
+definite-initialization, constructor-safety, and descriptor boundaries.
 
 ## Ownership for follow-up work
 
@@ -217,5 +230,5 @@ definite-initialization, constructor-safety, and public descriptor boundaries.
   the bounded source forms described above.
 - Branched `<init>` and `UninitializedThis` remain a separate constructor-flow
   problem. General inheritance/interface merges, arrays, `null`, reference
-  signatures, exception-flow joins, and arbitrary uninitialized values remain
-  out of scope.
+  fields, reference constructor arguments, exception-flow joins, and arbitrary
+  uninitialized values remain out of scope.
