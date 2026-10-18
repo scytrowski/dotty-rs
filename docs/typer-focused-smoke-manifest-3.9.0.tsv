@@ -1,0 +1,4 @@
+# Small source-file smoke selection for the focused Scala 3.9.0 typer audit.
+library/src/scala/annotation/compileTimeOnly.scala
+library/src/scala/collection/StringParsers.scala
+compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala

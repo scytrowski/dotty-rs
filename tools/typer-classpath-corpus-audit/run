@@ -9,12 +9,21 @@ usage() {
 Usage: tools/typer-classpath-corpus-audit/run [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --import-prefix-profile [--verify-determinism] [OUTPUT_PATH]
        tools/typer-classpath-corpus-audit/run --import-prefix-profile --source-file RELATIVE_PATH
+       tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST [--verify-determinism] [OUTPUT_PATH]
+       tools/typer-classpath-corpus-audit/run --focused-cohort package-term|object-module [--verify-determinism] [OUTPUT_PATH]
+       tools/typer-classpath-corpus-audit/run --focused-manifest MANIFEST --compare-legacy-profile [OUTPUT_PATH]
 
 By default, run the pinned audit once and write its report. Pass
 --verify-determinism to run it twice and compare normalized output. Set
 DOTTY_AUDIT_TMP_ROOT to retain per-run logs and intermediate reports there.
 --source-file runs the import-prefix probe only for frozen observations in one
 Scala source file and prints its resolver trace without generating a cohort report.
+--focused-manifest validates a Scala-root-relative file list, then runs only
+those source files and writes a separate FOCUSED / PARTIAL report.
+--focused-cohort selects stable path/tree identities from a pinned historical
+cohort and writes a separate FOCUSED / PARTIAL report.
+--compare-legacy-profile runs the legacy file-only profile once on the same
+selected files and records wall time, method/resolver counts, and peak RSS.
 USAGE
 }
 
@@ -22,6 +31,9 @@ verify_determinism=0
 import_prefix_profile=0
 output_path=""
 source_file=""
+focused_manifest=""
+focused_cohort=""
+compare_legacy_profile=0
 while (($#)); do
     case "$1" in
         --verify-determinism)
@@ -29,6 +41,25 @@ while (($#)); do
             ;;
         --import-prefix-profile)
             import_prefix_profile=1
+            ;;
+        --focused-manifest)
+            if (($# < 2)) || [[ -z "$2" ]]; then
+                usage >&2
+                exit 2
+            fi
+            focused_manifest="$2"
+            shift
+            ;;
+        --focused-cohort)
+            if (($# < 2)) || [[ -z "$2" ]]; then
+                usage >&2
+                exit 2
+            fi
+            focused_cohort="$2"
+            shift
+            ;;
+        --compare-legacy-profile)
+            compare_legacy_profile=1
             ;;
         --source-file)
             if (($# < 2)) || [[ -z "$2" ]]; then
@@ -63,6 +94,18 @@ if [[ -n "$source_file" && "$import_prefix_profile" != 1 ]]; then
 fi
 if [[ -n "$source_file" && "$verify_determinism" == 1 ]]; then
     printf '%s\n' '--source-file is a one-run diagnostic and cannot be combined with --verify-determinism' >&2
+    exit 2
+fi
+if [[ -n "$focused_manifest" && -n "$focused_cohort" ]]; then
+    printf '%s\n' '--focused-manifest and --focused-cohort are mutually exclusive' >&2
+    exit 2
+fi
+if [[ ( -n "$focused_manifest" || -n "$focused_cohort" ) && "$import_prefix_profile" == 1 ]]; then
+    printf '%s\n' 'focused audit selection cannot be combined with --import-prefix-profile' >&2
+    exit 2
+fi
+if [[ "$compare_legacy_profile" == 1 && -z "$focused_manifest$focused_cohort" ]]; then
+    printf '%s\n' '--compare-legacy-profile requires a focused manifest or cohort' >&2
     exit 2
 fi
 
@@ -116,7 +159,9 @@ if [[ -n "$source_file" ]]; then
 fi
 
 if [[ -z "$output_path" ]]; then
-    if [[ "$import_prefix_profile" == 1 ]]; then
+    if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
+        output_path="$repo_root/docs/typer-focused-audit-current-3.9.0.md"
+    elif [[ "$import_prefix_profile" == 1 ]]; then
         output_path="$repo_root/docs/typer-classpath-import-prefix-profile-current-3.9.0.md"
     else
         output_path="$repo_root/docs/typer-classpath-corpus-audit-3.9.0.md"
@@ -137,6 +182,202 @@ fi
 run_names=(first)
 if [[ "$verify_determinism" == 1 ]]; then
     run_names+=(second)
+fi
+if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
+    export CARGO_BUILD_JOBS=1
+    export RUST_TEST_THREADS=1
+    manifest_argument="$focused_manifest"
+    if [[ -n "$focused_manifest" && "$focused_manifest" != /* ]]; then
+        focused_manifest="$repo_root/$focused_manifest"
+    fi
+    if [[ -n "$focused_manifest" && ! -f "$focused_manifest" ]]; then
+        printf 'focused manifest does not exist: %s\n' "$focused_manifest" >&2
+        exit 2
+    fi
+    if command -v realpath >/dev/null 2>&1; then
+        output_path="$(realpath -m -- "$output_path")"
+    fi
+    case "$output_path" in
+        "$repo_root"/docs/typer-classpath-corpus-audit-3.9.0*|\
+        "$repo_root"/docs/typer-classpath-import-prefix-profile-3.9.0*)
+            printf 'focused output must not overwrite the full audit report or its cohort sidecars\n' >&2
+            exit 2
+            ;;
+    esac
+    if [[ -n "$focused_manifest" ]]; then
+        if [[ "$focused_manifest" == "$repo_root"/* ]]; then
+            selection_label="manifest: ${focused_manifest#"$repo_root"/}"
+        elif [[ "$manifest_argument" != /* ]]; then
+            selection_label="manifest: $manifest_argument"
+        else
+            selection_label="external manifest"
+        fi
+        PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/focused_selection.py" \
+            "$focused_manifest" --root "$scala_root" >"$tmp_dir/focused-files.txt"
+    else
+        case "$focused_cohort" in
+            package-term)
+                frozen_cohort="$repo_root/docs/typer-classpath-corpus-audit-3.9.0-package-term-first-blockers.tsv"
+                ;;
+            object-module)
+                frozen_cohort="$repo_root/docs/typer-classpath-corpus-audit-1051-object-module-blockers.tsv"
+                ;;
+            *)
+                printf 'unknown focused cohort: %s\n' "$focused_cohort" >&2
+                exit 2
+                ;;
+        esac
+        selection_label="frozen cohort: $focused_cohort"
+        PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/focused_selection.py" \
+            --cohort "$focused_cohort" --root "$scala_root" --repo-root "$repo_root" \
+            --methods-output "$tmp_dir/focused-methods.txt" >"$tmp_dir/focused-files.txt"
+        export DOTTY_AUDIT_FOCUSED_METHODS="$tmp_dir/focused-methods.txt"
+    fi
+    export DOTTY_AUDIT_FOCUSED_FILES="$tmp_dir/focused-files.txt"
+    if ! (
+        cd "$repo_root"
+        cargo test -p dotty-typer --test local_definition_audit --locked --no-run
+    ) >"$tmp_dir/build.log" 2>&1; then
+        cat "$tmp_dir/build.log" >&2
+        exit 1
+    fi
+    for run in "${run_names[@]}"; do
+        if ! (
+            cd "$repo_root"
+            if [[ -x /usr/bin/time ]]; then
+                /usr/bin/time -f 'MAX_RSS_KB=%M' -o "$tmp_dir/$run.rss" \
+                    cargo test -p dotty-typer --test local_definition_audit --locked \
+                    pinned_scala39_local_definition_audit -- --ignored --nocapture
+            else
+                cargo test -p dotty-typer --test local_definition_audit --locked \
+                    pinned_scala39_local_definition_audit -- --ignored --nocapture
+            fi
+        ) >"$tmp_dir/$run.log" 2>&1; then
+            cat "$tmp_dir/$run.log" >&2
+            exit 1
+        fi
+        sed -n '/^FOCUSED_REPORT_BEGIN$/,/^FOCUSED_REPORT_END$/p' "$tmp_dir/$run.log" \
+            | sed '1d;$d' >"$tmp_dir/$run.focused-report"
+        if [[ ! -s "$tmp_dir/$run.focused-report" ]]; then
+            cat "$tmp_dir/$run.log" >&2
+            printf 'focused report markers were missing\n' >&2
+            exit 1
+        fi
+        if [[ -n "$focused_cohort" ]]; then
+            PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/reconcile_focused_cohort.py" \
+                "$focused_cohort" "$frozen_cohort" "$tmp_dir/$run.focused-report" \
+                --rows "$tmp_dir/$run.focused-cohort.tsv" >"$tmp_dir/$run.cohort-summary.txt"
+        fi
+    done
+    if [[ "$verify_determinism" == 1 ]] && ! cmp -s "$tmp_dir/first.focused-report" "$tmp_dir/second.focused-report"; then
+        diff -u "$tmp_dir/first.focused-report" "$tmp_dir/second.focused-report" >&2 || true
+        printf 'normalized focused report was not deterministic\n' >&2
+        exit 1
+    fi
+    if [[ -n "$focused_cohort" && "$verify_determinism" == 1 ]] \
+        && ! cmp -s "$tmp_dir/first.focused-cohort.tsv" "$tmp_dir/second.focused-cohort.tsv"; then
+        diff -u "$tmp_dir/first.focused-cohort.tsv" "$tmp_dir/second.focused-cohort.tsv" >&2 || true
+        printf 'focused cohort reconciliation was not deterministic\n' >&2
+        exit 1
+    fi
+    if [[ "$compare_legacy_profile" == 1 ]]; then
+        rss_value() {
+            local value=""
+            if [[ -f "$1" ]]; then
+                value="$(sed -n 's/^MAX_RSS_KB=//p' "$1" | tail -1)"
+            fi
+            if [[ -n "$value" ]]; then
+                printf '%s' "$value"
+            else
+                printf unavailable
+            fi
+        }
+        profile_files="$(paste -sd, "$tmp_dir/focused-files.txt")"
+        if ! (
+            cd "$repo_root"
+            unset DOTTY_AUDIT_FOCUSED_FILES DOTTY_AUDIT_FOCUSED_METHODS
+            export DOTTY_AUDIT_PROFILE_FILES="$profile_files"
+            if [[ -x /usr/bin/time ]]; then
+                /usr/bin/time -f 'MAX_RSS_KB=%M' -o "$tmp_dir/legacy.rss" \
+                    cargo test -p dotty-typer --test local_definition_audit --locked \
+                    pinned_scala39_local_definition_audit -- --ignored --nocapture
+            else
+                cargo test -p dotty-typer --test local_definition_audit --locked \
+                    pinned_scala39_local_definition_audit -- --ignored --nocapture
+            fi
+        ) >"$tmp_dir/legacy.log" 2>&1; then
+            cat "$tmp_dir/legacy.log" >&2
+            exit 1
+        fi
+        legacy_timing="$(sed -n 's/^AUDIT_PROFILE_SUMMARY //p' "$tmp_dir/legacy.log" | tail -1)"
+        if [[ -z "$legacy_timing" ]]; then
+            cat "$tmp_dir/legacy.log" >&2
+            printf 'performance comparison timing markers were missing\n' >&2
+            exit 1
+        fi
+        printf 'mode\twall_ms\tmethods_attempted\tmethods_typed\tpackage_requests\tmember_requests\tpeak_rss_kb\n' >"$tmp_dir/comparison.tsv"
+        for run in "${run_names[@]}"; do
+            focused_timing="$(sed -n 's/^FOCUSED_TIMING //p' "$tmp_dir/$run.log" | tail -1)"
+            if [[ -z "$focused_timing" ]]; then
+                cat "$tmp_dir/$run.log" >&2
+                printf 'focused performance timing marker was missing for %s\n' "$run" >&2
+                exit 1
+            fi
+            printf 'focused-%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$run" \
+                "$(sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p' <<<"$focused_timing")" \
+                "$(sed -n 's/^methods_attempted=//p' "$tmp_dir/first.focused-report")" \
+                "$(sed -n 's/^methods_typed=//p' "$tmp_dir/first.focused-report")" \
+                "$(sed -n 's/^  package_requests=//p' "$tmp_dir/first.focused-report")" \
+                "$(sed -n 's/^  member_requests=//p' "$tmp_dir/first.focused-report")" \
+                "$(rss_value "$tmp_dir/$run.rss")" \
+                >>"$tmp_dir/comparison.tsv"
+        done
+        printf 'legacy-file-profile\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$(sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p' <<<"$legacy_timing")" \
+            "$(sed -n 's/.*methods_attempted=\([0-9]*\).*/\1/p' <<<"$legacy_timing")" \
+            "$(sed -n 's/.*methods_typed=\([0-9]*\).*/\1/p' <<<"$legacy_timing")" \
+            "$(sed -n 's/.*resolver_package_requests=\([0-9]*\).*/\1/p' <<<"$legacy_timing")" \
+            "$(sed -n 's/.*resolver_member_requests=\([0-9]*\).*/\1/p' <<<"$legacy_timing")" \
+            "$(rss_value "$tmp_dir/legacy.rss")" \
+            >>"$tmp_dir/comparison.tsv"
+    fi
+    mkdir -p "$(dirname -- "$output_path")"
+    {
+        printf '# Focused Scala 3.9.0 typer audit\n\n'
+        printf 'Status: **FOCUSED / PARTIAL**. This report covers only the selected source files and methods; full-corpus totals and frozen full-audit assertions do not apply.\n\n'
+        printf 'Inputs are pinned to Scala revision `%s`, Scala artifacts 3.9.0, and JDK %s.\n\n' "$revision" "$jdk_version"
+        printf 'Selection: `%s`\n\n' "$selection_label"
+        if [[ -n "$focused_cohort" ]]; then
+            printf '## Frozen row reconciliation\n\n'
+            printf 'The selected `path#tree` methods were joined back to every frozen cohort row. Rows missing a current method outcome remain explicit in the sidecar. Summary: `%s`.\n\n' "$(cat "$tmp_dir/first.cohort-summary.txt")"
+            printf 'Row-level comparison: [`%s`](%s).\n\n' \
+                "$(basename -- "${output_path%.md}-cohort.tsv")" \
+                "$(basename -- "${output_path%.md}-cohort.tsv")"
+        fi
+        if [[ "$compare_legacy_profile" == 1 ]]; then
+            comparison_path="${output_path%.md}-performance.tsv"
+            printf '## Same-file performance comparison\n\n'
+            printf 'The legacy file-only profile and focused mode used the same selected paths and pinned inputs. This diagnostic is intentionally separate from normalized output because wall time and peak RSS vary by run.\n\n'
+            printf 'Measured rows: [`%s`](%s).\n\n' "$(basename -- "$comparison_path")" "$(basename -- "$comparison_path")"
+        fi
+        printf '## Selected audit output\n\n```text\n'
+        cat "$tmp_dir/first.focused-report"
+        printf '```\n\n'
+        if [[ "$verify_determinism" == 1 ]]; then
+            printf 'Two normalized focused reports matched byte-for-byte.\n'
+        else
+            printf 'One run completed; determinism was not checked.\n'
+        fi
+    } >"$output_path"
+    if [[ -n "$focused_cohort" ]]; then
+        cp "$tmp_dir/first.focused-cohort.tsv" "${output_path%.md}-cohort.tsv"
+    fi
+    if [[ "$compare_legacy_profile" == 1 ]]; then
+        cp "$tmp_dir/comparison.tsv" "${output_path%.md}-performance.tsv"
+    fi
+    printf 'Wrote focused audit report to %s\n' "$output_path"
+    exit 0
 fi
 if [[ "$import_prefix_profile" == 1 ]]; then
     export SCALA39_IMPORT_PREFIX_BASELINE_PROFILE="$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md"
