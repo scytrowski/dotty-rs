@@ -182,7 +182,11 @@ pub(super) fn lower(
     ) {
         return Err(JvmCodegenError::ConstructorInitializerContextUnavailable { class });
     }
-    let metadata = class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
+    let all_metadata = unit.metadata(definitions)?;
+    let metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == class)
+        .ok_or(JvmCodegenError::MissingClassPlan { class })?;
     let constructor = metadata
         .constructor()
         .cloned()

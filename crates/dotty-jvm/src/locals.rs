@@ -106,8 +106,11 @@ pub(super) fn method_local_layout(
         .iter()
         .find(|plan| plan.method == method)
         .ok_or(JvmCodegenError::CallerMethodNotInJvmPlan { class, method })?;
-    let metadata = class_plan
-        .metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?
+    let all_metadata = unit.metadata(definitions)?;
+    let metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == class)
+        .ok_or(JvmCodegenError::MissingClassPlan { class })?
         .methods()
         .iter()
         .find(|metadata| metadata.symbol() == method)

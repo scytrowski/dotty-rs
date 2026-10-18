@@ -30,9 +30,15 @@ pub(super) fn emit_class(
             class: class_symbol,
         })?;
 
-    let metadata = plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
+    let all_metadata = unit.metadata(definitions)?;
+    let metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == class_symbol)
+        .ok_or(JvmCodegenError::MissingClassPlan {
+            class: class_symbol,
+        })?;
     let class_info = super::identity::class_info(unit.store, class_symbol)?;
-    validate_emittable_class(plan, &metadata, unit.store, definitions, class_info)?;
+    validate_emittable_class(plan, metadata, unit.store, definitions, class_info)?;
 
     let constructor_initializers = match &plan.initialization {
         JvmClassInitializationPlan::ImplicitNoArg => None,
@@ -111,7 +117,7 @@ pub(super) fn emit_class(
         })?;
         let code = crate::expression::lower_planned_method_body(
             unit,
-            &metadata,
+            metadata,
             definitions,
             method_metadata,
             body,
