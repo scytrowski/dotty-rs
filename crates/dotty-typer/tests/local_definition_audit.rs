@@ -6075,19 +6075,21 @@ fn pinned_scala39_local_definition_audit() {
         revision, "777528f19a58e794c9954a42f433373472ec57f8",
         "audit requires the repository's pinned Scala 3.9.0 source revision"
     );
-    let classpath_started = Instant::now();
-    let classpath = audit_classpath_from_environment();
-    let classpath_setup_time = classpath_started.elapsed();
     let profile_files = std::env::var("DOTTY_AUDIT_PROFILE_FILES")
         .ok()
         .map(|files| files.split(',').map(str::to_owned).collect::<BTreeSet<_>>());
+    let classpath_started = profile_files.as_ref().map(|_| Instant::now());
+    let classpath = audit_classpath_from_environment();
+    let classpath_setup_time =
+        classpath_started.map_or(Duration::ZERO, |started| started.elapsed());
     let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics {
         timing_enabled: profile_files.is_some(),
         ..ResolverMetrics::default()
     }));
-    let file_discovery_started = Instant::now();
+    let file_discovery_started = profile_files.as_ref().map(|_| Instant::now());
     let files = scala_files(&[root.join("library/src"), root.join("compiler/src")]);
-    let file_discovery_time = file_discovery_started.elapsed();
+    let file_discovery_time =
+        file_discovery_started.map_or(Duration::ZERO, |started| started.elapsed());
     let expected_files = profile_files.as_ref().map_or(files.len(), BTreeSet::len);
     let mut source_read_time = Duration::ZERO;
     let mut audit_merge_time = Duration::ZERO;
@@ -6115,26 +6117,28 @@ fn pinned_scala39_local_definition_audit() {
             continue;
         }
         processed_files += 1;
-        let source_read_started = Instant::now();
+        let source_read_started = profile_files.as_ref().map(|_| Instant::now());
         let source = match fs::read_to_string(file) {
             Ok(source) => source,
             Err(_) => {
-                source_read_time += source_read_started.elapsed();
+                source_read_time +=
+                    source_read_started.map_or(Duration::ZERO, |started| started.elapsed());
                 audit.files_attempted += 1;
                 audit.file_read_failed_files += 1;
                 audit.file_read_failed_paths.insert(relative);
                 continue;
             }
         };
-        source_read_time += source_read_started.elapsed();
-        let source_processing_and_merge_started = Instant::now();
+        source_read_time += source_read_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let source_processing_and_merge_started = profile_files.as_ref().map(|_| Instant::now());
         audit.merge(audit_source_with_classpath(
             &source,
             &relative,
             classpath.clone(),
             Rc::clone(&resolver_metrics),
         ));
-        audit_merge_time += source_processing_and_merge_started.elapsed();
+        audit_merge_time +=
+            source_processing_and_merge_started.map_or(Duration::ZERO, |started| started.elapsed());
     }
 
     if let Some(profile_files) = profile_files {
