@@ -211,6 +211,35 @@ pub enum AnalysisError {
         /// Unsupported result type.
         actual: FieldType,
     },
+    /// A reference argument does not match the exact class declared by the method reference.
+    WrongExactMethodArgument {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Zero-based parameter position in the method descriptor.
+        parameter: usize,
+        /// Exact class required by the method descriptor.
+        expected: ClassIdentity,
+        /// Exact class found on the operand stack.
+        actual: ClassIdentity,
+    },
+    /// A reference argument has no exact initialized class identity.
+    MissingExactMethodArgument {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Zero-based parameter position in the method descriptor.
+        parameter: usize,
+    },
+    /// An object type in a referenced method descriptor has an invalid internal name.
+    InvalidReferencedMethodClassName {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Constant-pool entry that owns the descriptor.
+        index: ConstantPoolIndex,
+        /// Zero-based parameter position, or `None` for the result.
+        parameter: Option<usize>,
+        /// Invalid class name from the descriptor.
+        name: String,
+    },
     /// The exact receiver class differs from the owner named by the method reference.
     MethodOwnerMismatch {
         /// Zero-based instruction position.
@@ -539,6 +568,41 @@ impl fmt::Display for AnalysisError {
                 formatter,
                 "instruction {instruction} method result has unsupported CFG type {actual:?}"
             ),
+            Self::WrongExactMethodArgument {
+                instruction,
+                parameter,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} passes {} as method parameter {parameter}, but the descriptor requires {}",
+                actual.internal_name(),
+                expected.internal_name()
+            ),
+            Self::MissingExactMethodArgument {
+                instruction,
+                parameter,
+            } => write!(
+                formatter,
+                "instruction {instruction} passes a reference without an exact class identity for method parameter {parameter}"
+            ),
+            Self::InvalidReferencedMethodClassName {
+                instruction,
+                index,
+                parameter,
+                name,
+            } => {
+                if let Some(parameter) = parameter {
+                    write!(formatter, "method parameter {parameter}")?;
+                } else {
+                    formatter.write_str("method result")?;
+                }
+                write!(
+                    formatter,
+                    " at instruction {instruction} has invalid JVM class name {name:?} in constant-pool entry {}",
+                    index.0
+                )
+            }
             Self::MethodOwnerMismatch {
                 instruction,
                 expected,
@@ -1920,12 +1984,51 @@ impl Frame {
         expected_owner: &ClassIdentity,
     ) -> Result<(), AnalysisError> {
         check_parameter_slots(descriptor, true, Some(instruction))?;
-        for _parameter in descriptor.parameters.iter().rev() {
-            self.pop_expected(instruction, ValueKind::Int)?;
+        for (parameter, ty) in descriptor.parameters.iter().enumerate().rev() {
+            match ty {
+                FieldType::Int | FieldType::Boolean => {
+                    self.pop_expected(instruction, ValueKind::Int)?;
+                }
+                FieldType::Object(name) => {
+                    let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+                    let expected = ClassIdentity(Arc::from(name.as_str()));
+                    let actual = actual.ok_or(AnalysisError::MissingExactMethodArgument {
+                        instruction,
+                        parameter,
+                    })?;
+                    if actual != expected {
+                        return Err(AnalysisError::WrongExactMethodArgument {
+                            instruction,
+                            parameter,
+                            expected,
+                            actual,
+                        });
+                    }
+                }
+                _ => {
+                    return Err(AnalysisError::UnsupportedFlowMethodParameter {
+                        instruction,
+                        parameter,
+                        actual: ty.clone(),
+                    });
+                }
+            }
         }
         self.pop_method_receiver(instruction, expected_owner)?;
-        if descriptor.return_type.is_some() {
-            self.push(instruction, ValueKind::Int)?;
+        match descriptor.return_type.as_ref() {
+            None => {}
+            Some(FieldType::Int | FieldType::Boolean) => {
+                self.push(instruction, ValueKind::Int)?;
+            }
+            Some(FieldType::Object(name)) => {
+                self.push_object(instruction, ClassIdentity(Arc::from(name.as_str())))?;
+            }
+            Some(actual) => {
+                return Err(AnalysisError::UnsupportedFlowMethodReturn {
+                    instruction,
+                    actual: actual.clone(),
+                });
+            }
         }
         Ok(())
     }
@@ -2240,8 +2343,9 @@ impl CfgCodeAnalyzer {
     /// `return`/`ireturn`. Reference, category-two, floating-point, exception,
     /// and switch flows are not supported. Use
     /// [`Self::analyze_with_current_class`] to enable exact initialized
-    /// receiver moves, primitive field accesses, and primitive `invokevirtual`
-    /// calls. No byte offsets or stack-map frames are produced.
+    /// receiver moves, primitive field accesses, and exact `invokevirtual`
+    /// calls with supported object/int-like descriptors. No byte offsets or
+    /// stack-map frames are produced.
     pub fn analyze(
         graph: &ControlFlowGraph,
         method_descriptor: &str,
@@ -2260,13 +2364,15 @@ impl CfgCodeAnalyzer {
     /// The existing [`Self::analyze`] entry point retains its receiver
     /// placeholder behavior. This context enables exact initialized-reference
     /// moves, `dup`/`pop`, `getfield`/`putfield` for `int` and `boolean` fields,
-    /// and `invokevirtual` methods with `int`/`boolean` parameters and
-    /// `int`/`boolean`/`void` results. It also supports in-block `new; dup;
+    /// and `invokevirtual` methods with exact object or int-like parameters and
+    /// exact object, int-like, or void results. Reference arguments and
+    /// receivers must match their declared class names exactly; no hierarchy
+    /// conversions are inferred. It also supports in-block `new; dup;
     /// primitive arguments; invokespecial <init>` with an exact allocation
     /// class and owner match. Uninitialized values may not escape to locals,
-    /// ordinary operations, branches, or block boundaries. Field and method
-    /// owners must match the exact receiver. Other invocation kinds and
-    /// reference field or method types remain unsupported.
+    /// ordinary operations, branches, or block boundaries. Field owners must
+    /// match the exact receiver. Other invocation kinds, reference fields,
+    /// arrays, and category-two method types remain unsupported.
     pub fn analyze_with_current_class(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -2613,23 +2719,43 @@ fn validate_flow_virtual_signature(
         return Err(AnalysisError::InvalidReferencedMethodName { instruction, index });
     }
     for (parameter, ty) in descriptor.parameters.iter().enumerate() {
-        if !matches!(ty, FieldType::Int | FieldType::Boolean) {
-            return Err(AnalysisError::UnsupportedFlowMethodParameter {
-                instruction,
-                parameter,
-                actual: ty.clone(),
-            });
+        match ty {
+            FieldType::Int | FieldType::Boolean => {}
+            FieldType::Object(name) if is_valid_internal_name(name) => {}
+            FieldType::Object(name) => {
+                return Err(AnalysisError::InvalidReferencedMethodClassName {
+                    instruction,
+                    index,
+                    parameter: Some(parameter),
+                    name: name.clone(),
+                });
+            }
+            _ => {
+                return Err(AnalysisError::UnsupportedFlowMethodParameter {
+                    instruction,
+                    parameter,
+                    actual: ty.clone(),
+                });
+            }
         }
     }
-    if let Some(result) = descriptor
-        .return_type
-        .as_ref()
-        .filter(|result| !matches!(result, FieldType::Int | FieldType::Boolean))
-    {
-        return Err(AnalysisError::UnsupportedFlowMethodReturn {
-            instruction,
-            actual: result.clone(),
-        });
+    match descriptor.return_type.as_ref() {
+        None | Some(FieldType::Int | FieldType::Boolean) => {}
+        Some(FieldType::Object(name)) if is_valid_internal_name(name) => {}
+        Some(FieldType::Object(name)) => {
+            return Err(AnalysisError::InvalidReferencedMethodClassName {
+                instruction,
+                index,
+                parameter: None,
+                name: name.clone(),
+            });
+        }
+        Some(actual) => {
+            return Err(AnalysisError::UnsupportedFlowMethodReturn {
+                instruction,
+                actual: actual.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -3208,6 +3334,211 @@ mod tests {
     }
 
     #[test]
+    fn invokes_virtual_with_exact_mixed_reference_arguments_and_results() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let mix = builder
+            .method_ref(
+                "example/Counter",
+                "mix",
+                "(ILexample/Arg;Z)Lexample/Result;",
+            )
+            .unwrap();
+        let get = builder.method_ref("example/Result", "get", "()I").unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut chained = CodeSequence::new();
+        chained
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::ILoad(LocalIndex::new(3)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(mix),
+            )))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(get),
+            )))
+            .instruction(Instruction::IReturn);
+        let chained_graph = ControlFlowGraph::build(&chained).unwrap();
+        let chained_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &chained_graph,
+            "mixAndChain",
+            "(ILexample/Arg;Z)I",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(chained_flow.max_stack, 4);
+
+        let mut loop_sequence = CodeSequence::new();
+        let head = loop_sequence.new_label().unwrap();
+        let done = loop_sequence.new_label().unwrap();
+        loop_sequence
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::ILoad(LocalIndex::new(3)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(mix),
+            )))
+            .instruction(Instruction::ILoad(LocalIndex::new(3)))
+            .instruction(Instruction::IStore(LocalIndex::new(4)))
+            .bind(head.clone())
+            .unwrap()
+            .instruction(Instruction::ILoad(LocalIndex::new(4)))
+            .branch(BranchInstruction::IfEq(done.clone()))
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .instruction(Instruction::IStore(LocalIndex::new(4)))
+            .branch(BranchInstruction::Goto(head.clone()))
+            .bind(done)
+            .unwrap()
+            .instruction(Instruction::AReturn);
+        let loop_graph = ControlFlowGraph::build(&loop_sequence).unwrap();
+        let loop_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &loop_graph,
+            "mixAcrossLoop",
+            "(ILexample/Arg;Z)Lexample/Result;",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(
+            loop_flow
+                .entry_state(loop_graph.block_for_label(&head).unwrap())
+                .unwrap()
+                .operand_stack,
+            [FlowValue::Object(class_identity("example/Result"))]
+        );
+        assert_eq!(
+            loop_flow
+                .entry_state(loop_graph.block_for_label(&head).unwrap())
+                .unwrap()
+                .locals[2],
+            FlowLocalState::Object(class_identity("example/Arg"))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_uninitialized_and_swapped_virtual_reference_arguments() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let arg_class = builder.class("example/Arg").unwrap();
+        let arg_method = builder
+            .method_ref("example/Counter", "take", "(Lexample/Arg;)V")
+            .unwrap();
+        let two_arg_method = builder
+            .method_ref(
+                "example/Counter",
+                "takeTwo",
+                "(Lexample/Arg;Lexample/Other;)V",
+            )
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut wrong_code = CodeSequence::new();
+        wrong_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(arg_method),
+            )))
+            .instruction(Instruction::Return);
+        let wrong_graph = ControlFlowGraph::build(&wrong_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_graph,
+                "wrongArgument",
+                "(Lexample/Other;)V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::WrongExactMethodArgument {
+                instruction: 2,
+                parameter: 0,
+                expected: class_identity("example/Arg"),
+                actual: class_identity("example/Other"),
+            })
+        );
+
+        let mut swapped_code = CodeSequence::new();
+        swapped_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(two_arg_method),
+            )))
+            .instruction(Instruction::Return);
+        let swapped_graph = ControlFlowGraph::build(&swapped_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &swapped_graph,
+                "swappedArguments",
+                "(Lexample/Arg;Lexample/Other;)V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::WrongExactMethodArgument {
+                instruction: 3,
+                parameter: 1,
+                expected: class_identity("example/Other"),
+                actual: class_identity("example/Arg"),
+            })
+        );
+
+        let mut uninitialized_code = CodeSequence::new();
+        uninitialized_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::New(ClassReference::new(operand(arg_class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(arg_method),
+            )))
+            .instruction(Instruction::Return);
+        let uninitialized_graph = ControlFlowGraph::build(&uninitialized_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &uninitialized_graph,
+                "uninitializedArgument",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 3,
+                allocation_site: 1,
+            })
+        );
+
+        let null_sequence = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::AConstNull,
+            Instruction::InvokeVirtual(VirtualMethodReference::new(operand(arg_method))),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_validated_with_current_class(
+                "nullArgument",
+                "()V",
+                false,
+                &null_sequence,
+                &pool,
+                Some(class_index),
+            ),
+            Err(AnalysisError::MissingExactMethodArgument {
+                instruction: 2,
+                parameter: 0,
+            })
+        );
+    }
+
+    #[test]
     fn rejects_virtual_method_owner_category_signature_and_reference_kinds() {
         let mut builder = ConstantPoolBuilder::new();
         let class_index = builder.class("example/Counter").unwrap();
@@ -3223,8 +3554,11 @@ mod tests {
                 &format!("({})V", "I".repeat(255)),
             )
             .unwrap();
-        let reference_parameter = builder
-            .method_ref("example/Counter", "accept", "(Ljava/lang/String;)V")
+        let array_parameter = builder
+            .method_ref("example/Counter", "acceptArray", "([I)V")
+            .unwrap();
+        let malformed_parameter_class = builder
+            .method_ref("example/Counter", "acceptMalformed", "(Lbad.name;)V")
             .unwrap();
         let byte_parameter = builder
             .method_ref("example/Counter", "acceptByte", "(B)V")
@@ -3232,8 +3566,8 @@ mod tests {
         let long_result = builder
             .method_ref("example/Counter", "wide", "()J")
             .unwrap();
-        let reference_result = builder
-            .method_ref("example/Counter", "object", "()Ljava/lang/Object;")
+        let array_result = builder
+            .method_ref("example/Counter", "array", "()[I")
             .unwrap();
         let constructor = builder
             .method_ref("example/Counter", "<init>", "()V")
@@ -3369,11 +3703,11 @@ mod tests {
 
         let signature_cases = [
             (
-                reference_parameter,
+                array_parameter,
                 AnalysisError::UnsupportedFlowMethodParameter {
                     instruction: 1,
                     parameter: 0,
-                    actual: FieldType::Object("java/lang/String".to_owned()),
+                    actual: FieldType::Array(Box::new(FieldType::Int)),
                 },
             ),
             (
@@ -3384,10 +3718,10 @@ mod tests {
                 },
             ),
             (
-                reference_result,
+                array_result,
                 AnalysisError::UnsupportedFlowMethodReturn {
                     instruction: 1,
-                    actual: FieldType::Object("java/lang/Object".to_owned()),
+                    actual: FieldType::Array(Box::new(FieldType::Int)),
                 },
             ),
             (
@@ -3427,6 +3761,31 @@ mod tests {
                 Err(expected)
             );
         }
+
+        let mut malformed_parameter_code = CodeSequence::new();
+        malformed_parameter_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(malformed_parameter_class),
+            )))
+            .instruction(Instruction::Return);
+        let malformed_parameter_graph = ControlFlowGraph::build(&malformed_parameter_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &malformed_parameter_graph,
+                "malformedParameterClass",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::InvalidReferencedMethodClassName {
+                instruction: 1,
+                index: malformed_parameter_class,
+                parameter: Some(0),
+                name: "bad.name".to_owned(),
+            })
+        );
 
         let mut malformed_code = CodeSequence::new();
         malformed_code

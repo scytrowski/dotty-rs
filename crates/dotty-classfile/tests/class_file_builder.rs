@@ -652,6 +652,42 @@ fn exact_reference_method_parameters_seed_linear_and_cfg_frames() {
 }
 
 #[test]
+fn linear_virtual_calls_use_exact_reference_analysis_without_reference_signature() {
+    let mut builder = ClassFileBuilder::new(
+        "example/VirtualCall",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("badArgument", "()V", |code| {
+            code.new_object("example/Other")?;
+            code.dup()?;
+            code.invokespecial("example/Other", "<init>", "()V")?;
+            code.dup()?;
+            code.invokevirtual("example/Other", "accept", "(Lexample/Arg;)V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(matches!(
+        builder.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::WrongExactMethodArgument {
+                instruction: 4,
+                parameter: 0,
+                expected,
+                actual,
+            }
+        )) if expected.internal_name() == "example/Arg"
+            && actual.internal_name() == "example/Other"
+    ));
+}
+
+#[test]
 fn exact_reference_returns_reject_wrong_classes_and_uninitialized_values() {
     let version = ClassFileVersion {
         major: 65,
@@ -689,6 +725,109 @@ fn exact_reference_returns_reject_wrong_classes_and_uninitialized_values() {
             dotty_classfile::bytecode::AnalysisError::UninitializedReferenceUse { .. }
         ))
     ));
+}
+
+#[test]
+fn virtual_reference_results_survive_loop_frames_and_are_preinterned() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut builder = ClassFileBuilder::new("example/Counter", version).unwrap();
+    builder
+        .add_instance_method("mix", "(ILexample/Arg;Z)Lexample/Result;", |code| {
+            code.new_object("example/Result")?;
+            code.dup()?;
+            code.invokespecial("example/Result", "<init>", "()V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_instance_method("useMixed", "(ILexample/Arg;Z)Lexample/Result;", |code| {
+            let head = code.new_label()?;
+            let done = code.new_label()?;
+            code.aload(0)?;
+            code.iload(1)?;
+            code.aload(2)?;
+            code.iload(3)?;
+            code.invokevirtual(
+                "example/Counter",
+                "mix",
+                "(ILexample/Arg;Z)Lexample/Result;",
+            )?;
+            code.iload(3)?;
+            code.istore(4)?;
+            code.mark(head.clone())?;
+            code.iload(4)?;
+            code.ifeq(done.clone())?;
+            code.iconst(0)?;
+            code.istore(4)?;
+            code.goto(head)?;
+            code.mark(done)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let method = method_named(&class_file, "useMixed");
+    let code = code_attribute(method);
+    let [Attribute::Other(stack_map)] = code.attributes.as_slice() else {
+        panic!("reference call loop should have a StackMapTable");
+    };
+    let bytes = stack_map.bytes;
+    let frame_count = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+    assert_eq!(frame_count, 2);
+    let mut cursor = 2;
+    let mut object_names = Vec::new();
+    for _ in 0..frame_count {
+        assert_eq!(bytes[cursor], 255, "expected full_frame");
+        cursor += 3; // frame type and offset_delta
+        let locals = usize::from(u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]));
+        cursor += 2;
+        for _ in 0..locals {
+            let tag = bytes[cursor];
+            cursor += 1;
+            match tag {
+                0..=6 => {}
+                7 => {
+                    let index =
+                        dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                            bytes[cursor],
+                            bytes[cursor + 1],
+                        ]));
+                    cursor += 2;
+                    object_names.push(class_file.constant_pool.class_name(index).unwrap());
+                }
+                8 => cursor += 2,
+                other => panic!("invalid verification type tag {other}"),
+            }
+        }
+        let stack = usize::from(u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]));
+        cursor += 2;
+        for _ in 0..stack {
+            let tag = bytes[cursor];
+            cursor += 1;
+            match tag {
+                0..=6 => {}
+                7 => {
+                    let index =
+                        dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                            bytes[cursor],
+                            bytes[cursor + 1],
+                        ]));
+                    cursor += 2;
+                    object_names.push(class_file.constant_pool.class_name(index).unwrap());
+                }
+                8 => cursor += 2,
+                other => panic!("invalid verification type tag {other}"),
+            }
+        }
+    }
+    assert_eq!(cursor, bytes.len());
+    assert!(object_names.contains(&"example/Result"));
 }
 
 #[test]

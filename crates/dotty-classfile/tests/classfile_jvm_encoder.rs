@@ -437,6 +437,13 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             Ok(())
         })
         .expect("typed getter construction succeeds");
+    box_class
+        .add_instance_method("combine", "(ILBox;Z)LBox;", |code| {
+            code.aload(2)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .expect("typed reference-argument and result method construction succeeds");
     let box_bytes = box_class
         .encode()
         .expect("Box is generated through the typed builder");
@@ -524,6 +531,49 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
             Ok(())
         })
         .expect("loop exact reference parameter construction succeeds");
+    caller
+        .add_static_method("callMixed", "(ILBox;Z)LBox;", |code| {
+            code.aload(1)?;
+            code.iload(0)?;
+            code.aload(1)?;
+            code.iload(2)?;
+            code.invokevirtual("Box", "combine", "(ILBox;Z)LBox;")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .expect("linear exact virtual reference argument and result construction succeeds");
+    caller
+        .add_static_method("chainMixed", "(ILBox;Z)I", |code| {
+            code.aload(1)?;
+            code.iload(0)?;
+            code.aload(1)?;
+            code.iload(2)?;
+            code.invokevirtual("Box", "combine", "(ILBox;Z)LBox;")?;
+            code.invokevirtual("Box", "get", "()I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .expect("chained exact virtual reference results construction succeeds");
+    caller
+        .add_static_method("loopMixed", "(ZLBox;)LBox;", |code| {
+            let head = code.new_label()?;
+            let done = code.new_label()?;
+            code.aload(1)?;
+            code.iconst(1)?;
+            code.aload(1)?;
+            code.iload(0)?;
+            code.invokevirtual("Box", "combine", "(ILBox;Z)LBox;")?;
+            code.mark(head.clone())?;
+            code.iload(0)?;
+            code.ifeq(done.clone())?;
+            code.iconst(0)?;
+            code.istore(0)?;
+            code.goto(head)?;
+            code.mark(done)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .expect("virtual reference result survives loop frame construction");
     caller
         .add_code_method("<init>", "()V", MethodAccessFlags(ACC_PUBLIC), |code| {
             code.aload(0)?;
@@ -622,7 +672,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
         Ok("I")
     );
     assert_eq!(box_file.fields[0].access_flags.0, ACC_PRIVATE);
-    assert_eq!(box_file.methods.len(), 2);
+    assert_eq!(box_file.methods.len(), 3);
     assert_eq!(
         box_file.constant_pool.utf8(box_file.methods[0].name_index),
         Ok("<init>")
@@ -663,7 +713,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     let caller = decode_and_validate(&caller_bytes);
     assert_eq!(caller.version, version);
     assert_eq!(caller.access_flags.0, ACC_PUBLIC | ACC_SUPER);
-    assert_eq!(caller.methods.len(), 8);
+    assert_eq!(caller.methods.len(), 11);
     let answer = &caller.methods[0];
     assert_eq!(caller.constant_pool.utf8(answer.name_index), Ok("answer"));
     assert_eq!(
@@ -781,6 +831,9 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
         if (generated != 42) throw new AssertionError("Caller.makeBox: " + generated);
         Box first = new Box(10);
         Box second = new Box(20);
+        if (Caller.callMixed(7, first, true) != first) throw new AssertionError("Caller.callMixed");
+        if (Caller.chainMixed(7, first, true) != 10) throw new AssertionError("Caller.chainMixed");
+        if (Caller.loopMixed(false, second) != second || Caller.loopMixed(true, first) != first) throw new AssertionError("Caller.loopMixed");
         if (Caller.echoBox(first) != first) throw new AssertionError("Caller.echoBox");
         if (Caller.chooseBox(true, first, second) != first || Caller.chooseBox(false, first, second) != second) throw new AssertionError("Caller.chooseBox");
         if (Caller.loopBox(false, second) != second || Caller.loopBox(true, first) != first) throw new AssertionError("Caller.loopBox");
@@ -831,6 +884,7 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 "stack=1, locals=1",
                 "putfield",
                 "getfield",
+                "public Box combine(int, Box, boolean);",
             ][..],
         ),
         (
@@ -839,6 +893,10 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
                 "public static int answer();",
                 "public static Box makeBox(int);",
                 "public static void branchBox(int);",
+                "public static Box callMixed(int, Box, boolean);",
+                "public static int chainMixed(int, Box, boolean);",
+                "public static Box loopMixed(boolean, Box);",
+                "invokevirtual",
                 "invokestatic",
                 "stack=2, locals=0",
                 "bipush        20",
