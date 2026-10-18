@@ -308,10 +308,8 @@ fn append_method_return(
         (JvmReturnType::Value(JvmType::Reference(ty)), Flow::Value(JvmType::Reference(found)))
             if ty == found =>
         {
-            return Err(JvmCodegenError::ReferenceMethodReturnUnsupported {
-                method: method.symbol(),
-                ty: JvmType::Reference(ty),
-            });
+            code.areturn()
+                .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
         }
         (JvmReturnType::Value(expected), Flow::Value(found)) if expected == found => {
             code.ireturn()
@@ -1553,20 +1551,6 @@ fn emit_apply(
             found: arguments.len(),
         });
     }
-    if let Some((index, JvmType::Reference(ty))) = parameters
-        .iter()
-        .copied()
-        .enumerate()
-        .find(|(_, parameter)| matches!(parameter, JvmType::Reference(_)))
-    {
-        return Err(JvmCodegenError::ReferenceCallArgumentUnsupported {
-            tree: tree_id,
-            method: target.method_symbol(),
-            index,
-            ty,
-        });
-    }
-
     context.visit(function, depth + 1)?;
     match target.receiver_tree() {
         Some(receiver) if matches!(context.tree(receiver)?.kind, TreeKind::This(_)) => {
@@ -2578,11 +2562,14 @@ fn emit_return(
                 found: None,
             }),
             Flow::Value(found) if expected == JvmReturnType::Value(found) => {
-                code.ireturn()
-                    .map_err(|error| JvmCodegenError::CodeBuilder {
-                        tree: tree_id,
-                        error,
-                    })?;
+                match found {
+                    JvmType::Reference(_) => code.areturn(),
+                    JvmType::Int | JvmType::Boolean => code.ireturn(),
+                }
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
                 Ok(Flow::Diverges)
             }
             Flow::Value(found) => Err(JvmCodegenError::ReturnValueTypeMismatch {

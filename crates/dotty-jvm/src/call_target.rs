@@ -242,7 +242,7 @@ pub(super) fn resolve_instance_call(
             class: caller_class,
             method,
         })?;
-    let found = project_result_type(unit.store, call_tree.ty, definitions);
+    let found = project_result_type(unit, call_tree.ty, definitions);
     let expected = method_metadata.descriptor().result();
     if found != Some(expected) {
         return Err(JvmCodegenError::JvmCallResultTypeMismatch {
@@ -292,8 +292,8 @@ fn resolve_receiver_class(
         }
         TreeKind::Ident(_) => {
             let Some(Type::TermRef {
+                prefix,
                 target: TermRefTarget::Symbol(local),
-                ..
             }) = unit.store.types.try_get(receiver.ty)
             else {
                 return Err(unsupported_call(
@@ -310,6 +310,83 @@ fn resolve_receiver_class(
                     tree: receiver_id,
                     symbol: *local,
                 })?;
+            let prefix_is_canonical = *prefix == definitions.no_prefix
+                && matches!(unit.store.types.try_get(*prefix), Some(Type::NoPrefix));
+            if !prefix_is_canonical {
+                return Err(unsupported_call(
+                    receiver_id,
+                    UnsupportedJvmCallShapeKind::UnsupportedReceiverPrefix,
+                ));
+            }
+            let local_type = match unit.store.symbols.info(*local) {
+                SymbolInfo::Complete(ty) => *ty,
+                SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                    return Err(JvmCodegenError::MissingSemanticInfo { symbol: *local });
+                }
+                SymbolInfo::Error => {
+                    return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *local });
+                }
+            };
+            if symbol.kind == SymbolKind::Parameter && symbol.owner == Some(caller_method) {
+                let Some(parameter_index) = method_plan
+                    .parameters
+                    .iter()
+                    .position(|parameter| parameter == local)
+                else {
+                    return Err(JvmCodegenError::InvalidParameterReference {
+                        tree: receiver_id,
+                        symbol: Some(*local),
+                    });
+                };
+                let all_metadata = unit.metadata(definitions)?;
+                let class_metadata = all_metadata
+                    .iter()
+                    .find(|metadata| metadata.identity().symbol() == caller_class)
+                    .ok_or(JvmCodegenError::MissingClassPlan {
+                        class: caller_class,
+                    })?;
+                let method_metadata = class_metadata
+                    .methods()
+                    .iter()
+                    .find(|metadata| metadata.symbol() == caller_method)
+                    .ok_or(JvmCodegenError::CallerMethodNotInJvmPlan {
+                        class: caller_class,
+                        method: caller_method,
+                    })?;
+                let parameter = method_metadata
+                    .parameters()
+                    .get(parameter_index)
+                    .filter(|parameter| parameter.symbol() == *local)
+                    .ok_or(JvmCodegenError::InvalidParameterReference {
+                        tree: receiver_id,
+                        symbol: Some(*local),
+                    })?;
+                let class_identities = all_metadata
+                    .iter()
+                    .map(|metadata| metadata.identity().clone())
+                    .collect::<Vec<_>>();
+                let found = crate::reference::project_method_signature_type(
+                    unit.store,
+                    local_type,
+                    definitions,
+                    &class_identities,
+                )?;
+                if found != parameter.ty() {
+                    return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
+                        tree: receiver_id,
+                        parameter: *local,
+                        expected: parameter.ty(),
+                        found: Some(found),
+                    });
+                }
+                return match found {
+                    JvmType::Reference(class) => Ok(class),
+                    JvmType::Int | JvmType::Boolean => Err(unsupported_call(
+                        receiver_id,
+                        UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
+                    )),
+                };
+            }
             let binding = method_plan
                 .locals
                 .iter()
@@ -330,15 +407,6 @@ fn resolve_receiver_class(
                     UnsupportedJvmCallShapeKind::MutableOrUnplannedReferenceReceiver,
                 ));
             }
-            let local_type = match unit.store.symbols.info(*local) {
-                SymbolInfo::Complete(ty) => *ty,
-                SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
-                    return Err(JvmCodegenError::MissingSemanticInfo { symbol: *local });
-                }
-                SymbolInfo::Error => {
-                    return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *local });
-                }
-            };
             project_reference_class(unit, local_type, definitions).ok_or_else(|| {
                 unsupported_call(
                     receiver_id,
@@ -349,6 +417,23 @@ fn resolve_receiver_class(
         TreeKind::Apply(apply) if constructor_application(unit, apply.function)? => unit
             .resolve_constructor_call(caller_class, caller_method, receiver_id, definitions)
             .map(|target| target.owner_class()),
+        TreeKind::Apply(_) => {
+            let target = unit.resolve_planned_instance_call(
+                caller_class,
+                caller_method,
+                receiver_id,
+                definitions,
+            )?;
+            match target.result() {
+                JvmReturnType::Value(JvmType::Reference(class)) => Ok(class),
+                JvmReturnType::Value(JvmType::Int | JvmType::Boolean) | JvmReturnType::Void => {
+                    Err(unsupported_call(
+                        receiver_id,
+                        UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
+                    ))
+                }
+            }
+        }
         _ => Err(unsupported_call(
             receiver_id,
             UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
@@ -413,10 +498,11 @@ fn tree<'a>(
 }
 
 fn project_result_type(
-    store: &SemanticStore,
+    unit: &JvmCompilationUnit<'_>,
     ty: TypeId,
     definitions: &Definitions,
 ) -> Option<JvmReturnType> {
+    let store = unit.store;
     match store.types.try_get(ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmReturnType::Value(JvmType::Int)),
         Type::Constant(Constant::Boolean(_)) => Some(JvmReturnType::Value(JvmType::Boolean)),
@@ -437,6 +523,13 @@ fn project_result_type(
             target: TypeRefTarget::Symbol(symbol),
             ..
         } if Some(*symbol) == type_symbol(store, definitions.unit) => Some(JvmReturnType::Void),
+        Type::TypeRef { .. } => match crate::reference::project_type(unit, ty, definitions)
+            .or_else(|_| crate::reference::project_constructor_type(unit, ty, definitions))
+            .ok()?
+        {
+            JvmType::Reference(class) => Some(JvmReturnType::Value(JvmType::Reference(class))),
+            JvmType::Int | JvmType::Boolean => None,
+        },
         _ => None,
     }
 }

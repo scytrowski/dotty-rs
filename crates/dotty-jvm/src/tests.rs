@@ -5627,6 +5627,321 @@ fn emits_nested_calls_and_evaluates_two_arguments_in_source_order() {
 }
 
 #[test]
+fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
+    let mut fixture = EmissionFixture::new(false);
+    let class_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(fixture.class),
+    });
+    let declarations = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => panic!("fixture class info should be ClassInfo"),
+        },
+        _ => panic!("fixture class info should be complete"),
+    };
+    let int_type = fixture.definitions.int;
+    let no_prefix = fixture.definitions.no_prefix;
+    let get = add_call_target_method(&mut fixture, "getReference", &[], int_type);
+    let identity = add_call_target_method(
+        &mut fixture,
+        "identityReference",
+        &[("value", class_type)],
+        class_type,
+    );
+    let identity_index = fixture
+        .methods
+        .iter()
+        .position(|method| *method == identity)
+        .unwrap();
+    let identity_parameter = fixture.parameters[identity_index][0];
+    set_method_body_to_parameter(&mut fixture, identity, identity_parameter);
+
+    let (forward, forward_parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        "forwardReference",
+        &[("value", class_type)],
+        class_type,
+    );
+    let forward_argument =
+        typed_method_ident_with_prefix(&mut fixture, forward_parameters[0], no_prefix);
+    let forward_body = typed_call_to(
+        &mut fixture,
+        identity,
+        vec![forward_argument],
+        class_type,
+        false,
+    );
+    fixture.methods.push(forward);
+    fixture.parameters.push(forward_parameters);
+    fixture.bodies.push(forward_body);
+
+    let (read, read_parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        "readReference",
+        &[("value", class_type)],
+        int_type,
+    );
+    let receiver = typed_method_ident_with_prefix(&mut fixture, read_parameters[0], no_prefix);
+    let select_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.ast.get(receiver).ty,
+        target: TermRefTarget::Symbol(get),
+    });
+    let select = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver,
+            name: fixture.store.symbols.get(get).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: select_type,
+    });
+    let int_type = fixture.definitions.int;
+    let read_body = typed_call(
+        &mut fixture,
+        select,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    fixture.methods.push(read);
+    fixture.parameters.push(read_parameters);
+    fixture.bodies.push(read_body);
+
+    let (nested_argument, nested_argument_parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        "nestedArgument",
+        &[("value", class_type)],
+        class_type,
+    );
+    let nested_argument_parameter =
+        typed_method_ident_with_prefix(&mut fixture, nested_argument_parameters[0], no_prefix);
+    let inner_argument_call = typed_call_to(
+        &mut fixture,
+        identity,
+        vec![nested_argument_parameter],
+        class_type,
+        false,
+    );
+    let nested_argument_body = typed_call_to(
+        &mut fixture,
+        identity,
+        vec![inner_argument_call],
+        class_type,
+        false,
+    );
+    fixture.methods.push(nested_argument);
+    fixture.parameters.push(nested_argument_parameters);
+    fixture.bodies.push(nested_argument_body);
+
+    let (nested_receiver, nested_receiver_parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        "nestedReceiver",
+        &[("value", class_type)],
+        fixture.definitions.int,
+    );
+    let nested_receiver_parameter =
+        typed_method_ident_with_prefix(&mut fixture, nested_receiver_parameters[0], no_prefix);
+    let receiver_call = typed_call_to(
+        &mut fixture,
+        identity,
+        vec![nested_receiver_parameter],
+        class_type,
+        false,
+    );
+    let get_select_type = fixture.store.types.alloc(Type::TermRef {
+        prefix: fixture.ast.get(receiver_call).ty,
+        target: TermRefTarget::Symbol(get),
+    });
+    let get_select = fixture.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: receiver_call,
+            name: fixture.store.symbols.get(get).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: get_select_type,
+    });
+    let nested_receiver_body = typed_call(
+        &mut fixture,
+        get_select,
+        Vec::new(),
+        ApplyKind::Regular,
+        int_type,
+    );
+    fixture.methods.push(nested_receiver);
+    fixture.parameters.push(nested_receiver_parameters);
+    fixture.bodies.push(nested_receiver_body);
+
+    let generated = fixture.emit().expect("exact planned reference calls lower");
+    let mut reader = Reader::new(generated.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode reference-call class");
+    class
+        .validate_references()
+        .expect("reference call descriptors validate");
+    let forward_code = emitted_method_code(&class, "forwardReference");
+    assert_eq!(&forward_code[..2], &[0x2a, 0x2b]);
+    assert_eq!(forward_code[2], 0xb6);
+    assert_eq!(forward_code[5], 0xb0);
+    assert_virtual_method_ref(
+        &class,
+        forward_code,
+        2,
+        "example/Answer",
+        "identityReference",
+        "(Lexample/Answer;)Lexample/Answer;",
+    );
+    let read_code = emitted_method_code(&class, "readReference");
+    assert_eq!(read_code[0], 0x2b);
+    assert_eq!(read_code[1], 0xb6);
+    assert_eq!(read_code[4], 0xac);
+    let nested_argument_code = emitted_method_code(&class, "nestedArgument");
+    assert_eq!(&nested_argument_code[..3], &[0x2a, 0x2a, 0x2b]);
+    assert_eq!(nested_argument_code[3], 0xb6);
+    assert_eq!(nested_argument_code[6], 0xb6);
+    assert_eq!(nested_argument_code[9], 0xb0);
+    let nested_receiver_code = emitted_method_code(&class, "nestedReceiver");
+    assert_eq!(&nested_receiver_code[..2], &[0x2a, 0x2b]);
+    assert_eq!(nested_receiver_code[2], 0xb6);
+    assert_eq!(nested_receiver_code[5], 0xb6);
+    assert_eq!(nested_receiver_code[8], 0xac);
+    assert_virtual_method_ref(
+        &class,
+        nested_receiver_code,
+        5,
+        "example/Answer",
+        "getReference",
+        "()I",
+    );
+}
+
+#[test]
+fn rejects_reference_call_result_with_a_different_planned_class() {
+    let mut fixture = EmissionFixture::new(false);
+    let answer_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(fixture.class),
+    });
+    let owner = fixture.store.symbols.get(fixture.class).owner.unwrap();
+    let no_prefix = fixture.definitions.no_prefix;
+    let object_type = fixture.definitions.object_type;
+    let other = add_reference_class(
+        &mut fixture.store,
+        owner,
+        "OtherReference",
+        no_prefix,
+        object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    let other_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(other),
+    });
+    let identity = add_call_target_method(
+        &mut fixture,
+        "identityReference",
+        &[("value", answer_type)],
+        answer_type,
+    );
+    let this_type = fixture.store.types.alloc(Type::ThisType {
+        class: fixture.class,
+    });
+    let argument = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: this_type,
+    });
+    let call = typed_call_to(&mut fixture, identity, vec![argument], other_type, false);
+    let mut unit = fixture.unit();
+    unit.classes.push(JvmClassPlan {
+        class: other,
+        fields: Vec::new(),
+        methods: Vec::new(),
+        initialization: JvmClassInitializationPlan::ImplicitNoArg,
+    });
+    assert_eq!(
+        unit.resolve_planned_instance_call(
+            fixture.class,
+            fixture.methods[1],
+            call,
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::JvmCallResultTypeMismatch {
+            tree: call,
+            method: identity,
+            expected: JvmReturnType::Value(JvmType::Reference(fixture.class)),
+            found: Some(JvmReturnType::Value(JvmType::Reference(other))),
+        })
+    );
+
+    let identity_index = fixture
+        .methods
+        .iter()
+        .position(|method| *method == identity)
+        .unwrap();
+    let identity_parameter = fixture.parameters[identity_index][0];
+    set_method_body_to_parameter(&mut fixture, identity, identity_parameter);
+    let class_type = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => panic!("fixture class info should be ClassInfo"),
+        },
+        _ => panic!("fixture class info should be complete"),
+    };
+    let (bad_forward, bad_forward_parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        class_type,
+        "badForwardReference",
+        &[("value", other_type)],
+        answer_type,
+    );
+    let no_prefix = fixture.definitions.no_prefix;
+    let bad_argument =
+        typed_method_ident_with_prefix(&mut fixture, bad_forward_parameters[0], no_prefix);
+    let bad_body = typed_call_to(
+        &mut fixture,
+        identity,
+        vec![bad_argument],
+        answer_type,
+        false,
+    );
+    fixture.methods.push(bad_forward);
+    fixture.parameters.push(bad_forward_parameters);
+    fixture.bodies.push(bad_body);
+    let mut unit = fixture.unit();
+    unit.classes.push(JvmClassPlan {
+        class: other,
+        fields: Vec::new(),
+        methods: Vec::new(),
+        initialization: JvmClassInitializationPlan::ImplicitNoArg,
+    });
+    assert_eq!(
+        emit_class(&unit, fixture.class, &fixture.definitions),
+        Err(JvmCodegenError::JvmCallArgumentMismatch {
+            tree: bad_body,
+            argument: bad_argument,
+            method: identity,
+            index: 0,
+            expected: JvmType::Reference(fixture.class),
+            found: JvmExpressionFlow::Value {
+                value_type: JvmType::Reference(other),
+                category: JvmValueCategory::Reference,
+            },
+        })
+    );
+}
+
+#[test]
 fn lowers_block_call_stats_in_source_order_with_exact_pop_and_invocations() {
     let mut fixture = EmissionFixture::new(false);
     let int_type = fixture.definitions.int;
