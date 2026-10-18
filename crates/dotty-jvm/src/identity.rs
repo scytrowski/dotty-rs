@@ -187,7 +187,15 @@ pub(super) fn class_metadata(
                 field: field_plan.field,
             });
         }
-        let field = field_metadata(field_plan, plan.class, store, typed_ast, definitions)?;
+        let field_reference_identities = descriptor_context.map(|(_, identities)| identities);
+        let field = field_metadata(
+            field_plan,
+            plan.class,
+            store,
+            typed_ast,
+            definitions,
+            field_reference_identities,
+        )?;
         if let Some(previous) = field_names.insert(field.name().to_owned(), field.symbol()) {
             return Err(JvmCodegenError::DuplicateJvmFieldName {
                 class: plan.class,
@@ -246,6 +254,7 @@ fn field_metadata(
     store: &SemanticStore,
     typed_ast: Option<&dotty_core::ast::TypedAst>,
     definitions: &Definitions,
+    class_identities: Option<&[JvmClassIdentity]>,
 ) -> Result<JvmFieldMetadata, JvmCodegenError> {
     let field = store
         .symbols
@@ -319,11 +328,12 @@ fn field_metadata(
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: plan.field }),
         SymbolInfo::Complete(ty) => *ty,
     };
-    let field_type = crate::descriptor::primitive_semantic_value_type(
+    let field_type = project_field_value_type(
         store,
         definitions,
         plan.field,
         field_type_id,
+        class_identities,
     )?;
 
     let initializer_id = plan
@@ -337,13 +347,30 @@ fn field_metadata(
                 field: plan.field,
                 initializer: initializer_id,
             })?;
-    let initializer_type = typed_expression_primitive_type(
+    let initializer_type = typed_expression_field_value_type(
         store,
         definitions,
         plan.field,
         initializer_id,
         initializer.ty,
+        class_identities,
     )?;
+    if matches!(initializer_type, crate::JvmType::Reference(_))
+        && !matches!(&initializer.kind, dotty_core::ast::TreeKind::Ident(_))
+    {
+        let symbol = match store.types.try_get(initializer.ty) {
+            Some(Type::TermRef {
+                target: dotty_core::types::TermRefTarget::Symbol(symbol),
+                ..
+            }) => Some(*symbol),
+            _ => None,
+        };
+        return Err(JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
+            field: plan.field,
+            initializer: initializer_id,
+            symbol,
+        });
+    }
     if initializer_type != field_type {
         return Err(JvmCodegenError::FieldInitializerTypeMismatch {
             field: plan.field,
@@ -365,19 +392,13 @@ fn field_metadata(
         ));
     }
 
-    let descriptor = field_type
-        .descriptor_char()
-        .ok_or(JvmCodegenError::UnsupportedJvmType {
-            symbol: plan.field,
-            ty: field_type_id,
-            kind: crate::UnsupportedJvmTypeKind::ReferenceClass,
-        })?
-        .to_string();
+    let descriptor = field_descriptor(plan.field, field_type_id, field_type, class_identities)?;
 
     Ok(JvmFieldMetadata {
         symbol: plan.field,
         name: name.to_owned(),
         descriptor,
+        value_type: field_type,
         access_flags: FieldAccessFlags(
             ACC_PRIVATE
                 | if field.flags.contains(SymbolFlags::MUTABLE) {
@@ -389,6 +410,106 @@ fn field_metadata(
         owner,
         initializer: initializer_id,
     })
+}
+
+fn project_field_value_type(
+    store: &SemanticStore,
+    definitions: &Definitions,
+    symbol: dotty_core::SymbolId,
+    ty: dotty_core::TypeId,
+    class_identities: Option<&[JvmClassIdentity]>,
+) -> Result<crate::JvmType, JvmCodegenError> {
+    match crate::descriptor::primitive_semantic_value_type(store, definitions, symbol, ty) {
+        Err(error @ JvmCodegenError::UnsupportedJvmType { .. }) => match class_identities {
+            Some(class_identities) => crate::reference::project_method_signature_type(
+                store,
+                ty,
+                definitions,
+                class_identities,
+            ),
+            None => Err(error),
+        },
+        result => result,
+    }
+}
+
+fn field_descriptor(
+    symbol: dotty_core::SymbolId,
+    ty: dotty_core::TypeId,
+    value_type: crate::JvmType,
+    class_identities: Option<&[JvmClassIdentity]>,
+) -> Result<String, JvmCodegenError> {
+    match value_type {
+        crate::JvmType::Int => Ok("I".to_owned()),
+        crate::JvmType::Boolean => Ok("Z".to_owned()),
+        crate::JvmType::Reference(class) => {
+            let Some(identity) = class_identities.and_then(|identities| {
+                identities
+                    .iter()
+                    .find(|identity| identity.symbol() == class)
+            }) else {
+                return Err(JvmCodegenError::UnsupportedJvmType {
+                    symbol,
+                    ty,
+                    kind: crate::UnsupportedJvmTypeKind::ReferenceClass,
+                });
+            };
+            Ok(format!("L{};", identity.internal_name()))
+        }
+    }
+}
+
+fn typed_expression_field_value_type(
+    store: &SemanticStore,
+    definitions: &Definitions,
+    symbol: dotty_core::SymbolId,
+    initializer: dotty_core::TreeId<dotty_core::ast::Typed>,
+    ty: dotty_core::TypeId,
+    class_identities: Option<&[JvmClassIdentity]>,
+) -> Result<crate::JvmType, JvmCodegenError> {
+    let Some(Type::TermRef {
+        target: dotty_core::types::TermRefTarget::Symbol(target),
+        ..
+    }) = store.types.try_get(ty)
+    else {
+        return project_field_value_type(store, definitions, symbol, ty, class_identities);
+    };
+    if !store.symbols.contains(*target) {
+        return Err(JvmCodegenError::UnknownFieldInitializerSymbol {
+            field: symbol,
+            initializer,
+            symbol: *target,
+        });
+    }
+    let referenced = store.symbols.get(*target);
+    let target_ty = match store.symbols.info(*target) {
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol: *target });
+        }
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *target }),
+        SymbolInfo::Complete(target_ty) => *target_ty,
+    };
+    let value_type =
+        project_field_value_type(store, definitions, symbol, target_ty, class_identities)?;
+    let parameter_owner = referenced.owner.and_then(|owner| {
+        store
+            .symbols
+            .contains(owner)
+            .then(|| store.symbols.get(owner))
+    });
+    if matches!(value_type, crate::JvmType::Reference(_))
+        && (referenced.kind != SymbolKind::Parameter
+            || !matches!(parameter_owner, Some(method)
+                if method.kind == SymbolKind::Constructor
+                    && method.owner == store.symbols.get(symbol).owner))
+    {
+        return Err(JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
+            field: symbol,
+            initializer,
+            symbol: Some(*target),
+        });
+    }
+    Ok(value_type)
 }
 
 pub(super) fn typed_expression_primitive_type(
