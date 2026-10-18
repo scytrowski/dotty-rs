@@ -1129,6 +1129,9 @@ fn reference_fields_and_constructor_arguments_verify_with_jdk() {
 
     let mut client = ClassFileBuilder::new("example/ReferenceFieldClient", version).unwrap();
     client
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    client
         .add_static_method("create", "(Lexample/Counter;)Lexample/Holder;", |code| {
             code.new_object("example/Holder")?;
             code.dup()?;
