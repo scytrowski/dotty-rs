@@ -40,6 +40,12 @@ The machine was an AMD Ryzen 9 7940HS mini PC with 30.6 GB reported RAM, Rust te
 
 Both measured runs used an already-built Cargo target. A cold Cargo build was not measured separately. The operating system page cache was not controlled, so cold and warm filesystem timings are unavailable. This profiling run did not invoke full normalized audit-report generation; the summary records the measured time to write this profile's own reports separately.
 
+### Cold/warm cache follow-up
+
+The [cache check report](typer-sequential-profile-3.9.0-cache-check/summary.md) and TSVs record two bounded follow-ups on the same five-file manifest and machine. With an empty Cargo target, the first run took 299.287 s wall / 223.298 s in the audit; the second run with the compiled target took 222.602 s / 221.952 s. The 76.685 s wall difference is Cargo compilation and startup, while measured audit time differed by 1.346 s.
+
+A separate pair requested eviction only for the selected Scala sources, Scala JARs, and JDK jmods, then measured residency with `fincore`. The first run took 252.582 s and the second, after those inputs had been read, took 220.461 s. Eviction was partial: 41,734,144 bytes were resident before the request and 35,147,776 bytes remained afterward. The report labels this `partial-eviction`; it does not present it as a fully cold filesystem run. Global page-cache clearing was avoided. The complete profile writer timer now includes all TSV sidecars and the summary; this run measured 24 ms. The earlier 11 ms figure stopped before those outputs were written and is superseded.
+
 The largest cost in this cohort was `tpd.scala` at a mean 222.3 s per pass. Across the two passes, method typing accounted for 338.855 s (76.0% of measured per-file phase time), and post-typing audit accounting accounted for 106.409 s (23.9%). The slowest stable method identity was `tpd.scala#tree=63`, `dotty.tools.dotc.ast.tpd$.ta`, at a mean 3.536 s per attempt. Generating the compact profile report took about 11 ms. This is a ratio for the focused profile report, not a measurement of the full-corpus report writer.
 
 The resolver observed 212,018 member requests with 25.616 s of inclusive lookup time, and 112,178 package requests with 4 ms. Across the two runs, class-load profiles recorded 32 full completions, 66 identity-shell creations, 138 reuses, and zero completed-cache hits. The largest request roots and their source method identities are listed in `request-roots.tsv`.
