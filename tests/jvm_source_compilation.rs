@@ -5167,6 +5167,162 @@ fn reference_receiver_calls_keep_private_access_rejected_and_allow_verified_bran
 }
 
 #[test]
+fn reference_parameters_and_results_compose_with_if_and_while_control_flow() {
+    let output = TestOutputDirectory::new("reference-parameter-result-control-flow");
+    let source = "class Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def increment(): Unit = current = current + 1\nclass CounterControl:\n  def pass(counter: Counter): Counter = counter\n  def choose(flag: Boolean, first: Counter, second: Counter): Counter =\n    if flag then first else second\n  def chooseThroughCall(flag: Boolean, first: Counter, second: Counter): Counter =\n    if flag then pass(first) else second\n  def incrementUntil(counter: Counter, limit: Int): Int =\n    while counter.get() < limit do counter.increment()\n    counter.get()\n  def incrementWhile(enabled: Boolean, counter: Counter, limit: Int): Int =\n    while enabled && counter.get() < limit do counter.increment()\n    counter.get()\n";
+    let first = compile_source_classes(
+        source,
+        "ReferenceParameterResultControlFlow.scala",
+        output.path(),
+    )
+    .expect("exact reference method values compose through if and while");
+    let second_output = TestOutputDirectory::new("reference-parameter-result-control-flow-repeat");
+    let second = compile_source_classes(
+        source,
+        "ReferenceParameterResultControlFlow.scala",
+        second_output.path(),
+    )
+    .expect("fresh frontend emits the same reference control-flow classes");
+    assert_eq!(first.len(), 2);
+    assert_eq!(second.len(), 2);
+    for (left, right) in first.iter().zip(&second) {
+        assert_eq!(left.class.bytes(), right.class.bytes());
+    }
+
+    let counter_artifact = first
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Counter")
+        .unwrap();
+    let counter = decode_emitted_class(counter_artifact);
+    counter
+        .validate_references()
+        .expect("Counter references validate");
+
+    let control_artifact = first
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "CounterControl")
+        .unwrap();
+    let control = decode_emitted_class(control_artifact);
+    control
+        .validate_references()
+        .expect("CounterControl references validate");
+    assert_eq!(
+        methods_with_descriptors(&control),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("pass".to_owned(), "(LCounter;)LCounter;".to_owned()),
+            (
+                "choose".to_owned(),
+                "(ZLCounter;LCounter;)LCounter;".to_owned()
+            ),
+            (
+                "chooseThroughCall".to_owned(),
+                "(ZLCounter;LCounter;)LCounter;".to_owned()
+            ),
+            ("incrementUntil".to_owned(), "(LCounter;I)I".to_owned()),
+            ("incrementWhile".to_owned(), "(ZLCounter;I)I".to_owned()),
+        ]
+    );
+
+    for method in ["choose", "chooseThroughCall"] {
+        let code = emitted_method_code(&control, method);
+        assert_eq!(code.last(), Some(&0xb0), "{method} returns with areturn");
+        assert!(
+            stack_map_frames(&control, method).iter().any(|frame| {
+                frame.stack == [StackMapVerificationType::Object("Counter".to_owned())]
+            }),
+            "{method} joins both branches with exact Object(Counter) on the stack"
+        );
+    }
+    assert_invocation_sequence(
+        &control,
+        emitted_method_code(&control, "chooseThroughCall"),
+        &[(0xb6, "CounterControl", "pass", "(LCounter;)LCounter;")],
+    );
+
+    for (method, expected_locals) in [
+        (
+            "incrementUntil",
+            vec![
+                StackMapVerificationType::Object("CounterControl".to_owned()),
+                StackMapVerificationType::Object("Counter".to_owned()),
+                StackMapVerificationType::Integer,
+            ],
+        ),
+        (
+            "incrementWhile",
+            vec![
+                StackMapVerificationType::Object("CounterControl".to_owned()),
+                StackMapVerificationType::Integer,
+                StackMapVerificationType::Object("Counter".to_owned()),
+                StackMapVerificationType::Integer,
+            ],
+        ),
+    ] {
+        let code = emitted_method_code(&control, method);
+        let back_edges = decode_branch_targets(code)
+            .into_iter()
+            .filter(|(offset, _, target)| target < offset)
+            .collect::<Vec<_>>();
+        assert!(!back_edges.is_empty(), "{method} has a loop back-edge");
+        let frames = stack_map_frames(&control, method);
+        for (_, _, target) in back_edges {
+            let frame = frames
+                .iter()
+                .find(|frame| frame.pc == target)
+                .unwrap_or_else(|| panic!("{method} back-edge target has a stack-map frame"));
+            assert_eq!(frame.locals, expected_locals, "{method} exact loop locals");
+            assert!(
+                frame.stack.is_empty(),
+                "{method} loop header has an empty stack"
+            );
+        }
+    }
+
+    if require_jdk_or_skip() {
+        let harness = output
+            .path()
+            .join("ReferenceParameterResultControlFlowHarness.java");
+        fs::write(
+            &harness,
+            "public final class ReferenceParameterResultControlFlowHarness { public static void main(String[] args) { CounterControl control = new CounterControl(); Counter first = new Counter(0); Counter second = new Counter(0); if (control.choose(true, first, second) != first || control.choose(false, first, second) != second) throw new AssertionError(\"branch identity\"); if (control.chooseThroughCall(true, first, second) != first || control.chooseThroughCall(false, first, second) != second) throw new AssertionError(\"call branch identity\"); Counter count = new Counter(0); if (control.incrementUntil(count, 0) != 0 || control.incrementUntil(count, 1) != 1 || control.incrementUntil(count, 10) != 10) throw new AssertionError(\"zero/one/multi iteration\"); Counter disabled = new Counter(0); if (control.incrementWhile(false, disabled, 10) != 0) throw new AssertionError(\"short-circuit zero iteration\"); if (control.incrementWhile(true, disabled, 4) != 4) throw new AssertionError(\"short-circuit multi iteration\"); System.out.println(\"reference parameter/result CFG verified\"); } }\n",
+        )
+        .expect("write reference parameter/result verifier harness");
+        let classpath = output.path().to_str().unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for reference control-flow harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected reference control-flow harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "ReferenceParameterResultControlFlowHarness",
+            ])
+            .output()
+            .expect("start JVM verifier for reference control-flow classes");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected reference control-flow classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "reference parameter/result CFG verified"
+        );
+    }
+}
+
+#[test]
 fn planned_reference_operations_verify_across_if_while_and_short_circuit_cfgs() {
     let output = TestOutputDirectory::new("planned-reference-control-flow");
     let source = "class Counter(start: Int):\n  private var current: Int = start\n  private var enabled: Boolean = true\n  def incrementUntil(limit: Int): Int =\n    while current < limit do current = current + 1\n    current\n  def enabledUntil(limit: Int): Int =\n    while enabled && current < limit do current = current + 1\n    current\n  def setEnabled(flag: Boolean): Int =\n    if flag then enabled = true else enabled = false\n    if enabled then current else 0\n  def get(): Int = current\n  def increment(): Unit = current = current + 1\nclass CounterClient:\n  def run(limit: Int): Int =\n    val counter = new Counter(0)\n    while counter.get() < limit do counter.increment()\n    counter.get()\n  def choose(flag: Boolean): Int =\n    if flag then new Counter(1).get() else new Counter(2).get()\n  def chooseLocal(flag: Boolean): Int =\n    val counter = if flag then new Counter(5) else new Counter(6)\n    counter.get()\n  def ifIncrement(flag: Boolean): Int =\n    val counter = new Counter(0)\n    if flag then counter.increment() else counter.increment()\n    counter.get()\n  def runAnd(running: Boolean, limit: Int): Int =\n    val counter = new Counter(0)\n    while running && counter.get() < limit do counter.increment()\n    counter.get()\n";

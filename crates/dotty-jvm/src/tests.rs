@@ -6881,6 +6881,87 @@ fn allows_same_class_allocations_in_if_branches_and_joins_exact_references() {
 }
 
 #[test]
+fn rejects_different_exact_reference_classes_at_an_if_expression_join() {
+    let mut fixture = EmissionFixture::new(false);
+    let class_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(fixture.class),
+    });
+    let owner = fixture.store.symbols.get(fixture.class).owner.unwrap();
+    let no_prefix = fixture.definitions.no_prefix;
+    let object_type = fixture.definitions.object_type;
+    let other = add_reference_class(
+        &mut fixture.store,
+        owner,
+        "OtherReference",
+        no_prefix,
+        object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    let other_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: no_prefix,
+        target: TypeRefTarget::Symbol(other),
+    });
+    let declarations = match fixture.store.symbols.info(fixture.class) {
+        SymbolInfo::Complete(ty) => match fixture.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => panic!("fixture class info should be ClassInfo"),
+        },
+        _ => panic!("fixture class info should be complete"),
+    };
+    let (method, parameters) = add_emission_method(
+        &mut fixture.store,
+        fixture.class,
+        declarations,
+        "selectReference",
+        &[
+            ("condition", fixture.definitions.boolean),
+            ("other", other_type),
+        ],
+        class_type,
+    );
+    let no_prefix = fixture.definitions.no_prefix;
+    let condition = typed_method_ident_with_prefix(&mut fixture, parameters[0], no_prefix);
+    let other_value = typed_method_ident_with_prefix(&mut fixture, parameters[1], no_prefix);
+    let this_type = fixture.store.types.alloc(Type::ThisType {
+        class: fixture.class,
+    });
+    let current = fixture.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: this_type,
+    });
+    let body = fixture.ast.alloc(Tree {
+        kind: TreeKind::If(dotty_core::ast::If {
+            cond: condition,
+            then_branch: current,
+            else_branch: other_value,
+        }),
+        position: None,
+        ty: class_type,
+    });
+    fixture.methods.push(method);
+    fixture.parameters.push(parameters);
+    fixture.bodies.push(body);
+    let mut unit = fixture.unit();
+    unit.classes.push(JvmClassPlan {
+        class: other,
+        fields: Vec::new(),
+        methods: Vec::new(),
+        initialization: JvmClassInitializationPlan::ImplicitNoArg,
+    });
+
+    assert_eq!(
+        emit_class(&unit, fixture.class, &fixture.definitions),
+        Err(JvmCodegenError::ReferenceTypeMismatch {
+            expected: fixture.class,
+            found: other,
+        })
+    );
+}
+
+#[test]
 fn resolves_typed_constructor_application_to_canonical_metadata() {
     let fixture = constructor_call_fixture(&[JvmType::Boolean, JvmType::Int]);
     let unit = JvmCompilationUnit {
