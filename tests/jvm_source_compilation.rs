@@ -951,7 +951,7 @@ fn reference_parameters_and_unqualified_this_lower_as_exact_values() {
         &harness,
         r#"public final class ReferenceParameterValuesHarness {
     public static void main(String[] args) {
-        Client client = new Client();
+        Client client = new Client(0);
         Counter counter = new Counter();
         if (client.parameter(counter) != 1) throw new AssertionError("parameter");
         if (client.current() != 2) throw new AssertionError("this");
