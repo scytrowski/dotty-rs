@@ -831,6 +831,8 @@ pub enum JvmCodegenError {
     },
     /// Reference method descriptors are deliberately outside this subset.
     ReferenceMethodDescriptorUnsupported { symbol: SymbolId, ty: JvmType },
+    /// Reference-valued method bodies do not yet emit `areturn`.
+    ReferenceMethodReturnUnsupported { method: SymbolId, ty: JvmType },
     /// The typed node is not yet part of the expression-lowering subset.
     UnsupportedTypedExpression {
         tree: TreeId<Typed>,
@@ -852,6 +854,31 @@ pub enum JvmCodegenError {
     InvalidParameterReference {
         tree: TreeId<Typed>,
         symbol: Option<SymbolId>,
+    },
+    /// A method-parameter `TermRef` carries a prefix other than canonical `NoPrefix`.
+    InvalidParameterReferencePrefix {
+        tree: TreeId<Typed>,
+        parameter: SymbolId,
+        prefix: TypeId,
+    },
+    /// A reference parameter needs a validated compilation-unit class plan.
+    ReferenceParameterRequiresPlan {
+        tree: TreeId<Typed>,
+        parameter: SymbolId,
+        class: SymbolId,
+    },
+    /// A typed `this` does not identify the current planned instance class.
+    InvalidCurrentThisReference {
+        tree: TreeId<Typed>,
+        expected: SymbolId,
+        found: Option<SymbolId>,
+    },
+    /// A qualified `this` value is outside the current expression subset.
+    QualifiedThisValueUnsupported { tree: TreeId<Typed> },
+    /// A reference value was requested without validated current-class metadata.
+    JvmReferenceValueContextUnavailable {
+        tree: TreeId<Typed>,
+        method: SymbolId,
     },
     /// Apply lowering was requested without a validated compilation-unit context.
     JvmCallContextUnavailable {

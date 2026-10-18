@@ -877,6 +877,78 @@ fn reference_method_descriptors_use_validated_package_internal_names() {
 }
 
 #[test]
+fn reference_parameters_and_unqualified_this_lower_as_exact_values() {
+    let source = "class Counter:\n  def value(): Int = 1\n\nclass Client:\n  def parameter(c: Counter): Int =\n    c\n    1\n  def current(): Int =\n    this\n    2\n  def mixed(flag: Boolean, count: Int, c: Counter, tail: Boolean): Int =\n    c\n    this\n    count\n";
+    let output = TestOutputDirectory::new("reference-parameter-values");
+    let artifacts = compile_source_classes(source, "ReferenceParameterValues.scala", output.path())
+        .expect("reference parameter and this values lower in planned methods");
+    let client_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client artifact");
+    let client = decode_emitted_class(client_artifact);
+
+    assert_eq!(
+        emitted_method_code(&client, "parameter"),
+        [0x2b, 0x57, 0x04, 0xac]
+    );
+    assert_eq!(
+        emitted_method_code(&client, "current"),
+        [0x2a, 0x57, 0x05, 0xac]
+    );
+    assert_eq!(
+        emitted_method_code(&client, "mixed"),
+        [0x2d, 0x57, 0x2a, 0x57, 0x1c, 0xac]
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness = output.path().join("ReferenceParameterValuesHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class ReferenceParameterValuesHarness {
+    public static void main(String[] args) {
+        Client client = new Client();
+        Counter counter = new Counter();
+        if (client.parameter(counter) != 1) throw new AssertionError("parameter");
+        if (client.current() != 2) throw new AssertionError("this");
+        if (client.mixed(true, 42, counter, false) != 42) throw new AssertionError("mixed");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javac = Command::new("javac")
+        .args(["-classpath", &classpath, "-d", &classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for reference parameter values");
+    assert!(
+        javac.status.success(),
+        "javac rejected the reference parameter harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "ReferenceParameterValuesHarness",
+        ])
+        .output()
+        .expect("start java for reference parameter values");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected the generated classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
 fn reference_method_descriptors_reject_canonical_classes_outside_the_unit() {
     let source =
         "class Counter:\n  def id(): Int = 1\nclass Client:\n  def pass(c: Counter): Counter = c\n";
@@ -1019,13 +1091,13 @@ fn reference_method_descriptor_slots_include_mixed_parameters_and_receiver() {
         SourceUnitCardinality::AtLeastTwo,
         Some(&mut inspect),
     );
-    assert!(matches!(result, Err(PipelineFailure::Codegen(_))));
+    assert!(result.is_ok());
     let (descriptor, slots) = projection.expect("unit metadata was inspected");
     assert_eq!(descriptor, expected_descriptor);
     assert_eq!(slots.len(), 254);
     assert_eq!(slots.first(), Some(&1));
     assert_eq!(slots.last(), Some(&254));
-    assert_eq!(output.class_files().len(), 0);
+    assert_eq!(output.class_files().len(), 2);
 
     let (source, _) = source_with_parameter_count(255);
     let output = TestOutputDirectory::new("reference-slot-overflow");
@@ -4565,10 +4637,6 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(seed: Int)\nclass CounterClient:\n  def make(): Counter = new Counter(1)\n",
         ),
         (
-            "reference-method-parameter",
-            "class Counter(seed: Int)\nclass CounterClient:\n  def use(counter: Counter): Int = 1\n",
-        ),
-        (
             "null-literal",
             "class CounterClient:\n  def use(): Int = null\n",
         ),
@@ -4623,17 +4691,7 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             ),
             "reference-method-result" => matches!(
                 &error,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType {
-                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
-                    ..
-                })
-            ),
-            "reference-method-parameter" => matches!(
-                &error,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType {
-                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
-                    ..
-                })
+                PipelineFailure::Codegen(JvmCodegenError::ReferenceMethodReturnUnsupported { .. })
             ),
             "null-literal" => matches!(
                 &error,

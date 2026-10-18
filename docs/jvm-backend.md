@@ -94,10 +94,10 @@ are read-only; the lifetime-bound references keep the caller as the owner.
 `JvmCompilationUnit::metadata` supports method parameters and results that
 resolve to exact classes in its validated emission unit. It retains each
 canonical `SymbolId` and uses the class plan's validated internal name to build
-the JVM object descriptor. This increment projects descriptors and metadata
-only; bytecode loads, calls, returns, and class emission for reference-valued
-method signatures remain unsupported. The audit, verifier contract, and
-remaining implementation sequence are recorded in
+the JVM object descriptor. Reference parameter identifiers and unqualified
+current `this` can now be loaded as exact reference values. Reference method
+returns and passing reference arguments to calls remain unsupported. The
+audit, verifier contract, and remaining implementation sequence are recorded in
 [`jvm-reference-signatures.md`](jvm-reference-signatures.md).
 
 The unit-aware projection reads the method's completed `Type::Method` and the
@@ -147,12 +147,16 @@ allocate semantic symbols or types.
 References occupy one category-one slot and remain distinct from `Int`,
 `Boolean`, and `Unit`. A planned method may initialize an immutable reference
 `val` from a completed, validated `new C(args)`, store it with `astore`, and
-read it by canonical local `SymbolId` with `aload`. The local's checked class
-identity must match the initializer's `Flow::Value`; read-before-store and
-mutable reference locals fail with typed errors. Reference values may be
-discarded as category-one block statements with `pop`, but cannot become
-method/constructor parameters or results, or field descriptors. Constructor
-reference arguments remain rejected. Exact initialized references may stay
+read it by canonical local `SymbolId` with `aload`. A reference method
+parameter can also be read with `aload` from its descriptor-assigned slot, and
+unqualified `this` can be read with `aload_0` after its `ThisType` matches the
+current planned class. The local's checked class identity must match the
+initializer's `Flow::Value`; read-before-store and mutable reference locals
+fail with typed errors. Reference values may be discarded as category-one
+block statements with `pop`. Planned reference method parameters are supported,
+but reference method results, call arguments, constructor parameters, and field
+descriptors remain unsupported. Constructor reference arguments remain
+rejected. Exact initialized references may stay
 live through `if` joins and `while` headers/back-edges. A reference stack join
 must have the same planned class on every incoming edge; different classes do
 not merge to `Object`. A local that is not initialized on every path becomes
@@ -170,7 +174,8 @@ unsupported states remain typed build errors.
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
 | Private `Int`/`Boolean` field on current `this` | `aload(0)` with `getfield`/`putfield` | Exact current class and primitive descriptor; receiver/temp locals must merge safely |
-| Primitive-result call on `this`, `new C`, or immutable local `C` | Canonical `invokevirtual` target | Receiver class must equal planned owner; reference parameters/results stay unsupported |
+| Primitive-result call on `this`, `new C`, or immutable local `C` | Canonical `invokevirtual` target | Receiver class must equal planned owner; reference call arguments and results stay unsupported |
+| Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
 | Different reference classes at a stack join | No classfile emitted | Typed exact-class merge error; no inferred `Object`/common parent |
 
@@ -221,7 +226,7 @@ and `independent() == 31` under `java -Xverify:all`.
 The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
 `DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the source integration test on JDK 21.
 Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
-reference method parameters/results, arbitrary classpath classes,
+reference method results and call arguments, arbitrary classpath classes,
 mutable reference locals, class-hierarchy joins, arrays, null, and branching
 constructor bodies unsupported. Reference operations remain restricted to
 exact classes and the verified primitive-result call subset.
@@ -574,7 +579,7 @@ Scala public accessor, bridge, or TASTy compatibility.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
 Negative source tests verify that field initialization, mutable reference
-locals, invalid while conditions, reference method parameters/results, private
+locals, invalid while conditions, reference method results and call arguments, private
 construction, immutable-local assignment, missing local references, mismatched
 local initializers and assignments, Unit locals, deferred reference locals,
 pattern locals, and parser diagnostics fail at their actual pipeline stage
@@ -589,9 +594,9 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation --locked
 ```
 
 Without the JDK it still runs structural and negative checks and explicitly
-skips Java verification. Reference method parameters/results, class-hierarchy
-joins, arrays, null, mutable reference locals, and branched constructors remain
-deferred.
+skips Java verification. Reference method results and call arguments,
+class-hierarchy joins, arrays, null, mutable reference locals, and branched
+constructors remain deferred.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
