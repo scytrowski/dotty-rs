@@ -150,8 +150,8 @@ def percentile(values: list[float], p: float) -> float:
 
 
 def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_paths: list[str], commit: str,
-                 scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path,
-                 output_started_ns: int) -> None:
+                 scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path) -> None:
+    output_started_ns = time.monotonic_ns()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run-timings.tsv").write_text(
         "run\tcargo_wall_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
@@ -249,7 +249,6 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
     ]
     candidates.sort(key=lambda item: (-item[0], item[1]))
     semantic_ms = phase_totals.get("typing_ms", 0) + phase_totals.get("typer_setup_ms", 0)
-    report_write_ms = max(0, (time.monotonic_ns() - output_started_ns) // 1_000_000)
     p50 = percentile([v for values in file_samples.values() for v in values], 0.50)
     p95 = percentile([v for values in file_samples.values() for v in values], 0.95)
     cpu_model = "unknown"
@@ -290,7 +289,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
         "",
         "See [`run-timings.tsv`](run-timings.tsv).",
         "",
-        f"Median / p95 selected-file wall time: {p50:.0f} / {p95:.0f} ms. Across repetitions, source typer setup plus method typing took {semantic_ms} ms; profile report generation took about {report_write_ms} ms (semantic-to-profile-report ratio {semantic_ms / max(1, report_write_ms):.2f}:1).",
+        f"Median / p95 selected-file wall time: {p50:.0f} / {p95:.0f} ms. Across repetitions, source typer setup plus method typing took {semantic_ms} ms; profile report generation took about PROFILE_REPORT_WRITE_MS ms (semantic-to-profile-report ratio PROFILE_REPORT_RATIO:1).",
         "",
         "## Slowest files",
         "",
@@ -339,7 +338,6 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
         "The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts.",
         "",
     ]
-    (out_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
     (out_dir / "resolver-operations.tsv").write_text(
         "operation\tcalls\tinclusive_ms\tinclusive_us\n" + "".join(
             f"{operation}\t{calls if calls is not None else 'not_captured'}\t{millis if millis is not None else 'not_captured'}\t{micros if micros is not None else 'not_captured'}\n"
@@ -359,6 +357,13 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
         "request_family\tcount_across_runs\n" + "".join(
             f"{name}\t{count}\n" for name, count in sorted(resolver_count_totals.items())
         ), encoding="utf-8")
+    summary_path = out_dir / "summary.md"
+    summary_path.write_text("\n".join(lines), encoding="utf-8")
+    report_write_ms = max(0, (time.monotonic_ns() - output_started_ns) // 1_000_000)
+    summary = summary_path.read_text(encoding="utf-8")
+    summary = summary.replace("PROFILE_REPORT_WRITE_MS", str(report_write_ms))
+    summary = summary.replace("PROFILE_REPORT_RATIO", f"{semantic_ms / max(1, report_write_ms):.2f}")
+    summary_path.write_text(summary, encoding="utf-8")
 
 
 def main() -> int:
@@ -452,8 +457,7 @@ def main() -> int:
     commit = args.measured_commit or subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         fail("--measured-commit must be a full 40-character Git SHA")
-    report_started = time.monotonic_ns()
-    write_report(out_dir, results, wall_times, selected, commit, scala_root, java_home, match.group(1), artifact_root, report_started)
+    write_report(out_dir, results, wall_times, selected, commit, scala_root, java_home, match.group(1), artifact_root)
     print(f"profile report: {out_dir / 'summary.md'}")
     return 0
 

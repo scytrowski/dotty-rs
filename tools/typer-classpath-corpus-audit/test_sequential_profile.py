@@ -1,6 +1,8 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import sequential_profile
 
@@ -65,6 +67,28 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["resolver_counts"]["resolver_member_requests"], 4)
         self.assertEqual(parsed["load_roots"][0]["root"], "scala/Function1")
         self.assertEqual(parsed["load_roots"][0]["distinct_classes"], 7)
+
+    def test_report_timer_includes_sidecar_writes_and_is_recorded_in_summary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original_write_text = Path.write_text
+
+            def delayed_write(path, data, *args, **kwargs):
+                if path.name == "resolver-counts.tsv":
+                    time.sleep(0.03)
+                return original_write_text(path, data, *args, **kwargs)
+
+            with patch.object(Path, "write_text", delayed_write):
+                sequential_profile.write_report(
+                    Path(temporary),
+                    [{"files": {}, "methods": {}, "resolver": {}, "summary": {"wall_ms": "0"}, "loads": {},
+                      "resolver_counts": {}, "load_roots": []}],
+                    [0], [], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary),
+                )
+
+            summary = (Path(temporary) / "summary.md").read_text()
+            timing_line = next(line for line in summary.splitlines() if "profile report generation" in line)
+            self.assertNotIn("PROFILE_REPORT_", summary)
+            self.assertGreaterEqual(int(timing_line.split("took about ", 1)[1].split(" ms", 1)[0]), 30)
 
 
 if __name__ == "__main__":
