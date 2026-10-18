@@ -33,6 +33,11 @@ struct ResolverMetrics {
     module_identity_inner_time: Duration,
     module_completion_inner_time: Duration,
     class_completion_inner_time: Duration,
+    class_completion_calls: usize,
+    classfile_completion_calls: usize,
+    tasty_completion_calls: usize,
+    classfile_completion_inner_time: Duration,
+    tasty_completion_inner_time: Duration,
     member_lookup_inner_time: Duration,
     package_lookup_inner_time: Duration,
     resolver_package_requests: usize,
@@ -810,17 +815,31 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         symbol: SymbolId,
     ) -> Result<bool, ResolutionError> {
         let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let format_origin = resolver_started.map(|_| symbol_origin_category(store, symbol));
         let request = if store.symbols.contains(symbol) {
             format!("completion::{}", audit_symbol_path(store, symbol))
         } else {
             "completion::unknown-symbol".to_owned()
         };
         let result = self.inner.complete_class(store, symbol);
-        if let Some(started) = resolver_started {
-            self.metrics.borrow_mut().class_completion_inner_time += started.elapsed();
-        }
+        let elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
         let profiles = self.inner.take_load_profiles();
         let mut metrics = self.metrics.borrow_mut();
+        if let Some(origin) = format_origin {
+            metrics.class_completion_calls += 1;
+            metrics.class_completion_inner_time += elapsed;
+            match origin {
+                "classpath_classfile" => {
+                    metrics.classfile_completion_calls += 1;
+                    metrics.classfile_completion_inner_time += elapsed;
+                }
+                "classpath_tasty" => {
+                    metrics.tasty_completion_calls += 1;
+                    metrics.tasty_completion_inner_time += elapsed;
+                }
+                _ => {}
+            }
+        }
         let file = metrics.current_file.clone();
         let method = metrics.current_method.clone();
         for profile in profiles {
@@ -6056,16 +6075,24 @@ fn pinned_scala39_local_definition_audit() {
         revision, "777528f19a58e794c9954a42f433373472ec57f8",
         "audit requires the repository's pinned Scala 3.9.0 source revision"
     );
-    let classpath = audit_classpath_from_environment();
     let profile_files = std::env::var("DOTTY_AUDIT_PROFILE_FILES")
         .ok()
         .map(|files| files.split(',').map(str::to_owned).collect::<BTreeSet<_>>());
+    let classpath_started = profile_files.as_ref().map(|_| Instant::now());
+    let classpath = audit_classpath_from_environment();
+    let classpath_setup_time =
+        classpath_started.map_or(Duration::ZERO, |started| started.elapsed());
     let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics {
         timing_enabled: profile_files.is_some(),
         ..ResolverMetrics::default()
     }));
+    let file_discovery_started = profile_files.as_ref().map(|_| Instant::now());
     let files = scala_files(&[root.join("library/src"), root.join("compiler/src")]);
+    let file_discovery_time =
+        file_discovery_started.map_or(Duration::ZERO, |started| started.elapsed());
     let expected_files = profile_files.as_ref().map_or(files.len(), BTreeSet::len);
+    let mut source_read_time = Duration::ZERO;
+    let mut audit_merge_time = Duration::ZERO;
     if let Some(profile_files) = &profile_files {
         assert!(
             !profile_files.is_empty(),
@@ -6090,21 +6117,28 @@ fn pinned_scala39_local_definition_audit() {
             continue;
         }
         processed_files += 1;
+        let source_read_started = profile_files.as_ref().map(|_| Instant::now());
         let source = match fs::read_to_string(file) {
             Ok(source) => source,
             Err(_) => {
+                source_read_time +=
+                    source_read_started.map_or(Duration::ZERO, |started| started.elapsed());
                 audit.files_attempted += 1;
                 audit.file_read_failed_files += 1;
                 audit.file_read_failed_paths.insert(relative);
                 continue;
             }
         };
+        source_read_time += source_read_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let source_processing_and_merge_started = profile_files.as_ref().map(|_| Instant::now());
         audit.merge(audit_source_with_classpath(
             &source,
             &relative,
             classpath.clone(),
             Rc::clone(&resolver_metrics),
         ));
+        audit_merge_time +=
+            source_processing_and_merge_started.map_or(Duration::ZERO, |started| started.elapsed());
     }
 
     if let Some(profile_files) = profile_files {
@@ -6114,8 +6148,12 @@ fn pinned_scala39_local_definition_audit() {
             "every requested profile path must match a Scala source file"
         );
         eprintln!(
-            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} wall_ms={}",
-            audit_started.elapsed().as_millis()
+            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} wall_ms={} classpath_setup_ms={} file_discovery_ms={} source_read_ms={} source_processing_and_merge_ms={}",
+            audit_started.elapsed().as_millis(),
+            classpath_setup_time.as_millis(),
+            file_discovery_time.as_millis(),
+            source_read_time.as_millis(),
+            audit_merge_time.as_millis()
         );
         print_resolver_metrics(&resolver_metrics.borrow());
         return;
@@ -10402,6 +10440,11 @@ fn audit_source_inner_filtered(
                 metrics.class_completion_inner_time,
                 metrics.member_lookup_inner_time,
                 metrics.package_lookup_inner_time,
+                metrics.class_completion_calls,
+                metrics.classfile_completion_calls,
+                metrics.tasty_completion_calls,
+                metrics.classfile_completion_inner_time,
+                metrics.tasty_completion_inner_time,
             )
         });
         if let Some(method_label) = &method_label {
@@ -10434,32 +10477,63 @@ fn audit_source_inner_filtered(
                 .borrow();
             let before = resolver_before.expect("profiled resolver counters must be captured");
             eprintln!(
-                "AUDIT_METHOD_RESOLVER file={path} tree={} module_identity_calls={} module_identity_inner_ms={} module_completion_calls={} module_completion_inner_ms={} class_completion_inner_ms={} member_calls={} member_inner_ms={} package_calls={} package_inner_ms={}",
+                "AUDIT_METHOD_RESOLVER file={path} tree={} module_identity_calls={} module_identity_inner_ms={} module_identity_inner_us={} module_completion_calls={} module_completion_inner_ms={} module_completion_inner_us={} class_completion_calls={} class_completion_inner_ms={} class_completion_inner_us={} classfile_completion_calls={} classfile_completion_inner_us={} tasty_completion_calls={} tasty_completion_inner_us={} member_calls={} member_inner_ms={} member_inner_us={} package_calls={} package_inner_ms={} package_inner_us={}",
                 method_tree.index(),
                 metrics.module_identity_resolver_calls - before.0,
                 metrics
                     .module_identity_inner_time
                     .saturating_sub(before.4)
                     .as_millis(),
+                metrics
+                    .module_identity_inner_time
+                    .saturating_sub(before.4)
+                    .as_micros(),
                 metrics.module_completion_resolver_calls - before.1,
                 metrics
                     .module_completion_inner_time
                     .saturating_sub(before.5)
                     .as_millis(),
                 metrics
+                    .module_completion_inner_time
+                    .saturating_sub(before.5)
+                    .as_micros(),
+                metrics.class_completion_calls - before.9,
+                metrics
                     .class_completion_inner_time
                     .saturating_sub(before.6)
                     .as_millis(),
+                metrics
+                    .class_completion_inner_time
+                    .saturating_sub(before.6)
+                    .as_micros(),
+                metrics.classfile_completion_calls - before.10,
+                metrics
+                    .classfile_completion_inner_time
+                    .saturating_sub(before.12)
+                    .as_micros(),
+                metrics.tasty_completion_calls - before.11,
+                metrics
+                    .tasty_completion_inner_time
+                    .saturating_sub(before.13)
+                    .as_micros(),
                 metrics.resolver_member_requests - before.2,
                 metrics
                     .member_lookup_inner_time
                     .saturating_sub(before.7)
                     .as_millis(),
+                metrics
+                    .member_lookup_inner_time
+                    .saturating_sub(before.7)
+                    .as_micros(),
                 metrics.resolver_package_requests - before.3,
                 metrics
                     .package_lookup_inner_time
                     .saturating_sub(before.8)
-                    .as_millis()
+                    .as_millis(),
+                metrics
+                    .package_lookup_inner_time
+                    .saturating_sub(before.8)
+                    .as_micros()
             );
         }
         if let Some(metrics) = &request_metrics {
@@ -11885,6 +11959,15 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!(
         "  typer_module_completion_resolver_calls={} outcomes={:?}",
         metrics.module_completion_resolver_calls, metrics.module_completion_resolver_outcomes
+    );
+    println!(
+        "  class_completion_calls={} class_completion_inner_us={} classfile_completion_calls={} classfile_completion_inner_us={} tasty_completion_calls={} tasty_completion_inner_us={}",
+        metrics.class_completion_calls,
+        metrics.class_completion_inner_time.as_micros(),
+        metrics.classfile_completion_calls,
+        metrics.classfile_completion_inner_time.as_micros(),
+        metrics.tasty_completion_calls,
+        metrics.tasty_completion_inner_time.as_micros()
     );
     let module_profile = &metrics.module_resolution;
     let completed_module_classes = completed_module_class_targets(metrics);

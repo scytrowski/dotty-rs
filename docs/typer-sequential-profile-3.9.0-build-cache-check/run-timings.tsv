@@ -1,0 +1,3 @@
+run	cargo_target_cache_state	cargo_wall_ms	audit_wall_ms	runner_overhead_ms	classpath_setup_ms	file_discovery_ms	source_read_ms	source_processing_and_merge_ms
+1	cold	299287	223298	75989	77	3	0	223214
+2	warm	222602	221952	650	80	3	0	221865
