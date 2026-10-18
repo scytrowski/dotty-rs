@@ -5,8 +5,9 @@
 //! [`assembler::assemble_labeled`] lays out and encodes symbolic branches.
 //! [`analysis::analyze`] computes straight-line `max_stack`/`max_locals`
 //! bounds; [`analysis::CfgCodeAnalyzer`] computes integer and exact initialized
-//! receiver-reference states over a [`control_flow::ControlFlowGraph`]. These APIs do not decode
-//! bytecode or perform general JVM verification or optimization. The linear
+//! reference states over a [`control_flow::ControlFlowGraph`], including the
+//! supported instance-field transfers and constructor arguments. These APIs do
+//! not decode bytecode or perform general JVM verification or optimization. The linear
 //! assembler and analyzer continue to represent one ordered straight-line
 //! block. [`code_sequence`] models labels and a small branch family and
 //! validates targets before assembly.
@@ -90,7 +91,9 @@ pub use analysis::{
     FlowLocalState, FlowValue, LinearCodeAnalyzer, UnsupportedFlowInstructionKind, ValueKind,
     analyze,
 };
-pub(crate) use analysis::{analyze_validated, analyze_validated_with_current_class};
+pub(crate) use analysis::{
+    analyze_validated, analyze_validated_constructor_body, analyze_validated_with_current_class,
+};
 pub(crate) use assembler::assemble_validated;
 pub use assembler::{
     AssembleError, AssembledCode, CodeLayout, ConstantPoolOperandKind, assemble, assemble_labeled,

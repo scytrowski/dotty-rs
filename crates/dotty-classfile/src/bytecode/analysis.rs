@@ -2,8 +2,9 @@
 //!
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
 //! [`CfgCodeAnalyzer`] propagates integer and exact initialized-class
-//! references across symbolic branches, including bounded primitive virtual
-//! calls and in-block object initialization. Neither analyzer is a full JVM
+//! references across symbolic branches, including bounded field transfers,
+//! constructor arguments, primitive virtual calls, and in-block object
+//! initialization. Neither analyzer is a full JVM
 //! verifier, and neither produces stack-map frames.
 
 use super::{
@@ -158,7 +159,7 @@ pub enum AnalysisError {
         /// Descriptor parser failure.
         error: DescriptorError,
     },
-    /// A CFG field access has a valid descriptor outside the supported `I`/`Z` subset.
+    /// A field access has a valid descriptor outside the supported int-like and object subset.
     UnsupportedFlowFieldType {
         /// Zero-based instruction position.
         instruction: usize,
@@ -178,6 +179,29 @@ pub enum AnalysisError {
         expected: ClassIdentity,
         /// Exact receiver class on the operand stack.
         actual: ClassIdentity,
+    },
+    /// A reference field value differs from the exact class in its descriptor.
+    WrongExactFieldValue {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Exact class required by the field descriptor.
+        expected: ClassIdentity,
+        /// Exact class found on the operand stack.
+        actual: ClassIdentity,
+    },
+    /// A reference field value has no exact initialized class identity.
+    MissingExactFieldValue {
+        /// Zero-based instruction position.
+        instruction: usize,
+    },
+    /// An object type in a field descriptor has an invalid internal name.
+    InvalidReferencedFieldClassName {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Constant-pool entry that owns the field descriptor.
+        index: ConstantPoolIndex,
+        /// Invalid class name from the descriptor.
+        name: String,
     },
     /// A method reference contains a malformed method descriptor.
     InvalidReferencedMethodDescriptor {
@@ -269,6 +293,11 @@ pub enum AnalysisError {
         allocated: ClassIdentity,
         /// Owner named by the constructor method reference.
         actual: ClassIdentity,
+    },
+    /// A branchless constructor does not start with the validated direct-super call.
+    InvalidConstructorSuperCall {
+        /// Zero-based instruction position of the invalid prologue instruction.
+        instruction: usize,
     },
     /// A local access extends past the maximum representable `max_locals`.
     LocalLimitExceeded {
@@ -539,6 +568,29 @@ impl fmt::Display for AnalysisError {
                 expected.internal_name(),
                 actual.internal_name()
             ),
+            Self::WrongExactFieldValue {
+                instruction,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} stores {} in a field requiring {}",
+                actual.internal_name(),
+                expected.internal_name()
+            ),
+            Self::MissingExactFieldValue { instruction } => write!(
+                formatter,
+                "instruction {instruction} stores a reference without an exact class identity"
+            ),
+            Self::InvalidReferencedFieldClassName {
+                instruction,
+                index,
+                name,
+            } => write!(
+                formatter,
+                "instruction {instruction} field at constant-pool index {} has invalid JVM class name {name:?}",
+                index.0
+            ),
             Self::InvalidReferencedMethodDescriptor {
                 instruction,
                 index,
@@ -633,6 +685,10 @@ impl fmt::Display for AnalysisError {
                 "instruction {instruction} constructor owner {} does not match allocated class {}",
                 actual.internal_name(),
                 allocated.internal_name()
+            ),
+            Self::InvalidConstructorSuperCall { instruction } => write!(
+                formatter,
+                "instruction {instruction} is not the required direct-super constructor call"
             ),
             Self::LocalLimitExceeded {
                 instruction,
@@ -876,6 +932,84 @@ pub(crate) fn analyze_validated_with_current_class(
     constant_pool: &ConstantPool,
     current_class_index: Option<ConstantPoolIndex>,
 ) -> Result<CodeAnalysis, AnalysisError> {
+    analyze_validated_with_current_class_inner(
+        method_name,
+        method_descriptor,
+        is_static,
+        instructions,
+        constant_pool,
+        current_class_index,
+        AnalysisContext::METHOD,
+    )
+}
+
+/// Analyzes the body of a branchless constructor after validating its first
+/// `aload_0; invokespecial DirectSuper.<init>()V` initialization sequence.
+pub(crate) fn analyze_validated_constructor_body(
+    method_descriptor: &str,
+    instructions: &[Instruction],
+    constant_pool: &ConstantPool,
+    current_class_index: ConstantPoolIndex,
+    super_class_index: ConstantPoolIndex,
+) -> Result<CodeAnalysis, AnalysisError> {
+    if !matches!(instructions.first(), Some(Instruction::ALoad(index)) if index.get() == 0) {
+        return Err(AnalysisError::InvalidConstructorSuperCall { instruction: 0 });
+    }
+    let Some(Instruction::InvokeSpecial(reference)) = instructions.get(1).copied() else {
+        return Err(AnalysisError::InvalidConstructorSuperCall { instruction: 1 });
+    };
+    let empty_descriptor =
+        MethodDescriptor::parse("()V").map_err(AnalysisError::InvalidMethodDescriptor)?;
+    let resolver = Frame::new(&empty_descriptor, true, None)?;
+    let (actual_owner, name, descriptor) = resolver.special_method(1, reference, constant_pool)?;
+    let expected_owner = class_identity_from_pool(constant_pool, super_class_index, 1)?;
+    if name != "<init>"
+        || !descriptor.parameters.is_empty()
+        || descriptor.return_type.is_some()
+        || actual_owner != expected_owner
+    {
+        return Err(AnalysisError::InvalidConstructorSuperCall { instruction: 1 });
+    }
+    let mut analysis = analyze_validated_with_current_class_inner(
+        "<init>",
+        method_descriptor,
+        false,
+        &instructions[2..],
+        constant_pool,
+        Some(current_class_index),
+        AnalysisContext {
+            after_constructor_super_call: true,
+            instruction_offset: 2,
+        },
+    )?;
+    // The validated `aload_0` prologue reaches one stack slot before the
+    // direct-super invocation; account for it in the full method maximum.
+    analysis.max_stack = analysis.max_stack.max(1);
+    Ok(analysis)
+}
+
+#[derive(Clone, Copy)]
+struct AnalysisContext {
+    after_constructor_super_call: bool,
+    instruction_offset: usize,
+}
+
+impl AnalysisContext {
+    const METHOD: Self = Self {
+        after_constructor_super_call: false,
+        instruction_offset: 0,
+    };
+}
+
+fn analyze_validated_with_current_class_inner(
+    method_name: &str,
+    method_descriptor: &str,
+    is_static: bool,
+    instructions: &[Instruction],
+    constant_pool: &ConstantPool,
+    current_class_index: Option<ConstantPoolIndex>,
+    context: AnalysisContext,
+) -> Result<CodeAnalysis, AnalysisError> {
     let descriptor = MethodDescriptor::parse(method_descriptor)
         .map_err(AnalysisError::InvalidMethodDescriptor)?;
     check_parameter_slots(&descriptor, !is_static, None)?;
@@ -886,16 +1020,20 @@ pub(crate) fn analyze_validated_with_current_class(
     let current_class = current_class_index
         .map(|index| class_identity_from_pool(constant_pool, index, 0))
         .transpose()?;
-    if current_class_index.is_some() && matches!(method_name, "<init>" | "<clinit>") {
+    if current_class_index.is_some()
+        && (method_name == "<clinit>"
+            || (method_name == "<init>" && !context.after_constructor_super_call))
+    {
         return Err(AnalysisError::InvalidInitializationContext {
             is_static,
-            is_constructor: true,
+            is_constructor: method_name == "<init>" || method_name == "<clinit>",
         });
     }
     let mut frame = Frame::new(&descriptor, is_static, current_class.as_ref())?;
     let mut returned = false;
 
-    for (instruction_index, instruction) in instructions.iter().copied().enumerate() {
+    for (offset, instruction) in instructions.iter().copied().enumerate() {
+        let instruction_index = context.instruction_offset.saturating_add(offset);
         if returned {
             return Err(AnalysisError::InstructionAfterReturn {
                 instruction: instruction_index,
@@ -917,13 +1055,17 @@ pub(crate) fn analyze_validated_with_current_class(
     Ok(CodeAnalysis {
         max_stack: u16::try_from(frame.max_stack).map_err(|_| {
             AnalysisError::StackLimitExceeded {
-                instruction: instructions.len().saturating_sub(1),
+                instruction: context
+                    .instruction_offset
+                    .saturating_add(instructions.len().saturating_sub(1)),
                 slots: frame.max_stack,
             }
         })?,
         max_locals: u16::try_from(frame.locals.len()).map_err(|_| {
             AnalysisError::LocalLimitExceeded {
-                instruction: instructions.len().saturating_sub(1),
+                instruction: context
+                    .instruction_offset
+                    .saturating_add(instructions.len().saturating_sub(1)),
                 index: u16::MAX,
                 width: 1,
             }
@@ -1175,9 +1317,13 @@ impl Frame {
                 if flow_current_class.is_some() {
                     self.ensure_no_pending_allocation(instruction_index)?;
                     let (owner, ty) = self.flow_field_type(instruction_index, reference, pool)?;
-                    validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
+                    let field_class =
+                        validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
                     self.pop_field_receiver(instruction_index, &owner)?;
-                    self.push(instruction_index, ValueKind::Int)?;
+                    match field_class {
+                        Some(class) => self.push_object(instruction_index, class)?,
+                        None => self.push(instruction_index, ValueKind::Int)?,
+                    }
                 } else {
                     let ty = self.field_type(instruction_index, reference, pool)?;
                     self.pop_expected(instruction_index, ValueKind::Reference)?;
@@ -1188,8 +1334,24 @@ impl Frame {
                 if flow_current_class.is_some() {
                     self.ensure_no_pending_allocation(instruction_index)?;
                     let (owner, ty) = self.flow_field_type(instruction_index, reference, pool)?;
-                    validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
-                    self.pop_expected(instruction_index, ValueKind::Int)?;
+                    let field_class =
+                        validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
+                    if let Some(expected) = field_class {
+                        let (_, actual) =
+                            self.pop_typed(instruction_index, ValueKind::Reference)?;
+                        let actual = actual.ok_or(AnalysisError::MissingExactFieldValue {
+                            instruction: instruction_index,
+                        })?;
+                        if actual != expected {
+                            return Err(AnalysisError::WrongExactFieldValue {
+                                instruction: instruction_index,
+                                expected,
+                                actual,
+                            });
+                        }
+                    } else {
+                        self.pop_expected(instruction_index, ValueKind::Int)?;
+                    }
                     self.pop_field_receiver(instruction_index, &owner)?;
                 } else {
                     let ty = self.field_type(instruction_index, reference, pool)?;
@@ -1199,14 +1361,39 @@ impl Frame {
             }
             Instruction::GetStatic(reference) => {
                 let ty = self.field_type(instruction_index, reference, pool)?;
+                if flow_current_class.is_some()
+                    && validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
+                        .is_some()
+                {
+                    return Err(AnalysisError::UnsupportedFlowFieldType {
+                        instruction: instruction_index,
+                        index: reference.index().get(),
+                    });
+                }
                 self.push(instruction_index, value_kind(&ty))?;
             }
             Instruction::PutStatic(reference) => {
                 let ty = self.field_type(instruction_index, reference, pool)?;
+                if flow_current_class.is_some()
+                    && validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
+                        .is_some()
+                {
+                    return Err(AnalysisError::UnsupportedFlowFieldType {
+                        instruction: instruction_index,
+                        index: reference.index().get(),
+                    });
+                }
                 self.pop_expected(instruction_index, value_kind(&ty))?;
             }
             Instruction::InvokeStatic(reference) => {
                 let descriptor = self.method_descriptor(instruction_index, reference, pool)?;
+                if flow_current_class.is_some() {
+                    validate_flow_static_signature(
+                        instruction_index,
+                        reference.index().get(),
+                        &descriptor,
+                    )?;
+                }
                 self.invoke(instruction_index, &descriptor, false)?;
             }
             Instruction::InvokeVirtual(reference) => {
@@ -1900,17 +2087,43 @@ impl Frame {
             });
         }
         check_parameter_slots(descriptor, true, Some(instruction))?;
-        for (parameter, ty) in descriptor.parameters.iter().enumerate() {
-            if !matches!(ty, FieldType::Int | FieldType::Boolean) {
-                return Err(AnalysisError::UnsupportedFlowMethodParameter {
-                    instruction,
-                    parameter,
-                    actual: ty.clone(),
-                });
+        for (parameter, ty) in descriptor.parameters.iter().enumerate().rev() {
+            match ty {
+                FieldType::Int | FieldType::Boolean => {
+                    self.pop_expected(instruction, ValueKind::Int)?;
+                }
+                FieldType::Object(name) if is_valid_internal_name(name) => {
+                    let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+                    let expected = ClassIdentity(Arc::from(name.as_str()));
+                    let actual = actual.ok_or(AnalysisError::MissingExactMethodArgument {
+                        instruction,
+                        parameter,
+                    })?;
+                    if actual != expected {
+                        return Err(AnalysisError::WrongExactMethodArgument {
+                            instruction,
+                            parameter,
+                            expected,
+                            actual,
+                        });
+                    }
+                }
+                FieldType::Object(name) => {
+                    return Err(AnalysisError::InvalidReferencedMethodClassName {
+                        instruction,
+                        index,
+                        parameter: Some(parameter),
+                        name: name.clone(),
+                    });
+                }
+                _ => {
+                    return Err(AnalysisError::UnsupportedFlowMethodParameter {
+                        instruction,
+                        parameter,
+                        actual: ty.clone(),
+                    });
+                }
             }
-        }
-        for _ in descriptor.parameters.iter().rev() {
-            self.pop_expected(instruction, ValueKind::Int)?;
         }
 
         let Some(actual_kind) = self.stack.last().copied() else {
@@ -2293,9 +2506,9 @@ impl FlowAnalysis {
     }
 }
 
-/// Fixed-point stack and local analysis for integer CFGs with exact
-/// initialized receiver references, bounded primitive virtual calls, and
-/// in-block allocation-site initialization.
+/// Fixed-point stack and local analysis for CFGs with exact initialized
+/// references, bounded field transfers and constructor arguments, primitive
+/// virtual calls, and in-block allocation-site initialization.
 pub struct CfgCodeAnalyzer;
 
 impl CfgCodeAnalyzer {
@@ -2654,7 +2867,8 @@ fn validate_flow_instruction_with_context(
     ) || (exact_references
         && matches!(
             instruction,
-            Instruction::ALoad(_)
+            Instruction::AConstNull
+                | Instruction::ALoad(_)
                 | Instruction::AStore(_)
                 | Instruction::AReturn
                 | Instruction::GetField(_)
@@ -2697,11 +2911,18 @@ fn validate_flow_field_type(
     instruction: usize,
     index: ConstantPoolIndex,
     ty: &FieldType,
-) -> Result<(), AnalysisError> {
-    if matches!(ty, FieldType::Int | FieldType::Boolean) {
-        Ok(())
-    } else {
-        Err(AnalysisError::UnsupportedFlowFieldType { instruction, index })
+) -> Result<Option<ClassIdentity>, AnalysisError> {
+    match ty {
+        FieldType::Int | FieldType::Boolean => Ok(None),
+        FieldType::Object(name) if is_valid_internal_name(name) => {
+            Ok(Some(ClassIdentity(Arc::from(name.as_str()))))
+        }
+        FieldType::Object(name) => Err(AnalysisError::InvalidReferencedFieldClassName {
+            instruction,
+            index,
+            name: name.clone(),
+        }),
+        _ => Err(AnalysisError::UnsupportedFlowFieldType { instruction, index }),
     }
 }
 
@@ -2758,6 +2979,48 @@ fn validate_flow_virtual_signature(
         }
     }
     Ok(())
+}
+
+fn validate_flow_static_signature(
+    instruction: usize,
+    index: ConstantPoolIndex,
+    descriptor: &MethodDescriptor,
+) -> Result<(), AnalysisError> {
+    for (parameter, ty) in descriptor.parameters.iter().enumerate() {
+        match ty {
+            FieldType::Int | FieldType::Boolean => {}
+            FieldType::Object(name) if !is_valid_internal_name(name) => {
+                return Err(AnalysisError::InvalidReferencedMethodClassName {
+                    instruction,
+                    index,
+                    parameter: Some(parameter),
+                    name: name.clone(),
+                });
+            }
+            other => {
+                return Err(AnalysisError::UnsupportedFlowMethodParameter {
+                    instruction,
+                    parameter,
+                    actual: other.clone(),
+                });
+            }
+        }
+    }
+    match descriptor.return_type.as_ref() {
+        None | Some(FieldType::Int | FieldType::Boolean) => Ok(()),
+        Some(FieldType::Object(name)) if !is_valid_internal_name(name) => {
+            Err(AnalysisError::InvalidReferencedMethodClassName {
+                instruction,
+                index,
+                parameter: None,
+                name: name.clone(),
+            })
+        }
+        Some(actual) => Err(AnalysisError::UnsupportedFlowMethodReturn {
+            instruction,
+            actual: actual.clone(),
+        }),
+    }
 }
 
 fn local_access(instruction: Instruction) -> Option<(LocalIndex, u8)> {
@@ -4085,6 +4348,238 @@ mod tests {
     }
 
     #[test]
+    fn analyzes_exact_object_field_reads_and_writes_in_cfg() {
+        let mut builder = ConstantPoolBuilder::new();
+        let holder_class = builder.class("example/Holder").unwrap();
+        let counter_field = builder
+            .field_ref("example/Holder", "ref", "Lexample/Counter;")
+            .unwrap();
+        let other_field = builder
+            .field_ref("example/Holder", "other", "[Lexample/Other;")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut read = CodeSequence::new();
+        read.instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(
+                counter_field,
+            ))))
+            .instruction(Instruction::AReturn);
+        let read_graph = ControlFlowGraph::build(&read).unwrap();
+        let read_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &read_graph,
+            "get",
+            "()Lexample/Counter;",
+            false,
+            &pool,
+            holder_class,
+        )
+        .unwrap();
+        assert_eq!(read_flow.max_stack, 1);
+
+        let mut write = CodeSequence::new();
+        let alternate = write.new_label().unwrap();
+        let join = write.new_label().unwrap();
+        write
+            .instruction(Instruction::ILoad(LocalIndex::new(2)))
+            .branch(BranchInstruction::IfEq(alternate.clone()))
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                counter_field,
+            ))))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(alternate)
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                counter_field,
+            ))))
+            .bind(join)
+            .unwrap()
+            .instruction(Instruction::Return);
+        let write_graph = ControlFlowGraph::build(&write).unwrap();
+        assert!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &write_graph,
+                "setIf",
+                "(Lexample/Counter;Z)V",
+                false,
+                &pool,
+                holder_class,
+            )
+            .is_ok()
+        );
+
+        let mut wrong_value = CodeSequence::new();
+        wrong_value
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                counter_field,
+            ))))
+            .instruction(Instruction::Return);
+        let wrong_value_graph = ControlFlowGraph::build(&wrong_value).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_value_graph,
+                "setWrong",
+                "(Lexample/Other;)V",
+                false,
+                &pool,
+                holder_class,
+            ),
+            Err(AnalysisError::WrongExactFieldValue {
+                instruction: 2,
+                expected: class_identity("example/Counter"),
+                actual: class_identity("example/Other"),
+            })
+        );
+
+        let mut null_value = CodeSequence::new();
+        null_value
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::AConstNull)
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                counter_field,
+            ))))
+            .instruction(Instruction::Return);
+        let null_value_graph = ControlFlowGraph::build(&null_value).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &null_value_graph,
+                "setNull",
+                "()V",
+                false,
+                &pool,
+                holder_class,
+            ),
+            Err(AnalysisError::MissingExactFieldValue { instruction: 2 })
+        );
+
+        let mut unsupported_array = CodeSequence::new();
+        unsupported_array
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(
+                other_field,
+            ))))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let unsupported_array_graph = ControlFlowGraph::build(&unsupported_array).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &unsupported_array_graph,
+                "readArray",
+                "()V",
+                false,
+                &pool,
+                holder_class,
+            ),
+            Err(AnalysisError::UnsupportedFlowFieldType {
+                instruction: 1,
+                index: other_field,
+            })
+        );
+    }
+
+    #[test]
+    fn invokespecial_constructor_arguments_keep_exact_reference_identity() {
+        let mut builder = ConstantPoolBuilder::new();
+        let client_class = builder.class("example/Client").unwrap();
+        let holder_class = builder.class("example/Holder").unwrap();
+        let constructor = builder
+            .method_ref(
+                "example/Holder",
+                "<init>",
+                "(Lexample/Counter;Lexample/Other;)V",
+            )
+            .unwrap();
+        let wrong_constructor = builder
+            .method_ref("example/Holder", "<init>", "(Lexample/Counter;)V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut construct = CodeSequence::new();
+        construct
+            .instruction(Instruction::New(ClassReference::new(operand(holder_class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::AReturn);
+        let construct_graph = ControlFlowGraph::build(&construct).unwrap();
+        assert!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &construct_graph,
+                "make",
+                "(Lexample/Counter;Lexample/Other;)Lexample/Holder;",
+                false,
+                &pool,
+                client_class,
+            )
+            .is_ok()
+        );
+
+        let mut swapped_arguments = CodeSequence::new();
+        swapped_arguments
+            .instruction(Instruction::New(ClassReference::new(operand(holder_class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::AReturn);
+        let swapped_arguments_graph = ControlFlowGraph::build(&swapped_arguments).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &swapped_arguments_graph,
+                "makeSwapped",
+                "(Lexample/Counter;Lexample/Other;)Lexample/Holder;",
+                false,
+                &pool,
+                client_class,
+            ),
+            Err(AnalysisError::WrongExactMethodArgument {
+                instruction: 4,
+                parameter: 1,
+                expected: class_identity("example/Other"),
+                actual: class_identity("example/Counter"),
+            })
+        );
+
+        let mut wrong_argument = CodeSequence::new();
+        wrong_argument
+            .instruction(Instruction::New(ClassReference::new(operand(holder_class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::ALoad(LocalIndex::new(2)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(wrong_constructor),
+            )))
+            .instruction(Instruction::AReturn);
+        let wrong_argument_graph = ControlFlowGraph::build(&wrong_argument).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_argument_graph,
+                "makeWrong",
+                "(Lexample/Counter;Lexample/Other;)Lexample/Holder;",
+                false,
+                &pool,
+                client_class,
+            ),
+            Err(AnalysisError::WrongExactMethodArgument {
+                instruction: 3,
+                parameter: 0,
+                expected: class_identity("example/Counter"),
+                actual: class_identity("example/Other"),
+            })
+        );
+    }
+
+    #[test]
     fn field_access_rejects_uninitialized_reference_local() {
         let mut builder = ConstantPoolBuilder::new();
         let class_index = builder.class("example/Counter").unwrap();
@@ -4932,10 +5427,9 @@ mod tests {
         for (constructor, expected) in [
             (
                 reference_constructor,
-                AnalysisError::UnsupportedFlowMethodParameter {
+                AnalysisError::UninitializedReferenceUse {
                     instruction: 2,
-                    parameter: 0,
-                    actual: FieldType::Object("java/lang/Object".to_owned()),
+                    allocation_site: 0,
                 },
             ),
             (
