@@ -467,26 +467,37 @@ fn typed_expression_field_value_type(
     ty: dotty_core::TypeId,
     class_identities: Option<&[JvmClassIdentity]>,
 ) -> Result<crate::JvmType, JvmCodegenError> {
-    let Some(Type::TermRef {
-        target: dotty_core::types::TermRefTarget::Symbol(target),
-        ..
-    }) = store.types.try_get(ty)
-    else {
-        return project_field_value_type(store, definitions, symbol, ty, class_identities);
+    let target = match store.types.try_get(ty) {
+        Some(Type::TermRef {
+            target: dotty_core::types::TermRefTarget::Symbol(target),
+            ..
+        }) => *target,
+        _ => {
+            let value_type =
+                project_field_value_type(store, definitions, symbol, ty, class_identities)?;
+            if matches!(value_type, crate::JvmType::Reference(_)) {
+                return Err(JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
+                    field: symbol,
+                    initializer,
+                    symbol: None,
+                });
+            }
+            return Ok(value_type);
+        }
     };
-    if !store.symbols.contains(*target) {
+    if !store.symbols.contains(target) {
         return Err(JvmCodegenError::UnknownFieldInitializerSymbol {
             field: symbol,
             initializer,
-            symbol: *target,
+            symbol: target,
         });
     }
-    let referenced = store.symbols.get(*target);
-    let target_ty = match store.symbols.info(*target) {
+    let referenced = store.symbols.get(target);
+    let target_ty = match store.symbols.info(target) {
         SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
-            return Err(JvmCodegenError::MissingSemanticInfo { symbol: *target });
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol: target });
         }
-        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *target }),
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: target }),
         SymbolInfo::Complete(target_ty) => *target_ty,
     };
     let value_type =
@@ -506,7 +517,7 @@ fn typed_expression_field_value_type(
         return Err(JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
             field: symbol,
             initializer,
-            symbol: Some(*target),
+            symbol: Some(target),
         });
     }
     Ok(value_type)

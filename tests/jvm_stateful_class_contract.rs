@@ -3034,6 +3034,65 @@ fn field_metadata_projects_private_reference_fields_from_the_full_unit() {
 }
 
 #[test]
+fn field_metadata_rejects_a_reference_identifier_without_a_parameter_term_ref() {
+    with_source(
+        "class Counter {}\nclass Holder(initial: Counter) { private val item: Counter = initial }",
+        |ast, source, index, definitions, typer| {
+            let counter = symbol_named(ast, index, source, typer, "Counter");
+            let holder = symbol_named(ast, index, source, typer, "Holder");
+            typer.complete_symbol(counter).unwrap();
+            typer.complete_symbol(holder).unwrap();
+            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "item");
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+
+            let mut malformed_ast = dotty_core::ast::TypedAst::new();
+            let mut malformed_initializer_tree = typer.typed_ast().get(initializer).clone();
+            malformed_initializer_tree.ty = field_type;
+            let malformed_initializer = malformed_ast.alloc(malformed_initializer_tree);
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: &malformed_ast,
+                classes: vec![
+                    JvmClassPlan {
+                        class: counter,
+                        methods: Vec::new(),
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    },
+                    JvmClassPlan {
+                        class: holder,
+                        methods: Vec::new(),
+                        fields: vec![JvmFieldPlan {
+                            field,
+                            source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                            initializer: Some(malformed_initializer),
+                        }],
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    },
+                ],
+            };
+            assert_eq!(
+                unit.metadata(definitions),
+                Err(
+                    dotty_jvm::JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
+                        field,
+                        initializer: malformed_initializer,
+                        symbol: None,
+                    }
+                )
+            );
+        },
+    );
+}
+
+#[test]
 fn field_metadata_rejects_reference_fields_outside_the_unit_and_self_initialization() {
     with_source(
         "class Outside {}\nclass Holder(initial: Outside) { private val item: Outside = initial }",
