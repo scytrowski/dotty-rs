@@ -6761,9 +6761,8 @@ fn verify_reference_object_apis_with_jdk(output_directory: &Path) {
             output.contains("major version: 65"),
             "{class_name}: {output}"
         );
-        assert!(output.contains("StackMapTable"), "{class_name}: {output}");
     }
-    let service = Command::new("javap")
+    let service_javap = Command::new("javap")
         .args([
             "-c",
             "-v",
@@ -6773,22 +6772,26 @@ fn verify_reference_object_apis_with_jdk(output_directory: &Path) {
             "CounterService",
         ])
         .output()
-        .expect("start javap for CounterService");
+        .expect("start javap to inspect CounterService frames");
     assert!(
-        service.status.success(),
+        service_javap.status.success(),
         "javap rejected CounterService\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&service.stdout),
-        String::from_utf8_lossy(&service.stderr)
+        String::from_utf8_lossy(&service_javap.stdout),
+        String::from_utf8_lossy(&service_javap.stderr)
     );
-    let service = String::from_utf8_lossy(&service.stdout);
+    assert!(
+        String::from_utf8_lossy(&service_javap.stdout).contains("StackMapTable"),
+        "branching CounterService methods must have StackMapTable frames"
+    );
+    let service = String::from_utf8_lossy(&service_javap.stdout);
     for expected in [
         "descriptor: (I)LCounter;",
         "descriptor: (LCounter;)LCounter;",
         "descriptor: (LCounter;)I",
         "descriptor: (ZLCounter;LCounter;)LCounter;",
         "descriptor: (LCounter;I)I",
-        "invokevirtual // Method Counter.get:()I",
-        "invokevirtual // Method Counter.increment:()I",
+        "// Method Counter.get:()I",
+        "// Method Counter.increment:()I",
         "create:(I)LCounter;",
         "read:(LCounter;)I",
         "new           #",
@@ -6819,6 +6822,7 @@ fn verify_reference_object_apis_with_jdk(output_directory: &Path) {
         &service,
         "public int roundTrip(int);",
         &[
+            "aload_0",
             "aload_0",
             "iload_1",
             "invokevirtual",
