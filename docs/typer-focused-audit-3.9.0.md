@@ -71,3 +71,15 @@ selected-method run against legacy processing of all methods in the same
 files, so method counts describe different scopes; the smoke manifest provides
 the direct file-mode comparison. Timing and RSS are measurement data and are
 kept outside the deterministic normalized report.
+
+### Initial smoke measurement
+
+The checked-in [#1281 smoke measurement](typer-focused-audit-1281-smoke-performance.tsv)
+uses the three manifest files, Scala revision `777528f19a58e794c9954a42f433373472ec57f8`,
+Scala 3.9.0 artifacts, and JDK 21.0.8. The two focused runs took 3.210 s and
+3.222 s; the legacy file profile took 3.981 s. All three attempted the same 31
+methods, typed zero, and made 269 package plus 102 member resolver requests.
+This is one local smoke sample, not evidence of a general 20% speedup: the
+legacy mode emits per-file and per-method timing diagnostics that focused mode
+does not. Peak RSS is `unavailable` because GNU `/usr/bin/time` is not installed
+on this worker. The focused normalized reports matched byte-for-byte.

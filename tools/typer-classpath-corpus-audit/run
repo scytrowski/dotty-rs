@@ -186,6 +186,7 @@ fi
 if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
     export CARGO_BUILD_JOBS=1
     export RUST_TEST_THREADS=1
+    manifest_argument="$focused_manifest"
     if [[ -n "$focused_manifest" && "$focused_manifest" != /* ]]; then
         focused_manifest="$repo_root/$focused_manifest"
     fi
@@ -201,7 +202,13 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
             ;;
     esac
     if [[ -n "$focused_manifest" ]]; then
-        selection_label="manifest: $focused_manifest"
+        if [[ "$focused_manifest" == "$repo_root"/* ]]; then
+            selection_label="manifest: ${focused_manifest#"$repo_root"/}"
+        elif [[ "$manifest_argument" != /* ]]; then
+            selection_label="manifest: $manifest_argument"
+        else
+            selection_label="external manifest"
+        fi
         PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/focused_selection.py" \
             "$focused_manifest" --root "$scala_root" >"$tmp_dir/focused-files.txt"
     else
@@ -299,22 +306,30 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
             cat "$tmp_dir/legacy.log" >&2
             exit 1
         fi
-        focused_timing="$(sed -n 's/^FOCUSED_TIMING //p' "$tmp_dir/first.log" | tail -1)"
         legacy_timing="$(sed -n 's/^AUDIT_PROFILE_SUMMARY //p' "$tmp_dir/legacy.log" | tail -1)"
-        if [[ -z "$focused_timing" || -z "$legacy_timing" ]]; then
+        if [[ -z "$legacy_timing" ]]; then
             cat "$tmp_dir/legacy.log" >&2
             printf 'performance comparison timing markers were missing\n' >&2
             exit 1
         fi
         printf 'mode\twall_ms\tmethods_attempted\tmethods_typed\tpackage_requests\tmember_requests\tpeak_rss_kb\n' >"$tmp_dir/comparison.tsv"
-        printf 'focused\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$(sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p' <<<"$focused_timing")" \
-            "$(sed -n 's/^methods_attempted=//p' "$tmp_dir/first.focused-report")" \
-            "$(sed -n 's/^methods_typed=//p' "$tmp_dir/first.focused-report")" \
-            "$(sed -n 's/^  package_requests=//p' "$tmp_dir/first.focused-report")" \
-            "$(sed -n 's/^  member_requests=//p' "$tmp_dir/first.focused-report")" \
-            "$(rss_value "$tmp_dir/first.rss")" \
-            >>"$tmp_dir/comparison.tsv"
+        for run in "${run_names[@]}"; do
+            focused_timing="$(sed -n 's/^FOCUSED_TIMING //p' "$tmp_dir/$run.log" | tail -1)"
+            if [[ -z "$focused_timing" ]]; then
+                cat "$tmp_dir/$run.log" >&2
+                printf 'focused performance timing marker was missing for %s\n' "$run" >&2
+                exit 1
+            fi
+            printf 'focused-%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$run" \
+                "$(sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p' <<<"$focused_timing")" \
+                "$(sed -n 's/^methods_attempted=//p' "$tmp_dir/first.focused-report")" \
+                "$(sed -n 's/^methods_typed=//p' "$tmp_dir/first.focused-report")" \
+                "$(sed -n 's/^  package_requests=//p' "$tmp_dir/first.focused-report")" \
+                "$(sed -n 's/^  member_requests=//p' "$tmp_dir/first.focused-report")" \
+                "$(rss_value "$tmp_dir/$run.rss")" \
+                >>"$tmp_dir/comparison.tsv"
+        done
         printf 'legacy-file-profile\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$(sed -n 's/.*wall_ms=\([0-9]*\).*/\1/p' <<<"$legacy_timing")" \
             "$(sed -n 's/.*methods_attempted=\([0-9]*\).*/\1/p' <<<"$legacy_timing")" \
