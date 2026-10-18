@@ -6075,28 +6075,58 @@ fn pinned_scala39_local_definition_audit() {
         revision, "777528f19a58e794c9954a42f433373472ec57f8",
         "audit requires the repository's pinned Scala 3.9.0 source revision"
     );
+    let focused_files = std::env::var_os("DOTTY_AUDIT_FOCUSED_FILES").map(|path| {
+        fs::read_to_string(path)
+            .expect("focused file selection must be readable")
+            .lines()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>()
+    });
+    let focused_methods = std::env::var_os("DOTTY_AUDIT_FOCUSED_METHODS").map(|path| {
+        fs::read_to_string(path)
+            .expect("focused method selection must be readable")
+            .lines()
+            .map(|line| {
+                let (path, tree) = line
+                    .rsplit_once("#tree=")
+                    .expect("focused method identity must contain a tree index");
+                (
+                    path.to_owned(),
+                    tree.parse::<u32>()
+                        .expect("method tree index must be numeric"),
+                )
+            })
+            .fold(
+                BTreeMap::<String, BTreeSet<u32>>::new(),
+                |mut selected, (path, tree)| {
+                    selected.entry(path).or_default().insert(tree);
+                    selected
+                },
+            )
+    });
     let profile_files = std::env::var("DOTTY_AUDIT_PROFILE_FILES")
         .ok()
         .map(|files| files.split(',').map(str::to_owned).collect::<BTreeSet<_>>());
-    let classpath_started = profile_files.as_ref().map(|_| Instant::now());
+    let selected_files = focused_files.as_ref().or(profile_files.as_ref());
+    let classpath_started = selected_files.map(|_| Instant::now());
     let classpath = audit_classpath_from_environment();
     let classpath_setup_time =
         classpath_started.map_or(Duration::ZERO, |started| started.elapsed());
     let resolver_metrics = Rc::new(RefCell::new(ResolverMetrics {
-        timing_enabled: profile_files.is_some(),
+        timing_enabled: selected_files.is_some(),
         ..ResolverMetrics::default()
     }));
-    let file_discovery_started = profile_files.as_ref().map(|_| Instant::now());
+    let file_discovery_started = selected_files.map(|_| Instant::now());
     let files = scala_files(&[root.join("library/src"), root.join("compiler/src")]);
     let file_discovery_time =
         file_discovery_started.map_or(Duration::ZERO, |started| started.elapsed());
-    let expected_files = profile_files.as_ref().map_or(files.len(), BTreeSet::len);
+    let expected_files = selected_files.map_or(files.len(), BTreeSet::len);
     let mut source_read_time = Duration::ZERO;
     let mut audit_merge_time = Duration::ZERO;
-    if let Some(profile_files) = &profile_files {
+    if let Some(selected_files) = selected_files {
         assert!(
-            !profile_files.is_empty(),
-            "profile file list must not be empty"
+            !selected_files.is_empty(),
+            "selected file list must not be empty"
         );
     }
     let mut audit = Audit::default();
@@ -6110,14 +6140,14 @@ fn pinned_scala39_local_definition_audit() {
             .unwrap_or(file)
             .to_string_lossy()
             .replace('\\', "/");
-        if profile_files
+        if selected_files
             .as_ref()
-            .is_some_and(|profile_files| !profile_files.contains(&relative))
+            .is_some_and(|selected_files| !selected_files.contains(&relative))
         {
             continue;
         }
         processed_files += 1;
-        let source_read_started = profile_files.as_ref().map(|_| Instant::now());
+        let source_read_started = selected_files.map(|_| Instant::now());
         let source = match fs::read_to_string(file) {
             Ok(source) => source,
             Err(_) => {
@@ -6130,15 +6160,128 @@ fn pinned_scala39_local_definition_audit() {
             }
         };
         source_read_time += source_read_started.map_or(Duration::ZERO, |started| started.elapsed());
-        let source_processing_and_merge_started = profile_files.as_ref().map(|_| Instant::now());
-        audit.merge(audit_source_with_classpath(
+        let source_processing_and_merge_started = selected_files.map(|_| Instant::now());
+        let selected_method_trees = focused_methods
+            .as_ref()
+            .map(|methods| methods.get(&relative).cloned().unwrap_or_default());
+        audit.merge(audit_source_with_classpath_filtered(
             &source,
             &relative,
             classpath.clone(),
             Rc::clone(&resolver_metrics),
+            selected_method_trees.as_ref(),
         ));
         audit_merge_time +=
             source_processing_and_merge_started.map_or(Duration::ZERO, |started| started.elapsed());
+    }
+
+    if let Some(focused_files) = focused_files {
+        assert_eq!(
+            processed_files,
+            focused_files.len(),
+            "every focused path must match a Scala source file"
+        );
+        if let Some(methods) = &focused_methods {
+            let selected_method_count = methods.values().map(BTreeSet::len).sum::<usize>();
+            assert!(
+                selected_method_count > 0,
+                "focused method selection must not be empty"
+            );
+            assert!(
+                methods.keys().all(|path| focused_files.contains(path)),
+                "every selected method must belong to a selected source file"
+            );
+            assert_eq!(
+                audit.local_method_first_blockers.len(),
+                selected_method_count,
+                "every selected method tree must exist and receive one typing outcome"
+            );
+        }
+        println!("FOCUSED_REPORT_BEGIN");
+        println!("status=FOCUSED / PARTIAL");
+        println!("selected_files={}", focused_files.len());
+        println!(
+            "selected_methods={}",
+            focused_methods
+                .as_ref()
+                .map_or(audit.local_method_attempts.len(), |methods| {
+                    methods.values().map(BTreeSet::len).sum()
+                })
+        );
+        println!("files_attempted={}", audit.files_attempted);
+        println!("parser_failed_files={}", audit.parser_failed_files);
+        println!("namer_failed_files={}", audit.namer_failed_files);
+        println!("methods_attempted={}", audit.local_method_attempts.len());
+        println!("methods_typed={}", audit.typed_local_defdefs);
+        println!(
+            "first_blocker_rows={}",
+            audit.local_method_first_blockers.len()
+        );
+        println!("selected_paths:");
+        for path in &focused_files {
+            println!("  {path}");
+        }
+        println!("method_outcomes:");
+        for row in &audit.local_method_attempts {
+            println!("  {row}");
+        }
+        println!("blocker_counts:");
+        for (name, bucket) in &audit.failures {
+            println!(
+                "  {name}: count={}, files={}",
+                bucket.count,
+                bucket.files.len()
+            );
+        }
+        let metrics = resolver_metrics.borrow();
+        println!("resolver_metrics:");
+        println!("  package_requests={}", metrics.resolver_package_requests);
+        println!("  package_successes={}", metrics.package_successes);
+        println!("  package_unresolved={}", metrics.package_unresolved);
+        println!("  package_errors={}", metrics.package_errors);
+        println!("  member_requests={}", metrics.resolver_member_requests);
+        println!("  member_successes={}", metrics.member_successes);
+        println!("  member_unresolved={}", metrics.member_unresolved);
+        println!("  member_errors={}", metrics.member_errors);
+        println!(
+            "  class_symbol_successes={}",
+            metrics.class_symbol_successes
+        );
+        println!("materialized_packages:");
+        for target in &metrics.packages {
+            println!("  {target}");
+        }
+        println!("materialized_classes:");
+        for target in &metrics.classes {
+            println!("  {target}");
+        }
+        println!("materialized_members:");
+        for target in &metrics.members {
+            println!("  {target}");
+        }
+        println!("materialized_objects:");
+        for target in &metrics.module_resolution.resolved_object_targets {
+            println!("  {target}");
+        }
+        println!("materialized_module_classes:");
+        for target in &metrics.module_resolution.completed_module_classes {
+            println!("  {target}");
+        }
+        println!("materialized_module_members:");
+        for target in &metrics.module_resolution.resolved_member_targets {
+            println!("  {target}");
+        }
+        println!("FOCUSED_REPORT_END");
+        println!(
+            "FOCUSED_TIMING files={} wall_ms={} classpath_setup_ms={} file_discovery_ms={} source_read_ms={} source_processing_and_merge_ms={}",
+            processed_files,
+            audit_started.elapsed().as_millis(),
+            classpath_setup_time.as_millis(),
+            file_discovery_time.as_millis(),
+            source_read_time.as_millis(),
+            audit_merge_time.as_millis()
+        );
+        return;
     }
 
     if let Some(profile_files) = profile_files {
@@ -6148,7 +6291,11 @@ fn pinned_scala39_local_definition_audit() {
             "every requested profile path must match a Scala source file"
         );
         eprintln!(
-            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} wall_ms={} classpath_setup_ms={} file_discovery_ms={} source_read_ms={} source_processing_and_merge_ms={}",
+            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} methods_attempted={} methods_typed={} resolver_package_requests={} resolver_member_requests={} wall_ms={} classpath_setup_ms={} file_discovery_ms={} source_read_ms={} source_processing_and_merge_ms={}",
+            audit.local_method_attempts.len(),
+            audit.typed_local_defdefs,
+            resolver_metrics.borrow().resolver_package_requests,
+            resolver_metrics.borrow().resolver_member_requests,
             audit_started.elapsed().as_millis(),
             classpath_setup_time.as_millis(),
             file_discovery_time.as_millis(),
@@ -8651,6 +8798,64 @@ fn local_patdef_audit_preserves_attempts_across_method_failures() {
 }
 
 #[test]
+fn focused_method_filter_attempts_only_the_selected_source_tree() {
+    let source =
+        "object Fixture { def enclosing = { def selected = 1; def ignored = 2; selected } }";
+    let source_id = SourceId::from_index(0);
+    let mut names = dotty_core::names::NameInterner::default();
+    let scanner = ContextualScanner::new(source).expect("fixture scanner should initialize");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source).expect("fixture source should be valid"),
+        source_id,
+        scanner,
+        &mut names,
+    );
+    let selected_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (names.resolve(definition.name.as_name().text()) == "selected").then_some(tree.index())
+        })
+        .expect("selected local method should be present");
+    let ignored_tree = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (names.resolve(definition.name.as_name().text()) == "ignored").then_some(tree.index())
+        })
+        .expect("unselected local method should be present");
+    let focused = audit_source_inner_filtered(
+        source,
+        "compiler/src/Fixture.scala",
+        None,
+        false,
+        None,
+        None,
+        Some(&BTreeSet::from([selected_tree])),
+    );
+    assert_eq!(focused.local_method_attempts.len(), 1);
+    assert_eq!(focused.local_method_first_blockers.len(), 1);
+    assert!(
+        focused
+            .local_method_attempts
+            .iter()
+            .all(|row| row.contains(&format!("#tree={selected_tree}")))
+    );
+    assert!(
+        focused
+            .local_method_attempts
+            .iter()
+            .all(|row| !row.contains(&format!("#tree={ignored_tree}")))
+    );
+}
+
+#[test]
 fn local_patdef_audit_distinguishes_missing_and_recovered_rhs() {
     let source = "object Audit { def outer: Unit = { val (left, right) = 1; () } }";
     let source_id = SourceId::from_index(0);
@@ -9543,13 +9748,22 @@ fn audit_source(text: &str, path: &str) -> Audit {
     audit_source_inner(text, path, None, false)
 }
 
-fn audit_source_with_classpath(
+fn audit_source_with_classpath_filtered(
     text: &str,
     path: &str,
     classpath: SharedClassPath,
     metrics: Rc<RefCell<ResolverMetrics>>,
+    method_trees: Option<&BTreeSet<u32>>,
 ) -> Audit {
-    audit_source_inner(text, path, Some((classpath, metrics)), false)
+    audit_source_inner_filtered(
+        text,
+        path,
+        Some((classpath, metrics)),
+        false,
+        None,
+        None,
+        method_trees,
+    )
 }
 
 fn audit_import_prefix_source_for_methods(
@@ -9567,6 +9781,7 @@ fn audit_import_prefix_source_for_methods(
         true,
         Some(method_trees),
         Some(source_package_paths),
+        None,
     )
 }
 
@@ -10155,7 +10370,7 @@ fn audit_source_inner(
     classpath: Option<(SharedClassPath, Rc<RefCell<ResolverMetrics>>)>,
     import_prefix_only: bool,
 ) -> Audit {
-    audit_source_inner_filtered(text, path, classpath, import_prefix_only, None, None)
+    audit_source_inner_filtered(text, path, classpath, import_prefix_only, None, None, None)
 }
 
 fn audit_source_inner_filtered(
@@ -10165,6 +10380,7 @@ fn audit_source_inner_filtered(
     import_prefix_only: bool,
     method_tree_filter: Option<&BTreeSet<u32>>,
     source_package_inventory: Option<&BTreeSet<String>>,
+    focused_method_tree_filter: Option<&BTreeSet<u32>>,
 ) -> Audit {
     let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
     let file_started = Instant::now();
@@ -10338,12 +10554,62 @@ fn audit_source_inner_filtered(
             Some((method, tree, rhs, range))
         })
         .collect::<Vec<_>>();
-    let mut root_methods = method_tree_filter.map_or(root_methods.clone(), |allowed| {
+    let mut root_methods = if let Some(selected_trees) = focused_method_tree_filter {
+        let selected_ranges = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| {
+                if !selected_trees.contains(&tree.index()) {
+                    return None;
+                }
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                definition.rhs?;
+                Some((tree.index(), node.position?.span().range()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            selected_ranges.len(),
+            selected_trees.len(),
+            "every selected method tree must identify a source method with a body"
+        );
+        let selected_roots = selected_ranges
+            .iter()
+            .map(|(selected_tree, selected_range)| {
+                root_methods
+                    .iter()
+                    .filter(|(_, tree, _, root_range)| {
+                        tree.index() == *selected_tree
+                            || (root_range.start() <= selected_range.start()
+                                && selected_range.end() <= root_range.end())
+                    })
+                    .min_by_key(|(_, _, _, root_range)| {
+                        root_range.end().saturating_sub(root_range.start())
+                    })
+                    .map(|(_, tree, _, _)| tree.index())
+                    .expect("selected method must have a typed enclosing method")
+            })
+            .collect::<BTreeSet<_>>();
         root_methods
             .into_iter()
-            .filter(|(_, tree, _, _)| allowed.contains(&tree.index()))
+            .filter(|(_, tree, _, _)| selected_roots.contains(&tree.index()))
             .collect()
-    });
+    } else {
+        method_tree_filter.map_or(root_methods.clone(), |allowed| {
+            root_methods
+                .into_iter()
+                .filter(|(_, tree, _, _)| allowed.contains(&tree.index()))
+                .collect()
+        })
+    };
+    if let Some(allowed) = method_tree_filter {
+        assert_eq!(
+            root_methods.len(),
+            allowed.len(),
+            "every selected method tree must identify one source method with a body"
+        );
+    }
     if profile_timing
         && let Some(limit) = std::env::var("DOTTY_AUDIT_PROFILE_METHOD_LIMIT")
             .ok()
@@ -10353,6 +10619,16 @@ fn audit_source_inner_filtered(
     }
 
     let local_method_trees = local_method_trees(&parsed.ast);
+    if let Some(allowed) = focused_method_tree_filter {
+        assert_eq!(
+            local_method_trees
+                .iter()
+                .filter(|(tree, _)| allowed.contains(&tree.index()))
+                .count(),
+            allowed.len(),
+            "every selected method tree must be a local method"
+        );
+    }
     let match_pattern_shapes = parsed
         .ast
         .iter()
@@ -10735,6 +11011,12 @@ fn audit_source_inner_filtered(
     }
 
     for (tree, range) in local_method_trees.clone() {
+        if focused_method_tree_filter.is_some_and(|allowed| !allowed.contains(&tree.index())) {
+            continue;
+        }
+        if method_tree_filter.is_some_and(|allowed| !allowed.contains(&tree.index())) {
+            continue;
+        }
         let TreeKind::DefDef(definition) = &parsed.ast.get(tree).kind else {
             unreachable!()
         };

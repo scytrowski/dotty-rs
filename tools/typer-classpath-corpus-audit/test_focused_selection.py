@@ -2,7 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from focused_selection import SelectionError, load_manifest, normalize_manifest_path
+from focused_selection import (
+    SelectionError,
+    load_cohort,
+    load_manifest,
+    normalize_manifest_path,
+)
 
 
 class FocusedSelectionTests(unittest.TestCase):
@@ -35,7 +40,14 @@ class FocusedSelectionTests(unittest.TestCase):
         )
 
     def test_rejects_non_normalized_or_unsafe_paths(self):
-        for value in ("/tmp/A.scala", "../A.scala", "src/../A.scala", "src//A.scala", "src\\A.scala"):
+        for value in (
+            "/tmp/A.scala",
+            "C:/src/A.scala",
+            "../A.scala",
+            "src/../A.scala",
+            "src//A.scala",
+            "src\\A.scala",
+        ):
             with self.subTest(value=value), self.assertRaises(SelectionError):
                 normalize_manifest_path(value, line_number=1)
 
@@ -57,6 +69,38 @@ class FocusedSelectionTests(unittest.TestCase):
         (self.library / "Escape.scala").symlink_to(outside)
         with self.assertRaisesRegex(SelectionError, "escapes the corpus"):
             load_manifest(self.manifest("library/src/Escape.scala\n"), self.roots())
+
+    def test_rejects_two_paths_that_alias_the_same_source(self):
+        (self.library / "Alias.scala").symlink_to(self.library / "A.scala")
+        with self.assertRaisesRegex(SelectionError, "same source"):
+            load_manifest(
+                self.manifest("library/src/A.scala\nlibrary/src/Alias.scala\n"),
+                self.roots(),
+            )
+
+    def test_named_cohorts_pin_rows_and_select_unique_path_tree_identities(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        for name, table in (
+            ("package-term", "docs/typer-classpath-corpus-audit-3.9.0-package-term-first-blockers.tsv"),
+            ("object-module", "docs/typer-classpath-corpus-audit-1051-object-module-blockers.tsv"),
+        ):
+            with self.subTest(name=name):
+                import csv
+
+                with (repo_root / table).open(encoding="utf-8", newline="") as frozen:
+                    rows = list(csv.DictReader(frozen, delimiter="\t"))
+                sources = {
+                    row["file"] if name == "package-term" else row["source_file"]
+                    for row in rows
+                }
+                for source in sources:
+                    path = self.base / source
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.touch()
+                files, methods = load_cohort(name, repo_root, self.base)
+                self.assertEqual(files, sorted(sources))
+                self.assertGreater(len(methods), 0)
+                self.assertEqual(len(methods), len(set(methods)))
 
 
 if __name__ == "__main__":
