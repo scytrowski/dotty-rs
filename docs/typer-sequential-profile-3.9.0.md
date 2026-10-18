@@ -42,7 +42,7 @@ Both measured runs used an already-built Cargo target. A cold Cargo build was no
 
 ### Cold/warm cache follow-up
 
-The [cache check report](typer-sequential-profile-3.9.0-cache-check/summary.md) and TSVs record two bounded follow-ups on the same five-file manifest and machine. With an empty Cargo target, the first run took 299.287 s wall / 223.298 s in the audit; the second run with the compiled target took 222.602 s / 221.952 s. The 76.685 s wall difference is Cargo compilation and startup, while measured audit time differed by 1.346 s.
+The [Cargo target cache report](typer-sequential-profile-3.9.0-build-cache-check/summary.md) and [input page-cache report](typer-sequential-profile-3.9.0-cache-check/summary.md) record two bounded follow-ups on the same five-file manifest and machine. With an empty Cargo target, the first run took 299.287 s wall / 223.298 s in the audit; the second run with the compiled target took 222.602 s / 221.952 s. The 76.685 s wall difference is Cargo compilation and startup, while measured audit time differed by 1.346 s.
 
 A separate pair requested eviction only for the selected Scala sources, Scala JARs, and JDK jmods, then measured residency with `fincore`. The first run took 252.582 s and the second, after those inputs had been read, took 220.461 s. Eviction was partial: 41,734,144 bytes were resident before the request and 35,147,776 bytes remained afterward. The report labels this `partial-eviction`; it does not present it as a fully cold filesystem run. Global page-cache clearing was avoided. The complete profile writer timer now includes all TSV sidecars and the summary; this run measured 24 ms. The earlier 11 ms figure stopped before those outputs were written and is superseded.
 
