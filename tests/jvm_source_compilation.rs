@@ -3063,7 +3063,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0xac
             | 0xb0
             | 0xb1 => 1,
-            0x10 | 0x15 | 0x36 => 2,
+            0x10 | 0x15 | 0x19 | 0x36 | 0x3a => 2,
             0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };
@@ -5169,7 +5169,7 @@ fn reference_receiver_calls_keep_private_access_rejected_and_allow_verified_bran
 #[test]
 fn reference_parameters_and_results_compose_with_if_and_while_control_flow() {
     let output = TestOutputDirectory::new("reference-parameter-result-control-flow");
-    let source = "class Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def increment(): Unit = current = current + 1\nclass CounterControl:\n  def pass(counter: Counter): Counter = counter\n  def choose(flag: Boolean, first: Counter, second: Counter): Counter =\n    if flag then first else second\n  def chooseThroughCall(flag: Boolean, first: Counter, second: Counter): Counter =\n    if flag then\n      pass(first)\n      first\n    else second\n  def incrementUntil(counter: Counter, limit: Int): Int =\n    while counter.get() < limit do counter.increment()\n    counter.get()\n  def incrementWhile(enabled: Boolean, counter: Counter, limit: Int): Int =\n    while enabled && counter.get() < limit do counter.increment()\n    counter.get()\n";
+    let source = "class Counter(start: Int):\n  private var current: Int = start\n  def get(): Int = current\n  def increment(): Unit = current = current + 1\nclass CounterControl:\n  def pass(counter: Counter): Counter = counter\n  def choose(flag: Boolean, first: Counter, second: Counter): Counter =\n    if flag then first else second\n  def chooseThroughCall(flag: Boolean, first: Counter, second: Counter): Counter =\n    if flag then\n      val allocated = new Counter(9)\n      pass(first)\n      first\n    else second\n  def incrementUntil(counter: Counter, limit: Int): Int =\n    while counter.get() < limit do counter.increment()\n    counter.get()\n  def incrementWhile(enabled: Boolean, counter: Counter, limit: Int): Int =\n    while enabled && counter.get() < limit do counter.increment()\n    counter.get()\n";
     let first = compile_source_classes(
         source,
         "ReferenceParameterResultControlFlow.scala",
@@ -5237,7 +5237,10 @@ fn reference_parameters_and_results_compose_with_if_and_while_control_flow() {
     assert_invocation_sequence(
         &control,
         emitted_method_code(&control, "chooseThroughCall"),
-        &[(0xb6, "CounterControl", "pass", "(LCounter;)LCounter;")],
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "CounterControl", "pass", "(LCounter;)LCounter;"),
+        ],
     );
 
     for (method, expected_locals) in [
