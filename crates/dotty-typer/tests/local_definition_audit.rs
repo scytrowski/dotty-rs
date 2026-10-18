@@ -6225,6 +6225,22 @@ fn pinned_scala39_local_definition_audit() {
         for row in &audit.local_method_attempts {
             println!("  {row}");
         }
+        println!("resolver_observations:");
+        println!("  attempt\ttarget\toutcome\tcause\tmaterialized_prefix\tselected_identity");
+        for (method, observations) in &resolver_metrics.borrow().resolver_requests_by_method {
+            let attempt = method.split("::").next().unwrap_or(method);
+            for observation in observations {
+                println!(
+                    "  {}\t{}\t{}\t{}\t{}\t{}",
+                    tsv_or_dash(attempt),
+                    tsv_or_dash(&observation.target),
+                    tsv_or_dash(&observation.outcome),
+                    tsv_or_dash(observation.cause.as_deref().unwrap_or("")),
+                    tsv_or_dash(observation.materialized_prefix.as_deref().unwrap_or("")),
+                    tsv_or_dash(observation.selected_identity.as_deref().unwrap_or("")),
+                );
+            }
+        }
         println!("blocker_counts:");
         for (name, bucket) in &audit.failures {
             println!(
@@ -8799,8 +8815,7 @@ fn local_patdef_audit_preserves_attempts_across_method_failures() {
 
 #[test]
 fn focused_method_filter_attempts_only_the_selected_source_tree() {
-    let source =
-        "object Fixture { def enclosing = { def selected = 1; def ignored = 2; selected } }";
+    let source = "object Fixture { def enclosing = { def selected = { import external.pkg.Value; 1 }; def ignored = 2; selected } }";
     let source_id = SourceId::from_index(0);
     let mut names = dotty_core::names::NameInterner::default();
     let scanner = ContextualScanner::new(source).expect("fixture scanner should initialize");
@@ -8830,17 +8845,88 @@ fn focused_method_filter_attempts_only_the_selected_source_tree() {
             (names.resolve(definition.name.as_name().text()) == "ignored").then_some(tree.index())
         })
         .expect("unselected local method should be present");
-    let focused = audit_source_inner_filtered(
-        source,
-        "compiler/src/Fixture.scala",
-        None,
-        false,
-        None,
-        None,
-        Some(&BTreeSet::from([selected_tree])),
-    );
-    assert_eq!(focused.local_method_attempts.len(), 1);
+    let classpath = SharedClassPath::new(CompositeClassPath::new(Vec::new()));
+    let audit_with_filter = |method_filter| {
+        let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
+        let audit = audit_source_inner_filtered(
+            source,
+            "compiler/src/Fixture.scala",
+            Some((classpath.clone(), Rc::clone(&metrics))),
+            false,
+            None,
+            None,
+            method_filter,
+        );
+        (audit, metrics)
+    };
+    let selected_trees = BTreeSet::from([selected_tree]);
+    let (focused, focused_metrics) = audit_with_filter(Some(&selected_trees));
+    let (unfocused, unfocused_metrics) = audit_with_filter(None);
+    let selected_identity = format!("compiler/src/Fixture.scala#tree={selected_tree}");
+    let selected_outcomes = |audit: &Audit| {
+        audit
+            .local_method_attempts
+            .iter()
+            .filter(|row| row.starts_with(&format!("method={selected_identity}::")))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
+    let focused_selected_outcomes = selected_outcomes(&focused);
+    let unfocused_selected_outcomes = selected_outcomes(&unfocused);
+    assert_eq!(focused_selected_outcomes.len(), 1);
+    assert_eq!(focused_selected_outcomes, unfocused_selected_outcomes);
     assert_eq!(focused.local_method_first_blockers.len(), 1);
+    assert_eq!(
+        focused.local_method_first_blockers.get(&selected_identity),
+        unfocused
+            .local_method_first_blockers
+            .get(&selected_identity),
+        "focused filtering must preserve the selected method's blocker/typed outcome"
+    );
+    let focused_resolution_rows = focused
+        .resolution_blocker_profile
+        .observations
+        .iter()
+        .filter(|row| row.method == selected_identity)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let unfocused_resolution_rows = unfocused
+        .resolution_blocker_profile
+        .observations
+        .iter()
+        .filter(|row| row.method == selected_identity)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        focused_resolution_rows, unfocused_resolution_rows,
+        "focused filtering must preserve selected-method resolver targets and materialization observations"
+    );
+    let selected_attempt = focused_selected_outcomes
+        .iter()
+        .next()
+        .and_then(|row| row.split("::attempt=").nth(1))
+        .and_then(|attempt| attempt.split("::").next())
+        .expect("selected method outcome should include its enclosing attempt")
+        .to_owned();
+    let requests_for_selected = |metrics: &ResolverMetrics| {
+        metrics
+            .resolver_requests_by_method
+            .iter()
+            .filter(|(method, _)| method.starts_with(&format!("{selected_attempt}::")))
+            .flat_map(|(_, requests)| requests.iter().cloned())
+            .collect::<Vec<_>>()
+    };
+    let focused_requests = requests_for_selected(&focused_metrics.borrow());
+    let unfocused_requests = requests_for_selected(&unfocused_metrics.borrow());
+    assert!(
+        !focused_requests.is_empty(),
+        "fixture should exercise external resolution: {:?}",
+        focused_metrics.borrow().resolver_requests_by_method
+    );
+    assert_eq!(
+        focused_requests, unfocused_requests,
+        "focused filtering must preserve selected-method request outcomes and materialization stages"
+    );
     assert!(
         focused
             .local_method_attempts

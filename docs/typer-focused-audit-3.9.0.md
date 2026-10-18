@@ -47,7 +47,12 @@ The smoke manifest audits all methods in its three files. A named cohort selects
 only its frozen method trees for outcome accounting; the typer runs the nearest
 enclosing method body needed to preserve source context, so sibling declarations
 in that body may also be traversed. Each outcome row shows both the selected
-`method` and the actual enclosing `attempt`. Parsing, AST inventory, and naming
+`method` and the actual enclosing `attempt`. Focused reports also include each
+resolver request's target, outcome, cause, materialized prefix, and selected
+identity. The frozen cohort sidecar joins those observations to each historical
+row by enclosing attempt and target, preserving explicit missing-attempt and
+missing-target states instead of copying a method-level blocker onto every row.
+Parsing, AST inventory, and naming
 still run for each distinct selected file. `--verify-determinism` executes two
 sequential runs (`CARGO_BUILD_JOBS=1`, `RUST_TEST_THREADS=1` are set by the
 runner) and compares normalized reports. The test binary is built once before
