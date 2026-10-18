@@ -43,6 +43,17 @@ class SequentialProfileTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 sequential_profile.read_manifest(manifest, scala_root)
 
+    def test_cargo_target_cache_state_tracks_compiled_audit_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target_dir = Path(temporary)
+            self.assertEqual(sequential_profile.cargo_target_cache_state(target_dir), "cold")
+            deps_dir = target_dir / "debug" / "deps"
+            deps_dir.mkdir(parents=True)
+            audit_binary = deps_dir / "local_definition_audit-abc123"
+            audit_binary.write_text("binary")
+            audit_binary.chmod(0o755)
+            self.assertEqual(sequential_profile.cargo_target_cache_state(target_dir), "warm")
+
     def test_profile_log_extracts_file_phases_methods_resolver_and_run_setup(self):
         log = """AUDIT_FILE_PHASE file=compiler/A.scala phase=parse ms=12
 AUDIT_METHOD_TIMING file=compiler/A.scala tree=8 method=foo elapsed_ms=44
@@ -82,7 +93,7 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
                     Path(temporary),
                     [{"files": {}, "methods": {}, "resolver": {}, "summary": {"wall_ms": "0"}, "loads": {},
                       "resolver_counts": {}, "load_roots": []}],
-                    [0], [], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary),
+                    [0], ["cold"], [], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary),
                 )
 
             summary = (Path(temporary) / "summary.md").read_text()

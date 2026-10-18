@@ -77,6 +77,16 @@ def resolver_duration_ms(values: dict[str, int], operation: str) -> int | str:
     return values.get(f"{operation}_inner_ms", "not_captured")
 
 
+def cargo_target_cache_state(target_dir: Path) -> str:
+    deps_dir = target_dir / "debug" / "deps"
+    if not deps_dir.is_dir():
+        return "cold"
+    return "warm" if any(
+        path.is_file() and not path.name.endswith(".d") and os.access(path, os.X_OK)
+        for path in deps_dir.glob("local_definition_audit-*")
+    ) else "cold"
+
+
 def parse_run(log: str) -> dict:
     result: dict = {
         "files": {}, "methods": {}, "resolver": {}, "summary": {},
@@ -149,17 +159,18 @@ def percentile(values: list[float], p: float) -> float:
     return ordered[index]
 
 
-def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_paths: list[str], commit: str,
+def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_states: list[str],
+                 file_paths: list[str], commit: str,
                  scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path) -> None:
     output_started_ns = time.monotonic_ns()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run-timings.tsv").write_text(
-        "run\tcargo_wall_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
+        "run\tcargo_target_cache_state\tcargo_wall_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
         + "".join(
-            f"{i}\t{wall}\t{int(r['summary']['wall_ms'])}\t{wall-int(r['summary']['wall_ms'])}\t"
+            f"{i}\t{cache_state}\t{wall}\t{int(r['summary']['wall_ms'])}\t{wall-int(r['summary']['wall_ms'])}\t"
             f"{r['summary'].get('classpath_setup_ms', '0')}\t{r['summary'].get('file_discovery_ms', '0')}\t"
             f"{r['summary'].get('source_read_ms', '0')}\t{r['summary'].get('source_processing_and_merge_ms', r['summary'].get('source_audit_merge_ms', '0'))}\n"
-            for i, (r, wall) in enumerate(zip(runs, run_walls), 1)
+            for i, (r, wall, cache_state) in enumerate(zip(runs, run_walls, cache_states), 1)
         ), encoding="utf-8")
 
     phase_totals: dict[str, int] = {}
@@ -278,12 +289,12 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
         f"- JDK: `{jdk_version}` at `{java_home}`",
         f"- Host: `{cpu_model}`, {mem_total} memory; build profile `test`; Cargo/test concurrency fixed at 1",
         f"- Manifest files: {len(file_paths)}; profiled method observations per run: {len(runs[0]['methods'])}; repetitions: {len(runs)}",
-        "- Both timed repetitions used the already-built Cargo target. A cold Cargo build was not measured separately; OS page-cache state was not controlled and cold/warm filesystem time is not compared.",
+        f"- Cargo target cache by repetition: {', '.join(f'{index}={state}' for index, state in enumerate(cache_states, 1))}. `cold` means no compiled local_definition_audit test binary existed in the selected target directory; OS page-cache state is not controlled or compared.",
         "- `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup and harness/report-log overhead.",
         "- Classpath setup includes JDK module and Scala JAR adapter construction. No artifact decode timing is reported separately: class/module completion timers are inclusive at the resolver boundary.",
         "- Cache evidence: classloader profiles report completed-cache hits, full completions, identity shell creation/reuse, and hierarchy requests. They do not expose all lookup cache misses; those are not inferred.",
         "- Rollback/retry observations are recorded by existing resolver rows. Time spent in failed probes is included in method and resolver inclusive timing and is not independently subtractable.",
-        "- Semantic/report ratio compares `typer_setup + typing` against generation of these profile TSV/Markdown artifacts. It does not time the full-corpus normalized report writer, which this focused run does not invoke.",
+        "- Semantic/report ratio compares `typer_setup + typing` against generation of all profile TSV/Markdown artifacts. It does not time the full-corpus normalized report writer, which this focused run does not invoke.",
         "",
         "## Repetition timings",
         "",
@@ -416,6 +427,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[dict] = []
     wall_times: list[int] = []
+    cache_states: list[str] = []
     if args.summarize_existing:
         import csv
         timing_path = out_dir / "run-timings.tsv"
@@ -428,9 +440,13 @@ def main() -> int:
                     fail(f"no saved profile log: {log_path}")
                 results.append(parse_run(log_path.read_text(encoding="utf-8")))
                 wall_times.append(int(row["cargo_wall_ms"]))
+                cache_states.append(row.get("cargo_target_cache_state", "unknown"))
     else:
+        target_dir = Path(env.get("CARGO_TARGET_DIR", REPO_ROOT / "target")).resolve()
         for index in range(1, args.runs + 1):
             print(f"starting serial profile run {index}/{args.runs}", flush=True)
+            cache_state = cargo_target_cache_state(target_dir)
+            cache_states.append(cache_state)
             started = time.monotonic_ns()
             completed = subprocess.run(AUDIT_TEST, cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, check=False)
@@ -442,7 +458,7 @@ def main() -> int:
                 fail(f"profile run {index} failed with exit code {completed.returncode}; see {log_path}")
             results.append(parse_run(completed.stdout))
             wall_times.append(wall_ms)
-            print(f"run {index}/{args.runs}: cargo_wall_ms={wall_ms} audit_wall_ms={results[-1]['summary']['wall_ms']}", flush=True)
+            print(f"run {index}/{args.runs}: target_cache={cache_state} cargo_wall_ms={wall_ms} audit_wall_ms={results[-1]['summary']['wall_ms']}", flush=True)
     if not results:
         fail("no profile runs to summarize")
     expected_methods = {(key, value["method"]) for key, value in results[0]["methods"].items()}
@@ -457,7 +473,7 @@ def main() -> int:
     commit = args.measured_commit or subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         fail("--measured-commit must be a full 40-character Git SHA")
-    write_report(out_dir, results, wall_times, selected, commit, scala_root, java_home, match.group(1), artifact_root)
+    write_report(out_dir, results, wall_times, cache_states, selected, commit, scala_root, java_home, match.group(1), artifact_root)
     print(f"profile report: {out_dir / 'summary.md'}")
     return 0
 
