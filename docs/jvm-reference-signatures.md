@@ -106,16 +106,17 @@ prefix is missing.
 | Layer | Existing behavior | Invariant to preserve |
 | --- | --- | --- |
 | Parser / namer / typer | The audit fixture produces real canonical parameter, method, class, `This`, `Ident`, `Apply`, and `If` trees. Source `Counter` declarations retain a root-package `TypeRef` prefix. | Preserve these identities; do not manufacture or normalize trees to fit the backend. The current source Typer rejects `null` with `NullLiteralTypingDeferred`; it does not currently resolve source `Array` in this fixture (`TypeNameNotFound`). |
-| `dotty-jvm::descriptor` | Unit metadata projects primitive types and exact planned-class references to checked JVM method descriptors. The standalone store-only `JvmMethodPlan::descriptor`, fields, and constructors remain primitive-only. | Keep canonical class identity, source package-prefix, owner, arity, modifiers, parameter-symbol order, and JVMS slot-limit validation. |
+| `dotty-jvm::descriptor` | Unit metadata projects primitive types and exact planned-class references to checked JVM method and primary-constructor descriptors. Store-only method and constructor projections remain primitive-only. | Keep canonical class identity, source package-prefix, owner, arity, modifiers, parameter-symbol order, and JVMS slot-limit validation. |
 | `dotty-jvm` expression and local lowering | Planned reference locals, parameters, current `this`, returns, and virtual calls compose through exact `if` joins, `while` back-edges, nested blocks, and short-circuit conditions. | Keep exact parameter/class identity checks; evaluate receivers then arguments once in source order; preserve the validated owner and descriptor. |
 | Linear `dotty-classfile` analyzer | Class-aware analysis seeds object parameters and the instance receiver with exact descriptor/current-class identities. In that mode, `areturn` and straight-line `invokevirtual` arguments/results require exact initialized classes. The context-free analyzer retains category-only behavior. | Preserve generic JVM validation and explicit rejection of unsupported descriptor forms. |
 | CFG `dotty-classfile` analyzer | Class-aware flow seeds object method parameters with exact `ClassIdentity`, retains exact stack joins, and checks `areturn` and `invokevirtual` arguments/results against exact descriptor classes. | Preserve fail-closed joins and unsupported descriptor checks; do not infer hierarchy conversions. |
 | Class-file builder / frames | Linear and CFG methods with supported object descriptors pre-intern descriptor/current-class identities before the pool is frozen. Initial and branch-target frames preserve exact object types produced by virtual calls. Unsupported descriptor shapes and mismatched or uninitialized values fail before bytes are returned. | Keep verifier-backed coverage for call results carried through control flow. |
 
 The class-file descriptor parser and verifier enforce the exact reference
-types passed between planned methods. This does not enable arbitrary classpath
-targets, hierarchy conversions, reference fields, or reference-valued
-constructor parameters.
+types passed between planned methods. Exact planned-class primary-constructor
+parameters are also represented in unit metadata. This does not enable
+arbitrary classpath targets, hierarchy conversions, reference fields, or
+reference-valued constructor-call argument lowering.
 
 ## Rejection characterization and scope boundaries
 
