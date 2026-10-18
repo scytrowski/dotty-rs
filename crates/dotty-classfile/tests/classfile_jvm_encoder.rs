@@ -134,6 +134,17 @@ fn code<'a, 'b>(method: &'a dotty_classfile::classfile::MethodInfo<'b>) -> &'a C
     }
 }
 
+fn method_named<'a, 'b>(
+    class_file: &'a ClassFile<'b>,
+    name: &str,
+) -> &'a dotty_classfile::classfile::MethodInfo<'b> {
+    class_file
+        .methods
+        .iter()
+        .find(|method| class_file.constant_pool.utf8(method.name_index) == Ok(name))
+        .unwrap_or_else(|| panic!("missing method {name}"))
+}
+
 fn operand_index(
     code: &CodeAttribute<'_>,
     offset: usize,
@@ -159,6 +170,64 @@ fn skip_verification_type(bytes: &[u8], cursor: &mut usize) {
         _ => panic!("invalid verification_type_info tag {tag}"),
     }
     assert!(*cursor <= bytes.len(), "truncated verification_type_info");
+}
+
+fn stack_map_references_class(
+    class_file: &ClassFile<'_>,
+    method: &dotty_classfile::classfile::MethodInfo<'_>,
+    expected_class: &str,
+) -> bool {
+    let code = code(method);
+    let [Attribute::Other(attribute)] = code.attributes.as_slice() else {
+        return false;
+    };
+    if class_file.constant_pool.utf8(attribute.name_index) != Ok("StackMapTable") {
+        return false;
+    }
+    let bytes = attribute.bytes;
+    let mut cursor = 0;
+    let frame_count = read_u2(bytes, &mut cursor);
+    for _ in 0..frame_count {
+        if bytes[cursor] != 255 {
+            return false;
+        }
+        cursor += 1;
+        cursor += 2; // offset_delta
+        for _ in 0..read_u2(bytes, &mut cursor) {
+            if verification_type_references_class(class_file, bytes, &mut cursor, expected_class) {
+                return true;
+            }
+        }
+        for _ in 0..read_u2(bytes, &mut cursor) {
+            if verification_type_references_class(class_file, bytes, &mut cursor, expected_class) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn verification_type_references_class(
+    class_file: &ClassFile<'_>,
+    bytes: &[u8],
+    cursor: &mut usize,
+    expected_class: &str,
+) -> bool {
+    let tag = bytes[*cursor];
+    *cursor += 1;
+    match tag {
+        7 => {
+            let index =
+                dotty_classfile::classfile::ConstantPoolIndex(read_u2(bytes, cursor) as u16);
+            class_file.constant_pool.class_name(index) == Ok(expected_class)
+        }
+        8 => {
+            *cursor += 2;
+            false
+        }
+        0..=6 => false,
+        _ => panic!("invalid verification_type_info tag {tag}"),
+    }
 }
 
 fn assert_stack_map_targets(
@@ -976,6 +1045,169 @@ fn public_builders_emit_executable_calculator_box_and_caller_classes() {
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
         "Calculator.add=42\nCalculator.max=22,22,22\nCalculator.sumTo=55,0,1\nCalculator.nested=100,10,1,0\nBox.get=42\nCaller.answer=42\nCaller.makeBox=42\nCaller.branchBox=ok"
+    );
+}
+
+#[test]
+fn reference_fields_and_constructor_arguments_verify_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+
+    let mut counter = ClassFileBuilder::new("example/Counter", version).unwrap();
+    counter
+        .add_instance_method("<init>", "()V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    let counter_bytes = counter.encode().unwrap();
+    fs::create_dir_all(directory.path().join("example")).unwrap();
+    fs::write(
+        directory.path().join("example/Counter.class"),
+        counter_bytes,
+    )
+    .unwrap();
+
+    let mut holder = ClassFileBuilder::new("example/Holder", version).unwrap();
+    holder
+        .add_field("ref", "Lexample/Counter;", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    holder
+        .add_instance_method("<init>", "(Lexample/Counter;)V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    holder
+        .add_instance_method("get", "()Lexample/Counter;", |code| {
+            code.aload(0)?;
+            code.getfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    holder
+        .add_instance_method("setIf", "(Lexample/Counter;Z)V", |code| {
+            let alternate = code.new_label()?;
+            let done = code.new_label()?;
+            code.iload(2)?;
+            code.ifeq(alternate.clone())?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.goto(done.clone())?;
+            code.mark(alternate)?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.mark(done)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    let holder_bytes = holder.encode().unwrap();
+    let holder_file = decode_and_validate(&holder_bytes);
+    assert!(stack_map_references_class(
+        &holder_file,
+        method_named(&holder_file, "setIf"),
+        "example/Counter"
+    ));
+    fs::write(directory.path().join("example/Holder.class"), holder_bytes).unwrap();
+
+    let mut client = ClassFileBuilder::new("example/ReferenceFieldClient", version).unwrap();
+    client
+        .add_static_method("create", "(Lexample/Counter;)Lexample/Holder;", |code| {
+            code.new_object("example/Holder")?;
+            code.dup()?;
+            code.aload(0)?;
+            code.invokespecial("example/Holder", "<init>", "(Lexample/Counter;)V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    client
+        .add_static_method("run", "()V", |code| {
+            code.new_object("example/Counter")?;
+            code.dup()?;
+            code.invokespecial("example/Counter", "<init>", "()V")?;
+            code.astore(0)?;
+            code.new_object("example/Holder")?;
+            code.dup()?;
+            code.aload(0)?;
+            code.invokespecial("example/Holder", "<init>", "(Lexample/Counter;)V")?;
+            code.astore(1)?;
+            code.aload(1)?;
+            code.aload(0)?;
+            code.iconst(1)?;
+            code.invokevirtual("example/Holder", "setIf", "(Lexample/Counter;Z)V")?;
+            code.aload(1)?;
+            code.invokevirtual("example/Holder", "get", "()Lexample/Counter;")?;
+            code.pop()?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    let client_bytes = client.encode().unwrap();
+    fs::write(
+        directory.path().join("example/ReferenceFieldClient.class"),
+        client_bytes,
+    )
+    .unwrap();
+
+    let harness = directory.path().join("ReferenceFieldHarness.java");
+    fs::write(
+        &harness,
+        "public class ReferenceFieldHarness { public static void main(String[] args) { example.ReferenceFieldClient.run(); System.out.println(\"reference-field=ok\"); } }\n",
+    )
+    .unwrap();
+    let directory_arg = directory.path().to_str().unwrap();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            directory_arg,
+            "-d",
+            directory_arg,
+            harness.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for reference-field harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            directory_arg,
+            "ReferenceFieldHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected reference fields or constructor arguments\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "reference-field=ok"
     );
 }
 

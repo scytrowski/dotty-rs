@@ -1058,12 +1058,7 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
         .unwrap();
     assert!(matches!(
         references.encode(),
-        Err(ClassFileBuildError::Analysis(
-            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
-                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::Reference,
-                ..
-            }
-        ))
+        Err(ClassFileBuildError::Analysis(_))
     ));
 
     let mut unreachable_reference =
@@ -1084,10 +1079,7 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
     assert!(matches!(
         unreachable_reference.encode(),
         Err(ClassFileBuildError::Analysis(
-            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
-                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::Reference,
-                ..
-            }
+            dotty_classfile::bytecode::AnalysisError::UnreachableBlock { .. }
         ))
     ));
 
@@ -1316,6 +1308,198 @@ fn builds_constructor_and_instance_field_access_from_symbolic_code() {
                 && code.code[0] == 0x2a && code.code[1] == 0x1b
                 && code.code[2] == 0xb5 && code.code[5] == 0xb1
     ));
+}
+
+#[test]
+fn builds_exact_reference_fields_and_constructor_arguments_with_cfg_frames() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut holder = ClassFileBuilder::new("example/Holder", version).unwrap();
+    holder
+        .add_field("ref", "Lexample/Counter;", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    holder
+        .add_instance_method("<init>", "(Lexample/Counter;)V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    holder
+        .add_instance_method("get", "()Lexample/Counter;", |code| {
+            code.aload(0)?;
+            code.getfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    holder
+        .add_instance_method("setIf", "(Lexample/Counter;Z)V", |code| {
+            let alternate = code.new_label()?;
+            let done = code.new_label()?;
+            code.iload(2)?;
+            code.ifeq(alternate.clone())?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.goto(done.clone())?;
+            code.mark(alternate)?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.mark(done)?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let holder_bytes = holder.encode().unwrap();
+    let holder_file = decode(&holder_bytes);
+    let set_if = method_named(&holder_file, "setIf");
+    let set_if_code = code_attribute(set_if);
+    assert!(set_if_code.max_stack >= 2);
+    assert!(set_if_code.max_locals >= 3);
+    let classes = (1..u16::MAX)
+        .filter_map(|index| {
+            match holder_file
+                .constant_pool
+                .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))?
+            {
+                ConstantPoolEntry::Class { name_index } => {
+                    holder_file.constant_pool.utf8(*name_index).ok()
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
+    assert!(classes.contains(&"example/Counter"));
+
+    let mut factory =
+        ClassFileBuilder::new("example/FactoryWithReferenceArgument", version).unwrap();
+    factory
+        .add_static_method("create", "(Lexample/Counter;)Lexample/Holder;", |code| {
+            code.new_object("example/Holder")?;
+            code.dup()?;
+            code.aload(0)?;
+            code.invokespecial("example/Holder", "<init>", "(Lexample/Counter;)V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    let factory_bytes = factory.encode().unwrap();
+    let factory_file = decode(&factory_bytes);
+    assert!((1..u16::MAX).any(|index| matches!(
+        factory_file
+            .constant_pool
+            .get(dotty_classfile::constant_pool::ConstantPoolIndex(index)),
+        Some(ConstantPoolEntry::Class { name_index })
+            if factory_file.constant_pool.utf8(*name_index) == Ok("example/Holder")
+    )));
+}
+
+#[test]
+fn rejects_wrong_reference_field_value_and_constructor_argument() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut holder = ClassFileBuilder::new("example/Holder", version).unwrap();
+    holder
+        .add_field("ref", "Lexample/Counter;", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    holder
+        .add_instance_method("setWrong", "(Lexample/Other;)V", |code| {
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/Holder", "ref", "Lexample/Counter;")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        holder.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::WrongExactFieldValue { .. }
+        ))
+    ));
+
+    let mut factory = ClassFileBuilder::new("example/Factory", version).unwrap();
+    factory
+        .add_static_method("createWrong", "(Lexample/Other;)Lexample/Holder;", |code| {
+            code.new_object("example/Holder")?;
+            code.dup()?;
+            code.aload(0)?;
+            code.invokespecial("example/Holder", "<init>", "(Lexample/Counter;)V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        factory.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::WrongExactMethodArgument { .. }
+        ))
+    ));
+}
+
+#[test]
+fn rejects_static_and_instance_field_opcode_mismatches() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut instance_access = ClassFileBuilder::new("example/StaticField", version).unwrap();
+    instance_access
+        .add_field(
+            "value",
+            "Lexample/Counter;",
+            FieldAccessFlags(ACC_PRIVATE | dotty_classfile::classfile::ACC_STATIC),
+        )
+        .unwrap();
+    instance_access
+        .add_instance_method("getWrong", "()Lexample/Counter;", |code| {
+            code.aload(0)?;
+            code.getfield("example/StaticField", "value", "Lexample/Counter;")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        instance_access.encode(),
+        Err(ClassFileBuildError::FieldOperationStaticnessMismatch {
+            instruction: 1,
+            field: "value".to_owned(),
+            field_is_static: true,
+            operation_is_static: false,
+        })
+    );
+
+    let mut static_access = ClassFileBuilder::new("example/InstanceField", version).unwrap();
+    static_access
+        .add_field("value", "Lexample/Counter;", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    static_access
+        .add_static_method("getWrong", "()Lexample/Counter;", |code| {
+            code.getstatic("example/InstanceField", "value", "Lexample/Counter;")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        static_access.encode(),
+        Err(ClassFileBuildError::FieldOperationStaticnessMismatch {
+            instruction: 0,
+            field: "value".to_owned(),
+            field_is_static: false,
+            operation_is_static: true,
+        })
+    );
 }
 
 #[test]

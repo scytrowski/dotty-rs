@@ -6,8 +6,9 @@
 //! At finalization it interns symbolic references with
 //! [`crate::constant_pool_builder::ConstantPoolBuilder`] and creates a
 //! temporary borrowed [`crate::class_file::ClassFile`] view for encoding.
-//! This avoids self-referential storage. Typed code receives category and
-//! stack/local analysis, not full JVM verification.
+//! This avoids self-referential storage. Typed code receives stack and local
+//! analysis with exact checks for the supported reference subset; it does not
+//! receive full JVM verification.
 //!
 //! ```
 //! use dotty_classfile::classfile::{
@@ -41,11 +42,11 @@ use crate::bytecode::code_builder::{
 };
 use crate::bytecode::{
     AnalysisError, AssembleError, BranchInstruction, CfgCodeAnalyzer, CodeSequence,
-    ControlFlowGraph, Instruction, StackMapFrameGenerationError, StackMapTable,
+    ControlFlowGraph, Instruction, LdcConstant, StackMapFrameGenerationError, StackMapTable,
     generate_stack_map_frames_with_receiver,
 };
 use crate::class_file::{ClassFile, ClassFileVersion};
-use crate::constant_pool::ConstantPoolIndex;
+use crate::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex};
 use crate::constant_pool_builder::{ConstantPoolBuildError, ConstantPoolBuilder};
 use crate::descriptor::{DescriptorError, FieldType, MethodDescriptor};
 use crate::encode_error::EncodeError;
@@ -111,6 +112,17 @@ pub enum ClassFileBuildError {
     InvalidAccessFlags,
     /// The class-file superclass relation is invalid for the declared class.
     InvalidSuperclass,
+    /// A field instruction's staticness does not match the declared field.
+    FieldOperationStaticnessMismatch {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Referenced field name.
+        field: String,
+        /// Whether the declared field is static.
+        field_is_static: bool,
+        /// Whether the bytecode operation is static.
+        operation_is_static: bool,
+    },
     /// The same interface was added more than once.
     DuplicateInterface,
     /// A class cannot declare itself as an implemented interface.
@@ -179,6 +191,25 @@ impl fmt::Display for ClassFileBuildError {
                 formatter.write_str("invalid combination of JVM access flags")
             }
             Self::InvalidSuperclass => formatter.write_str("invalid JVM superclass relation"),
+            Self::FieldOperationStaticnessMismatch {
+                instruction,
+                field,
+                field_is_static,
+                operation_is_static,
+            } => write!(
+                formatter,
+                "instruction {instruction} uses {} access for field {field}, which is {}",
+                if *operation_is_static {
+                    "static"
+                } else {
+                    "instance"
+                },
+                if *field_is_static {
+                    "static"
+                } else {
+                    "an instance field"
+                }
+            ),
             Self::DuplicateInterface => formatter.write_str("duplicate interface declaration"),
             Self::SelfInterface => formatter.write_str("a class cannot implement itself"),
             Self::DuplicateField => formatter.write_str("duplicate field name and descriptor"),
@@ -689,6 +720,14 @@ impl ClassFileBuilder {
         // interned before the final pool is frozen; the append-only builder
         // guarantees these indices remain stable afterward.
         let preview_pool = pool_builder.clone().finish()?;
+        for resolved in resolved_code.iter().flatten() {
+            validate_field_operation_staticness(
+                resolved,
+                &self.class_name,
+                &self.fields,
+                &preview_pool,
+            )?;
+        }
         let mut frame_class_identities = std::collections::BTreeSet::new();
         for (method, resolved) in self.methods.iter().zip(&resolved_code) {
             let Some(ResolvedMethodCode::Branched(sequence)) = resolved else {
@@ -784,30 +823,27 @@ impl ClassFileBuilder {
                     let descriptor = crate::descriptor::MethodDescriptor::parse(&method.descriptor)
                         .map_err(AnalysisError::InvalidMethodDescriptor)
                         .map_err(ClassFileBuildError::Analysis)?;
-                    let has_reference_descriptor = descriptor
-                        .parameters
-                        .iter()
-                        .chain(descriptor.return_type.iter())
-                        .any(|ty| {
-                            matches!(
-                                ty,
-                                crate::descriptor::FieldType::Object(_)
-                                    | crate::descriptor::FieldType::Array(_)
-                            )
+                    let constructor_body = if method.name == "<init>" {
+                        &instructions[2.min(instructions.len())..]
+                    } else {
+                        &instructions[..]
+                    };
+                    let requires_exact_references = method_descriptor_has_references(&descriptor)
+                        || constructor_body.iter().copied().any(|instruction| {
+                            instruction_requires_exact_references(instruction, &constant_pool)
                         });
-                    let has_virtual_call = instructions
-                        .iter()
-                        .any(|instruction| matches!(instruction, Instruction::InvokeVirtual(_)));
-                    let analysis = if !(has_reference_descriptor || has_virtual_call)
-                        || matches!(method.name.as_str(), "<init>" | "<clinit>")
-                    {
-                        crate::bytecode::analyze_validated(
+                    let analysis = if method.name == "<init>" && requires_exact_references {
+                        let super_class = super_class
+                            .ok_or(AnalysisError::InvalidConstructorSuperCall { instruction: 1 })
+                            .map_err(ClassFileBuildError::Analysis)?;
+                        crate::bytecode::analyze_validated_constructor_body(
                             &method.descriptor,
-                            method.access_flags.is_static(),
                             &instructions,
                             &constant_pool,
+                            this_class,
+                            super_class,
                         )
-                    } else {
+                    } else if requires_exact_references {
                         crate::bytecode::analyze_validated_with_current_class(
                             &method.name,
                             &method.descriptor,
@@ -815,6 +851,13 @@ impl ClassFileBuilder {
                             &instructions,
                             &constant_pool,
                             Some(this_class),
+                        )
+                    } else {
+                        crate::bytecode::analyze_validated(
+                            &method.descriptor,
+                            method.access_flags.is_static(),
+                            &instructions,
+                            &constant_pool,
                         )
                     }
                     .map_err(ClassFileBuildError::Analysis)?;
@@ -960,6 +1003,167 @@ impl ClassFileBuilder {
         };
         class_file.encode().map_err(ClassFileBuildError::Encode)
     }
+}
+
+fn validate_field_operation_staticness(
+    code: &ResolvedMethodCode,
+    current_class: &str,
+    fields: &[OwnedField],
+    pool: &ConstantPool,
+) -> Result<(), ClassFileBuildError> {
+    let instructions: Vec<(usize, Instruction)> =
+        match code {
+            ResolvedMethodCode::Linear(instructions) => {
+                instructions.iter().copied().enumerate().collect()
+            }
+            ResolvedMethodCode::Branched(sequence) => {
+                let graph =
+                    ControlFlowGraph::build(sequence).map_err(ClassFileBuildError::ControlFlow)?;
+                graph
+                    .blocks()
+                    .iter()
+                    .flat_map(|block| {
+                        block.instructions.iter().enumerate().filter_map(
+                            move |(offset, element)| match element {
+                                crate::bytecode::CodeElement::Instruction(instruction) => {
+                                    Some((block.instruction_range.start + offset, *instruction))
+                                }
+                                crate::bytecode::CodeElement::Branch(_)
+                                | crate::bytecode::CodeElement::Label(_) => None,
+                            },
+                        )
+                    })
+                    .collect()
+            }
+        };
+    for (instruction, operation) in instructions {
+        let (reference, operation_is_static) = match operation {
+            Instruction::GetField(reference) | Instruction::PutField(reference) => {
+                (reference, false)
+            }
+            Instruction::GetStatic(reference) | Instruction::PutStatic(reference) => {
+                (reference, true)
+            }
+            _ => continue,
+        };
+        let Some(ConstantPoolEntry::Fieldref {
+            class_index,
+            name_and_type_index,
+        }) = pool.get(reference.index().get())
+        else {
+            continue;
+        };
+        if pool.class_name(*class_index).ok() != Some(current_class) {
+            continue;
+        }
+        let Ok((name, descriptor)) = pool.name_and_type(*name_and_type_index) else {
+            continue;
+        };
+        let Some(field) = fields
+            .iter()
+            .find(|field| field.name == name && field.descriptor == descriptor)
+        else {
+            continue;
+        };
+        let field_is_static = field.access_flags.0 & ACC_STATIC != 0;
+        if field_is_static != operation_is_static {
+            return Err(ClassFileBuildError::FieldOperationStaticnessMismatch {
+                instruction,
+                field: name.to_owned(),
+                field_is_static,
+                operation_is_static,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn method_descriptor_has_references(descriptor: &MethodDescriptor) -> bool {
+    descriptor
+        .parameters
+        .iter()
+        .chain(descriptor.return_type.iter())
+        .any(|ty| matches!(ty, FieldType::Object(_) | FieldType::Array(_)))
+}
+
+fn instruction_requires_exact_references(instruction: Instruction, pool: &ConstantPool) -> bool {
+    match instruction {
+        Instruction::AConstNull
+        | Instruction::AStore(_)
+        | Instruction::AReturn
+        | Instruction::GetField(_)
+        | Instruction::PutField(_)
+        | Instruction::InvokeVirtual(_)
+        | Instruction::New(_)
+        | Instruction::Ldc(LdcConstant::Reference(_)) => true,
+        Instruction::InvokeSpecial(reference) => {
+            special_reference_is_constructor(reference.index().get(), pool)
+        }
+        Instruction::GetStatic(reference) | Instruction::PutStatic(reference) => {
+            field_reference_has_reference_type(reference.index().get(), pool)
+        }
+        Instruction::InvokeStatic(reference) => {
+            method_reference_has_reference_type(reference.index().get(), pool)
+        }
+        _ => false,
+    }
+}
+
+fn special_reference_is_constructor(index: ConstantPoolIndex, pool: &ConstantPool) -> bool {
+    match pool.get(index) {
+        Some(
+            ConstantPoolEntry::Methodref {
+                name_and_type_index,
+                ..
+            }
+            | ConstantPoolEntry::InterfaceMethodref {
+                name_and_type_index,
+                ..
+            },
+        ) => pool
+            .name_and_type(*name_and_type_index)
+            .map(|(name, _)| name == "<init>")
+            .unwrap_or(true),
+        _ => true,
+    }
+}
+
+fn field_reference_has_reference_type(index: ConstantPoolIndex, pool: &ConstantPool) -> bool {
+    let Some(ConstantPoolEntry::Fieldref {
+        name_and_type_index,
+        ..
+    }) = pool.get(index)
+    else {
+        return true;
+    };
+    let Ok((_, descriptor)) = pool.name_and_type(*name_and_type_index) else {
+        return true;
+    };
+    FieldType::parse(descriptor)
+        .map(|ty| matches!(ty, FieldType::Object(_) | FieldType::Array(_)))
+        .unwrap_or(true)
+}
+
+fn method_reference_has_reference_type(index: ConstantPoolIndex, pool: &ConstantPool) -> bool {
+    let Some(
+        ConstantPoolEntry::Methodref {
+            name_and_type_index,
+            ..
+        }
+        | ConstantPoolEntry::InterfaceMethodref {
+            name_and_type_index,
+            ..
+        },
+    ) = pool.get(index)
+    else {
+        return true;
+    };
+    let Ok((_, descriptor)) = pool.name_and_type(*name_and_type_index) else {
+        return true;
+    };
+    MethodDescriptor::parse(descriptor)
+        .map(|descriptor| method_descriptor_has_references(&descriptor))
+        .unwrap_or(true)
 }
 
 fn resolve_code(
