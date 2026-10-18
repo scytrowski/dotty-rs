@@ -1282,6 +1282,8 @@ pub enum UnsupportedJvmCallShapeKind {
     NonCurrentThis,
     /// A selected member uses a qualified `this` expression.
     QualifiedThisReceiver,
+    /// A nested reference-call receiver points back to an active call tree.
+    RecursiveReceiver,
     /// The canonical term reference has a prefix outside this call subset.
     UnsupportedReceiverPrefix,
 }

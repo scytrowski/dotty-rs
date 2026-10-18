@@ -1,5 +1,7 @@
 //! Canonical projection of supported typed calls to planned JVM targets.
 
+use std::collections::HashSet;
+
 use dotty_core::ast::{ApplyKind, Tree, TreeKind, Typed};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId, TypeId};
@@ -63,6 +65,67 @@ pub(super) fn resolve_instance_call(
     call: TreeId<Typed>,
     definitions: &Definitions,
 ) -> Result<JvmCallTarget, JvmCodegenError> {
+    let mut context = CallResolutionContext::default();
+    resolve_instance_call_recursive(
+        unit,
+        caller_class,
+        caller_method,
+        call,
+        definitions,
+        &mut context,
+    )
+}
+
+#[derive(Default)]
+struct CallResolutionContext {
+    depth: usize,
+    active_calls: HashSet<TreeId<Typed>>,
+}
+
+fn resolve_instance_call_recursive(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    caller_method: SymbolId,
+    call: TreeId<Typed>,
+    definitions: &Definitions,
+    context: &mut CallResolutionContext,
+) -> Result<JvmCallTarget, JvmCodegenError> {
+    let call_tree = tree(unit.store, unit.typed_ast, call)?;
+    if context.depth >= crate::JVM_EXPRESSION_DEPTH_LIMIT {
+        return Err(JvmCodegenError::ExpressionDepthExceeded {
+            tree: call,
+            position: call_tree.position,
+            limit: crate::JVM_EXPRESSION_DEPTH_LIMIT,
+        });
+    }
+    if !context.active_calls.insert(call) {
+        return Err(unsupported_call(
+            call,
+            UnsupportedJvmCallShapeKind::RecursiveReceiver,
+        ));
+    }
+    context.depth += 1;
+    let result = resolve_instance_call_body(
+        unit,
+        caller_class,
+        caller_method,
+        call,
+        definitions,
+        context,
+    );
+    context.depth -= 1;
+    context.active_calls.remove(&call);
+    result
+}
+
+fn resolve_instance_call_body(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    caller_method: SymbolId,
+    call: TreeId<Typed>,
+    definitions: &Definitions,
+    context: &mut CallResolutionContext,
+) -> Result<JvmCallTarget, JvmCodegenError> {
     let class_plan = unit
         .classes
         .iter()
@@ -114,6 +177,7 @@ pub(super) fn resolve_instance_call(
                 caller_method_plan,
                 receiver,
                 definitions,
+                context,
             )?;
             (Some(receiver), receiver_class)
         }
@@ -272,6 +336,7 @@ fn resolve_receiver_class(
     method_plan: &crate::JvmMethodPlan,
     receiver_id: TreeId<Typed>,
     definitions: &Definitions,
+    context: &mut CallResolutionContext,
 ) -> Result<SymbolId, JvmCodegenError> {
     let receiver = tree(unit.store, unit.typed_ast, receiver_id)?;
     match &receiver.kind {
@@ -418,11 +483,13 @@ fn resolve_receiver_class(
             .resolve_constructor_call(caller_class, caller_method, receiver_id, definitions)
             .map(|target| target.owner_class()),
         TreeKind::Apply(_) => {
-            let target = unit.resolve_planned_instance_call(
+            let target = resolve_instance_call_recursive(
+                unit,
                 caller_class,
                 caller_method,
                 receiver_id,
                 definitions,
+                context,
             )?;
             match target.result() {
                 JvmReturnType::Value(JvmType::Reference(class)) => Ok(class),

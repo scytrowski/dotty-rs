@@ -5824,6 +5824,132 @@ fn reference_call_values_are_forwarded_and_used_as_receivers_once() {
 }
 
 #[test]
+fn reference_call_receiver_resolution_rejects_cycles_and_excessive_depth() {
+    let mut cyclic = EmissionFixture::new(false);
+    let class_type = cyclic.store.types.alloc(Type::TypeRef {
+        prefix: cyclic.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(cyclic.class),
+    });
+    let identity = add_call_target_method(
+        &mut cyclic,
+        "identityReference",
+        &[("value", class_type)],
+        class_type,
+    );
+    let this_type = cyclic.store.types.alloc(Type::ThisType {
+        class: cyclic.class,
+    });
+    let this = cyclic.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: this_type,
+    });
+    let selected_type = cyclic.store.types.alloc(Type::TermRef {
+        prefix: this_type,
+        target: TermRefTarget::Symbol(identity),
+    });
+    let select = cyclic.ast.alloc(Tree {
+        kind: TreeKind::Select(Select {
+            qualifier: this,
+            name: cyclic.store.symbols.get(identity).name,
+            backquoted: false,
+        }),
+        position: None,
+        ty: selected_type,
+    });
+    let call = typed_call(
+        &mut cyclic,
+        select,
+        vec![this],
+        ApplyKind::Regular,
+        class_type,
+    );
+    let TreeKind::Select(select_tree) = &mut cyclic.ast.get_mut(select).kind else {
+        unreachable!();
+    };
+    select_tree.qualifier = call;
+
+    let unit = cyclic.unit();
+    unit.validate()
+        .expect("resolver cycles remain valid unit data");
+    assert_eq!(
+        unit.resolve_planned_instance_call(
+            cyclic.class,
+            cyclic.methods[1],
+            call,
+            &cyclic.definitions,
+        ),
+        Err(JvmCodegenError::UnsupportedJvmCallShape {
+            tree: call,
+            kind: UnsupportedJvmCallShapeKind::RecursiveReceiver,
+        })
+    );
+
+    let mut deep = EmissionFixture::new(false);
+    let class_type = deep.store.types.alloc(Type::TypeRef {
+        prefix: deep.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(deep.class),
+    });
+    let identity = add_call_target_method(
+        &mut deep,
+        "identityReference",
+        &[("value", class_type)],
+        class_type,
+    );
+    let this_type = deep.store.types.alloc(Type::ThisType { class: deep.class });
+    let mut receiver = deep.ast.alloc(Tree {
+        kind: TreeKind::This(This { qual: None }),
+        position: None,
+        ty: this_type,
+    });
+    let mut innermost_call = None;
+    for _ in 0..=crate::JVM_EXPRESSION_DEPTH_LIMIT {
+        let selected_type = deep.store.types.alloc(Type::TermRef {
+            prefix: deep.ast.get(receiver).ty,
+            target: TermRefTarget::Symbol(identity),
+        });
+        let select = deep.ast.alloc(Tree {
+            kind: TreeKind::Select(Select {
+                qualifier: receiver,
+                name: deep.store.symbols.get(identity).name,
+                backquoted: false,
+            }),
+            position: None,
+            ty: selected_type,
+        });
+        let argument = deep.ast.alloc(Tree {
+            kind: TreeKind::This(This { qual: None }),
+            position: None,
+            ty: this_type,
+        });
+        receiver = typed_call(
+            &mut deep,
+            select,
+            vec![argument],
+            ApplyKind::Regular,
+            class_type,
+        );
+        innermost_call.get_or_insert(receiver);
+    }
+    let unit = deep.unit();
+    unit.validate()
+        .expect("deep call chain remains valid unit data");
+    assert_eq!(
+        unit.resolve_planned_instance_call(
+            deep.class,
+            deep.methods[1],
+            receiver,
+            &deep.definitions,
+        ),
+        Err(JvmCodegenError::ExpressionDepthExceeded {
+            tree: innermost_call.unwrap(),
+            position: None,
+            limit: crate::JVM_EXPRESSION_DEPTH_LIMIT,
+        })
+    );
+}
+
+#[test]
 fn rejects_reference_call_result_with_a_different_planned_class() {
     let mut fixture = EmissionFixture::new(false);
     let answer_type = fixture.store.types.alloc(Type::TypeRef {
