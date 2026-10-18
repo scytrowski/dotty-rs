@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::fmt;
+
+const MAX_HUFFMAN_CODE_LENGTH: usize = 15;
 
 /// Errors decompressing a DEFLATE (RFC 1951) stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,11 +138,18 @@ impl<'a> BitReader<'a> {
 
 /// A canonical Huffman decode table (RFC 1951 §3.2.2), built from an
 /// array of per-symbol code lengths (`0` meaning "this symbol has no
-/// code").
+/// code"). Symbols are stored in canonical code order so decoding can
+/// check a code's length-specific range without hashing every candidate.
 pub(crate) struct HuffmanTable {
-    /// Keyed by `(code length, code value)`; the code value is the bits
-    /// read so far, built most-significant-bit first as they arrive.
-    codes: HashMap<(u8, u16), u16>,
+    /// Number of assigned codes at each length. DEFLATE code lengths are
+    /// limited to 15 bits by RFC 1951.
+    counts: [u16; MAX_HUFFMAN_CODE_LENGTH + 1],
+    /// Smallest canonical code at each length.
+    first_codes: [u32; MAX_HUFFMAN_CODE_LENGTH + 1],
+    /// Starting offset for each length in `symbols`.
+    first_symbols: [usize; MAX_HUFFMAN_CODE_LENGTH + 1],
+    /// Symbols ordered by length and then by canonical code.
+    symbols: Vec<u16>,
     max_length: u8,
 }
 
@@ -150,52 +158,71 @@ impl HuffmanTable {
         let max_length = lengths.iter().copied().max().unwrap_or(0);
         if max_length == 0 {
             return Self {
-                codes: HashMap::new(),
+                counts: [0; MAX_HUFFMAN_CODE_LENGTH + 1],
+                first_codes: [0; MAX_HUFFMAN_CODE_LENGTH + 1],
+                first_symbols: [0; MAX_HUFFMAN_CODE_LENGTH + 1],
+                symbols: Vec::new(),
                 max_length: 0,
             };
         }
 
-        let mut bit_length_count = vec![0u32; usize::from(max_length) + 1];
+        debug_assert!(usize::from(max_length) <= MAX_HUFFMAN_CODE_LENGTH);
+        let mut counts = [0u16; MAX_HUFFMAN_CODE_LENGTH + 1];
         for &length in lengths {
             if length > 0 {
-                bit_length_count[usize::from(length)] += 1;
+                counts[usize::from(length)] += 1;
             }
         }
 
         // RFC 1951 §3.2.2: the smallest code for each length, derived
         // from how many codes of the previous length were used.
-        let mut next_code = vec![0u16; usize::from(max_length) + 1];
+        let mut first_codes = [0u32; MAX_HUFFMAN_CODE_LENGTH + 1];
+        let mut first_symbols = [0usize; MAX_HUFFMAN_CODE_LENGTH + 1];
         let mut code: u32 = 0;
+        let mut symbol_offset = 0;
         for bits in 1..=usize::from(max_length) {
-            code = (code + bit_length_count[bits - 1]) << 1;
-            next_code[bits] = code as u16;
+            code = (code + u32::from(counts[bits - 1])) << 1;
+            first_codes[bits] = code;
+            first_symbols[bits] = symbol_offset;
+            symbol_offset += usize::from(counts[bits]);
         }
 
-        let mut codes = HashMap::new();
+        let mut symbols = vec![0u16; symbol_offset];
+        let mut next_symbol = first_symbols;
         for (symbol, &length) in lengths.iter().enumerate() {
             if length == 0 {
                 continue;
             }
             let length_index = usize::from(length);
-            let assigned_code = next_code[length_index];
-            next_code[length_index] += 1;
-            codes.insert((length, assigned_code), symbol as u16);
+            symbols[next_symbol[length_index]] = symbol as u16;
+            next_symbol[length_index] += 1;
         }
 
-        Self { codes, max_length }
+        Self {
+            counts,
+            first_codes,
+            first_symbols,
+            symbols,
+            max_length,
+        }
     }
 
     /// Decodes one Huffman-coded symbol, reading one bit at a time and
     /// extending the candidate code most-significant-bit first (§3.2.2)
     /// until an assigned code of that length matches.
     pub(crate) fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16, InflateError> {
-        let mut code: u16 = 0;
+        let mut code: u32 = 0;
 
         for length in 1..=self.max_length {
-            code = (code << 1) | (reader.read_bits(1)? as u16);
+            code = (code << 1) | reader.read_bits(1)?;
+            let length_index = usize::from(length);
+            let first_code = self.first_codes[length_index];
 
-            if let Some(&symbol) = self.codes.get(&(length, code)) {
-                return Ok(symbol);
+            if code >= first_code {
+                let offset = (code - first_code) as usize;
+                if offset < usize::from(self.counts[length_index]) {
+                    return Ok(self.symbols[self.first_symbols[length_index] + offset]);
+                }
             }
         }
 
@@ -541,6 +568,25 @@ mod tests {
     }
 
     #[test]
+    fn huffman_table_decodes_mixed_lengths_in_canonical_order() {
+        // Canonical assignment for [2, 1, 3, 3] is: symbol 1 -> 0,
+        // symbol 0 -> 10, symbol 2 -> 110, symbol 3 -> 111.
+        let table = HuffmanTable::from_code_lengths(&[2, 1, 3, 3]);
+        let mut writer = BitWriter::new();
+        writer.write_huffman_code(0b0, 1);
+        writer.write_huffman_code(0b10, 2);
+        writer.write_huffman_code(0b110, 3);
+        writer.write_huffman_code(0b111, 3);
+        let bytes = writer.finish();
+
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(table.decode(&mut reader).unwrap(), 1);
+        assert_eq!(table.decode(&mut reader).unwrap(), 0);
+        assert_eq!(table.decode(&mut reader).unwrap(), 2);
+        assert_eq!(table.decode(&mut reader).unwrap(), 3);
+    }
+
+    #[test]
     fn huffman_decode_reports_an_error_for_an_unassigned_code() {
         // Only two of the four possible 2-bit codes are assigned (to
         // symbols 1 and 2, since symbol 0 has length 0). A bit pattern
@@ -663,5 +709,36 @@ mod tests {
         .unwrap();
         assert_eq!(decompressed, expected);
         assert_eq!(crate::crc32::checksum(&decompressed), 0xaa43_8c97);
+    }
+
+    #[test]
+    #[ignore = "manual DEFLATE microbenchmark; set DOTTY_DEFLATE_BENCH_JAR"]
+    fn benchmark_real_deflate_jar_entry() {
+        use std::time::Instant;
+
+        let jar_path = std::env::var_os("DOTTY_DEFLATE_BENCH_JAR")
+            .expect("DOTTY_DEFLATE_BENCH_JAR must name the pinned Scala compiler JAR");
+        let jar_bytes = std::fs::read(jar_path).unwrap();
+        let compressed =
+            extract_raw_deflate_bytes(&jar_bytes, "dotty/tools/dotc/typer/Typer.class");
+        let repetitions = 50;
+        let mut timings = Vec::new();
+
+        for _ in 0..3 {
+            let start = Instant::now();
+            let mut output_len = 0;
+            for _ in 0..repetitions {
+                let output = inflate(&compressed, usize::MAX).unwrap();
+                output_len = output.len();
+                assert_eq!(crate::crc32::checksum(&output), 0x3f26_522d);
+            }
+            timings.push(start.elapsed());
+            assert_eq!(output_len, 580_610);
+        }
+
+        eprintln!(
+            "DEFLATE benchmark: entry=dotty/tools/dotc/typer/Typer.class, compressed_bytes={}, output_bytes=580610, repetitions={repetitions}, timings={timings:?}",
+            compressed.len(),
+        );
     }
 }
