@@ -194,6 +194,9 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
         printf 'focused manifest does not exist: %s\n' "$focused_manifest" >&2
         exit 2
     fi
+    if command -v realpath >/dev/null 2>&1; then
+        output_path="$(realpath -m -- "$output_path")"
+    fi
     case "$output_path" in
         "$repo_root"/docs/typer-classpath-corpus-audit-3.9.0*|\
         "$repo_root"/docs/typer-classpath-import-prefix-profile-3.9.0*)
