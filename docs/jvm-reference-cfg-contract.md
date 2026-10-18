@@ -33,12 +33,12 @@ type equality.
 
 ## Analysis boundaries
 
-`ValueKind::Reference` in `LinearCodeAnalyzer` records only a one-slot category.
-The linear analyzer uses it for `null`, `new`, `aload`/`astore`, fields, calls,
-and reference returns. It does not retain the referenced class, distinguish
-initialized from uninitialized references, track the PC of `new`, or validate
-that a constructor's owner matches the allocation. A passing linear-analysis
-result therefore is not evidence of verifier safety.
+`ValueKind::Reference` in the context-free `LinearCodeAnalyzer` records only a
+one-slot category. The class-aware linear path used by `ClassFileBuilder`
+retains exact initialized class identities for supported descriptors and
+rejects reference arguments whose identity is missing or different. The CFG
+path is required whenever control flow or allocation-site initialization
+matters; a category-only result is not evidence of verifier safety.
 
 `CfgCodeAnalyzer` tracks `Top`, integer, exact initialized class references,
 and allocation-site-specific uninitialized references. The operand stack
@@ -50,11 +50,11 @@ emitting class, while branched constructors remain unsupported. The
 
 The constructor path in `ClassFileBuilder` rejects branched `<init>` bodies
 because it does not track the transition from `uninitializedThis` to
-initialized `this`. The source backend enables only planned initialized
-references, primitive fields, primitive-result calls, and complete allocations
-that remain within one basic block. It still rejects public reference
-signatures, mutable reference locals, hierarchy joins, arrays, null, and
-branched constructors.
+initialized `this`. Generic class-file analysis supports exact object
+parameters and results for `invokevirtual`, while the source backend enables
+only its separately planned subset. Source bytecode lowering still rejects
+public reference signatures, mutable reference locals, hierarchy joins,
+arrays, null, and branched constructors.
 
 ## Bounded state model
 
@@ -75,10 +75,9 @@ adapter may map its canonical source class identity to that internal name
 before invoking class-file analysis.
 
 For an ordinary non-static, non-constructor method, the initial local 0 is
-`Initialized(emitting_class)`. Static methods start with only descriptor
-parameters. The descriptor parameters themselves remain restricted to the
-existing primitive subset; public reference parameters and results do not
-become supported as a side effect. A constructor starts with
+`Initialized(emitting_class)`. Static methods start with descriptor-derived
+parameters, including exact object identities. The Scala source backend still
+restricts emitted public method signatures to its existing subset. A constructor starts with
 `UninitializedThis`; do not treat it as an ordinary receiver. Its branch path
 and superclass-initialization flow remain unsupported.
 
@@ -118,7 +117,7 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | `aload` / `astore` | Load only an initialized exact-class local. Stores preserve the exact initialized class; reject unusable or uninitialized values. |
 | `dup` / `pop` | Preserve or discard the same abstract value; `dup` must retain one allocation-site identity, not initialize it. |
 | `getfield` / `putfield` | Validate the fieldref and descriptor. Receiver must be initialized and its class must exactly equal the field owner. Values must match the field's supported primitive category. |
-| `invokevirtual` | Validate methodref and descriptor. Receiver class must exactly equal the method owner; reference arguments/results remain unsupported. |
+| `invokevirtual` | Validate methodref and descriptor. Pop supported arguments right-to-left; each object argument and receiver must exactly match its declared class/owner. Push the exact object result or int-like result. Arrays and category-two types remain unsupported. |
 | `new` | Validate the `CONSTANT_Class`; push a fresh uninitialized allocation-site identity. |
 | `invokespecial <init>` | Consume only the matching uninitialized allocation and exact owner/descriptor. On normal completion rewrite all aliases of that allocation to `Initialized(owner)`. |
 | Integer instructions and branches | Preserve the existing integer transfer rules. Branch operands are int-like only; reference equality branches are out of scope. |
@@ -185,15 +184,17 @@ checks generated classfiles and runs representative methods under
 `java -Xverify:all` on JDK 21+.
 
 The class-file unit tests exercise exact local/stack transfer, allocation
-tracking, owner checks, joins, and frame projection. The linear analyzer may
-accept category-shaped invalid sequences because it is not a verifier; do not
-use its success as a positive test for any reference-bearing method.
+tracking, owner and argument checks, joins, and frame projection. The JDK
+encoder gate checks virtual reference calls, chaining, and exact result frames
+under `java -Xverify:all`. The context-free linear analyzer may accept
+category-shaped invalid sequences; class-aware linear analysis is used for
+straight-line builder methods.
 
 | Case | Required behavior | Evidence or explicit boundary |
 | --- | --- | --- |
 | `Counter` reference local through a loop header and join | Same `Initialized(Counter)` state at each compatible stack/local join; emit `Object(Counter)` frame entry | Covered by source integration and JDK `-Xverify:all` |
 | Reference-bearing conditional and current `this` | Seed local 0 as emitting class; preserve exact receiver state at branch target | Covered by field/call branch and loop cases under JDK verifier |
-| `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner in this subset | Covered by classfile analyzer tests and source integration |
+| `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner; virtual calls also check supported exact object arguments and results | Covered by classfile analyzer tests and JDK verifier gate |
 | Different initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to `Object` | Classfile analyzer regression tests |
 | Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
 | Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |

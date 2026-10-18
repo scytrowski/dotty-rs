@@ -795,7 +795,10 @@ impl ClassFileBuilder {
                                     | crate::descriptor::FieldType::Array(_)
                             )
                         });
-                    let analysis = if !has_reference_descriptor
+                    let has_virtual_call = instructions
+                        .iter()
+                        .any(|instruction| matches!(instruction, Instruction::InvokeVirtual(_)));
+                    let analysis = if !(has_reference_descriptor || has_virtual_call)
                         || matches!(method.name.as_str(), "<init>" | "<clinit>")
                     {
                         crate::bytecode::analyze_validated(
