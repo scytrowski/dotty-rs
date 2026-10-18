@@ -567,6 +567,18 @@ The JDK gate inspects `javap -c -v` output and runs zero-, one-, and
 multi-iteration loops, both allocation branches, and equal/over-limit starting
 values under `java -Xverify:all`.
 
+`ReferenceObjectApis.scala` closes the two-class API path from actual Scala
+source through the lexer, parser, namer, typer, canonical JVM plans, and class
+file encoder. Its `Counter` and `CounterService` methods cover `new`, exact
+reference parameters/results, `this`, `if` joins, virtual calls in `while`,
+and a reference-returning call passed to another planned call. The source test
+checks descriptors, owners, decoded `Object(Counter)` frame entries and branch
+PCs; two fresh sessions must emit byte-identical ordered class batches. Its
+JDK harness checks reference identity and loop edge cases with
+`java -Xverify:all`. See
+[`jvm-reference-signatures.md`](jvm-reference-signatures.md) for the fixture's
+precise coverage and remaining limits.
+
 Multi-class compilation encodes every planned class in memory before staging or
 publishing output files, so semantic, codegen, and encoding failures publish no
 classes. If a filesystem write or rename fails during publication, cleanup and

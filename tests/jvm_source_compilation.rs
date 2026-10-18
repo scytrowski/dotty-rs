@@ -4688,6 +4688,204 @@ fn real_counter_objects_source_emits_two_deterministic_verified_classes() {
 }
 
 #[test]
+fn real_reference_object_apis_compile_and_verify_end_to_end() {
+    let first_output = TestOutputDirectory::new("reference-object-apis-first");
+    let second_output = TestOutputDirectory::new("reference-object-apis-second");
+    let source = fs::read_to_string(fixture_path("ReferenceObjectApis.scala"))
+        .expect("read real-source reference API fixture");
+    let first = compile_source_classes(&source, "ReferenceObjectApis.scala", first_output.path())
+        .expect("Counter and CounterService compile through the real source pipeline");
+    let second = compile_source_classes(&source, "ReferenceObjectApis.scala", second_output.path())
+        .expect("a fresh source session compiles the same reference API fixture");
+
+    let identities = |artifacts: &[EmittedArtifact]| {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(identities(&first), identities(&second));
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Counter", "CounterService"]
+    );
+    assert_eq!(
+        first_output.class_files(),
+        [
+            first_output.path().join("Counter.class"),
+            first_output.path().join("CounterService.class")
+        ]
+    );
+    assert_eq!(
+        second_output.class_files(),
+        [
+            second_output.path().join("Counter.class"),
+            second_output.path().join("CounterService.class")
+        ]
+    );
+
+    let counter = decode_emitted_class(&first[0]);
+    let service = decode_emitted_class(&first[1]);
+    assert!(counter.access_flags.is_public());
+    assert!(service.access_flags.is_public());
+    assert!(
+        counter
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+    assert!(
+        service
+            .methods
+            .iter()
+            .all(|method| method.access_flags.is_public())
+    );
+    assert!(
+        counter
+            .methods
+            .iter()
+            .all(|method| !method.access_flags.is_static())
+    );
+    assert!(
+        service
+            .methods
+            .iter()
+            .all(|method| !method.access_flags.is_static())
+    );
+    assert_eq!(
+        methods_with_descriptors(&counter),
+        [
+            ("<init>".to_owned(), "(I)V".to_owned()),
+            ("get".to_owned(), "()I".to_owned()),
+            ("increment".to_owned(), "()I".to_owned()),
+            ("self".to_owned(), "()LCounter;".to_owned()),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&service),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("create".to_owned(), "(I)LCounter;".to_owned()),
+            ("passthrough".to_owned(), "(LCounter;)LCounter;".to_owned()),
+            ("read".to_owned(), "(LCounter;)I".to_owned()),
+            (
+                "choose".to_owned(),
+                "(ZLCounter;LCounter;)LCounter;".to_owned()
+            ),
+            ("incrementUntil".to_owned(), "(LCounter;I)I".to_owned()),
+            ("roundTrip".to_owned(), "(I)I".to_owned()),
+        ]
+    );
+    assert_opcode_sequence(emitted_method_code(&counter, "self"), &[0x2a, 0xb0]);
+    assert_opcode_sequence(
+        emitted_method_code(&service, "create"),
+        &[0xbb, 0x59, 0x1b, 0xb7, 0xb0],
+    );
+    assert_method_reference(
+        &service,
+        emitted_method_code(&service, "create"),
+        0xb7,
+        "Counter",
+        "<init>",
+        "(I)V",
+    );
+    let create_code = emitted_method_code(&service, "create");
+    let (new_offset, _) = decode_subset_instructions(create_code)
+        .into_iter()
+        .find(|(_, opcode)| *opcode == 0xbb)
+        .expect("create emits a new instruction");
+    let new_index = u16::from_be_bytes([create_code[new_offset + 1], create_code[new_offset + 2]]);
+    let ConstantPoolEntry::Class { name_index } = service
+        .constant_pool
+        .get(ConstantPoolIndex(new_index))
+        .expect("new instruction references a constant-pool entry")
+    else {
+        panic!("new must reference a CONSTANT_Class entry");
+    };
+    assert_eq!(service.constant_pool.utf8(*name_index), Ok("Counter"));
+    assert_opcode_sequence(emitted_method_code(&service, "passthrough"), &[0x2b, 0xb0]);
+    assert_invocation_sequence(
+        &service,
+        emitted_method_code(&service, "read"),
+        &[(0xb6, "Counter", "get", "()I")],
+    );
+    assert_invocation_sequence(
+        &service,
+        emitted_method_code(&service, "incrementUntil"),
+        &[
+            (0xb6, "Counter", "get", "()I"),
+            (0xb6, "Counter", "increment", "()I"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    let choose = emitted_method_code(&service, "choose");
+    let choose_frames = stack_map_frames(&service, "choose");
+    let choose_targets = decode_branch_targets(choose)
+        .into_iter()
+        .map(|(_, _, target)| target)
+        .collect::<Vec<_>>();
+    assert!(!choose_targets.is_empty());
+    assert!(
+        choose_targets
+            .iter()
+            .all(|target| choose_frames.iter().any(|frame| frame.pc == *target))
+    );
+    assert!(choose_frames.iter().any(|frame| {
+        frame
+            .locals
+            .contains(&StackMapVerificationType::Object("Counter".to_owned()))
+            && frame.stack == [StackMapVerificationType::Object("Counter".to_owned())]
+    }));
+    let increment_frames = stack_map_frames(&service, "incrementUntil");
+    let increment_code = emitted_method_code(&service, "incrementUntil");
+    let increment_targets = decode_branch_targets(increment_code)
+        .into_iter()
+        .map(|(_, _, target)| target)
+        .collect::<Vec<_>>();
+    assert!(!increment_targets.is_empty());
+    assert!(
+        increment_targets
+            .iter()
+            .all(|target| increment_frames.iter().any(|frame| frame.pc == *target))
+    );
+    assert!(increment_frames.iter().any(|frame| {
+        frame
+            .locals
+            .contains(&StackMapVerificationType::Object("Counter".to_owned()))
+    }));
+    let increment_method = service
+        .methods
+        .iter()
+        .find(|method| service.constant_pool.utf8(method.name_index) == Ok("incrementUntil"))
+        .unwrap();
+    let [Attribute::Code(increment_body)] = increment_method.attributes.as_slice() else {
+        panic!("incrementUntil has one Code attribute");
+    };
+    assert!(increment_body.max_stack >= 2);
+    assert_eq!(increment_body.max_locals, 3);
+    assert_invocation_sequence(
+        &service,
+        emitted_method_code(&service, "roundTrip"),
+        &[
+            (0xb6, "CounterService", "create", "(I)LCounter;"),
+            (0xb6, "CounterService", "read", "(LCounter;)I"),
+        ],
+    );
+
+    if require_jdk_or_skip() {
+        verify_reference_object_apis_with_jdk(first_output.path());
+    }
+}
+
+#[test]
 fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
     let cases = [
         (
@@ -4729,6 +4927,26 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
         (
             "reference-var-reassignment",
             "class Counter(seed: Int)\nclass CounterClient:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    counter = new Counter(seed + 1)\n    counter.get()\n",
+        ),
+        (
+            "wrong-class-reference-argument",
+            "class Counter\nclass Other\nclass Client:\n  def accept(counter: Counter): Counter = counter\n  def wrong(other: Other): Counter = accept(other)\n",
+        ),
+        (
+            "wrong-method-result-class",
+            "class Counter\nclass Other\nclass Client:\n  def wrong(): Counter = new Other()\n",
+        ),
+        (
+            "different-reference-if-result",
+            "class Counter\nclass Other\nclass Client:\n  def wrong(flag: Boolean, counter: Counter, other: Other): Counter = if flag then counter else other\n",
+        ),
+        (
+            "reference-field",
+            "class Counter\nclass Holder:\n  private val counter: Counter = new Counter()\n",
+        ),
+        (
+            "generic-class",
+            "class Box[A](value: A)\nclass Client:\n  def use(): Int = 1\n",
         ),
     ];
     for (label, source) in cases {
@@ -4788,6 +5006,32 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "reference-var-reassignment" => matches!(
                 &error,
                 PipelineFailure::Typer(TyperError::UnstableSelectionPrefix { .. })
+            ),
+            "wrong-class-reference-argument" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    ..
+                })
+            ),
+            "wrong-method-result-class" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::MethodBodyTypeMismatch { .. })
+            ),
+            "different-reference-if-result" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::ReferenceTypeMismatch { .. })
+            ),
+            "reference-field" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
+            ),
+            "generic-class" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::InvalidPrimaryConstructor {
+                    issue: dotty_jvm::JvmConstructorIssue::SourceShape,
+                    ..
+                })
             ),
             _ => unreachable!("all cases have an expected pipeline stage"),
         };
@@ -6484,6 +6728,141 @@ fn verify_counter_with_jdk(output_directory: &Path) {
         .output()
         .expect("start java verifier for Counter");
     assert!(java.status.success(), "java failed for Counter: {:?}", java);
+}
+
+fn verify_reference_object_apis_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 class output path");
+    let counter = Command::new("javap")
+        .args(["-c", "-v", "-p", "-classpath", output_path, "Counter"])
+        .output()
+        .expect("start javap for Counter API");
+    assert!(
+        counter.status.success(),
+        "javap rejected Counter\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&counter.stdout),
+        String::from_utf8_lossy(&counter.stderr)
+    );
+    let counter = String::from_utf8_lossy(&counter.stdout);
+    assert!(counter.contains("descriptor: ()LCounter;"));
+    assert_javap_instruction_sequence(&counter, "public Counter self();", &["aload_0", "areturn"]);
+    for class_name in ["Counter", "CounterService"] {
+        let javap = Command::new("javap")
+            .args(["-c", "-v", "-p", "-classpath", output_path, class_name])
+            .output()
+            .expect("start javap for real-source reference APIs");
+        assert!(
+            javap.status.success(),
+            "javap rejected {class_name}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let output = String::from_utf8_lossy(&javap.stdout);
+        assert!(
+            output.contains("major version: 65"),
+            "{class_name}: {output}"
+        );
+        assert!(output.contains("StackMapTable"), "{class_name}: {output}");
+    }
+    let service = Command::new("javap")
+        .args([
+            "-c",
+            "-v",
+            "-p",
+            "-classpath",
+            output_path,
+            "CounterService",
+        ])
+        .output()
+        .expect("start javap for CounterService");
+    assert!(
+        service.status.success(),
+        "javap rejected CounterService\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&service.stdout),
+        String::from_utf8_lossy(&service.stderr)
+    );
+    let service = String::from_utf8_lossy(&service.stdout);
+    for expected in [
+        "descriptor: (I)LCounter;",
+        "descriptor: (LCounter;)LCounter;",
+        "descriptor: (LCounter;)I",
+        "descriptor: (ZLCounter;LCounter;)LCounter;",
+        "descriptor: (LCounter;I)I",
+        "invokevirtual // Method Counter.get:()I",
+        "invokevirtual // Method Counter.increment:()I",
+        "create:(I)LCounter;",
+        "read:(LCounter;)I",
+        "new           #",
+        "dup",
+        "Counter.\"<init>\":(I)V",
+    ] {
+        assert!(
+            service.contains(expected),
+            "javap output omitted {expected:?}:\n{service}"
+        );
+    }
+    assert_javap_instruction_sequence(
+        &service,
+        "public Counter create(int);",
+        &["new", "dup", "iload_1", "invokespecial", "areturn"],
+    );
+    assert_javap_instruction_sequence(
+        &service,
+        "public Counter passthrough(Counter);",
+        &["aload_1", "areturn"],
+    );
+    assert_javap_instruction_sequence(
+        &service,
+        "public int read(Counter);",
+        &["aload_1", "invokevirtual", "ireturn"],
+    );
+    assert_javap_instruction_sequence(
+        &service,
+        "public int roundTrip(int);",
+        &[
+            "aload_0",
+            "iload_1",
+            "invokevirtual",
+            "invokevirtual",
+            "ireturn",
+        ],
+    );
+
+    let harness = output_directory.join("ReferenceObjectApisHarness.java");
+    fs::write(
+        &harness,
+        "public final class ReferenceObjectApisHarness {\n  public static void main(String[] args) {\n    CounterService service = new CounterService();\n    Counter created = service.create(5);\n    if (created.get() != 5) throw new AssertionError(\"create\");\n    if (service.passthrough(created) != created) throw new AssertionError(\"identity\");\n    if (service.read(created) != created.get()) throw new AssertionError(\"read\");\n    if (created.self() != created) throw new AssertionError(\"this identity\");\n    Counter other = service.create(8);\n    if (service.choose(true, created, other) != created) throw new AssertionError(\"true branch identity\");\n    if (service.choose(false, created, other) != other) throw new AssertionError(\"false branch identity\");\n    if (service.incrementUntil(service.create(0), 0) != 0) throw new AssertionError(\"zero loop\");\n    if (service.incrementUntil(service.create(0), 1) != 1) throw new AssertionError(\"one loop\");\n    if (service.incrementUntil(service.create(0), 10) != 10) throw new AssertionError(\"many loop\");\n    if (service.incrementUntil(service.create(12), 10) != 12) throw new AssertionError(\"start above limit\");\n    if (service.roundTrip(13) != 13) throw new AssertionError(\"nested reference result argument\");\n    System.out.println(\"reference object APIs verified\");\n  }\n}\n",
+    )
+    .expect("write Java reference API harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness)
+        .output()
+        .expect("start javac for reference API harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected reference API harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "ReferenceObjectApisHarness",
+        ])
+        .output()
+        .expect("start JVM verifier for reference APIs");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected reference APIs\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "reference object APIs verified"
+    );
 }
 
 fn verify_reference_control_flow_with_jdk(output_directory: &Path) {

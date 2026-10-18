@@ -164,3 +164,29 @@ verification in the class-file builder are implemented by #1271. Reference
 returns and planned virtual-call values are covered by real-source and typed
 tree fixtures, with the JDK 21+ `java -Xverify:all` gate checking emitted
 classfiles.
+
+## End-to-end object API fixture
+
+`tests/fixtures/jvm/ReferenceObjectApis.scala` and
+`real_reference_object_apis_compile_and_verify_end_to_end` close the bounded
+reference API path with two ordinary classes compiled from one real source
+session. The fixture covers `Counter.self(): Counter`, construction and
+passthrough, a reference parameter used by `read`, exact reference selection
+in `choose`, repeated receiver calls in `incrementUntil`, and a returned
+reference passed as a nested call argument in `roundTrip`.
+
+The test compiles two independent frontend sessions and checks the ordered
+class byte streams for exact equality. Full classfile decoding checks major
+version 65, method access, the required descriptors, constructor and virtual
+call owners, `Object(Counter)` entries in the `choose` join and loop-header
+frames, branch target PCs, and local/stack limits. When JDK 21+ tools are
+available, `javap -c -v` checks the emitted instruction sequences and a Java
+harness exercises object identity, both branches, loop boundaries and nested
+calls under `java -Xverify:all`. CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so
+that verification cannot silently skip there.
+
+This remains a deliberately small JVM surface. Reference fields and
+reference-valued constructor parameters are rejected; so are arrays, `null`,
+generic classes, arbitrary external targets, hierarchy conversions, traits,
+and general Scala ABI or `.tasty` emission. The test adapter emits a complete
+batch only after all classes have been encoded in memory.

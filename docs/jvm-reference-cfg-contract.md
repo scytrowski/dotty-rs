@@ -193,6 +193,16 @@ reference parameter. Its frame assertions require `Object(Counter)` on the
 conditional operand stack and in the loop-header locals alongside primitive
 parameters.
 
+The broader `ReferenceObjectApis.scala` fixture keeps both classes in one
+source semantic session and adds `Counter.self`, `CounterService.create`,
+`passthrough`, `read`, `choose`, `incrementUntil`, and `roundTrip`. Its
+regression checks that each actual branch target has a decoded stack-map frame,
+that `Object(Counter)` is resolved through the emitted constant pool at the
+branch join and loop header, and that the loop's exact reference parameter
+survives its back-edge. The independent-session bytes are compared in class
+output order. On JDK 21+, `javap` and the Java identity/loop harness run the
+classfiles with `-Xverify:all`; CI requires this toolchain.
+
 The class-file unit tests exercise exact local/stack transfer, allocation
 tracking, owner and argument checks, joins, and frame projection. The JDK
 encoder gate checks virtual reference calls, chaining, and exact result frames
