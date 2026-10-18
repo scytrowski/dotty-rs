@@ -931,6 +931,13 @@ pub enum JvmCodegenError {
         expected: JvmType,
         found: JvmExpressionFlow,
     },
+    /// Reference-valued arguments are not part of the current virtual-call subset.
+    ReferenceCallArgumentUnsupported {
+        tree: TreeId<Typed>,
+        method: SymbolId,
+        index: usize,
+        ty: SymbolId,
+    },
     /// A typed parameter reference has a different primitive type from its local metadata.
     ParameterReferenceTypeMismatch {
         tree: TreeId<Typed>,
@@ -1810,7 +1817,11 @@ impl JvmCompilationUnit<'_> {
             .iter()
             .find(|plan| plan.class == class)
             .ok_or(JvmCodegenError::MissingClassPlan { class })?;
-        let metadata = plan.metadata_with_typed_ast(self.store, self.typed_ast, definitions)?;
+        let all_metadata = self.metadata(definitions)?;
+        let metadata = all_metadata
+            .iter()
+            .find(|metadata| metadata.identity().symbol() == class)
+            .ok_or(JvmCodegenError::MissingClassPlan { class })?;
         let method_plan = plan
             .methods
             .iter()
@@ -1824,7 +1835,7 @@ impl JvmCompilationUnit<'_> {
         let body = method_plan
             .body
             .ok_or(JvmCodegenError::MissingTypedBody { method })?;
-        expression::lower_planned_method_body(self, &metadata, definitions, method_metadata, body)
+        expression::lower_planned_method_body(self, metadata, definitions, method_metadata, body)
     }
 
     /// Lowers planned primitive field initializers into source-ordered
@@ -1914,15 +1925,13 @@ impl JvmCompilationUnit<'_> {
         call: TreeId<Typed>,
         definitions: &Definitions,
     ) -> Result<dotty_classfile::bytecode::CodeBuilder, JvmCodegenError> {
-        let class_plan = self
-            .classes
+        let all_metadata = self.metadata(definitions)?;
+        let class_metadata = all_metadata
             .iter()
-            .find(|plan| plan.class == caller_class)
+            .find(|metadata| metadata.identity().symbol() == caller_class)
             .ok_or(JvmCodegenError::MissingClassPlan {
                 class: caller_class,
             })?;
-        let class_metadata =
-            class_plan.metadata_with_typed_ast(self.store, self.typed_ast, definitions)?;
         let caller_metadata = class_metadata
             .methods()
             .iter()
@@ -1935,7 +1944,7 @@ impl JvmCompilationUnit<'_> {
             self.resolve_same_class_call(caller_class, caller_method, call, definitions)?;
         expression::lower_current_receiver(
             self.typed_ast,
-            &class_metadata,
+            class_metadata,
             caller_metadata,
             call,
             &target,

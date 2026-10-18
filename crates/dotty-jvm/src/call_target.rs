@@ -226,8 +226,13 @@ pub(super) fn resolve_instance_call(
         });
     }
 
-    let class_metadata =
-        owner_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
+    let all_metadata = unit.metadata(definitions)?;
+    let class_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == receiver_class)
+        .ok_or(JvmCodegenError::MissingClassPlan {
+            class: receiver_class,
+        })?;
     let method_metadata = class_metadata
         .methods()
         .iter()

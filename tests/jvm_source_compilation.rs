@@ -878,10 +878,51 @@ fn reference_method_descriptors_use_validated_package_internal_names() {
 
 #[test]
 fn reference_parameters_and_unqualified_this_lower_as_exact_values() {
-    let source = "class Counter:\n  def value(): Int = 1\n\nclass Client:\n  def parameter(c: Counter): Int =\n    c\n    1\n  def current(): Int =\n    this\n    2\n  def mixed(flag: Boolean, count: Int, c: Counter, tail: Boolean): Int =\n    c\n    this\n    count\n";
+    let source = "class Counter:\n  def value(): Int = 1\n\nclass Client(seed: Int):\n  def parameter(c: Counter): Int =\n    { c }\n    1\n  def current(): Int =\n    this\n    2\n  def currentIf(flag: Boolean): Int =\n    if flag then this else this\n    3\n  def mixed(flag: Boolean, count: Int, c: Counter, tail: Boolean): Int =\n    c\n    this\n    count\n\nclass Factory:\n  def build(): Int =\n    new Client(0)\n    4\n";
     let output = TestOutputDirectory::new("reference-parameter-values");
-    let artifacts = compile_source_classes(source, "ReferenceParameterValues.scala", output.path())
-        .expect("reference parameter and this values lower in planned methods");
+    let mut inspect = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        let client = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(plan.class).name.text())
+                    == "Client"
+            })
+            .expect("Client plan")
+            .class;
+        for method_name in ["parameter", "current", "currentIf", "mixed"] {
+            let method = unit
+                .classes
+                .iter()
+                .find(|plan| plan.class == client)
+                .unwrap()
+                .methods
+                .iter()
+                .find(|method| {
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(method.method).name.text())
+                        == method_name
+                })
+                .unwrap()
+                .method;
+            unit.lower_method_body(client, method, definitions)
+                .unwrap_or_else(|error| {
+                    panic!("public method lowering failed for {method_name}: {error:?}")
+                });
+        }
+    };
+    let artifacts = compile_source_batch_observed(
+        source,
+        "ReferenceParameterValues.scala",
+        output.path(),
+        SourceId::from_index(1273),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut inspect),
+    )
+    .expect("reference parameter and this values lower in planned methods");
     let client_artifact = artifacts
         .iter()
         .find(|artifact| artifact.class.internal_name() == "Client")
@@ -896,6 +937,7 @@ fn reference_parameters_and_unqualified_this_lower_as_exact_values() {
         emitted_method_code(&client, "current"),
         [0x2a, 0x57, 0x05, 0xac]
     );
+    assert!(emitted_method_code(&client, "currentIf").contains(&0x2a));
     assert_eq!(
         emitted_method_code(&client, "mixed"),
         [0x2d, 0x57, 0x2a, 0x57, 0x1c, 0xac]
@@ -913,7 +955,9 @@ fn reference_parameters_and_unqualified_this_lower_as_exact_values() {
         Counter counter = new Counter();
         if (client.parameter(counter) != 1) throw new AssertionError("parameter");
         if (client.current() != 2) throw new AssertionError("this");
+        if (client.currentIf(true) != 3 || client.currentIf(false) != 3) throw new AssertionError("this if");
         if (client.mixed(true, 42, counter, false) != 42) throw new AssertionError("mixed");
+        if (new Factory().build() != 4) throw new AssertionError("allocation");
     }
 }
 "#,
@@ -946,6 +990,36 @@ fn reference_parameters_and_unqualified_this_lower_as_exact_values() {
         String::from_utf8_lossy(&java.stdout),
         String::from_utf8_lossy(&java.stderr)
     );
+}
+
+#[test]
+fn reference_value_extensions_keep_exact_identity_and_call_argument_limits() {
+    let mismatch = "class Counter:\n  def value(): Int = 1\nclass Client:\n  def choose(flag: Boolean, counter: Counter): Int =\n    if flag then this else counter\n    1\n";
+    let output = TestOutputDirectory::new("reference-value-identity-mismatch");
+    let error = compile_source_classes(mismatch, "ReferenceIdentityMismatch.scala", output.path())
+        .expect_err("different planned classes cannot join as a reference value");
+    assert!(matches!(
+        &error,
+        PipelineFailure::Codegen(JvmCodegenError::ReferenceTypeMismatch { .. })
+    ));
+    assert!(output.class_files().is_empty());
+
+    let reference_argument = "class Counter:\n  def value(): Int = 1\nclass Client:\n  def accept(counter: Counter): Int = 1\n  def pass(counter: Counter): Int = accept(counter)\n";
+    let output = TestOutputDirectory::new("reference-call-argument-remains-unsupported");
+    let error = compile_source_classes(
+        reference_argument,
+        "ReferenceCallArgument.scala",
+        output.path(),
+    )
+    .expect_err("reference call arguments remain unsupported");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(JvmCodegenError::ReferenceCallArgumentUnsupported { .. })
+        ),
+        "unexpected reference-argument failure: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
 }
 
 #[test]

@@ -124,12 +124,15 @@ pub(super) fn resolve(
         .iter()
         .find(|plan| plan.class == owner_class)
         .ok_or(JvmCodegenError::MissingClassPlan { class: owner_class })?;
-    let class_metadata =
-        class_plan.metadata_with_typed_ast(unit.store, unit.typed_ast, definitions)?;
+    let all_metadata = unit.metadata(definitions)?;
+    let class_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == owner_class)
+        .ok_or(JvmCodegenError::MissingClassPlan { class: owner_class })?;
     let class_info = crate::identity::class_info(unit.store, owner_class)?;
     crate::emission::validate_emittable_class(
         class_plan,
-        &class_metadata,
+        class_metadata,
         unit.store,
         definitions,
         class_info,
@@ -175,7 +178,7 @@ pub(super) fn resolve(
     let (descriptor, access_flags, owner_internal_name) = approved_constructor(
         unit,
         class_plan,
-        &class_metadata,
+        class_metadata,
         constructor,
         apply_tree,
         definitions,

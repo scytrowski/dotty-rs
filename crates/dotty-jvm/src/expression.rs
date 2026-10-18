@@ -444,75 +444,13 @@ fn lower_leaf(
                     symbol,
                 });
             };
-            if !context.store.symbols.contains(parameter.symbol()) {
-                return Err(JvmCodegenError::InvalidParameterReference {
-                    tree: tree_id,
-                    symbol: Some(parameter.symbol()),
-                });
-            }
-            let parameter_symbol = context.store.symbols.get(parameter.symbol());
-            if parameter_symbol.kind != dotty_core::symbols::SymbolKind::Parameter
-                || parameter_symbol.owner != Some(context.method.symbol())
-            {
-                return Err(JvmCodegenError::InvalidParameterReference {
-                    tree: tree_id,
-                    symbol: Some(parameter.symbol()),
-                });
-            }
             let Some(prefix) = term_prefix else {
                 return Err(JvmCodegenError::InvalidParameterReference {
                     tree: tree_id,
                     symbol: Some(parameter.symbol()),
                 });
             };
-            if prefix != context.definitions.no_prefix
-                || !matches!(context.store.types.try_get(prefix), Some(Type::NoPrefix))
-            {
-                return Err(JvmCodegenError::InvalidParameterReferencePrefix {
-                    tree: tree_id,
-                    parameter: parameter.symbol(),
-                    prefix,
-                });
-            }
-            let symbol_type = match context.store.symbols.info(parameter.symbol()) {
-                SymbolInfo::Complete(ty) => Some(*ty),
-                SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => None,
-            };
-            let found = match parameter.ty() {
-                JvmType::Reference(class) => {
-                    if let Some(ty) = symbol_type {
-                        let Some((_, _, metadata)) = context.call_context else {
-                            return Err(JvmCodegenError::ReferenceParameterRequiresPlan {
-                                tree: tree_id,
-                                parameter: parameter.symbol(),
-                                class,
-                            });
-                        };
-                        let class_identities = metadata
-                            .iter()
-                            .map(|metadata| metadata.identity().clone())
-                            .collect::<Vec<_>>();
-                        Some(crate::reference::project_method_signature_type(
-                            context.store,
-                            ty,
-                            context.definitions,
-                            &class_identities,
-                        )?)
-                    } else {
-                        None
-                    }
-                }
-                JvmType::Int | JvmType::Boolean => symbol_type
-                    .and_then(|ty| primitive_type(context.store, ty, context.definitions)),
-            };
-            if found != Some(parameter.ty()) {
-                return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
-                    tree: tree_id,
-                    parameter: parameter.symbol(),
-                    expected: parameter.ty(),
-                    found,
-                });
-            }
+            parameter_value_type(context, tree_id, parameter.symbol(), prefix)?;
             match parameter.ty() {
                 JvmType::Reference(_) => code.aload(usize::from(parameter.slot())),
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(parameter.slot())),
@@ -527,52 +465,10 @@ fn lower_leaf(
             if this.qual.is_some() {
                 return Err(JvmCodegenError::QualifiedThisValueUnsupported { tree: tree_id });
             }
-            let Some((unit, class, metadata)) = context.call_context else {
-                return Err(JvmCodegenError::JvmReferenceValueContextUnavailable {
-                    tree: tree_id,
-                    method: context.method.symbol(),
-                });
-            };
-            let expected = class.identity().symbol();
-            let found = match context.store.types.try_get(tree.ty) {
-                Some(Type::ThisType { class }) => Some(*class),
-                _ => None,
-            };
-            if found != Some(expected) {
-                return Err(JvmCodegenError::InvalidCurrentThisReference {
-                    tree: tree_id,
-                    expected,
-                    found,
-                });
-            }
-            if !unit.classes.iter().any(|plan| plan.class == expected) {
-                return Err(JvmCodegenError::MissingClassPlan { class: expected });
-            }
-            if !metadata
-                .iter()
-                .any(|planned| planned == class && planned.identity().symbol() == expected)
-            {
-                return Err(JvmCodegenError::JvmReferenceValueContextUnavailable {
-                    tree: tree_id,
-                    method: context.method.symbol(),
-                });
-            }
-            let Some(caller) = class
-                .methods()
-                .iter()
-                .find(|method| method.symbol() == context.method.symbol())
+            let JvmType::Reference(expected) = current_this_value_type(context, tree_id, tree.ty)?
             else {
-                return Err(JvmCodegenError::CallerMethodNotInJvmPlan {
-                    class: expected,
-                    method: context.method.symbol(),
-                });
+                unreachable!("current this projection always returns a reference")
             };
-            if caller.access_flags().is_static() {
-                return Err(JvmCodegenError::JvmReferenceValueContextUnavailable {
-                    tree: tree_id,
-                    method: caller.symbol(),
-                });
-            }
             code.aload(0)
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -585,6 +481,151 @@ fn lower_leaf(
             node: tree_kind_name(kind),
         }),
     }
+}
+
+fn parameter_value_type(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    symbol: SymbolId,
+    prefix: TypeId,
+) -> Result<JvmType, JvmCodegenError> {
+    let Some(parameter) = context
+        .method
+        .parameters()
+        .iter()
+        .find(|parameter| parameter.symbol() == symbol)
+        .copied()
+    else {
+        return Err(JvmCodegenError::InvalidParameterReference {
+            tree,
+            symbol: Some(symbol),
+        });
+    };
+    if !context.store.symbols.contains(symbol) {
+        return Err(JvmCodegenError::InvalidParameterReference {
+            tree,
+            symbol: Some(symbol),
+        });
+    }
+    let parameter_symbol = context.store.symbols.get(symbol);
+    if parameter_symbol.kind != dotty_core::symbols::SymbolKind::Parameter
+        || parameter_symbol.owner != Some(context.method.symbol())
+    {
+        return Err(JvmCodegenError::InvalidParameterReference {
+            tree,
+            symbol: Some(symbol),
+        });
+    }
+    if prefix != context.definitions.no_prefix
+        || !matches!(context.store.types.try_get(prefix), Some(Type::NoPrefix))
+    {
+        return Err(JvmCodegenError::InvalidParameterReferencePrefix {
+            tree,
+            parameter: symbol,
+            prefix,
+        });
+    }
+    let semantic_type = match context.store.symbols.info(symbol) {
+        SymbolInfo::Complete(ty) => *ty,
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol });
+        }
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol }),
+    };
+    let found = match parameter.ty() {
+        JvmType::Reference(class) => {
+            let Some((_, _, metadata)) = context.call_context else {
+                return Err(JvmCodegenError::ReferenceParameterRequiresPlan {
+                    tree,
+                    parameter: symbol,
+                    class,
+                });
+            };
+            let class_identities = metadata
+                .iter()
+                .map(|metadata| metadata.identity().clone())
+                .collect::<Vec<_>>();
+            crate::reference::project_method_signature_type(
+                context.store,
+                semantic_type,
+                context.definitions,
+                &class_identities,
+            )?
+        }
+        JvmType::Int | JvmType::Boolean => {
+            primitive_type(context.store, semantic_type, context.definitions).ok_or(
+                JvmCodegenError::ParameterReferenceTypeMismatch {
+                    tree,
+                    parameter: symbol,
+                    expected: parameter.ty(),
+                    found: None,
+                },
+            )?
+        }
+    };
+    if found != parameter.ty() {
+        return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
+            tree,
+            parameter: symbol,
+            expected: parameter.ty(),
+            found: Some(found),
+        });
+    }
+    Ok(found)
+}
+
+fn current_this_value_type(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    ty: TypeId,
+) -> Result<JvmType, JvmCodegenError> {
+    let Some((unit, class, metadata)) = context.call_context else {
+        return Err(JvmCodegenError::JvmReferenceValueContextUnavailable {
+            tree,
+            method: context.method.symbol(),
+        });
+    };
+    let expected = class.identity().symbol();
+    let found = match context.store.types.try_get(ty) {
+        Some(Type::ThisType { class }) => Some(*class),
+        _ => None,
+    };
+    if found != Some(expected) {
+        return Err(JvmCodegenError::InvalidCurrentThisReference {
+            tree,
+            expected,
+            found,
+        });
+    }
+    if !unit.classes.iter().any(|plan| plan.class == expected) {
+        return Err(JvmCodegenError::MissingClassPlan { class: expected });
+    }
+    if !metadata
+        .iter()
+        .any(|planned| planned == class && planned.identity().symbol() == expected)
+    {
+        return Err(JvmCodegenError::JvmReferenceValueContextUnavailable {
+            tree,
+            method: context.method.symbol(),
+        });
+    }
+    let Some(caller) = class
+        .methods()
+        .iter()
+        .find(|method| method.symbol() == context.method.symbol())
+    else {
+        return Err(JvmCodegenError::CallerMethodNotInJvmPlan {
+            class: expected,
+            method: context.method.symbol(),
+        });
+    };
+    if caller.access_flags().is_static() {
+        return Err(JvmCodegenError::JvmReferenceValueContextUnavailable {
+            tree,
+            method: caller.symbol(),
+        });
+    }
+    Ok(JvmType::Reference(expected))
 }
 
 fn local_reference_slot(
@@ -1334,9 +1375,12 @@ fn block_value_type(
             Ok(_) | Err(_) => None,
         });
     }
+    if matches!(context.store.types.try_get(ty), Some(Type::ThisType { .. })) {
+        return current_this_value_type(context, tree, ty).map(Some);
+    }
     let Some(Type::TermRef {
+        prefix,
         target: TermRefTarget::Symbol(symbol),
-        ..
     }) = context.store.types.try_get(ty)
     else {
         return Ok(None);
@@ -1390,47 +1434,7 @@ fn block_value_type(
         )
         .map(Some);
     }
-    let Some(parameter) = context
-        .method
-        .parameters()
-        .iter()
-        .find(|parameter| parameter.symbol() == *symbol)
-        .copied()
-    else {
-        return Err(JvmCodegenError::InvalidParameterReference {
-            tree,
-            symbol: Some(*symbol),
-        });
-    };
-    if !context.store.symbols.contains(*symbol) {
-        return Err(JvmCodegenError::InvalidParameterReference {
-            tree,
-            symbol: Some(*symbol),
-        });
-    }
-    let parameter_symbol = context.store.symbols.get(*symbol);
-    if parameter_symbol.kind != dotty_core::symbols::SymbolKind::Parameter
-        || parameter_symbol.owner != Some(context.method.symbol())
-    {
-        return Err(JvmCodegenError::InvalidParameterReference {
-            tree,
-            symbol: Some(*symbol),
-        });
-    }
-    let symbol_type = match context.store.symbols.info(*symbol) {
-        SymbolInfo::Complete(ty) => Some(*ty),
-        SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => None,
-    };
-    let found = symbol_type.and_then(|ty| primitive_type(context.store, ty, context.definitions));
-    if found != Some(parameter.ty()) {
-        return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
-            tree,
-            parameter: *symbol,
-            expected: parameter.ty(),
-            found,
-        });
-    }
-    Ok(found)
+    parameter_value_type(context, tree, *symbol, *prefix).map(Some)
 }
 
 fn is_boolean_not_block_result(
@@ -1547,6 +1551,19 @@ fn emit_apply(
             method: target.method_symbol(),
             expected: parameters.len(),
             found: arguments.len(),
+        });
+    }
+    if let Some((index, JvmType::Reference(ty))) = parameters
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, parameter)| matches!(parameter, JvmType::Reference(_)))
+    {
+        return Err(JvmCodegenError::ReferenceCallArgumentUnsupported {
+            tree: tree_id,
+            method: target.method_symbol(),
+            index,
+            ty,
         });
     }
 
