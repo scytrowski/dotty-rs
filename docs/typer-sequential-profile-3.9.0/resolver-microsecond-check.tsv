@@ -1,0 +1,13 @@
+dotty_rs_commit	manifest_files	runs	measure	count	value	unit	notes
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	cargo_wall_time	1	220155	ms	
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	audit_setup_and_source_loop	1	219535	ms	
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	member_requests	106009	12726008	us	inclusive resolver time
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	Object_to_ModuleClass_identity_requests	105985	70634	us	inclusive resolver time
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	package_requests	56089	28969	us	inclusive resolver time
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	direct_complete_class_hook_calls	27	2	us	does not include completions initiated inside member resolution
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	direct_classfile_completion_hook_calls	0	0	us	not a count of all classfile loads
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	direct_TASTy_completion_hook_calls	0	0	us	not a count of all TASTy loads
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	classloader_full_completions	16		count	format not captured in this profile
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	identity_shell_creations	33		count	
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	identity_shell_reuses	69		count	
+b32800dd1a8bbbeb815b924f70b592814c2b3333	5	1	completed_cache_hits	0		count	

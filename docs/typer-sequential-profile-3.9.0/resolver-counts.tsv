@@ -1,0 +1,12 @@
+request_family	count_across_runs
+external_member_errors	414
+external_member_requests	212018
+external_member_successes	106002
+external_member_unresolved	105600
+external_package_errors	0
+external_package_requests	112178
+external_package_successes	450
+external_package_unresolved	111728
+resolver_member_requests	212018
+typer_module_completion_resolver_calls	0
+typer_module_identity_resolver_calls	211970

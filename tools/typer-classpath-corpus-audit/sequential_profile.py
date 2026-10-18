@@ -69,6 +69,14 @@ def kvs(line: str) -> dict[str, str]:
     return dict(re.findall(r"([a-zA-Z_][a-zA-Z0-9_]*)=([^\s]+)", line))
 
 
+def resolver_duration_us(values: dict[str, int], operation: str) -> int | str:
+    return values.get(f"{operation}_inner_us", "not_captured")
+
+
+def resolver_duration_ms(values: dict[str, int], operation: str) -> int | str:
+    return values.get(f"{operation}_inner_ms", "not_captured")
+
+
 def parse_run(log: str) -> dict:
     result: dict = {
         "files": {}, "methods": {}, "resolver": {}, "summary": {},
@@ -182,11 +190,13 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
             method_samples.append((data["elapsed_ms"], path, tree, data["method"]))
             method_row_data.append((data["elapsed_ms"], path, tree, "\t".join(str(value) for value in [
                 run_index, path, tree, data["method"], data["elapsed_ms"],
-                resolver.get("module_identity_calls", 0), resolver.get("module_identity_inner_us", 0),
-                resolver.get("module_completion_calls", 0), resolver.get("module_completion_inner_us", 0),
-                resolver.get("class_completion_inner_us", 0), resolver.get("member_calls", 0),
-                resolver.get("member_inner_us", 0), resolver.get("package_calls", 0),
-                resolver.get("package_inner_us", 0),
+                resolver.get("module_identity_calls", "not_captured"), resolver_duration_ms(resolver, "module_identity"), resolver_duration_us(resolver, "module_identity"),
+                resolver.get("module_completion_calls", "not_captured"), resolver_duration_ms(resolver, "module_completion"), resolver_duration_us(resolver, "module_completion"),
+                resolver.get("class_completion_calls", "not_captured"), resolver_duration_ms(resolver, "class_completion"), resolver_duration_us(resolver, "class_completion"),
+                resolver.get("classfile_completion_calls", "not_captured"), resolver_duration_us(resolver, "classfile_completion"),
+                resolver.get("tasty_completion_calls", "not_captured"), resolver_duration_us(resolver, "tasty_completion"),
+                resolver.get("member_calls", "not_captured"), resolver_duration_ms(resolver, "member"), resolver_duration_us(resolver, "member"),
+                resolver.get("package_calls", "not_captured"), resolver_duration_ms(resolver, "package"), resolver_duration_us(resolver, "package"),
             ])))
             for name, value in resolver.items():
                 if name.endswith("_calls") or name.endswith("_inner_ms") or name.endswith("_inner_us"):
@@ -197,7 +207,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
         f"{run}\t{path}\t{phase}\t{millis}\t{outcome}"
         for millis, path, phase, run, outcome in sorted(file_row_data, key=lambda item: (-item[0], item[1], item[2], item[3]))
     ]
-    method_rows = ["run\tfile\ttree\tmethod\telapsed_ms\tmodule_identity_calls\tmodule_identity_inner_us\tmodule_completion_calls\tmodule_completion_inner_us\tclass_completion_inner_us\tmember_calls\tmember_inner_us\tpackage_calls\tpackage_inner_us"] + [
+    method_rows = ["run\tfile\ttree\tmethod\telapsed_ms\tmodule_identity_calls\tmodule_identity_inner_ms\tmodule_identity_inner_us\tmodule_completion_calls\tmodule_completion_inner_ms\tmodule_completion_inner_us\tclass_completion_calls\tclass_completion_inner_ms\tclass_completion_inner_us\tclassfile_completion_calls\tclassfile_completion_inner_us\ttasty_completion_calls\ttasty_completion_inner_us\tmember_calls\tmember_inner_ms\tmember_inner_us\tpackage_calls\tpackage_inner_ms\tpackage_inner_us"] + [
         row for _elapsed, _path, _tree, row in sorted(method_row_data, key=lambda item: (-item[0], item[1], item[2], item[3]))
     ]
     (out_dir / "file-phases.tsv").write_text("\n".join(file_rows) + "\n", encoding="utf-8")
@@ -216,22 +226,25 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
         key=lambda item: (-item[0], item[2], item[3], item[4]),
     )[:10]
     # Durations from resolver wrappers are inclusive and can overlap. Rank by observed time, not guessed cost.
-    resolver_operations: dict[str, tuple[int, int]] = {}
+    resolver_operations: dict[str, tuple[int | None, int | None, int | None]] = {}
     for operation in (
         "module_identity", "module_completion", "class_completion", "classfile_completion",
         "tasty_completion", "member", "package",
     ):
-        micros = resolver_totals.get(f"{operation}_inner_us", [0, 0])[0]
-        millis = resolver_totals.get(f"{operation}_inner_ms", [0, 0])[0]
-        calls = resolver_totals.get(f"{operation}_calls", [0, 0])[0]
-        resolver_operations[operation] = (calls, micros if micros else millis * 1000)
-    member_calls, member_micros = resolver_operations["member"]
+        micros_key = f"{operation}_inner_us"
+        millis_key = f"{operation}_inner_ms"
+        calls_key = f"{operation}_calls"
+        micros = resolver_totals.get(micros_key, [0, 0])[0] if micros_key in resolver_totals else None
+        millis = resolver_totals.get(millis_key, [0, 0])[0] if millis_key in resolver_totals else None
+        calls = resolver_totals.get(calls_key, [0, 0])[0] if calls_key in resolver_totals else None
+        resolver_operations[operation] = (calls, millis, micros)
+    member_calls, member_millis, member_micros = resolver_operations["member"]
     candidates = [
         (phase_totals.get("typing_ms", 0), "SourceTyper method typing", len(method_samples),
          "Inspect the recorded hottest method identities first; do not share store/session semantic IDs across files."),
         (phase_totals.get("postprocess_ms", 0), "post-typing audit accounting", len(file_samples) * len(runs),
          "Break down repeated source/blocker projections while preserving per-row identities and rollback coverage."),
-        (round(member_micros / 1000), "resolver member lookup", member_calls,
+        (round((member_micros / 1000) if member_micros is not None else member_millis or 0), "resolver member lookup", member_calls or 0,
          "Investigate immutable resource/query reuse only; keep SymbolId, TypeId, ScopeId, interned names, and transaction state local to each SemanticStore/LoadingSession."),
     ]
     candidates.sort(key=lambda item: (-item[0], item[1]))
@@ -293,8 +306,18 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
     for phase, total in sorted(phase_totals.items(), key=lambda item: (-item[1], item[0])):
         lines.append(f"| `{phase}` | {total} | {100 * total / max(1, phase_sum):.1f}% |")
     lines += ["", "## Resolver operation families", "", "Durations are wrapper-inclusive; nested work may overlap.", "", "| Operation | Calls | Inclusive ms |", "| --- | ---: | ---: |"]
-    for operation, (calls, micros) in sorted(resolver_operations.items(), key=lambda item: (-item[1][1], item[0])):
-        lines.append(f"| `{operation}` | {calls} | {micros / 1000:.3f} |")
+    resolver_sort_key = lambda item: (item[1][1] is None and item[1][2] is None, -(item[1][2] if item[1][2] is not None else (item[1][1] or 0) * 1000), item[0])
+    for operation, (calls, millis, micros) in sorted(resolver_operations.items(), key=resolver_sort_key):
+        calls_text = "not captured" if calls is None else str(calls)
+        if micros is not None:
+            time_text = f"{micros / 1000:.3f}"
+        elif millis is None:
+            time_text = "not captured"
+        elif millis == 0 and (calls is None or calls > 0):
+            time_text = "below 1 ms per method"
+        else:
+            time_text = f"{millis:.3f}"
+        lines.append(f"| `{operation}` | {calls_text} | {time_text} |")
     lines += ["", "## Classpath load counts", "", "| Observation | Count across runs |", "| --- | ---: |"]
     for name in sorted(load_totals):
         lines.append(f"| `{name}` | {load_totals[name]} |")
@@ -318,8 +341,9 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
     ]
     (out_dir / "summary.md").write_text("\n".join(lines), encoding="utf-8")
     (out_dir / "resolver-operations.tsv").write_text(
-        "operation\tcalls\tinclusive_microseconds\n" + "".join(
-            f"{operation}\t{calls}\t{micros}\n" for operation, (calls, micros) in sorted(resolver_operations.items())
+        "operation\tcalls\tinclusive_ms\tinclusive_us\n" + "".join(
+            f"{operation}\t{calls if calls is not None else 'not_captured'}\t{millis if millis is not None else 'not_captured'}\t{micros if micros is not None else 'not_captured'}\n"
+            for operation, (calls, millis, micros) in sorted(resolver_operations.items(), key=resolver_sort_key)
         ), encoding="utf-8")
     (out_dir / "classpath-loads.tsv").write_text(
         "run\tmeasure\tcount\n" + "".join(
@@ -340,12 +364,15 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], file_pat
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--runs", type=int, default=2)
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target/typer-sequential-profile")
     parser.add_argument("--summarize-existing", action="store_true", help="rebuild reports from run-N.log without rerunning the audit")
+    parser.add_argument("--measured-commit", help="override source commit when summarizing saved logs")
     args = parser.parse_args()
     if not 1 <= args.runs <= 3:
         fail("--runs must be between 1 and 3 to keep the profile bounded")
+    if args.measured_commit and not args.summarize_existing:
+        fail("--measured-commit is only valid with --summarize-existing")
     scala_root = Path(os.environ.get("SCALA39_ROOT", ""))
     java_home = Path(os.environ.get("JAVA_HOME", ""))
     if not scala_root.is_dir() or not java_home.is_dir():
@@ -415,12 +442,16 @@ def main() -> int:
         fail("no profile runs to summarize")
     expected_methods = {(key, value["method"]) for key, value in results[0]["methods"].items()}
     expected_files = set(results[0]["files"])
+    if expected_files != set(selected):
+        fail("profile logs do not match the checked-in manifest file set")
     for index, result in enumerate(results[1:], 2):
         if {(key, value["method"]) for key, value in result["methods"].items()} != expected_methods:
             fail(f"profile run {index} did not preserve the same method identities")
         if set(result["files"]) != expected_files:
             fail(f"profile run {index} did not preserve the same selected files")
-    commit = subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
+    commit = args.measured_commit or subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        fail("--measured-commit must be a full 40-character Git SHA")
     report_started = time.monotonic_ns()
     write_report(out_dir, results, wall_times, selected, commit, scala_root, java_home, match.group(1), artifact_root, report_started)
     print(f"profile report: {out_dir / 'summary.md'}")
