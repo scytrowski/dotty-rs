@@ -8469,6 +8469,53 @@ mod tests {
     }
 
     #[test]
+    fn compiler_28_8_package_alias_tasty_is_accepted_by_the_loader() {
+        let package_name = BinaryName::from_internal("dotty/tools/dotc/semanticdb/package");
+        let class_path = InMemoryTastyClassPath(HashMap::from([(
+            package_name,
+            dotty_tasty_fixture_bytes("scala3-compiler/dotty/tools/dotc/semanticdb/package.tasty"),
+        )]));
+        let owner = BinaryName::from_internal("dotty/tools/dotc/semanticdb/package$");
+
+        let target = resolve_tasty_alias_target(&class_path, &owner, "ExtractSemanticInfo")
+            .expect("Scala 3.9 compiler package TASTy should be accepted")
+            .expect("the pinned package TASTy contains this alias");
+        assert!(matches!(
+            target,
+            tasty_symbol::TypeAliasTarget::Candidate(_)
+                | tasty_symbol::TypeAliasTarget::Alias { .. }
+        ));
+    }
+
+    #[test]
+    fn compiler_package_alias_rejects_unvalidated_tasty_minor_versions() {
+        let package_name = BinaryName::from_internal("dotty/tools/dotc/semanticdb/package");
+        let mut bytes =
+            dotty_tasty_fixture_bytes("scala3-compiler/dotty/tools/dotc/semanticdb/package.tasty");
+        // The pinned compiler fixture uses the one-byte base-128 encoding for
+        // each header version component. Change 28.8.0 to unvalidated 28.7.0.
+        bytes[5] = 7 | 0x80;
+        let class_path = InMemoryTastyClassPath(HashMap::from([(package_name, bytes)]));
+        let owner = BinaryName::from_internal("dotty/tools/dotc/semanticdb/package$");
+
+        let error = resolve_tasty_alias_target(&class_path, &owner, "ExtractSemanticInfo")
+            .expect_err("an unvalidated Scala TASTy version must not be parsed as an alias");
+        assert!(matches!(
+            error,
+            TastyAliasResolutionError::InvalidTasty(
+                _,
+                tasty_symbol::TastyDecodeError::UnsupportedClassloaderVersion {
+                    major: 28,
+                    minor: 7,
+                    experimental: 0,
+                },
+                _,
+                ClassFormat::Tasty,
+            )
+        ));
+    }
+
+    #[test]
     fn loading_source_reports_a_malformed_package_alias_tasty_file() {
         let resources = HashMap::from([
             (
