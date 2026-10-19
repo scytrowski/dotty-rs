@@ -693,13 +693,13 @@ pub enum JvmCodegenError {
         tree: TreeId<Typed>,
         field: SymbolId,
     },
-    /// A primitive field read is outside the currently modeled CFG stack flow.
+    /// A field read is outside the currently modeled CFG stack flow.
     JvmFieldReadInUnsupportedControlFlow {
         tree: TreeId<Typed>,
         method: SymbolId,
         field: SymbolId,
     },
-    /// A primitive field write is outside the currently modeled CFG stack flow.
+    /// A field write is outside the currently modeled CFG stack flow.
     JvmFieldWriteInUnsupportedControlFlow {
         tree: TreeId<Typed>,
         method: SymbolId,

@@ -366,6 +366,18 @@ fn resolve_receiver_class(
                     UnsupportedJvmCallShapeKind::UnsupportedFunctionTree,
                 ));
             };
+            if unit.store.symbols.contains(*local)
+                && unit.store.symbols.get(*local).kind == SymbolKind::Field
+            {
+                return planned_current_field_receiver_class(
+                    unit,
+                    caller_class,
+                    receiver_id,
+                    *local,
+                    *prefix,
+                    definitions,
+                );
+            }
             let symbol = unit
                 .store
                 .symbols
@@ -479,6 +491,39 @@ fn resolve_receiver_class(
                 )
             })
         }
+        TreeKind::Select(select) => {
+            let qualifier = tree(unit.store, unit.typed_ast, select.qualifier)?;
+            if !matches!(
+                qualifier.kind,
+                TreeKind::This(dotty_core::ast::This { qual: None })
+            ) || !matches!(
+                unit.store.types.try_get(qualifier.ty),
+                Some(Type::ThisType { class }) if *class == caller_class
+            ) {
+                return Err(unsupported_call(
+                    receiver_id,
+                    UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
+                ));
+            }
+            let Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(field),
+            }) = unit.store.types.try_get(receiver.ty)
+            else {
+                return Err(unsupported_call(
+                    receiver_id,
+                    UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
+                ));
+            };
+            planned_current_field_receiver_class(
+                unit,
+                caller_class,
+                receiver_id,
+                *field,
+                *prefix,
+                definitions,
+            )
+        }
         TreeKind::Apply(apply) if constructor_application(unit, apply.function)? => unit
             .resolve_constructor_call(caller_class, caller_method, receiver_id, definitions)
             .map(|target| target.owner_class()),
@@ -520,6 +565,65 @@ fn constructor_application(
         tree(unit.store, unit.typed_ast, select.qualifier)?.kind,
         TreeKind::New(_)
     ))
+}
+
+fn planned_current_field_receiver_class(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    receiver: TreeId<Typed>,
+    field: SymbolId,
+    prefix: TypeId,
+    definitions: &Definitions,
+) -> Result<SymbolId, JvmCodegenError> {
+    let Some(field_symbol) = unit
+        .store
+        .symbols
+        .contains(field)
+        .then(|| unit.store.symbols.get(field))
+    else {
+        return Err(JvmCodegenError::UnknownJvmFieldReference {
+            tree: receiver,
+            field,
+        });
+    };
+    if field_symbol.kind != SymbolKind::Field || field_symbol.owner != Some(caller_class) {
+        return Err(unsupported_call(
+            receiver,
+            UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
+        ));
+    }
+    if !matches!(
+        unit.store.types.try_get(prefix),
+        Some(Type::ThisType { class }) if *class == caller_class
+    ) {
+        return Err(unsupported_call(
+            receiver,
+            UnsupportedJvmCallShapeKind::UnsupportedReceiverPrefix,
+        ));
+    }
+    let class_metadata = unit
+        .metadata(definitions)?
+        .into_iter()
+        .find(|metadata| metadata.identity().symbol() == caller_class)
+        .ok_or(JvmCodegenError::MissingClassPlan {
+            class: caller_class,
+        })?;
+    let field_metadata = class_metadata
+        .fields()
+        .iter()
+        .find(|metadata| metadata.symbol() == field)
+        .ok_or(JvmCodegenError::FieldNotInJvmPlan {
+            tree: receiver,
+            class: caller_class,
+            field,
+        })?;
+    match field_metadata.value_type() {
+        JvmType::Reference(class) => Ok(class),
+        JvmType::Int | JvmType::Boolean => Err(unsupported_call(
+            receiver,
+            UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
+        )),
+    }
 }
 
 fn prefix_matches_receiver(
