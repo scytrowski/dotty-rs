@@ -185,8 +185,14 @@ fail with typed errors. Reference values may be discarded as category-one
 block statements with `pop`. Planned reference parameters and results, plus
 reference virtual-call arguments and results, are supported. Primary
 constructor metadata accepts exact references to classes in the same
-compilation unit. The constructor-call resolver checks those argument types,
-but method-body lowering still rejects reference-valued constructor arguments.
+compilation unit. Method-body constructor calls may pass a reference parameter,
+an initialized immutable local of an exact planned class, or the current
+unqualified `this` when its class matches the constructor parameter. These
+references may appear between primitive arguments; each is loaded once in
+source order as part of the `new`/`dup`/arguments/`invokespecial` sequence.
+Mutable reference locals, fields, nested allocations, method-call results, and
+branching expressions remain unsupported as constructor arguments. The
+uninitialized object and argument evaluation must complete in one basic block.
 Exact initialized references may stay
 live through `if` joins and `while` headers/back-edges. A reference stack join
 must have the same planned class on every incoming edge; different classes do
@@ -194,8 +200,9 @@ not merge to `Object`. A local that is not initialized on every path becomes
 unusable, and a later read fails.
 
 Allocation may occur in a branch or loop body only as one complete
-`new`/`dup`/branch-free primitive-argument/`invokespecial` sequence inside a
-basic block. The uninitialized object cannot cross a branch edge, enter a
+`new`/`dup`/supported-argument/`invokespecial` sequence inside a basic block.
+Arguments may be primitive values or the checked reference values described
+above. The uninitialized object cannot cross a branch edge, enter a
 local, or escape to another operation. A completed allocation becomes the
 exact planned class identity. The classfile CFG analyzer and frame generator
 validate generated methods before class bytes are returned; malformed or
@@ -207,6 +214,7 @@ unsupported states remain typed build errors.
 | Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and value descriptor; reference types must match at CFG joins |
 | Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver, argument, and result classes must exactly match planned descriptors |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
+| Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must exactly match; full allocation sequence remains in one basic block |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
 | Different reference classes at a stack join | No classfile emitted | Typed exact-class merge error; no inferred `Object`/common parent |
 

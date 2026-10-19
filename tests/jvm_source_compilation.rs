@@ -4915,8 +4915,16 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(seed: Int)\nclass CounterClient:\n  def run(): Int = new Counter(true).get()\n",
         ),
         (
+            "wrong-constructor-reference-class",
+            "class Counter\nclass Other\nclass Box(counter: Counter)\nclass Client:\n  def wrong(other: Other): Box = new Box(other)\n",
+        ),
+        (
             "branching-constructor-argument",
             "class Counter(seed: Int):\n  def get(): Int = 1\nclass CounterClient:\n  def run(flag: Boolean): Int = new Counter(if flag then 1 else 2).get()\n",
+        ),
+        (
+            "reference-branch-constructor-argument",
+            "class Counter\nclass Box(counter: Counter)\nclass Client:\n  def choose(flag: Boolean, counter: Counter): Box = new Box(if flag then counter else counter)\n",
         ),
         (
             "unplanned-object-class",
@@ -4935,8 +4943,20 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(start: Int)\nclass Other(start: Int)\nclass CounterClient:\n  def choose(flag: Boolean): Int =\n    val selected = if flag then new Counter(1) else new Other(2)\n    1\n",
         ),
         (
-            "reference-constructor-argument",
-            "class Counter(start: Int)\nclass Box(counter: Counter)\nclass CounterClient:\n  def use(counter: Counter): Int =\n    new Box(counter)\n    1\n",
+            "nested-reference-constructor-argument",
+            "class Counter(start: Int)\nclass Box(counter: Counter)\nclass Client:\n  def nested(): Box = new Box(new Counter(1))\n",
+        ),
+        (
+            "reference-returning-call-constructor-argument",
+            "class Counter\nclass Box(counter: Counter)\nclass Client:\n  def make(): Counter = new Counter()\n  def nested(): Box = new Box(make())\n",
+        ),
+        (
+            "mutable-reference-local-constructor-argument",
+            "class Counter\nclass Box(counter: Counter)\nclass Client:\n  def nested(counter: Counter): Box =\n    var current = counter\n    new Box(current)\n",
+        ),
+        (
+            "reference-field-constructor-argument",
+            "class Counter\nclass Box(counter: Counter)\nclass Client(counter: Counter):\n  private val saved: Counter = counter\n  def nested(): Box = new Box(saved)\n",
         ),
         (
             "reference-var-reassignment",
@@ -4987,9 +5007,24 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                     ..
                 })
             ),
+            "wrong-constructor-reference-class" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    ..
+                })
+            ),
             "branching-constructor-argument" => matches!(
                 &error,
                 PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmConstructorArgument { .. })
+            ),
+            "reference-branch-constructor-argument" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmConstructorArgument { .. })
+                    | PipelineFailure::Codegen(
+                        JvmCodegenError::JvmConstructorCallArgumentTypeMismatch { .. }
+                    )
+                    | PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch { .. })
             ),
             "unplanned-object-class" => matches!(
                 &error,
@@ -5010,9 +5045,17 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                     ..
                 })
             ),
-            "reference-constructor-argument" => matches!(
+            "nested-reference-constructor-argument"
+            | "reference-returning-call-constructor-argument"
+            | "mutable-reference-local-constructor-argument"
+            | "reference-field-constructor-argument" => matches!(
                 &error,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmConstructorArgument { .. })
+                PipelineFailure::Codegen(
+                    JvmCodegenError::JvmConstructorCallArgumentTypeMismatch { .. }
+                ) | PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch { .. })
+                    | PipelineFailure::Codegen(
+                        JvmCodegenError::UnsupportedMutableReferenceLocal { .. }
+                    )
             ),
             "reference-var-reassignment" => matches!(
                 &error,
@@ -5053,6 +5096,122 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
         assert!(
             output.class_files().is_empty(),
             "{label} failure must not publish any classfile"
+        );
+    }
+}
+
+#[test]
+fn reference_constructor_arguments_lower_in_order_and_verify_initialized_values() {
+    let output = TestOutputDirectory::new("reference-constructor-arguments");
+    let artifacts = compile_planned_constructor_source(
+        "class Counter(seed: Int):\n  private val value: Int = seed\n  def get(): Int = value\nclass Other()\nclass Holder(amount: Int, counter: Counter, enabled: Boolean):\n  private val saved: Counter = counter\n  private val savedAmount: Int = amount\n  private val savedEnabled: Boolean = enabled\n  def reference(): Counter = saved\n  def number(): Int = savedAmount\n  def flag(): Boolean = savedEnabled\nclass Pair(counter: Counter, other: Other):\n  private val savedCounter: Counter = counter\n  private val savedOther: Other = other\n  def first(): Counter = savedCounter\n  def second(): Other = savedOther\nclass OwnerBox(owner: Client):\n  private val savedOwner: Client = owner\n  def get(): Client = savedOwner\nclass Client:\n  def wrap(counter: Counter): Holder = new Holder(3, counter, true)\n  def wrapLocal(counter: Counter): Holder =\n    val saved = counter\n    new Holder(4, saved, false)\n  def pair(counter: Counter, other: Other): Pair = new Pair(counter, other)\n  def ownerBox(): OwnerBox = new OwnerBox(this)\n",
+        output.path(),
+    )
+    .unwrap();
+    let decode_class = |name: &str| {
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("{name} class is emitted"));
+        let mut reader = Reader::new(artifact.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("decode emitted class");
+        class
+            .validate_references()
+            .expect("generated class references are valid");
+        class
+    };
+    let holder = decode_class("Holder");
+    let holder_constructor = holder
+        .methods
+        .iter()
+        .find(|method| holder.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .unwrap();
+    assert_eq!(
+        holder
+            .constant_pool
+            .utf8(holder_constructor.descriptor_index),
+        Ok("(ILCounter;Z)V")
+    );
+
+    let client = decode_class("Client");
+    let wrap = emitted_method_code(&client, "wrap");
+    assert_opcode_sequence(wrap, &[0xbb, 0x59, 0x06, 0x2b, 0x04, 0xb7, 0xb0]);
+    let wrap_local = emitted_method_code(&client, "wrapLocal");
+    assert_opcode_sequence(
+        wrap_local,
+        &[0x2b, 0x4d, 0xbb, 0x59, 0x07, 0x2c, 0x03, 0xb7, 0xb0],
+    );
+    let pair = emitted_method_code(&client, "pair");
+    assert_opcode_sequence(pair, &[0xbb, 0x59, 0x2b, 0x2c, 0xb7, 0xb0]);
+    let owner_box = emitted_method_code(&client, "ownerBox");
+    assert_opcode_sequence(owner_box, &[0xbb, 0x59, 0x2a, 0xb7, 0xb0]);
+    let assert_constructor_ref = |code: &[u8], expected_owner: &str, descriptor: &str| {
+        let instructions = decode_subset_instructions(code);
+        let invokes = instructions
+            .iter()
+            .filter_map(|(offset, opcode)| (*opcode == 0xb7).then_some(*offset))
+            .collect::<Vec<_>>();
+        assert_eq!(invokes.len(), 1);
+        let index = u16::from_be_bytes([code[invokes[0] + 1], code[invokes[0] + 2]]);
+        let ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        } = client
+            .constant_pool
+            .get(ConstantPoolIndex(index))
+            .expect("constructor invocation is a Methodref")
+        else {
+            panic!("invokespecial points at Methodref")
+        };
+        assert_eq!(
+            client.constant_pool.class_name(*class_index),
+            Ok(expected_owner)
+        );
+        assert_eq!(
+            client.constant_pool.name_and_type(*name_and_type_index),
+            Ok(("<init>", descriptor))
+        );
+    };
+    assert_constructor_ref(wrap, "Holder", "(ILCounter;Z)V");
+    assert_constructor_ref(wrap_local, "Holder", "(ILCounter;Z)V");
+    assert_constructor_ref(pair, "Pair", "(LCounter;LOther;)V");
+    assert_constructor_ref(owner_box, "OwnerBox", "(LClient;)V");
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output
+            .path()
+            .join("ReferenceConstructorArgumentsHarness.java");
+        fs::write(
+            &harness,
+            "public final class ReferenceConstructorArgumentsHarness { public static void main(String[] args) { Client client = new Client(); Counter counter = new Counter(17); Other other = new Other(); Holder holder = client.wrap(counter); if (holder.reference() != counter || holder.number() != 3 || !holder.flag()) throw new AssertionError(\"mixed constructor arguments\"); Holder local = client.wrapLocal(counter); if (local.reference() != counter || local.number() != 4 || local.flag()) throw new AssertionError(\"initialized local argument\"); Pair pair = client.pair(counter, other); if (pair.first() != counter || pair.second() != other) throw new AssertionError(\"distinct reference arguments\"); OwnerBox owner = client.ownerBox(); if (owner.get() != client) throw new AssertionError(\"initialized this argument\"); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .unwrap();
+        assert!(
+            javac.status.success(),
+            "javac rejected reference constructor argument harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "ReferenceConstructorArgumentsHarness",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected reference constructor arguments\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
         );
     }
 }
