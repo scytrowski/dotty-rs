@@ -474,6 +474,7 @@ pub(super) fn class_metadata(
             typed_ast,
             definitions,
             field_reference_identities,
+            superclass,
         )?;
         if let Some(previous) = field_names.insert(field.name().to_owned(), field.symbol()) {
             return Err(JvmCodegenError::DuplicateJvmFieldName {
@@ -542,6 +543,7 @@ fn field_metadata(
     typed_ast: Option<&dotty_core::ast::TypedAst>,
     definitions: &Definitions,
     class_identities: Option<&[JvmClassIdentity]>,
+    superclass: Option<&crate::JvmSuperclassPlan>,
 ) -> Result<JvmFieldMetadata, JvmCodegenError> {
     let field = store
         .symbols
@@ -590,7 +592,31 @@ fn field_metadata(
             self_type,
         });
     }
-    if class_info.parents.as_slice() != [definitions.object_type] || !valid_object_definition {
+    let parent_symbol =
+        class_info
+            .parents
+            .first()
+            .and_then(|parent| match store.types.try_get(*parent) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                }) => Some(*symbol),
+                _ => None,
+            });
+    let valid_parent = match superclass {
+        Some(proof) => {
+            proof.class() == owner
+                && proof.class_internal_name() == class_identity(store, owner)?.internal_name()
+                && parent_symbol == Some(proof.parent())
+                && (proof.parent() != definitions.object_class
+                    || (class_info.parents.as_slice() == [definitions.object_type]
+                        && valid_object_definition))
+        }
+        None => {
+            class_info.parents.as_slice() == [definitions.object_type] && valid_object_definition
+        }
+    };
+    if !valid_parent {
         return Err(JvmCodegenError::UnsupportedJvmSuperclass {
             class: owner,
             parent: class_info.parents.first().copied(),
@@ -906,7 +932,85 @@ pub(super) fn unit_metadata(
         )?;
         metadata.push(class);
     }
+    validate_final_parent_method_collisions(unit, &metadata)?;
     Ok(metadata)
+}
+
+fn validate_final_parent_method_collisions(
+    unit: &crate::JvmCompilationUnit<'_>,
+    metadata: &[JvmClassMetadata],
+) -> Result<(), JvmCodegenError> {
+    for child in metadata {
+        let Some(superclass) = child.superclass() else {
+            continue;
+        };
+        let Some(parent) = metadata
+            .iter()
+            .find(|candidate| candidate.identity().symbol() == superclass.parent())
+        else {
+            continue;
+        };
+        for child_method in child.methods() {
+            for parent_method in parent.methods() {
+                if parent_method.access_flags().is_final()
+                    && !parent_method.access_flags().is_private()
+                    && child_method.name() == parent_method.name()
+                    && child_method.descriptor().as_str() == parent_method.descriptor().as_str()
+                {
+                    return Err(JvmCodegenError::FinalJvmMethodOverride {
+                        class: child.identity().symbol(),
+                        method: child_method.symbol(),
+                        parent: parent.identity().symbol(),
+                        parent_method: parent_method.symbol(),
+                        name: child_method.name().to_owned(),
+                        descriptor: Some(child_method.descriptor().as_str().to_owned()),
+                    });
+                }
+            }
+        }
+
+        let parent_info = class_info(unit.store, parent.identity().symbol())?;
+        for parent_method in unit
+            .store
+            .scopes
+            .get(parent_info.declarations)
+            .entered_symbols()
+            .filter(|symbol| {
+                unit.store.symbols.contains(*symbol)
+                    && unit.store.symbols.get(*symbol).kind == SymbolKind::Method
+                    && unit
+                        .store
+                        .symbols
+                        .get(*symbol)
+                        .flags
+                        .contains(SymbolFlags::FINAL)
+                    && unit.store.symbols.get(*symbol).visibility != Visibility::Private
+            })
+            .filter(|symbol| {
+                !parent
+                    .methods()
+                    .iter()
+                    .any(|planned| planned.symbol() == *symbol)
+            })
+        {
+            let parent_symbol = unit.store.symbols.get(parent_method);
+            let Some(name) = unit.store.names.try_resolve(parent_symbol.name.text()) else {
+                continue;
+            };
+            if let Some(child_method) = child.methods().iter().find(|method| method.name() == name)
+            {
+                return Err(JvmCodegenError::FinalJvmMethodOverride {
+                    class: child.identity().symbol(),
+                    method: child_method.symbol(),
+                    parent: parent.identity().symbol(),
+                    parent_method,
+                    name: name.to_owned(),
+                    descriptor: None,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn method_metadata(
