@@ -30971,3 +30971,138 @@ mod tests {
             source,
             &index,
             &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(matches!(
+            typer.complete_symbol(method),
+            Err(TyperError::RepeatedParameterClauseUnsupported {
+                method: error_method,
+                method_tree_index,
+                clause_index: 0,
+                parameter_index: 0,
+                kind: MethodKind::Contextual,
+            }) if error_method == method && method_tree_index == method_tree.index()
+        ));
+        assert_eq!(typer.store().checkpoint(), before);
+        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
+    }
+
+    #[test]
+    fn curried_monomorphic_application_types_each_clause() {
+        let source_text =
+            "class C { def f(x: Int)(y: Boolean): Boolean = y; def use: Boolean = f(1)(true) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
+        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
+            panic!("outer clause should be an Apply")
+        };
+        assert!(matches!(
+            typer.store().types.get(typer.typed_ast().get(outer.function).ty),
+            Type::Method(method) if method.params.len() == 1 && method.params[0].ty == definitions.boolean
+        ));
+    }
+
+    #[test]
+    fn selected_generic_receiver_method_can_be_applied() {
+        let source_text = "class Box[A] { def accept(value: A): A = value }; class Use { def use(box: Box[Int]): Int = box.accept(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let parameter = val_symbol(&parsed, &store, &index, source, "box").0;
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(parameter).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
+    }
+
+    #[test]
+    fn dependent_method_result_is_deferred() {
+        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(1) }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let callee = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "f" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let reserved = typer.store.types.reserve();
+        let dependent = typer.store.types.alloc(Type::ParamRef {
+            binder: reserved.id(),
+            index: 0,
+        });
+        let callable = typer.store.types.fill(
+            reserved,
+            Type::Method(dotty_core::types::MethodType {
+                params: vec![dotty_core::types::MethodParam {
+                    name: dotty_core::TermName::new(typer.store.names.intern("x")),
+                    ty: definitions.int,
+                    erased: false,
+                    varargs: false,
+                }],
+                result: dependent,
+                kind: MethodKind::Plain,
+            }),
+        );
+        typer
+            .store
+            .symbols
+            .set_info(callee, SymbolInfo::Complete(callable));
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::DependentMethodApplicationDeferred { binder, result, .. })
+                if binder == callable && result == dependent
+        ));
+    }
+}
