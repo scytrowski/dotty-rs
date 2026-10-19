@@ -20,7 +20,7 @@ const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = i
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
 const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
 const BLOCKS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Blocks.scala");
-const LOCALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Locals.scala");
+const LOCALS: &str = include_str!("fixtures/Locals.scala");
 const NUMERIC_BLOCKS: &str = "package example\nclass NumericBlocks:\n  def run: Int =\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n    8\n    9\n    10\n    11\n    12\n    13\n    14\n    15\n    16\n    17\n    18\n    19\n    20\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
