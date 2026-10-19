@@ -1,5 +1,5 @@
 class Base {
-  def value(): Int = 20
+  def value(): Int = 10
   def doubled(): Int = value() * 2
 }
 
