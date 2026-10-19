@@ -1066,6 +1066,28 @@ mod tests {
     }
 
     #[test]
+    fn malformed_deflate_keeps_the_invalid_deflate_diagnostic_code() {
+        let archive_bytes = minimal_zip_with_entry(
+            "Broken.class",
+            COMPRESSION_METHOD_DEFLATE,
+            crate::crc32::checksum(&[]),
+            &[0x07], // BFINAL = 1, reserved BTYPE = 3
+            0,
+        );
+        let archive = ZipArchive::open(archive_bytes).unwrap();
+
+        let error = archive
+            .read_entry("Broken.class")
+            .expect_err("reserved block type must be rejected");
+
+        assert!(matches!(
+            error,
+            ZipError::Inflate(InflateError::InvalidData)
+        ));
+        assert_eq!(error.code(), "classpath.zip.invalid_deflate_data");
+    }
+
+    #[test]
     fn memory_and_file_backings_match_for_valid_missing_and_package_queries() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // local header

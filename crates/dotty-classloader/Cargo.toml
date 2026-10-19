@@ -8,6 +8,7 @@ dotty-tasty = { path = "../dotty-tasty" }
 dotty-classfile = { path = "../dotty-classfile" }
 dotty-core = { path = "../dotty-core" }
 crc32fast = "1.5.2"
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 
 [dev-dependencies]
 dotty-tasty-unpickler = { path = "../dotty-tasty-unpickler" }
