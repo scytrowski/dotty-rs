@@ -7787,6 +7787,46 @@ fn invalid_source_is_rejected_with_parser_diagnostics_without_output() {
 }
 
 #[test]
+fn single_inheritance_audit_fixture_reaches_jvm_superclass_rejection_without_output() {
+    let output = TestOutputDirectory::new("single-inheritance-audit");
+    let fixture = fixture_path("SingleInheritanceAudit.scala");
+    let source = fs::read_to_string(fixture).expect("read single-inheritance audit fixture");
+    let error =
+        compile_source_classes(&source, "SingleInheritanceAudit.scala", output.path()).unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmSuperclass { .. })
+        ),
+        "expected a codegen superclass rejection after lexer/parser/namer/typer, got {error:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "the batch compiler must not publish partial class files"
+    );
+}
+
+#[test]
+fn super_method_source_is_rejected_by_typer_before_jvm_emission() {
+    let output = TestOutputDirectory::new("super-method-unsupported");
+    let source = "class Base { def value(): Int = 10 }; class Derived extends Base { def read(): Int = super.value() }";
+    let error = compile_source_classes(source, "SuperMethod.scala", output.path())
+        .expect_err("super.method() must fail in the current frontend");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Typer(TyperError::UnsupportedExpression {
+                expression_kind: "expression or declaration tree",
+                ..
+            })
+        ),
+        "super.method() failed at an unexpected pipeline stage: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
 fn source_local_declarations_export_method_scoped_canonical_bindings() {
     let source_text = "class C {\n def first(x: Int): Int = { val value = x; { val value = value; value } }\n def second(x: Int): Int = { val value = x; value }\n}";
     let source_id = SourceId::from_index(1);
