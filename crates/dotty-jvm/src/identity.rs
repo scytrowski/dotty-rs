@@ -932,7 +932,85 @@ pub(super) fn unit_metadata(
         )?;
         metadata.push(class);
     }
+    validate_final_parent_method_collisions(unit, &metadata)?;
     Ok(metadata)
+}
+
+fn validate_final_parent_method_collisions(
+    unit: &crate::JvmCompilationUnit<'_>,
+    metadata: &[JvmClassMetadata],
+) -> Result<(), JvmCodegenError> {
+    for child in metadata {
+        let Some(superclass) = child.superclass() else {
+            continue;
+        };
+        let Some(parent) = metadata
+            .iter()
+            .find(|candidate| candidate.identity().symbol() == superclass.parent())
+        else {
+            continue;
+        };
+        for child_method in child.methods() {
+            for parent_method in parent.methods() {
+                if parent_method.access_flags().is_final()
+                    && !parent_method.access_flags().is_private()
+                    && child_method.name() == parent_method.name()
+                    && child_method.descriptor().as_str() == parent_method.descriptor().as_str()
+                {
+                    return Err(JvmCodegenError::FinalJvmMethodOverride {
+                        class: child.identity().symbol(),
+                        method: child_method.symbol(),
+                        parent: parent.identity().symbol(),
+                        parent_method: parent_method.symbol(),
+                        name: child_method.name().to_owned(),
+                        descriptor: Some(child_method.descriptor().as_str().to_owned()),
+                    });
+                }
+            }
+        }
+
+        let parent_info = class_info(unit.store, parent.identity().symbol())?;
+        for parent_method in unit
+            .store
+            .scopes
+            .get(parent_info.declarations)
+            .entered_symbols()
+            .filter(|symbol| {
+                unit.store.symbols.contains(*symbol)
+                    && unit.store.symbols.get(*symbol).kind == SymbolKind::Method
+                    && unit
+                        .store
+                        .symbols
+                        .get(*symbol)
+                        .flags
+                        .contains(SymbolFlags::FINAL)
+                    && unit.store.symbols.get(*symbol).visibility != Visibility::Private
+            })
+            .filter(|symbol| {
+                !parent
+                    .methods()
+                    .iter()
+                    .any(|planned| planned.symbol() == *symbol)
+            })
+        {
+            let parent_symbol = unit.store.symbols.get(parent_method);
+            let Some(name) = unit.store.names.try_resolve(parent_symbol.name.text()) else {
+                continue;
+            };
+            if let Some(child_method) = child.methods().iter().find(|method| method.name() == name)
+            {
+                return Err(JvmCodegenError::FinalJvmMethodOverride {
+                    class: child.identity().symbol(),
+                    method: child_method.symbol(),
+                    parent: parent.identity().symbol(),
+                    parent_method,
+                    name: name.to_owned(),
+                    descriptor: None,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn method_metadata(

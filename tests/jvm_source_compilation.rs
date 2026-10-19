@@ -7981,6 +7981,76 @@ fn source_single_inheritance_emits_and_verifies_the_noarg_super_chain() {
 }
 
 #[test]
+fn source_subclass_rejects_overrides_of_final_parent_methods_without_output() {
+    let output = TestOutputDirectory::new("final-parent-method-override");
+    let source = "class Base { final def value(): Int = 1 }\nclass Derived extends Base { override def value(): Int = 2 }\n";
+    let error = compile_source_classes(source, "FinalParentMethod.scala", output.path())
+        .expect_err("a child cannot override a final JVM method");
+
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(JvmCodegenError::FinalJvmMethodOverride {
+                ref name,
+                ref descriptor,
+                ..
+            }) if name == "value" && descriptor.as_deref() == Some("()I")
+        ),
+        "expected a typed final-method override error, got {error:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "a failed final-method override check must publish no class files"
+    );
+}
+
+#[test]
+fn final_parent_method_name_collision_fails_closed_when_parent_method_is_unplanned() {
+    let output = TestOutputDirectory::new("unplanned-final-parent-method-override");
+    let source = "class Base { final def value(): Int = 1 }\nclass Derived extends Base { override def value(): Int = 2 }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let base = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == base)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "FinalParentMethodUnplanned.scala",
+        output.path(),
+        SourceId::from_index(1329),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("unplanned final parent methods must not permit a same-name child method");
+
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(JvmCodegenError::FinalJvmMethodOverride {
+                ref name,
+                descriptor: None,
+                ..
+            }) if name == "value"
+        ),
+        "expected conservative final-method collision error, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
 fn super_method_source_is_rejected_by_typer_before_jvm_emission() {
     let output = TestOutputDirectory::new("super-method-unsupported");
     let source = "class Base { def value(): Int = 10 }; class Derived extends Base { def read(): Int = super.value() }";

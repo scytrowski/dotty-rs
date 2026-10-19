@@ -104,8 +104,12 @@ constructor's single direct-parent `<init>()V` call. The supported graph is
 limited to the canonical Object root and one same-unit edge from a public
 ordinary class to a public, non-final ordinary parent whose own parent is
 Object. Deeper or external chains, unavailable constructors, and other
-unsupported shapes fail before bytes are returned. This does not validate
-override conformance or define hierarchy-aware reference joins.
+unsupported shapes fail before bytes are returned. The projection also rejects
+a child method with the same JVM name and descriptor as a projected
+non-private final method in its direct parent. If that parent method is not
+planned, the backend conservatively rejects a child method with the same name.
+General override conformance and hierarchy-aware reference joins remain outside
+this contract.
 
 ## Method descriptor projection
 

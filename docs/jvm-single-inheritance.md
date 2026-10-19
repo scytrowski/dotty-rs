@@ -29,8 +29,12 @@ the method's declaring owner, `Base`.
 The namer records source `override` as `SymbolFlags::OVERRIDE`. This is only
 syntax evidence: the current source namer/typer does not validate that a
 matching parent member exists or that the override's signature and
-visibility are compatible. Do not treat that flag as a validated override
-relationship.
+visibility are compatible. The JVM metadata projection rejects exact
+name-and-descriptor collisions with planned non-private final methods in the
+direct parent. If a final parent method is absent from the parent's plan, a
+child method with the same name is conservatively rejected. Other override
+compatibility remains unvalidated; do not treat the flag as a validated
+override relationship.
 
 The JVM adapter accepts a canonical Object root and one same-unit edge from a
 public ordinary class to a public, non-final ordinary parent whose own parent
@@ -105,6 +109,7 @@ publish partial output.
 | Unknown/wrong parent type | If name/type resolution cannot resolve it, reject in the frontend; otherwise hierarchy validation rejects noncanonical or non-class parents | No class file should be produced | Source resolution and canonical hierarchy projection; never lower by name guess |
 | Parent cycle (`A extends B`, `B extends A`) | `JvmSuperclassIssue::InheritanceCycle` | No `super_class` chain is emitted | Validated hierarchy graph in `dotty-jvm`, keyed by canonical symbols |
 | Extending a `final` class | `JvmSuperclassIssue::ParentIsFinal` | JVMS forbids extending a final class | Parent flag validation in the `dotty-jvm` hierarchy check |
+| Child method with the same JVM signature as a planned non-private final direct-parent method | `FinalJvmMethodOverride` before any class files are published; name-only conservative rejection if the parent method is unplanned | JVMS forbids overriding the final method | Exact JVM name-and-descriptor collision check in `dotty-jvm` |
 | `override` with no matching parent method | The namer records `OVERRIDE` syntax but does not prove an overridden declaration; class emission does not validate this relation | No dispatch entry may be invented | Override conformance in the source typer/namer contract, before JVM projection |
 | Override with incompatible parameter/result descriptor or reduced visibility | No validated override relation is recorded | Same JVM name+descriptor must identify the virtual entry; access cannot be narrowed incompatibly | Source override checking plus JVM descriptor/visibility validation; bridge generation remains unsupported |
 | Trait parent or multiple parents | The hierarchy validator rejects traits and unsupported parent-list shapes before output | JVM has one direct `super_class`; interfaces require distinct metadata and dispatch rules | Explicitly reject traits/multiple parents in `dotty-jvm`; later interface support is separate |

@@ -1214,6 +1214,17 @@ pub enum JvmCodegenError {
         parent: Option<SymbolId>,
         issue: JvmSuperclassIssue,
     },
+    /// A planned child method collides with a non-private final method
+    /// declared by its validated direct parent. The descriptor is absent
+    /// when the parent's method is unplanned and the backend rejects by name.
+    FinalJvmMethodOverride {
+        class: SymbolId,
+        method: SymbolId,
+        parent: SymbolId,
+        parent_method: SymbolId,
+        name: String,
+        descriptor: Option<String>,
+    },
     /// The class declares a self type outside this emission subset.
     UnsupportedJvmSelfType { class: SymbolId, self_type: TypeId },
     /// A declared field, initializer, nested type, or other member is outside
