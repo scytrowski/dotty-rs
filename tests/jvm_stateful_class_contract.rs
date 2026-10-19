@@ -3946,18 +3946,8 @@ fn primary_constructor_metadata_projects_exact_unit_references_and_mixed_slots()
                 &[dotty_jvm::JvmType::Reference(counter)]
             );
             assert_eq!(target.owner_class(), holder);
-            let TreeKind::Apply(application_tree) = &unit.typed_ast.get(application).kind else {
-                unreachable!()
-            };
-            assert!(matches!(
-                unit.lower_method_body(client, client_method, definitions),
-                Err(
-                    dotty_jvm::JvmCodegenError::UnsupportedJvmConstructorArgument {
-                        tree,
-                        argument,
-                    }
-                ) if tree == application && argument == application_tree.args[0]
-            ));
+            unit.lower_method_body(client, client_method, definitions)
+                .expect("planned reference parameter is a supported constructor argument");
         },
     );
 }
