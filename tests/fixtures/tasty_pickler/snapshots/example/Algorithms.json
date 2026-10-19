@@ -1,0 +1,6039 @@
+{
+  "attributes": [
+    "SOURCEFILEattr"
+  ],
+  "header": {
+    "tooling": "Scala 3.9.0",
+    "version": [
+      28,
+      9,
+      0
+    ]
+  },
+  "names": [
+    {
+      "parameters": [],
+      "result": {
+        "qualified": [
+          {
+            "qualified": [
+              {
+                "utf8": "java"
+              },
+              {
+                "utf8": "lang"
+              }
+            ]
+          },
+          {
+            "utf8": "Object"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "<init>"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "qualified": [
+                {
+                  "utf8": "java"
+                },
+                {
+                  "utf8": "lang"
+                }
+              ]
+            },
+            {
+              "utf8": "String"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "qualified": [
+              {
+                "qualified": [
+                  {
+                    "utf8": "scala"
+                  },
+                  {
+                    "utf8": "annotation"
+                  }
+                ]
+              },
+              {
+                "utf8": "internal"
+              }
+            ]
+          },
+          {
+            "utf8": "SourceFile"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "<init>"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "&"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "&&"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "^"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "|"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "||"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "<"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "<="
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": ">"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Boolean"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": ">="
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Int"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "%"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Int"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "*"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Int"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "+"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Int"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "-"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "utf8": "scala"
+          },
+          {
+            "utf8": "Int"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "/"
+      }
+    },
+    {
+      "qualified": [
+        {
+          "qualified": [
+            {
+              "qualified": [
+                {
+                  "utf8": "scala"
+                },
+                {
+                  "utf8": "annotation"
+                }
+              ]
+            },
+            {
+              "utf8": "internal"
+            }
+          ]
+        },
+        {
+          "utf8": "SourceFile"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "qualified": [
+            {
+              "utf8": "java"
+            },
+            {
+              "utf8": "lang"
+            }
+          ]
+        },
+        {
+          "utf8": "Object"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "qualified": [
+            {
+              "utf8": "java"
+            },
+            {
+              "utf8": "lang"
+            }
+          ]
+        },
+        {
+          "utf8": "String"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "annotation"
+            }
+          ]
+        },
+        {
+          "utf8": "internal"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "utf8": "java"
+        },
+        {
+          "utf8": "lang"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "utf8": "scala"
+        },
+        {
+          "utf8": "Boolean"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "utf8": "scala"
+        },
+        {
+          "utf8": "Int"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "utf8": "scala"
+        },
+        {
+          "utf8": "annotation"
+        }
+      ]
+    },
+    {
+      "utf8": "%"
+    },
+    {
+      "utf8": "&"
+    },
+    {
+      "utf8": "&&"
+    },
+    {
+      "utf8": "*"
+    },
+    {
+      "utf8": "+"
+    },
+    {
+      "utf8": "-"
+    },
+    {
+      "utf8": "/"
+    },
+    {
+      "utf8": "<"
+    },
+    {
+      "utf8": "<="
+    },
+    {
+      "utf8": "<init>"
+    },
+    {
+      "utf8": "<source>"
+    },
+    {
+      "utf8": ">"
+    },
+    {
+      "utf8": ">="
+    },
+    {
+      "utf8": "ASTs"
+    },
+    {
+      "utf8": "Algorithms"
+    },
+    {
+      "utf8": "Attributes"
+    },
+    {
+      "utf8": "Boolean"
+    },
+    {
+      "utf8": "Comments"
+    },
+    {
+      "utf8": "Int"
+    },
+    {
+      "utf8": "Object"
+    },
+    {
+      "utf8": "Positions"
+    },
+    {
+      "utf8": "SourceFile"
+    },
+    {
+      "utf8": "String"
+    },
+    {
+      "utf8": "Unit"
+    },
+    {
+      "utf8": "^"
+    },
+    {
+      "utf8": "a"
+    },
+    {
+      "utf8": "add"
+    },
+    {
+      "utf8": "annotation"
+    },
+    {
+      "utf8": "b"
+    },
+    {
+      "utf8": "both"
+    },
+    {
+      "utf8": "divide"
+    },
+    {
+      "utf8": "eagerAnd"
+    },
+    {
+      "utf8": "eagerAndEffect"
+    },
+    {
+      "utf8": "eagerOr"
+    },
+    {
+      "utf8": "eagerOrEffect"
+    },
+    {
+      "utf8": "either"
+    },
+    {
+      "utf8": "example"
+    },
+    {
+      "utf8": "exclusiveOr"
+    },
+    {
+      "utf8": "greater"
+    },
+    {
+      "utf8": "greaterOrEqual"
+    },
+    {
+      "utf8": "i"
+    },
+    {
+      "utf8": "immutableLocal"
+    },
+    {
+      "utf8": "internal"
+    },
+    {
+      "utf8": "java"
+    },
+    {
+      "utf8": "lang"
+    },
+    {
+      "utf8": "less"
+    },
+    {
+      "utf8": "lessOrEqual"
+    },
+    {
+      "utf8": "multiply"
+    },
+    {
+      "utf8": "n"
+    },
+    {
+      "utf8": "negate"
+    },
+    {
+      "utf8": "remainder"
+    },
+    {
+      "utf8": "saved"
+    },
+    {
+      "utf8": "scala"
+    },
+    {
+      "utf8": "shortCircuitAnd"
+    },
+    {
+      "utf8": "shortCircuitOr"
+    },
+    {
+      "utf8": "subtract"
+    },
+    {
+      "utf8": "sumTo"
+    },
+    {
+      "utf8": "total"
+    },
+    {
+      "utf8": "unary_!"
+    },
+    {
+      "utf8": "value"
+    },
+    {
+      "utf8": "|"
+    },
+    {
+      "utf8": "||"
+    }
+  ],
+  "nodes": [
+    {
+      "children": [
+        "n1",
+        "n2"
+      ],
+      "id": "n0",
+      "owner": null,
+      "parent": null,
+      "tag": "PACKAGE"
+    },
+    {
+      "children": [],
+      "id": "n1",
+      "name": {
+        "utf8": "example"
+      },
+      "owner": "n0",
+      "parent": "n0",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [
+        "n3",
+        "n338"
+      ],
+      "id": "n2",
+      "modifiers": [
+        "ANNOTATION"
+      ],
+      "name": {
+        "utf8": "Algorithms"
+      },
+      "owner": "n0",
+      "parent": "n0",
+      "role": "source-class",
+      "tag": "TYPEDEF"
+    },
+    {
+      "children": [
+        "n4",
+        "n10",
+        "n13",
+        "n29",
+        "n43",
+        "n57",
+        "n71",
+        "n85",
+        "n100",
+        "n114",
+        "n128",
+        "n142",
+        "n150",
+        "n165",
+        "n179",
+        "n193",
+        "n207",
+        "n221",
+        "n237",
+        "n253",
+        "n269",
+        "n285",
+        "n299"
+      ],
+      "id": "n3",
+      "owner": "n2",
+      "parent": "n2",
+      "tag": "TEMPLATE"
+    },
+    {
+      "children": [
+        "n5"
+      ],
+      "id": "n4",
+      "owner": "n2",
+      "parent": "n3",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n6",
+        "n9"
+      ],
+      "id": "n5",
+      "name": {
+        "parameters": [],
+        "result": {
+          "qualified": [
+            {
+              "qualified": [
+                {
+                  "utf8": "java"
+                },
+                {
+                  "utf8": "lang"
+                }
+              ]
+            },
+            {
+              "utf8": "Object"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "<init>"
+        }
+      },
+      "owner": "n2",
+      "parent": "n4",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [
+        "n7"
+      ],
+      "id": "n6",
+      "owner": "n2",
+      "parent": "n5",
+      "tag": "NEW"
+    },
+    {
+      "children": [
+        "n8"
+      ],
+      "id": "n7",
+      "name": {
+        "utf8": "Object"
+      },
+      "owner": "n2",
+      "parent": "n6",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n8",
+      "name": {
+        "qualified": [
+          {
+            "utf8": "java"
+          },
+          {
+            "utf8": "lang"
+          }
+        ]
+      },
+      "owner": "n2",
+      "parent": "n7",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [],
+      "id": "n9",
+      "owner": "n2",
+      "parent": "n5",
+      "reference": {
+        "direction": "backward",
+        "target": "n7"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n11"
+      ],
+      "has_rhs": false,
+      "header": [
+        {
+          "clause": "EMPTYCLAUSE"
+        }
+      ],
+      "id": "n10",
+      "modifiers": [
+        "STABLE"
+      ],
+      "name": {
+        "utf8": "<init>"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "compiler-default-constructor",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n12"
+      ],
+      "id": "n11",
+      "name": {
+        "utf8": "Unit"
+      },
+      "owner": "n10",
+      "parent": "n10",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n12",
+      "name": {
+        "utf8": "scala"
+      },
+      "owner": "n10",
+      "parent": "n11",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [
+        "n14",
+        "n18",
+        "n21",
+        "n23"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n13",
+      "modifiers": [],
+      "name": {
+        "utf8": "add"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n15"
+      ],
+      "id": "n14",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n13",
+      "parent": "n13",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n16"
+      ],
+      "id": "n15",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n13",
+      "parent": "n14",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [
+        "n17"
+      ],
+      "id": "n16",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n13",
+      "parent": "n15",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n17",
+      "name": {
+        "utf8": "scala"
+      },
+      "owner": "n13",
+      "parent": "n16",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [
+        "n19"
+      ],
+      "id": "n18",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n13",
+      "parent": "n13",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n20"
+      ],
+      "id": "n19",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n13",
+      "parent": "n18",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n20",
+      "owner": "n13",
+      "parent": "n19",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n22"
+      ],
+      "id": "n21",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n13",
+      "parent": "n13",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n22",
+      "owner": "n13",
+      "parent": "n21",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n24",
+        "n28"
+      ],
+      "id": "n23",
+      "owner": "n13",
+      "parent": "n13",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n25",
+        "n26"
+      ],
+      "id": "n24",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "+"
+        }
+      },
+      "owner": "n13",
+      "parent": "n23",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n25",
+      "owner": "n13",
+      "parent": "n24",
+      "reference": {
+        "direction": "backward",
+        "target": "n14"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n27"
+      ],
+      "id": "n26",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n13",
+      "parent": "n24",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n27",
+      "owner": "n13",
+      "parent": "n26",
+      "reference": {
+        "direction": "backward",
+        "target": "n12"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n28",
+      "owner": "n13",
+      "parent": "n23",
+      "reference": {
+        "direction": "backward",
+        "target": "n18"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n30",
+        "n33",
+        "n36",
+        "n38"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n29",
+      "modifiers": [],
+      "name": {
+        "utf8": "subtract"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n31"
+      ],
+      "id": "n30",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n29",
+      "parent": "n29",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n32"
+      ],
+      "id": "n31",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n29",
+      "parent": "n30",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n32",
+      "owner": "n29",
+      "parent": "n31",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n34"
+      ],
+      "id": "n33",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n29",
+      "parent": "n29",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n35"
+      ],
+      "id": "n34",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n29",
+      "parent": "n33",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n35",
+      "owner": "n29",
+      "parent": "n34",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n37"
+      ],
+      "id": "n36",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n29",
+      "parent": "n29",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n37",
+      "owner": "n29",
+      "parent": "n36",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n39",
+        "n42"
+      ],
+      "id": "n38",
+      "owner": "n29",
+      "parent": "n29",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n40",
+        "n41"
+      ],
+      "id": "n39",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "-"
+        }
+      },
+      "owner": "n29",
+      "parent": "n38",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n40",
+      "owner": "n29",
+      "parent": "n39",
+      "reference": {
+        "direction": "backward",
+        "target": "n30"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n41",
+      "owner": "n29",
+      "parent": "n39",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n42",
+      "owner": "n29",
+      "parent": "n38",
+      "reference": {
+        "direction": "backward",
+        "target": "n33"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n44",
+        "n47",
+        "n50",
+        "n52"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n43",
+      "modifiers": [],
+      "name": {
+        "utf8": "multiply"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n45"
+      ],
+      "id": "n44",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n43",
+      "parent": "n43",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n46"
+      ],
+      "id": "n45",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n43",
+      "parent": "n44",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n46",
+      "owner": "n43",
+      "parent": "n45",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n48"
+      ],
+      "id": "n47",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n43",
+      "parent": "n43",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n49"
+      ],
+      "id": "n48",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n43",
+      "parent": "n47",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n49",
+      "owner": "n43",
+      "parent": "n48",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n51"
+      ],
+      "id": "n50",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n43",
+      "parent": "n43",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n51",
+      "owner": "n43",
+      "parent": "n50",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n53",
+        "n56"
+      ],
+      "id": "n52",
+      "owner": "n43",
+      "parent": "n43",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n54",
+        "n55"
+      ],
+      "id": "n53",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "*"
+        }
+      },
+      "owner": "n43",
+      "parent": "n52",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n54",
+      "owner": "n43",
+      "parent": "n53",
+      "reference": {
+        "direction": "backward",
+        "target": "n44"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n55",
+      "owner": "n43",
+      "parent": "n53",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n56",
+      "owner": "n43",
+      "parent": "n52",
+      "reference": {
+        "direction": "backward",
+        "target": "n47"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n58",
+        "n61",
+        "n64",
+        "n66"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n57",
+      "modifiers": [],
+      "name": {
+        "utf8": "divide"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n59"
+      ],
+      "id": "n58",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n57",
+      "parent": "n57",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n60"
+      ],
+      "id": "n59",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n57",
+      "parent": "n58",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n60",
+      "owner": "n57",
+      "parent": "n59",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n62"
+      ],
+      "id": "n61",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n57",
+      "parent": "n57",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n63"
+      ],
+      "id": "n62",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n57",
+      "parent": "n61",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n63",
+      "owner": "n57",
+      "parent": "n62",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n65"
+      ],
+      "id": "n64",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n57",
+      "parent": "n57",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n65",
+      "owner": "n57",
+      "parent": "n64",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n67",
+        "n70"
+      ],
+      "id": "n66",
+      "owner": "n57",
+      "parent": "n57",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n68",
+        "n69"
+      ],
+      "id": "n67",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "/"
+        }
+      },
+      "owner": "n57",
+      "parent": "n66",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n68",
+      "owner": "n57",
+      "parent": "n67",
+      "reference": {
+        "direction": "backward",
+        "target": "n58"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n69",
+      "owner": "n57",
+      "parent": "n67",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n70",
+      "owner": "n57",
+      "parent": "n66",
+      "reference": {
+        "direction": "backward",
+        "target": "n61"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n72",
+        "n75",
+        "n78",
+        "n80"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n71",
+      "modifiers": [],
+      "name": {
+        "utf8": "remainder"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n73"
+      ],
+      "id": "n72",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n71",
+      "parent": "n71",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n74"
+      ],
+      "id": "n73",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n71",
+      "parent": "n72",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n74",
+      "owner": "n71",
+      "parent": "n73",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n76"
+      ],
+      "id": "n75",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n71",
+      "parent": "n71",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n77"
+      ],
+      "id": "n76",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n71",
+      "parent": "n75",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n77",
+      "owner": "n71",
+      "parent": "n76",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n79"
+      ],
+      "id": "n78",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n71",
+      "parent": "n71",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n79",
+      "owner": "n71",
+      "parent": "n78",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n81",
+        "n84"
+      ],
+      "id": "n80",
+      "owner": "n71",
+      "parent": "n71",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n82",
+        "n83"
+      ],
+      "id": "n81",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "%"
+        }
+      },
+      "owner": "n71",
+      "parent": "n80",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n82",
+      "owner": "n71",
+      "parent": "n81",
+      "reference": {
+        "direction": "backward",
+        "target": "n72"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n83",
+      "owner": "n71",
+      "parent": "n81",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n84",
+      "owner": "n71",
+      "parent": "n80",
+      "reference": {
+        "direction": "backward",
+        "target": "n75"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n86",
+        "n89",
+        "n92",
+        "n95"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n85",
+      "modifiers": [],
+      "name": {
+        "utf8": "less"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n87"
+      ],
+      "id": "n86",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n85",
+      "parent": "n85",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n88"
+      ],
+      "id": "n87",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n85",
+      "parent": "n86",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n88",
+      "owner": "n85",
+      "parent": "n87",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n90"
+      ],
+      "id": "n89",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n85",
+      "parent": "n85",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n91"
+      ],
+      "id": "n90",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n85",
+      "parent": "n89",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n91",
+      "owner": "n85",
+      "parent": "n90",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n93"
+      ],
+      "id": "n92",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n85",
+      "parent": "n85",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [
+        "n94"
+      ],
+      "id": "n93",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n85",
+      "parent": "n92",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n94",
+      "owner": "n85",
+      "parent": "n93",
+      "reference": {
+        "direction": "backward",
+        "target": "n17"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n96",
+        "n99"
+      ],
+      "id": "n95",
+      "owner": "n85",
+      "parent": "n85",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n97",
+        "n98"
+      ],
+      "id": "n96",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "<"
+        }
+      },
+      "owner": "n85",
+      "parent": "n95",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n97",
+      "owner": "n85",
+      "parent": "n96",
+      "reference": {
+        "direction": "backward",
+        "target": "n86"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n98",
+      "owner": "n85",
+      "parent": "n96",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n99",
+      "owner": "n85",
+      "parent": "n95",
+      "reference": {
+        "direction": "backward",
+        "target": "n89"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n101",
+        "n104",
+        "n107",
+        "n109"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n100",
+      "modifiers": [],
+      "name": {
+        "utf8": "lessOrEqual"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n102"
+      ],
+      "id": "n101",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n100",
+      "parent": "n100",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n103"
+      ],
+      "id": "n102",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n100",
+      "parent": "n101",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n103",
+      "owner": "n100",
+      "parent": "n102",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n105"
+      ],
+      "id": "n104",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n100",
+      "parent": "n100",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n106"
+      ],
+      "id": "n105",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n100",
+      "parent": "n104",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n106",
+      "owner": "n100",
+      "parent": "n105",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n108"
+      ],
+      "id": "n107",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n100",
+      "parent": "n100",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n108",
+      "owner": "n100",
+      "parent": "n107",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n110",
+        "n113"
+      ],
+      "id": "n109",
+      "owner": "n100",
+      "parent": "n100",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n111",
+        "n112"
+      ],
+      "id": "n110",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "<="
+        }
+      },
+      "owner": "n100",
+      "parent": "n109",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n111",
+      "owner": "n100",
+      "parent": "n110",
+      "reference": {
+        "direction": "backward",
+        "target": "n101"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n112",
+      "owner": "n100",
+      "parent": "n110",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n113",
+      "owner": "n100",
+      "parent": "n109",
+      "reference": {
+        "direction": "backward",
+        "target": "n104"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n115",
+        "n118",
+        "n121",
+        "n123"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n114",
+      "modifiers": [],
+      "name": {
+        "utf8": "greater"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n116"
+      ],
+      "id": "n115",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n114",
+      "parent": "n114",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n117"
+      ],
+      "id": "n116",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n114",
+      "parent": "n115",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n117",
+      "owner": "n114",
+      "parent": "n116",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n119"
+      ],
+      "id": "n118",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n114",
+      "parent": "n114",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n120"
+      ],
+      "id": "n119",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n114",
+      "parent": "n118",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n120",
+      "owner": "n114",
+      "parent": "n119",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n122"
+      ],
+      "id": "n121",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n114",
+      "parent": "n114",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n122",
+      "owner": "n114",
+      "parent": "n121",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n124",
+        "n127"
+      ],
+      "id": "n123",
+      "owner": "n114",
+      "parent": "n114",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n125",
+        "n126"
+      ],
+      "id": "n124",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": ">"
+        }
+      },
+      "owner": "n114",
+      "parent": "n123",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n125",
+      "owner": "n114",
+      "parent": "n124",
+      "reference": {
+        "direction": "backward",
+        "target": "n115"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n126",
+      "owner": "n114",
+      "parent": "n124",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n127",
+      "owner": "n114",
+      "parent": "n123",
+      "reference": {
+        "direction": "backward",
+        "target": "n118"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n129",
+        "n132",
+        "n135",
+        "n137"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n128",
+      "modifiers": [],
+      "name": {
+        "utf8": "greaterOrEqual"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n130"
+      ],
+      "id": "n129",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n128",
+      "parent": "n128",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n131"
+      ],
+      "id": "n130",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n128",
+      "parent": "n129",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n131",
+      "owner": "n128",
+      "parent": "n130",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n133"
+      ],
+      "id": "n132",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n128",
+      "parent": "n128",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n134"
+      ],
+      "id": "n133",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n128",
+      "parent": "n132",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n134",
+      "owner": "n128",
+      "parent": "n133",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n136"
+      ],
+      "id": "n135",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n128",
+      "parent": "n128",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n136",
+      "owner": "n128",
+      "parent": "n135",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n138",
+        "n141"
+      ],
+      "id": "n137",
+      "owner": "n128",
+      "parent": "n128",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n139",
+        "n140"
+      ],
+      "id": "n138",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": ">="
+        }
+      },
+      "owner": "n128",
+      "parent": "n137",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n139",
+      "owner": "n128",
+      "parent": "n138",
+      "reference": {
+        "direction": "backward",
+        "target": "n129"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n140",
+      "owner": "n128",
+      "parent": "n138",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n141",
+      "owner": "n128",
+      "parent": "n137",
+      "reference": {
+        "direction": "backward",
+        "target": "n132"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n143",
+        "n146",
+        "n148"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "value"
+          }
+        }
+      ],
+      "id": "n142",
+      "modifiers": [],
+      "name": {
+        "utf8": "negate"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n144"
+      ],
+      "id": "n143",
+      "name": {
+        "utf8": "value"
+      },
+      "owner": "n142",
+      "parent": "n142",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n145"
+      ],
+      "id": "n144",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n142",
+      "parent": "n143",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n145",
+      "owner": "n142",
+      "parent": "n144",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n147"
+      ],
+      "id": "n146",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n142",
+      "parent": "n142",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n147",
+      "owner": "n142",
+      "parent": "n146",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n149"
+      ],
+      "id": "n148",
+      "name": {
+        "utf8": "unary_!"
+      },
+      "owner": "n142",
+      "parent": "n142",
+      "tag": "SELECT"
+    },
+    {
+      "children": [],
+      "id": "n149",
+      "owner": "n142",
+      "parent": "n148",
+      "reference": {
+        "direction": "backward",
+        "target": "n143"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n151",
+        "n154",
+        "n157",
+        "n159"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n150",
+      "modifiers": [],
+      "name": {
+        "utf8": "both"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n152"
+      ],
+      "id": "n151",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n150",
+      "parent": "n150",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n153"
+      ],
+      "id": "n152",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n150",
+      "parent": "n151",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n153",
+      "owner": "n150",
+      "parent": "n152",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n155"
+      ],
+      "id": "n154",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n150",
+      "parent": "n150",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n156"
+      ],
+      "id": "n155",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n150",
+      "parent": "n154",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n156",
+      "owner": "n150",
+      "parent": "n155",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n158"
+      ],
+      "id": "n157",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n150",
+      "parent": "n150",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n158",
+      "owner": "n150",
+      "parent": "n157",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n160",
+        "n164"
+      ],
+      "id": "n159",
+      "owner": "n150",
+      "parent": "n150",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n161",
+        "n162"
+      ],
+      "id": "n160",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "&&"
+        }
+      },
+      "owner": "n150",
+      "parent": "n159",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n161",
+      "owner": "n150",
+      "parent": "n160",
+      "reference": {
+        "direction": "backward",
+        "target": "n151"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n163"
+      ],
+      "id": "n162",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n150",
+      "parent": "n160",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n163",
+      "owner": "n150",
+      "parent": "n162",
+      "reference": {
+        "direction": "backward",
+        "target": "n12"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n164",
+      "owner": "n150",
+      "parent": "n159",
+      "reference": {
+        "direction": "backward",
+        "target": "n154"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n166",
+        "n169",
+        "n172",
+        "n174"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n165",
+      "modifiers": [],
+      "name": {
+        "utf8": "either"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n167"
+      ],
+      "id": "n166",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n165",
+      "parent": "n165",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n168"
+      ],
+      "id": "n167",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n165",
+      "parent": "n166",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n168",
+      "owner": "n165",
+      "parent": "n167",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n170"
+      ],
+      "id": "n169",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n165",
+      "parent": "n165",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n171"
+      ],
+      "id": "n170",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n165",
+      "parent": "n169",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n171",
+      "owner": "n165",
+      "parent": "n170",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n173"
+      ],
+      "id": "n172",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n165",
+      "parent": "n165",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n173",
+      "owner": "n165",
+      "parent": "n172",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n175",
+        "n178"
+      ],
+      "id": "n174",
+      "owner": "n165",
+      "parent": "n165",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n176",
+        "n177"
+      ],
+      "id": "n175",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "||"
+        }
+      },
+      "owner": "n165",
+      "parent": "n174",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n176",
+      "owner": "n165",
+      "parent": "n175",
+      "reference": {
+        "direction": "backward",
+        "target": "n166"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n177",
+      "owner": "n165",
+      "parent": "n175",
+      "reference": {
+        "direction": "backward",
+        "target": "n162"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n178",
+      "owner": "n165",
+      "parent": "n174",
+      "reference": {
+        "direction": "backward",
+        "target": "n169"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n180",
+        "n183",
+        "n186",
+        "n188"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n179",
+      "modifiers": [],
+      "name": {
+        "utf8": "eagerAnd"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n181"
+      ],
+      "id": "n180",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n179",
+      "parent": "n179",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n182"
+      ],
+      "id": "n181",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n179",
+      "parent": "n180",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n182",
+      "owner": "n179",
+      "parent": "n181",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n184"
+      ],
+      "id": "n183",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n179",
+      "parent": "n179",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n185"
+      ],
+      "id": "n184",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n179",
+      "parent": "n183",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n185",
+      "owner": "n179",
+      "parent": "n184",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n187"
+      ],
+      "id": "n186",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n179",
+      "parent": "n179",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n187",
+      "owner": "n179",
+      "parent": "n186",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n189",
+        "n192"
+      ],
+      "id": "n188",
+      "owner": "n179",
+      "parent": "n179",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n190",
+        "n191"
+      ],
+      "id": "n189",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "&"
+        }
+      },
+      "owner": "n179",
+      "parent": "n188",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n190",
+      "owner": "n179",
+      "parent": "n189",
+      "reference": {
+        "direction": "backward",
+        "target": "n180"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n191",
+      "owner": "n179",
+      "parent": "n189",
+      "reference": {
+        "direction": "backward",
+        "target": "n162"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n192",
+      "owner": "n179",
+      "parent": "n188",
+      "reference": {
+        "direction": "backward",
+        "target": "n183"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n194",
+        "n197",
+        "n200",
+        "n202"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n193",
+      "modifiers": [],
+      "name": {
+        "utf8": "eagerOr"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n195"
+      ],
+      "id": "n194",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n193",
+      "parent": "n193",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n196"
+      ],
+      "id": "n195",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n193",
+      "parent": "n194",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n196",
+      "owner": "n193",
+      "parent": "n195",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n198"
+      ],
+      "id": "n197",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n193",
+      "parent": "n193",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n199"
+      ],
+      "id": "n198",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n193",
+      "parent": "n197",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n199",
+      "owner": "n193",
+      "parent": "n198",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n201"
+      ],
+      "id": "n200",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n193",
+      "parent": "n193",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n201",
+      "owner": "n193",
+      "parent": "n200",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n203",
+        "n206"
+      ],
+      "id": "n202",
+      "owner": "n193",
+      "parent": "n193",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n204",
+        "n205"
+      ],
+      "id": "n203",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "|"
+        }
+      },
+      "owner": "n193",
+      "parent": "n202",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n204",
+      "owner": "n193",
+      "parent": "n203",
+      "reference": {
+        "direction": "backward",
+        "target": "n194"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n205",
+      "owner": "n193",
+      "parent": "n203",
+      "reference": {
+        "direction": "backward",
+        "target": "n162"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n206",
+      "owner": "n193",
+      "parent": "n202",
+      "reference": {
+        "direction": "backward",
+        "target": "n197"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n208",
+        "n211",
+        "n214",
+        "n216"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "a"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "b"
+          }
+        }
+      ],
+      "id": "n207",
+      "modifiers": [],
+      "name": {
+        "utf8": "exclusiveOr"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n209"
+      ],
+      "id": "n208",
+      "name": {
+        "utf8": "a"
+      },
+      "owner": "n207",
+      "parent": "n207",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n210"
+      ],
+      "id": "n209",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n207",
+      "parent": "n208",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n210",
+      "owner": "n207",
+      "parent": "n209",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n212"
+      ],
+      "id": "n211",
+      "name": {
+        "utf8": "b"
+      },
+      "owner": "n207",
+      "parent": "n207",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n213"
+      ],
+      "id": "n212",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n207",
+      "parent": "n211",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n213",
+      "owner": "n207",
+      "parent": "n212",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n215"
+      ],
+      "id": "n214",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n207",
+      "parent": "n207",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n215",
+      "owner": "n207",
+      "parent": "n214",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n217",
+        "n220"
+      ],
+      "id": "n216",
+      "owner": "n207",
+      "parent": "n207",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n218",
+        "n219"
+      ],
+      "id": "n217",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "^"
+        }
+      },
+      "owner": "n207",
+      "parent": "n216",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n218",
+      "owner": "n207",
+      "parent": "n217",
+      "reference": {
+        "direction": "backward",
+        "target": "n208"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n219",
+      "owner": "n207",
+      "parent": "n217",
+      "reference": {
+        "direction": "backward",
+        "target": "n162"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n220",
+      "owner": "n207",
+      "parent": "n216",
+      "reference": {
+        "direction": "backward",
+        "target": "n211"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n222",
+        "n224"
+      ],
+      "has_rhs": true,
+      "header": [],
+      "id": "n221",
+      "modifiers": [],
+      "name": {
+        "utf8": "shortCircuitAnd"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n223"
+      ],
+      "id": "n222",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n221",
+      "parent": "n221",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n223",
+      "owner": "n221",
+      "parent": "n222",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n225",
+        "n228"
+      ],
+      "id": "n224",
+      "owner": "n221",
+      "parent": "n221",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n226",
+        "n227"
+      ],
+      "id": "n225",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "&&"
+        }
+      },
+      "owner": "n221",
+      "parent": "n224",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n226",
+      "owner": "n221",
+      "parent": "n225",
+      "tag": "FALSEconst",
+      "value": false
+    },
+    {
+      "children": [],
+      "id": "n227",
+      "owner": "n221",
+      "parent": "n225",
+      "reference": {
+        "direction": "backward",
+        "target": "n162"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n229",
+        "n236"
+      ],
+      "id": "n228",
+      "owner": "n221",
+      "parent": "n224",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n230",
+        "n235"
+      ],
+      "id": "n229",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": ">"
+        }
+      },
+      "owner": "n221",
+      "parent": "n228",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [
+        "n231",
+        "n234"
+      ],
+      "id": "n230",
+      "owner": "n221",
+      "parent": "n229",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n232",
+        "n233"
+      ],
+      "id": "n231",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "/"
+        }
+      },
+      "owner": "n221",
+      "parent": "n230",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n232",
+      "owner": "n221",
+      "parent": "n231",
+      "tag": "INTconst",
+      "value": 1
+    },
+    {
+      "children": [],
+      "id": "n233",
+      "owner": "n221",
+      "parent": "n231",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n234",
+      "owner": "n221",
+      "parent": "n230",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [],
+      "id": "n235",
+      "owner": "n221",
+      "parent": "n229",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n236",
+      "owner": "n221",
+      "parent": "n228",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [
+        "n238",
+        "n240"
+      ],
+      "has_rhs": true,
+      "header": [],
+      "id": "n237",
+      "modifiers": [],
+      "name": {
+        "utf8": "shortCircuitOr"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n239"
+      ],
+      "id": "n238",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n237",
+      "parent": "n237",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n239",
+      "owner": "n237",
+      "parent": "n238",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n241",
+        "n244"
+      ],
+      "id": "n240",
+      "owner": "n237",
+      "parent": "n237",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n242",
+        "n243"
+      ],
+      "id": "n241",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "||"
+        }
+      },
+      "owner": "n237",
+      "parent": "n240",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n242",
+      "owner": "n237",
+      "parent": "n241",
+      "tag": "TRUEconst",
+      "value": true
+    },
+    {
+      "children": [],
+      "id": "n243",
+      "owner": "n237",
+      "parent": "n241",
+      "reference": {
+        "direction": "backward",
+        "target": "n162"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n245",
+        "n252"
+      ],
+      "id": "n244",
+      "owner": "n237",
+      "parent": "n240",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n246",
+        "n251"
+      ],
+      "id": "n245",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": ">"
+        }
+      },
+      "owner": "n237",
+      "parent": "n244",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [
+        "n247",
+        "n250"
+      ],
+      "id": "n246",
+      "owner": "n237",
+      "parent": "n245",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n248",
+        "n249"
+      ],
+      "id": "n247",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "/"
+        }
+      },
+      "owner": "n237",
+      "parent": "n246",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n248",
+      "owner": "n237",
+      "parent": "n247",
+      "tag": "INTconst",
+      "value": 1
+    },
+    {
+      "children": [],
+      "id": "n249",
+      "owner": "n237",
+      "parent": "n247",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n250",
+      "owner": "n237",
+      "parent": "n246",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [],
+      "id": "n251",
+      "owner": "n237",
+      "parent": "n245",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n252",
+      "owner": "n237",
+      "parent": "n244",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [
+        "n254",
+        "n256"
+      ],
+      "has_rhs": true,
+      "header": [],
+      "id": "n253",
+      "modifiers": [],
+      "name": {
+        "utf8": "eagerAndEffect"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n255"
+      ],
+      "id": "n254",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n253",
+      "parent": "n253",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n255",
+      "owner": "n253",
+      "parent": "n254",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n257",
+        "n260"
+      ],
+      "id": "n256",
+      "owner": "n253",
+      "parent": "n253",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n258",
+        "n259"
+      ],
+      "id": "n257",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "&"
+        }
+      },
+      "owner": "n253",
+      "parent": "n256",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n258",
+      "owner": "n253",
+      "parent": "n257",
+      "tag": "FALSEconst",
+      "value": false
+    },
+    {
+      "children": [],
+      "id": "n259",
+      "owner": "n253",
+      "parent": "n257",
+      "reference": {
+        "direction": "backward",
+        "target": "n162"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n261",
+        "n268"
+      ],
+      "id": "n260",
+      "owner": "n253",
+      "parent": "n256",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n262",
+        "n267"
+      ],
+      "id": "n261",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": ">"
+        }
+      },
+      "owner": "n253",
+      "parent": "n260",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [
+        "n263",
+        "n266"
+      ],
+      "id": "n262",
+      "owner": "n253",
+      "parent": "n261",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n264",
+        "n265"
+      ],
+      "id": "n263",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "/"
+        }
+      },
+      "owner": "n253",
+      "parent": "n262",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n264",
+      "owner": "n253",
+      "parent": "n263",
+      "tag": "INTconst",
+      "value": 1
+    },
+    {
+      "children": [],
+      "id": "n265",
+      "owner": "n253",
+      "parent": "n263",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n266",
+      "owner": "n253",
+      "parent": "n262",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [],
+      "id": "n267",
+      "owner": "n253",
+      "parent": "n261",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n268",
+      "owner": "n253",
+      "parent": "n260",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [
+        "n270",
+        "n272"
+      ],
+      "has_rhs": true,
+      "header": [],
+      "id": "n269",
+      "modifiers": [],
+      "name": {
+        "utf8": "eagerOrEffect"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n271"
+      ],
+      "id": "n270",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n269",
+      "parent": "n269",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n271",
+      "owner": "n269",
+      "parent": "n270",
+      "reference": {
+        "direction": "backward",
+        "target": "n93"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n273",
+        "n276"
+      ],
+      "id": "n272",
+      "owner": "n269",
+      "parent": "n269",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n274",
+        "n275"
+      ],
+      "id": "n273",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Boolean"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "|"
+        }
+      },
+      "owner": "n269",
+      "parent": "n272",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n274",
+      "owner": "n269",
+      "parent": "n273",
+      "tag": "TRUEconst",
+      "value": true
+    },
+    {
+      "children": [],
+      "id": "n275",
+      "owner": "n269",
+      "parent": "n273",
+      "reference": {
+        "direction": "backward",
+        "target": "n162"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n277",
+        "n284"
+      ],
+      "id": "n276",
+      "owner": "n269",
+      "parent": "n272",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n278",
+        "n283"
+      ],
+      "id": "n277",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": ">"
+        }
+      },
+      "owner": "n269",
+      "parent": "n276",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [
+        "n279",
+        "n282"
+      ],
+      "id": "n278",
+      "owner": "n269",
+      "parent": "n277",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n280",
+        "n281"
+      ],
+      "id": "n279",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "/"
+        }
+      },
+      "owner": "n269",
+      "parent": "n278",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n280",
+      "owner": "n269",
+      "parent": "n279",
+      "tag": "INTconst",
+      "value": 1
+    },
+    {
+      "children": [],
+      "id": "n281",
+      "owner": "n269",
+      "parent": "n279",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n282",
+      "owner": "n269",
+      "parent": "n278",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [],
+      "id": "n283",
+      "owner": "n269",
+      "parent": "n277",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n284",
+      "owner": "n269",
+      "parent": "n276",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [
+        "n286",
+        "n289",
+        "n291"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "value"
+          }
+        }
+      ],
+      "id": "n285",
+      "modifiers": [],
+      "name": {
+        "utf8": "immutableLocal"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n287"
+      ],
+      "id": "n286",
+      "name": {
+        "utf8": "value"
+      },
+      "owner": "n285",
+      "parent": "n285",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n288"
+      ],
+      "id": "n287",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n285",
+      "parent": "n286",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n288",
+      "owner": "n285",
+      "parent": "n287",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n290"
+      ],
+      "id": "n289",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n285",
+      "parent": "n285",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n290",
+      "owner": "n285",
+      "parent": "n289",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n292",
+        "n295"
+      ],
+      "expression": "n292",
+      "id": "n291",
+      "owner": "n285",
+      "parent": "n285",
+      "stats": [
+        "n295"
+      ],
+      "tag": "BLOCK"
+    },
+    {
+      "children": [
+        "n293",
+        "n294"
+      ],
+      "id": "n292",
+      "owner": "n285",
+      "parent": "n291",
+      "tag": "TYPED"
+    },
+    {
+      "children": [],
+      "id": "n293",
+      "owner": "n285",
+      "parent": "n292",
+      "reference": {
+        "direction": "forward",
+        "target": "n295"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n294",
+      "owner": "n285",
+      "parent": "n292",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n296",
+        "n298"
+      ],
+      "has_rhs": true,
+      "id": "n295",
+      "modifiers": [],
+      "name": {
+        "utf8": "saved"
+      },
+      "owner": "n285",
+      "parent": "n291",
+      "role": "local-value",
+      "tag": "VALDEF"
+    },
+    {
+      "children": [
+        "n297"
+      ],
+      "id": "n296",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n285",
+      "parent": "n295",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n297",
+      "owner": "n285",
+      "parent": "n296",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n298",
+      "owner": "n285",
+      "parent": "n295",
+      "reference": {
+        "direction": "backward",
+        "target": "n286"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n300",
+        "n303",
+        "n305"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "n"
+          }
+        }
+      ],
+      "id": "n299",
+      "modifiers": [],
+      "name": {
+        "utf8": "sumTo"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n301"
+      ],
+      "id": "n300",
+      "name": {
+        "utf8": "n"
+      },
+      "owner": "n299",
+      "parent": "n299",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n302"
+      ],
+      "id": "n301",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n299",
+      "parent": "n300",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n302",
+      "owner": "n299",
+      "parent": "n301",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n304"
+      ],
+      "id": "n303",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n299",
+      "parent": "n299",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n304",
+      "owner": "n299",
+      "parent": "n303",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n306",
+        "n309",
+        "n313",
+        "n317"
+      ],
+      "expression": "n306",
+      "id": "n305",
+      "owner": "n299",
+      "parent": "n299",
+      "stats": [
+        "n309",
+        "n313",
+        "n317"
+      ],
+      "tag": "BLOCK"
+    },
+    {
+      "children": [
+        "n307",
+        "n308"
+      ],
+      "id": "n306",
+      "owner": "n299",
+      "parent": "n305",
+      "tag": "TYPED"
+    },
+    {
+      "children": [],
+      "id": "n307",
+      "owner": "n299",
+      "parent": "n306",
+      "reference": {
+        "direction": "forward",
+        "target": "n313"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n308",
+      "owner": "n299",
+      "parent": "n306",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n310",
+        "n312"
+      ],
+      "has_rhs": true,
+      "id": "n309",
+      "modifiers": [
+        "MUTABLE"
+      ],
+      "name": {
+        "utf8": "i"
+      },
+      "owner": "n299",
+      "parent": "n305",
+      "role": "local-value",
+      "tag": "VALDEF"
+    },
+    {
+      "children": [
+        "n311"
+      ],
+      "id": "n310",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n299",
+      "parent": "n309",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n311",
+      "owner": "n299",
+      "parent": "n310",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n312",
+      "owner": "n299",
+      "parent": "n309",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "children": [
+        "n314",
+        "n316"
+      ],
+      "has_rhs": true,
+      "id": "n313",
+      "modifiers": [
+        "MUTABLE"
+      ],
+      "name": {
+        "utf8": "total"
+      },
+      "owner": "n299",
+      "parent": "n305",
+      "role": "local-value",
+      "tag": "VALDEF"
+    },
+    {
+      "children": [
+        "n315"
+      ],
+      "id": "n314",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n299",
+      "parent": "n313",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n315",
+      "owner": "n299",
+      "parent": "n314",
+      "reference": {
+        "direction": "backward",
+        "target": "n16"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n316",
+      "owner": "n299",
+      "parent": "n313",
+      "tag": "INTconst",
+      "value": 0
+    },
+    {
+      "body": "n323",
+      "children": [
+        "n318",
+        "n323"
+      ],
+      "condition": "n318",
+      "id": "n317",
+      "owner": "n299",
+      "parent": "n305",
+      "tag": "WHILE"
+    },
+    {
+      "children": [
+        "n319",
+        "n322"
+      ],
+      "id": "n318",
+      "owner": "n299",
+      "parent": "n317",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n320",
+        "n321"
+      ],
+      "id": "n319",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Boolean"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "<"
+        }
+      },
+      "owner": "n299",
+      "parent": "n318",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n320",
+      "owner": "n299",
+      "parent": "n319",
+      "reference": {
+        "direction": "backward",
+        "target": "n309"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n321",
+      "owner": "n299",
+      "parent": "n319",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n322",
+      "owner": "n299",
+      "parent": "n318",
+      "reference": {
+        "direction": "backward",
+        "target": "n300"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n324",
+        "n331"
+      ],
+      "expression": "n324",
+      "id": "n323",
+      "owner": "n299",
+      "parent": "n317",
+      "stats": [
+        "n331"
+      ],
+      "tag": "BLOCK"
+    },
+    {
+      "children": [
+        "n325",
+        "n326"
+      ],
+      "id": "n324",
+      "left": "n325",
+      "owner": "n299",
+      "parent": "n323",
+      "right": "n326",
+      "tag": "ASSIGN"
+    },
+    {
+      "children": [],
+      "id": "n325",
+      "owner": "n299",
+      "parent": "n324",
+      "reference": {
+        "direction": "backward",
+        "target": "n320"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n327",
+        "n330"
+      ],
+      "id": "n326",
+      "owner": "n299",
+      "parent": "n324",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n328",
+        "n329"
+      ],
+      "id": "n327",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "+"
+        }
+      },
+      "owner": "n299",
+      "parent": "n326",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n328",
+      "owner": "n299",
+      "parent": "n327",
+      "reference": {
+        "direction": "backward",
+        "target": "n320"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n329",
+      "owner": "n299",
+      "parent": "n327",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n330",
+      "owner": "n299",
+      "parent": "n326",
+      "tag": "INTconst",
+      "value": 1
+    },
+    {
+      "children": [
+        "n332",
+        "n333"
+      ],
+      "id": "n331",
+      "left": "n332",
+      "owner": "n299",
+      "parent": "n323",
+      "right": "n333",
+      "tag": "ASSIGN"
+    },
+    {
+      "children": [],
+      "id": "n332",
+      "owner": "n299",
+      "parent": "n331",
+      "reference": {
+        "direction": "backward",
+        "target": "n307"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n334",
+        "n337"
+      ],
+      "id": "n333",
+      "owner": "n299",
+      "parent": "n331",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n335",
+        "n336"
+      ],
+      "id": "n334",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "Int"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "Int"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "+"
+        }
+      },
+      "owner": "n299",
+      "parent": "n333",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [],
+      "id": "n335",
+      "owner": "n299",
+      "parent": "n334",
+      "reference": {
+        "direction": "backward",
+        "target": "n307"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n336",
+      "owner": "n299",
+      "parent": "n334",
+      "reference": {
+        "direction": "backward",
+        "target": "n26"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n337",
+      "owner": "n299",
+      "parent": "n333",
+      "reference": {
+        "direction": "backward",
+        "target": "n320"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n339",
+        "n341"
+      ],
+      "id": "n338",
+      "owner": "n2",
+      "parent": "n2",
+      "tag": "ANNOTATION"
+    },
+    {
+      "children": [
+        "n340"
+      ],
+      "id": "n339",
+      "name": {
+        "utf8": "SourceFile"
+      },
+      "owner": "n2",
+      "parent": "n338",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n340",
+      "name": {
+        "qualified": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "annotation"
+              }
+            ]
+          },
+          {
+            "utf8": "internal"
+          }
+        ]
+      },
+      "owner": "n2",
+      "parent": "n339",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [
+        "n342",
+        "n346"
+      ],
+      "id": "n341",
+      "owner": "n2",
+      "parent": "n338",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n343",
+        "n345"
+      ],
+      "id": "n342",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "qualified": [
+                  {
+                    "utf8": "java"
+                  },
+                  {
+                    "utf8": "lang"
+                  }
+                ]
+              },
+              {
+                "utf8": "String"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "qualified": [
+                {
+                  "qualified": [
+                    {
+                      "utf8": "scala"
+                    },
+                    {
+                      "utf8": "annotation"
+                    }
+                  ]
+                },
+                {
+                  "utf8": "internal"
+                }
+              ]
+            },
+            {
+              "utf8": "SourceFile"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "<init>"
+        }
+      },
+      "owner": "n2",
+      "parent": "n341",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [
+        "n344"
+      ],
+      "id": "n343",
+      "owner": "n2",
+      "parent": "n342",
+      "tag": "NEW"
+    },
+    {
+      "children": [],
+      "id": "n344",
+      "owner": "n2",
+      "parent": "n343",
+      "reference": {
+        "direction": "backward",
+        "target": "n339"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n345",
+      "owner": "n2",
+      "parent": "n342",
+      "reference": {
+        "direction": "backward",
+        "target": "n339"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n346",
+      "name": {
+        "utf8": "<source>"
+      },
+      "owner": "n2",
+      "parent": "n341",
+      "tag": "STRINGconst"
+    }
+  ],
+  "position_nodes": [
+    "n0",
+    "n2",
+    "n341",
+    "n344",
+    "n346",
+    "n3",
+    "n10",
+    "n11",
+    "n7",
+    "n13",
+    "n14",
+    "n15",
+    "n18",
+    "n19",
+    "n21",
+    "n24",
+    "n25",
+    "n28",
+    "n29",
+    "n30",
+    "n31",
+    "n33",
+    "n34",
+    "n36",
+    "n39",
+    "n40",
+    "n42",
+    "n43",
+    "n44",
+    "n45",
+    "n47",
+    "n48",
+    "n50",
+    "n53",
+    "n54",
+    "n56",
+    "n57",
+    "n58",
+    "n59",
+    "n61",
+    "n62",
+    "n64",
+    "n67",
+    "n68",
+    "n70",
+    "n71",
+    "n72",
+    "n73",
+    "n75",
+    "n76",
+    "n78",
+    "n81",
+    "n82",
+    "n84",
+    "n85",
+    "n86",
+    "n87",
+    "n89",
+    "n90",
+    "n92",
+    "n96",
+    "n97",
+    "n99",
+    "n100",
+    "n101",
+    "n102",
+    "n104",
+    "n105",
+    "n107",
+    "n110",
+    "n111",
+    "n113",
+    "n114",
+    "n115",
+    "n116",
+    "n118",
+    "n119",
+    "n121",
+    "n124",
+    "n125",
+    "n127",
+    "n128",
+    "n129",
+    "n130",
+    "n132",
+    "n133",
+    "n135",
+    "n138",
+    "n139",
+    "n141",
+    "n142",
+    "n143",
+    "n144",
+    "n146",
+    "n148",
+    "n149",
+    "n150",
+    "n151",
+    "n152",
+    "n154",
+    "n155",
+    "n157",
+    "n160",
+    "n161",
+    "n164",
+    "n165",
+    "n166",
+    "n167",
+    "n169",
+    "n170",
+    "n172",
+    "n175",
+    "n176",
+    "n178",
+    "n179",
+    "n180",
+    "n181",
+    "n183",
+    "n184",
+    "n186",
+    "n189",
+    "n190",
+    "n192",
+    "n193",
+    "n194",
+    "n195",
+    "n197",
+    "n198",
+    "n200",
+    "n203",
+    "n204",
+    "n206",
+    "n207",
+    "n208",
+    "n209",
+    "n211",
+    "n212",
+    "n214",
+    "n217",
+    "n218",
+    "n220",
+    "n221",
+    "n222",
+    "n225",
+    "n226",
+    "n229",
+    "n231",
+    "n232",
+    "n234",
+    "n236",
+    "n237",
+    "n238",
+    "n241",
+    "n242",
+    "n245",
+    "n247",
+    "n248",
+    "n250",
+    "n252",
+    "n253",
+    "n254",
+    "n257",
+    "n258",
+    "n261",
+    "n263",
+    "n264",
+    "n266",
+    "n268",
+    "n269",
+    "n270",
+    "n273",
+    "n274",
+    "n277",
+    "n279",
+    "n280",
+    "n282",
+    "n284",
+    "n285",
+    "n286",
+    "n287",
+    "n289",
+    "n295",
+    "n296",
+    "n298",
+    "n293",
+    "n294",
+    "n299",
+    "n300",
+    "n301",
+    "n303",
+    "n309",
+    "n310",
+    "n312",
+    "n313",
+    "n314",
+    "n316",
+    "n317",
+    "n319",
+    "n320",
+    "n322",
+    "n332",
+    "n334",
+    "n335",
+    "n337",
+    "n325",
+    "n327",
+    "n328",
+    "n330",
+    "n307",
+    "n308"
+  ],
+  "schema": 1,
+  "sections": [
+    "ASTs",
+    "Attributes",
+    "Comments",
+    "Positions"
+  ]
+}
