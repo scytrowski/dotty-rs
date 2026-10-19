@@ -1413,6 +1413,23 @@ fn nested_expression_depth_budget_has_a_typed_failure() {
 
 #[test]
 fn if_application_branches_share_depth_and_repeated_node_validation_state() {
+    let shallow_if_with_application = "package example\nclass Shallow:
+  def choose(flag: Boolean): Int = if flag then identity(1) else 2
+  def identity(x: Int): Int = x
+";
+    assert!(
+        source_outputs_named_with_limits(
+            shallow_if_with_application,
+            "Shallow.scala",
+            ValidationLimits {
+                max_expression_depth: 0,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        )
+        .is_ok()
+    );
+
     let nested_if_with_applications = "package example\nclass Mixed:
   def choose(flag: Boolean): Int = if flag then if flag then identity(identity(1)) else 2 else 3
   def identity(x: Int): Int = x

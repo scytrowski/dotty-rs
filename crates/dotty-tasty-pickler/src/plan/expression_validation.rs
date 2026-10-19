@@ -500,7 +500,7 @@ impl Validator<'_, '_> {
             return self.validate_if_expression(source_id, typed_id, method, depth + 1, visited);
         }
         if matches!(source.kind, TreeKind::Apply(_)) && matches!(typed.kind, TreeKind::Apply(_)) {
-            self.validate_nested_application(source_id, typed_id, method, depth + 1, visited)?;
+            self.validate_nested_application(source_id, typed_id, method, depth, visited)?;
             return Ok(typed.ty);
         }
         self.charge(1)?;
