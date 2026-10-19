@@ -852,7 +852,8 @@ impl Validator<'_, '_> {
                 None
             }
             (TreeKind::PhaseSpecific(UntypedNode::Number(number)), TreeKind::Literal(literal)) => {
-                if !matches!((&literal.value, body_type), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value)
+                if result_type != p.definitions.int
+                    || !matches!((&literal.value, body_type), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value)
                 {
                     return Err(PickleError::BodyType {
                         tree: body,

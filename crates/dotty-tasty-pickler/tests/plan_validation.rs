@@ -1024,6 +1024,43 @@ fn raw_whole_numbers_check_decimal_and_signed_bit_pattern_values() {
 }
 
 #[test]
+fn raw_int_body_cannot_be_paired_with_a_boolean_result() {
+    let mut f = Fixture::new();
+    let method = f.methods[0].symbol;
+    f.store
+        .symbols
+        .set_info(method, SymbolInfo::Complete(f.definitions.boolean));
+    let boolean_symbol = f
+        .store
+        .types
+        .get(f.definitions.boolean)
+        .reference_symbol()
+        .unwrap();
+    let TreeKind::DefDef(definition) = &f.source_ast.get(f.methods[0].source_tree).kind else {
+        panic!()
+    };
+    let result_tpt = definition.tpt;
+    let TreeKind::Ident(source_result) = &mut f.source_ast.get_mut(result_tpt).kind else {
+        panic!()
+    };
+    source_result.name = f.store.symbols.get(boolean_symbol).name;
+
+    f.source_ast.get_mut(f.rhs).kind =
+        TreeKind::PhaseSpecific(UntypedNode::Number(NumberLiteral {
+            text: f.store.names.intern("42"),
+            kind: NumberKind::Whole(10),
+        }));
+
+    assert_eq!(
+        f.plan().validate().err(),
+        Some(PickleError::BodyType {
+            tree: f.body,
+            ty: f.typed_ast.get(f.body).ty,
+        })
+    );
+}
+
+#[test]
 fn malformed_raw_whole_numbers_do_not_accept_an_arbitrary_typed_value() {
     for (text, radix) in [
         ("2147483648", 10),
