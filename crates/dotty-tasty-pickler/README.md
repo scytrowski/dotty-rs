@@ -1,11 +1,12 @@
 # Source semantic TASTy pickler boundary
 
 This crate implements **read-only plan validation, semantic type/reference
-projection, declaration skeletons and complete literal, formal-reference or same-class call
-bodies** for Scala 3.9.0 TASTy (28.9.0). `ValidatedPicklePlan::pickle()` returns owned `PickledTasty`
+projection, declaration skeletons and complete literal, formal-reference,
+same-class call, conditional and bounded block bodies** for Scala 3.9.0 TASTy
+(28.9.0). `ValidatedPicklePlan::pickle()` returns owned `PickledTasty`
 bytes with the actual existing typed RHS. Independent Scala compilation of this
 producer's output is covered by the pinned opt-in oracle for the `Answer`,
-`Parameters`, same-class `References`, and `Operations` call fixtures.
+`Parameters`, same-class `References`, `Operations` call and `Blocks` fixtures.
 
 `PicklePlan` borrows the canonical semantic store, Definitions, untyped/typed ASTs,
 source semantic index and a `SourceTypedBindings` provider. Source metadata is
@@ -15,8 +16,8 @@ owned; declarations carry explicitly ordered canonical IDs and exact body roots.
 
 Validation is split by responsibility inside the private `plan` module:
 `source_binding` owns source/typed identity and span checks, while
-`expression_validation` owns the supported literal, formal-reference and
-same-class application shapes. New expression forms should extend that
+`expression_validation` owns the supported literal, formal-reference,
+same-class application, conditional and block shapes. New expression forms should extend that
 validator and its focused tests; they should not add a second binding or span
 policy in serialization. Follow-up pickler increments can build on these
 boundaries without changing the borrowed input contract or current support
@@ -32,6 +33,12 @@ An Int method may also contain a typed conditional whose condition is a
 Boolean formal reference or Boolean literal and whose branches are supported
 Int expressions or nested conditionals. The condition/then/else structure is
 preserved in TASTy; the pickler does not fold constant conditions.
+An Int block is accepted only when source and typed block roots and every
+statement/final-expression edge have exact frontend bindings. Supported Int
+statements are emitted in source order; TASTy encodes the final expression
+first, then the ordered stat list. Nested source blocks, local declarations,
+assignments, throws and unmatched typed-statement expansions remain unsupported.
+A statement is never discarded or coerced to Unit.
 Same-class method references derive their
 target from the typed `TermRef`, require a public declared Int method in the
 plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
@@ -162,13 +169,14 @@ verified [oracle](../../docs/tasty-pickler-oracle.md) for the frozen shape, erro
 and ownership rules, and follow-up encoding/interoperability gates.
 
 `ValidatedPicklePlan::pickle_with_limits(PickleLimits)` shares the validated
-declaration builder and emits `TreeKind::Literal(Constant::Int)` from the exact
-method-plan root. `Tree::ty` must be `Type::Constant(Constant::Int(value))` with
-the same value; the declared method result remains `Definitions.int`. The wire
-RHS is one `INTconst` using the safe codec's signed integer encoding. No extra
-type tree or widening node is required by the pinned oracle. Unsupported
-expression kinds are rejected without following their children; no recursive
-expression serializer or truncation is introduced.
+declaration builder and emits the exact method-plan root. `Tree::ty` must agree
+with its supported expression and the declared method result. Literal RHSs use
+one `INTconst` with the safe codec's signed integer encoding. A block's typed
+result type must match its final expression; no inference or Unit conversion is
+performed. Its `BLOCK` fields follow the pinned Scala layout: final expression,
+then ordered statements. Expression recursion is bounded by depth/item limits
+and rejects repeated typed IDs and cycles; unsupported kinds fail with typed
+errors.
 
 The owned result exposes `bytes()`, `source()`, `intended_tasty_path()`, canonical
 `declarations()` with AST-relative addresses, and `body(method_symbol)` with the

@@ -281,6 +281,22 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Conditionals = 17, 42, 1, 2, 3, 17, 19, 42, 31, 42", 17,
             ),
+            "example/Blocks.tasty": (
+                "example.Blocks", r"public int ordered\(boolean, int\)", "BlocksRuntime.java",
+                """public final class BlocksRuntime {
+  public static void main(String[] args) {
+    example.Blocks blocks = new example.Blocks();
+    int orderedTrue = blocks.ordered(true, 42);
+    int orderedFalse = blocks.ordered(false, 42);
+    int single = blocks.single();
+    int calls = blocks.calls();
+    if (orderedTrue != 42 || orderedFalse != 42 || single != 7 || calls != 3)
+      throw new AssertionError("unexpected Blocks results");
+    System.out.println("Blocks = " + orderedTrue + ", " + orderedFalse + ", " + single + ", " + calls);
+  }
+}
+""", "Blocks = 42, 42, 7, 3", 3,
+            ),
             "example/References.tasty": (
                 "example.References", r"public int first\(\)", "ReferencesRuntime.java",
                 """public final class ReferencesRuntime {
@@ -352,6 +368,15 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Conditionals class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Blocks.tasty":
+                signatures = (
+                    r"public int ordered\(boolean, int\)",
+                    r"public int single\(\)",
+                    r"public int calls\(\)",
+                    r"public int identity\(int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Blocks class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":

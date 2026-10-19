@@ -14,6 +14,8 @@ use crate::{
     bounded_expression_depth,
 };
 
+mod block;
+
 struct ExpressionBudget {
     max_depth: usize,
     item_limit: usize,
@@ -108,7 +110,7 @@ fn lower_expression_inner(
         )?;
         let then_depth = if matches!(
             ast.try_get(if_expr.then_branch).map(|tree| &tree.kind),
-            Some(TreeKind::If(_))
+            Some(TreeKind::If(_) | TreeKind::Block(_))
         ) {
             depth + 1
         } else {
@@ -128,7 +130,7 @@ fn lower_expression_inner(
         )?;
         let else_depth = if matches!(
             ast.try_get(if_expr.else_branch).map(|tree| &tree.kind),
-            Some(TreeKind::If(_))
+            Some(TreeKind::If(_) | TreeKind::Block(_))
         ) {
             depth + 1
         } else {
@@ -154,6 +156,17 @@ fn lower_expression_inner(
                 AstField::Tree(else_branch),
             ],
         });
+    }
+    if let TreeKind::Block(block) = &tree.kind {
+        return block::lower_block_inner(
+            store,
+            ast,
+            block,
+            method,
+            parameters,
+            ExpressionState { depth, budget },
+            context,
+        );
     }
     if let TreeKind::Apply(application) = &tree.kind {
         if application.kind != ApplyKind::Regular || application.args.is_empty() {
@@ -210,7 +223,7 @@ fn lower_expression_inner(
         for &argument in &application.args {
             let argument_depth = if matches!(
                 ast.try_get(argument).map(|argument| &argument.kind),
-                Some(TreeKind::Apply(_))
+                Some(TreeKind::Apply(_) | TreeKind::Block(_))
             ) {
                 depth + 1
             } else {
