@@ -172,15 +172,14 @@ fn resolve_tasty_alias_target<E: ClassPathEntry>(
     else {
         return Ok(None);
     };
-    let file =
-        dotty_tasty::tasty::TastyFile::parse_scala_3_9(resource.bytes()).map_err(|error| {
-            TastyAliasResolutionError::InvalidTasty(
-                package_name.clone(),
-                tasty_symbol::TastyDecodeError::Parse(error),
-                resource.origin().clone(),
-                resource.format(),
-            )
-        })?;
+    let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
+        TastyAliasResolutionError::InvalidTasty(
+            package_name.clone(),
+            error,
+            resource.origin().clone(),
+            resource.format(),
+        )
+    })?;
     tasty_symbol::resolve_type_alias_target(&file, alias, owner.package_path()).map_err(|error| {
         TastyAliasResolutionError::InvalidTasty(
             package_name,
