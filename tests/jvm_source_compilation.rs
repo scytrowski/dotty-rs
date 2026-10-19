@@ -7382,7 +7382,34 @@ fn verify_reference_holder_with_jdk(output_directory: &Path) {
     let harness_path = output_directory.join("ReferenceHolderHarness.java");
     fs::write(
         &harness_path,
-        "public final class ReferenceHolderHarness { public static void main(String[] args) { Counter first = new Counter(2); Holder holder = new Holder(first, true); if (holder.value() != first || holder.initial() != first) throw new AssertionError(\"initial identity\"); if (holder.read() != 2 || !holder.isEnabled()) throw new AssertionError(\"initial values\"); if (holder.choose(true, new Counter(9)) != first || holder.choose(false, first) != first) throw new AssertionError(\"branch join identity\"); if (holder.incrementUntil(4) != 4 || first.get() != 4) throw new AssertionError(\"loop mutation\"); Counter replacement = new Counter(12); holder.replace(replacement); if (holder.value() != replacement || holder.initial() != first || holder.read() != 12) throw new AssertionError(\"replacement identity\"); HolderClient client = new HolderClient(); if (client.wrap(first).value() != first) throw new AssertionError(\"wrap identity\"); if (client.run(1, 4) != 4) throw new AssertionError(\"client run\"); } }\n",
+        r#"public final class ReferenceHolderHarness {
+    public static void main(String[] args) {
+        Counter original = new Counter(2);
+        Counter replacement = new Counter(7);
+        Holder holder = new Holder(original, true);
+        if (holder.value() != original || holder.initial() != original)
+            throw new AssertionError("initial identity");
+        if (holder.isEnabled() != true || holder.read() != 2)
+            throw new AssertionError("initial values");
+        if (holder.choose(true, replacement) != original
+                || holder.choose(false, original) != original)
+            throw new AssertionError("branch join identity");
+
+        holder.replace(replacement);
+        if (holder.value() != replacement || holder.initial() != original || holder.read() != 7)
+            throw new AssertionError("replacement identity");
+        if (holder.incrementUntil(10) != 10 || replacement.get() != 10 || original.get() != 2)
+            throw new AssertionError("replacement loop mutation or object isolation");
+
+        HolderClient client = new HolderClient();
+        if (client.wrap(original).value() != original)
+            throw new AssertionError("wrap identity");
+        if (client.run(0, 0) != 0 || client.run(0, 1) != 1
+                || client.run(0, 10) != 10 || client.run(12, 5) != 12)
+            throw new AssertionError("client loop boundary cases");
+    }
+}
+"#,
     )
     .expect("write ReferenceHolder Java harness");
     let javac = Command::new("javac")
