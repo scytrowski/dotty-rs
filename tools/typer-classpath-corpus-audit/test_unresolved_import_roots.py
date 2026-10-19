@@ -1,5 +1,6 @@
 """Focused tests for the #1336 read-only classpath evidence collector."""
 
+import csv
 import importlib.util
 import sys
 import tempfile
@@ -75,6 +76,46 @@ class UnresolvedImportRootTests(unittest.TestCase):
             )
             rows, _, _ = audit.scan([jar], [missing])
             self.assertIn("no_candidate_resource_in_supplied_classpath", rows)
+
+    def test_package_level_quotes_helper_uses_synthetic_package_resource(self):
+        root = SCRIPT.parents[2]
+        report = root / "docs/typer-classpath-import-prefix-profile-1180-3.9.0.md"
+        observations = audit.profile.extract_observations(report.read_text(encoding="utf-8"))
+        row = next(row for row in observations if row["target_key"].startswith("quotes::<"))
+        with tempfile.TemporaryDirectory() as temp:
+            jar = Path(temp) / "scala-library.jar"
+            with zipfile.ZipFile(jar, "w") as archive:
+                archive.writestr("scala/quoted/Quotes$package.tasty", tasty(28, 9, 0))
+                archive.writestr("scala/quoted/Quotes$package$.class", b"class-bytes")
+            rows, _, totals = audit.scan([jar], [row])
+            self.assertIn("scala/quoted/Quotes$package.tasty", rows)
+            self.assertIn("package_level_helper", rows)
+            self.assertIn("candidate_resource_present_identity_requires_semantic_oracle", rows)
+            self.assertEqual(totals["candidate_resource_present_identity_requires_semantic_oracle"], 1)
+
+    def test_compiler_object_source_kinds_match_term_resolver_results(self):
+        root = SCRIPT.parents[2]
+        source_path = root / "docs/typer-classpath-import-roots-1336-target-sources.tsv"
+        resolver_path = root / "docs/typer-classpath-import-roots-1336-resolver-results.tsv"
+        with source_path.open(encoding="utf-8") as source_file:
+            sources = {
+                row["target_key"].split("::<", 1)[0]: row["declaration_kind"]
+                for row in csv.DictReader(source_file, delimiter="\t")
+            }
+        with resolver_path.open(encoding="utf-8") as resolver_file:
+            results = list(csv.DictReader(resolver_file, delimiter="\t"))
+        for name in ("Parsers", "Scanners", "Settings", "SymDenotations"):
+            self.assertIn("object", sources[name].lower())
+            self.assertTrue(
+                any(
+                    row["target_key"].startswith(name + "::<")
+                    and row["request_kind"] == "package_member"
+                    and row["namespace"] == "Term"
+                    and row["resolver_result_kind"] == "symbol:Object"
+                    for row in results
+                ),
+                name,
+            )
 
     def test_scans_jmod_class_entries_for_default_java_lang_candidate(self):
         with tempfile.TemporaryDirectory() as temp:

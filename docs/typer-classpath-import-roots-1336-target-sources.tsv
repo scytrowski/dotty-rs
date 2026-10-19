@@ -12,12 +12,12 @@ Manifest::<first-segment-unresolved>	scala/reflect/Manifest.scala:51,76	trait Ma
 MegaPhase::<first-segment-unresolved>	dotty/tools/dotc/transform/MegaPhase.scala:18,145	object + class MegaPhase	Scala 3.9 compiler source
 NameKinds::<first-segment-unresolved>	dotty/tools/dotc/core/NameKinds.scala:15	object NameKinds	Scala 3.9 compiler source
 Names::<first-segment-unresolved>	dotty/tools/dotc/core/Names.scala:15	object Names	Scala 3.9 compiler source
-Parsers::<first-segment-unresolved>	dotty/tools/dotc/parsing/Parsers.scala:38	class Parsers	Scala 3.9 compiler source
+Parsers::<first-segment-unresolved>	dotty/tools/dotc/parsing/Parsers.scala:38	object Parsers	Scala 3.9 compiler source
 Periods::<first-segment-unresolved>	dotty/tools/dotc/core/Periods.scala:10	object Periods	Scala 3.9 compiler source
 ProtoTypes::<first-segment-unresolved>	dotty/tools/dotc/typer/ProtoTypes.scala:27	object ProtoTypes	Scala 3.9 compiler source
-Scanners::<first-segment-unresolved>	dotty/tools/dotc/parsing/Scanners.scala:27	class Scanners	Scala 3.9 compiler source
-Settings::<first-segment-unresolved>	dotty/tools/dotc/config/Settings.scala:17	class Settings	Scala 3.9 compiler source
-SymDenotations::<first-segment-unresolved>	dotty/tools/dotc/core/SymDenotations.scala:30	class SymDenotations	Scala 3.9 compiler source
+Scanners::<first-segment-unresolved>	dotty/tools/dotc/parsing/Scanners.scala:27	object Scanners	Scala 3.9 compiler source
+Settings::<first-segment-unresolved>	dotty/tools/dotc/config/Settings.scala:17	object Settings	Scala 3.9 compiler source
+SymDenotations::<first-segment-unresolved>	dotty/tools/dotc/core/SymDenotations.scala:30	object SymDenotations	Scala 3.9 compiler source
 SymbolInformation::<first-segment-unresolved>	dotty/tools/dotc/semanticdb/SymbolInformation.scala:12,189	case class + companion object (generated semanticdb source)	Scala 3.9 compiler source
 Symbols::<first-segment-unresolved>	dotty/tools/dotc/core/Symbols.scala:40	object Symbols	Scala 3.9 compiler source
 Texts::<first-segment-unresolved>	dotty/tools/dotc/printing/Texts.scala:5	object Texts	Scala 3.9 compiler source
@@ -29,4 +29,4 @@ collection::<first-segment-unresolved>	scala/collection/package.scala:18	package
 core::<first-segment-unresolved>	dotty/tools/dotc/semanticdb/Scala3.scala:3	source import alias `import dotty.tools.dotc.core`	Scala 3.9 compiler source
 num::<first-segment-unresolved>	scala/collection/immutable/NumericRange.scala	source-local `num` term parameter	Scala 3.9 library source
 processInternal::<first-segment-unresolved>	scala/sys/process/package.scala:226	private object processInternal	Scala 3.9 library source
-quotes::<first-segment-unresolved>	scala/quoted/Expr.scala:329	source-local contextual parameter `quotes: Quotes`	Scala 3.9 library source
+quotes::<first-segment-unresolved>	scala/quoted/Quotes.scala:22; observed in FromExpr.scala:95, Type.scala:87, Varargs.scala:55	package-level `transparent inline def quotes(using q: Quotes): q.type = q`; compiles to `scala/quoted/Quotes$package.tasty` and package-object classes	Scala 3.9 library source

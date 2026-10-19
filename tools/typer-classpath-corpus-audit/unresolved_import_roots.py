@@ -21,6 +21,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROFILE = HERE / "import_prefix_profile.py"
+# Scala 3 emits top-level package definitions into a synthetic package object.
+# This pinned helper is the source-level `scala.quoted.quotes` package member.
+PACKAGE_LEVEL_NAME_RESOURCE_ALIASES = {
+    "scala/quoted/quotes": ("scala/quoted/Quotes$package",),
+}
 spec = importlib.util.spec_from_file_location("import_prefix_profile", PROFILE)
 assert spec and spec.loader
 profile = importlib.util.module_from_spec(spec)
@@ -114,10 +119,15 @@ def scan(
         candidates = candidate_paths(row)
         for origin, stem in candidates:
             exact = []
-            for suffix in (".tasty", ".class", "$.class"):
-                for artifact, path, data in resources.get(stem + suffix, []):
-                    version = tasty_header(data) if suffix == ".tasty" else "-"
-                    exact.append({"origin": origin, "path": path, "archive": artifact, "tasty_version": version})
+            resource_stems = ((stem, origin),) + tuple(
+                (alias, "package_level_helper")
+                for alias in PACKAGE_LEVEL_NAME_RESOURCE_ALIASES.get(stem, ())
+            )
+            for resource_stem, resource_origin in resource_stems:
+                for suffix in (".tasty", ".class", "$.class"):
+                    for artifact, path, data in resources.get(resource_stem + suffix, []):
+                        version = tasty_header(data) if suffix == ".tasty" else "-"
+                        exact.append({"origin": resource_origin, "path": path, "archive": artifact, "tasty_version": version})
             if exact:
                 found.extend(exact)
         key = row["target_key"]
@@ -135,7 +145,7 @@ def scan(
     summary = io.StringIO()
     summary.write("# Unresolved import-root resource scan\n\n")
     summary.write("This report scans the frozen #1180 rows against the explicitly supplied, ordered JAR list. A `.class` or `.tasty` hit is resource evidence only; this scan does not prove a Scala `object`, `ModuleClass`, member completion, or selected import.\n\n")
-    summary.write("The row-level evidence is in [`typer-classpath-import-roots-1336-3.9.0.tsv`](typer-classpath-import-roots-1336-3.9.0.tsv), the deduplicated lexical candidate matrix is in [`typer-classpath-import-roots-1336-target-candidates.tsv`](typer-classpath-import-roots-1336-target-candidates.tsv), resolver outcomes are in [`typer-classpath-import-roots-1336-resolver-results.tsv`](typer-classpath-import-roots-1336-resolver-results.tsv), and object/version notes are in [`typer-classpath-import-root-fixtures-1336-3.9.0.md`](typer-classpath-import-root-fixtures-1336-3.9.0.md). Historical blocker and selector evidence remains in the unchanged [#1180 reconciliation](typer-classpath-import-prefix-profile-1180-3.9.0-reconciliation.tsv).\n\n")
+    summary.write("The row-level evidence is in [`typer-classpath-import-roots-1336-3.9.0.tsv`](typer-classpath-import-roots-1336-3.9.0.tsv), the deduplicated lexical candidate matrix is in [`typer-classpath-import-roots-1336-target-candidates.tsv`](typer-classpath-import-roots-1336-target-candidates.tsv), resolver outcomes are in [`typer-classpath-import-roots-1336-resolver-results.tsv`](typer-classpath-import-roots-1336-resolver-results.tsv), source declaration owners are in [`typer-classpath-import-roots-1336-target-sources.tsv`](typer-classpath-import-roots-1336-target-sources.tsv), and object/version notes are in [`typer-classpath-import-root-fixtures-1336-3.9.0.md`](typer-classpath-import-root-fixtures-1336-3.9.0.md). Historical blocker and selector evidence remains in the unchanged [#1180 reconciliation](typer-classpath-import-prefix-profile-1180-3.9.0-reconciliation.tsv).\n\n")
     summary.write(f"Scala: 3.9.0; JDK: {java_version}.\n\n")
     summary.write("## Pinned archives\n\n")
     summary.write("| order | archive | SHA-256 |\n|---:|---|---|\n")
@@ -151,7 +161,7 @@ def scan(
         found = item["evidence"]
         first = "-" if not found else f"`{found[0]['path']}` from `{found[0]['archive'].split('@sha256:')[0]}` (TASTy {found[0]['tasty_version']})"
         summary.write(f"| `{key}` | {item['observations']} | {item['classification']} | {first} |\n")
-    summary.write("\nThe row-level TSV preserves every frozen row. `ordered_candidate_evidence` records each direct class/TASTy resource hit in lexical-candidate order, including archive digest and parsed TASTy header. No historical source or selector outcome is rewritten. The report does not count Scala ModuleClass requests, completions, or selected members; those must come from a resolver-level audit, not inferred from archive names.\n")
+    summary.write("\nThe row-level TSV preserves every frozen row. `ordered_candidate_evidence` records direct class/TASTy hits in lexical-candidate order, plus the explicitly mapped Scala package-level helper resource for `scala.quoted.quotes`; each entry includes archive digest and parsed TASTy header. No historical source or selector outcome is rewritten. ModuleClass requests, completions, and selected members come from the separate resolver-level audit.\n")
     return rows_out.getvalue(), summary.getvalue(), totals
 
 

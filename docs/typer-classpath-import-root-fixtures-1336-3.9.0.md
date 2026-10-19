@@ -4,18 +4,21 @@ The frozen cohort is unchanged from #1180: 1,063 observations in 81 files,
 31 target keys and 393 distinct blocker origins. All 393 origins are
 inherited; none is direct. The row-by-row resource scan is in
 [`typer-classpath-import-roots-1336-3.9.0.tsv`](typer-classpath-import-roots-1336-3.9.0.tsv).
-The deduplicated candidate list the source declaration ownership table is in
+The deduplicated candidate list is in
+[`typer-classpath-import-roots-1336-target-candidates.tsv`](typer-classpath-import-roots-1336-target-candidates.tsv),
+the source declaration ownership table is in
 [`typer-classpath-import-roots-1336-target-sources.tsv`](typer-classpath-import-roots-1336-target-sources.tsv),
 and the real resolver results are in
-[`typer-classpath-import-roots-1336-target-candidates.tsv`](typer-classpath-import-roots-1336-target-candidates.tsv)
-and
 [`typer-classpath-import-roots-1336-resolver-results.tsv`](typer-classpath-import-roots-1336-resolver-results.tsv).
 It finds a class or TASTy resource along one of the recorded lexical candidate
-paths for 27 keys (1,055 observations). The exact-name scan has no `.class` or
-`.tasty` resource for `collection`, `core`, `num`, and `quotes`; follow-up
+paths for 28 keys (1,058 observations). The exact target-name scan has no
+`.class` or `.tasty` resource for `collection`, `core`, and `num`; follow-up
 probes classify `collection` as a real Scala package path backed by the source
-package object, `core` as
-an existing source import alias, and `num`/`quotes` as source-local terms. The
+package object, `core` as an existing source import alias, and `num` as a
+source-local term. The `quotes` helper is instead a package-level definition
+in `scala.quoted.Quotes`, emitted to `Quotes$package.tasty` and associated
+package-object classes; the classpath has the resource, but the current
+package-member resolver request still returns no symbol. The
 historical lexical package list did not include default imports; the Scala
 3.9 oracle and pinned JDK 21.0.8 classpath confirm `Character` as
 `java.lang.Character`.
@@ -48,6 +51,16 @@ Scala's default `java.lang` import. JDK 21.0.8's `java.base.jmod` provides
 package term. `Character` is therefore a built-in class/type candidate, not a
 source-only or absent-classpath name.
 
+The `Parsers`, `Scanners`, `Settings`, and `SymDenotations` cohort keys are
+objects in the pinned compiler sources. Their Term resolver requests also
+return `Object`, consistent with the declaration-owner table.
+
+The pinned Scala 3.9.0 oracle compiles a direct import of
+`scala.quoted.quotes` and uses it under an anonymous contextual `Quotes`
+parameter. This independently confirms the package-level helper used by the
+three frozen rows. The exact source sites and generated package-object
+artifact are recorded in the target-source and row-level evidence tables.
+
 The existing source fixture corpora also provide a version control pair:
 `crates/dotty-tasty/tests/fixtures/scala3-compiler/manifest.toml` pins
 compiler fixtures to 28.8.0, and
@@ -60,7 +73,8 @@ No decoder behavior is changed here.
 ## Oracle controls and remaining evidence boundary
 
 The updated `scala39_import_oracle.py` includes the five direct object imports
-above alongside its existing positive and negative controls. The run passed
+above, a package-level `scala.quoted.quotes` control, and existing positive
+and negative controls. The run passed
 with Scala 3.9.0. Existing negative controls keep a missing package root
 separate from a missing selected member, and keep class-as-term failure
 separate from a successful object term.

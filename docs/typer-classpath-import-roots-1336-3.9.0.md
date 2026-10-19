@@ -94,8 +94,8 @@ Observations: 1063; files: 81; target keys: 31; direct blocker origins: 0; inher
 
 ## Resource classifications
 
-- `candidate_resource_present_identity_requires_semantic_oracle`: 1055 observations
-- `no_candidate_resource_in_supplied_classpath`: 8 observations
+- `candidate_resource_present_identity_requires_semantic_oracle`: 1058 observations
+- `no_candidate_resource_in_supplied_classpath`: 5 observations
 
 ## Target matrix
 
@@ -131,10 +131,12 @@ Observations: 1063; files: 81; target keys: 31; direct blocker origins: 0; inher
 | `core::<first-segment-unresolved>` | 1 | no_candidate_resource_in_supplied_classpath | - |
 | `num::<first-segment-unresolved>` | 2 | no_candidate_resource_in_supplied_classpath | - |
 | `processInternal::<first-segment-unresolved>` | 9 | candidate_resource_present_identity_requires_semantic_oracle | `scala/sys/process/processInternal.tasty` from `scala-library-3.9.0.jar` (TASTy 28.9.0) |
-| `quotes::<first-segment-unresolved>` | 3 | no_candidate_resource_in_supplied_classpath | - |
+| `quotes::<first-segment-unresolved>` | 3 | candidate_resource_present_identity_requires_semantic_oracle | `scala/quoted/Quotes$package.tasty` from `scala-library-3.9.0.jar` (TASTy 28.9.0) |
 
-The row-level TSV preserves every frozen row. `ordered_candidate_evidence` records each direct class/TASTy resource hit in lexical-candidate order, including archive digest and parsed TASTy header. No historical source or selector outcome is rewritten. The report does not count Scala ModuleClass requests, completions, or selected members; those must come from a resolver-level audit, not inferred from archive names.
+The row-level TSV preserves every frozen row. `ordered_candidate_evidence` records direct class/TASTy hits in lexical-candidate order, plus the explicitly mapped Scala package-level helper resource for `scala.quoted.quotes`; each entry includes archive digest and parsed TASTy header. No historical source or selector outcome is rewritten. ModuleClass requests, completions, and selected members come from the separate resolver-level audit.
 
 ## Resolver summary
 
-The ignored serial resolver audit issued 118 Term and 118 Type `MemberRequest`s across the deduplicated lexical candidates, plus 118 full package-path checks and five selected-member probes. Term results: 25 Objects, one Package, 92 missing, no errors. Type results: three Classes, one Trait, 91 missing, 23 typed resolver errors. Exactly one full candidate package path exists (`scala.collection`). The member and per-candidate details are recorded in the resolver TSV.
+The ignored serial resolver audit issued 118 Term and 118 Type `MemberRequest`s across the deduplicated lexical candidates, plus 118 full package-path checks and five selected-member probes. Term results: 25 Objects, one Package, 92 missing, no errors. Type results: three Classes, one Trait, 91 missing, 23 typed resolver errors. Exactly one full candidate package path exists (`scala.collection`). The member and per-candidate outcomes are in the resolver TSV.
+
+The `quotes` resource evidence is the generated `scala/quoted/Quotes$package.tasty` artifact; the pinned Scala compiler oracle confirms the package-level `scala.quoted.quotes` import, while the current package-member resolver still returns no symbol for that candidate.
