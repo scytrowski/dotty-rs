@@ -2036,10 +2036,13 @@ impl JvmCompilationUnit<'_> {
     }
 
     /// Lowers one explicitly planned method body using this unit's validated
-    /// class, field, and method metadata. This method-level path supports exact
-    /// planned reference values and can lower private primitive field reads
-    /// and mutable field assignments; [`emit_class`] installs only fields
-    /// covered by a validated primary constructor.
+    /// class, field, and method metadata. This method-level path supports
+    /// planned reference values and the validated direct `Derived` to
+    /// `Base` assignment for arguments, immutable local initializers, and
+    /// returns. It can also lower private primitive field reads and mutable
+    /// field assignments; it does not enable arbitrary `Object` upcasts.
+    /// [`emit_class`] installs only fields covered by a validated
+    /// primary constructor.
     pub fn lower_method_body(
         &self,
         class: SymbolId,
@@ -2121,8 +2124,9 @@ impl JvmCompilationUnit<'_> {
     /// agree. An inherited target must be the exact planned public method
     /// declared by the receiver's validated direct parent. This read-only
     /// resolver emits no instructions; method-body lowering checks direct
-    /// subclass argument assignability while evaluating the receiver once
-    /// before arguments in source order.
+    /// subclass assignability for arguments, immutable local initializers,
+    /// and returns while evaluating each receiver once before arguments in
+    /// source order. Other reference conversions remain unsupported.
     pub fn resolve_planned_instance_call(
         &self,
         caller_class: SymbolId,
