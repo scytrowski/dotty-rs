@@ -218,7 +218,26 @@ impl ValidatedPicklePlan<'_, '_> {
                 } else {
                     for &parameter in parameters {
                         let parameter_name = context.intern_name(symbol(self, parameter)?.name)?;
-                        let parameter_type = context.int_type_syntax()?;
+                        let parameter_semantic_type = match symbol(self, parameter)?.info {
+                            SymbolInfo::Complete(ty) => match p.store.types.try_get(ty) {
+                                Some(Type::Method(_)) => {
+                                    return Err(PickleError::MalformedType {
+                                        ty,
+                                        role: TypeRole::Parameter,
+                                    });
+                                }
+                                Some(_) => ty,
+                                None => return Err(PickleError::IncompleteType { ty }),
+                            },
+                            info => {
+                                return Err(PickleError::IncompleteSymbol {
+                                    symbol: parameter,
+                                    info,
+                                });
+                            }
+                        };
+                        let parameter_type =
+                            context.primitive_type_syntax(parameter_semantic_type)?;
                         context.bind_declaration(
                             parameter,
                             AstNode::Length {
@@ -238,7 +257,21 @@ impl ValidatedPicklePlan<'_, '_> {
                     }
                 }
             }
-            let result = context.int_type_syntax()?;
+            let method_info = match symbol(self, method.symbol)?.info {
+                SymbolInfo::Complete(ty) => ty,
+                info => {
+                    return Err(PickleError::IncompleteSymbol {
+                        symbol: method.symbol,
+                        info,
+                    });
+                }
+            };
+            let result_semantic_type = match p.store.types.try_get(method_info) {
+                Some(Type::Method(signature)) => signature.result,
+                Some(_) => method_info,
+                None => return Err(PickleError::IncompleteType { ty: method_info }),
+            };
+            let result = context.primitive_type_syntax(result_semantic_type)?;
             // No invented METHODtype payload, abstract modifier or substitute
             // for the method's real RHS.
             fields.push(AstField::Tree(result));

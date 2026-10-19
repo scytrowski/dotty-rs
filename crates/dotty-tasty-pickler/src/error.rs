@@ -24,6 +24,7 @@ pub enum ReferenceError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Builtin {
     Int,
+    Boolean,
     Unit,
     Object,
 }

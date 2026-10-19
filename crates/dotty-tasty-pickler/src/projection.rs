@@ -120,7 +120,12 @@ impl<'a> EncodingContext<'a> {
                 role: crate::TypeRole::NoPrefix,
             });
         }
-        for builtin in [Builtin::Int, Builtin::Unit, Builtin::Object] {
+        for builtin in [
+            Builtin::Int,
+            Builtin::Boolean,
+            Builtin::Unit,
+            Builtin::Object,
+        ] {
             context.builtin(builtin)?;
         }
         Ok(context)
@@ -247,6 +252,7 @@ impl<'a> EncodingContext<'a> {
         self.charge(1)?;
         let (ty, expected) = match builtin {
             Builtin::Int => (self.definitions.int, "Int"),
+            Builtin::Boolean => (self.definitions.boolean, "Boolean"),
             Builtin::Unit => (self.definitions.unit, "Unit"),
             Builtin::Object => (self.definitions.object_type, "Object"),
         };
@@ -843,7 +849,12 @@ impl<'a> EncodingContext<'a> {
             .map_err(construction)
     }
     fn external_inner(&mut self, symbol: SymbolId) -> Result<AstLabel, PickleError> {
-        for builtin in [Builtin::Int, Builtin::Unit, Builtin::Object] {
+        for builtin in [
+            Builtin::Int,
+            Builtin::Boolean,
+            Builtin::Unit,
+            Builtin::Object,
+        ] {
             if self.builtin(builtin)? == symbol {
                 return self.builtin_ref(builtin);
             }
@@ -927,6 +938,7 @@ impl<'a> EncodingContext<'a> {
                             depth,
                         )?
                     } else if *symbol == self.builtin(Builtin::Int)?
+                        || *symbol == self.builtin(Builtin::Boolean)?
                         || *symbol == self.builtin(Builtin::Object)?
                     {
                         if *prefix != self.definitions.no_prefix {
@@ -1019,6 +1031,31 @@ impl<'a> EncodingContext<'a> {
                 })
                 .map_err(construction)
         })
+    }
+    /// An explicit Boolean type syntax wrapper, distinct from its semantic type.
+    pub fn boolean_type_syntax(&mut self) -> Result<AstLabel, PickleError> {
+        self.run(|c| {
+            let symbol = c.builtin(Builtin::Boolean)?;
+            let name = c.utf8(c.text(c.symbol(symbol)?.name.text())?)?;
+            let child = c.lower(c.definitions.boolean, 0)?;
+            c.wire
+                .push(AstNode::NatAst {
+                    tag: IDENTTPT_TAG,
+                    value: AstOperand::Nat(name),
+                    child,
+                })
+                .map_err(construction)
+        })
+    }
+    /// Projects the explicit source syntax wrapper for a supported primitive.
+    pub fn primitive_type_syntax(&mut self, ty: TypeId) -> Result<AstLabel, PickleError> {
+        if ty == self.definitions.int {
+            self.int_type_syntax()
+        } else if ty == self.definitions.boolean {
+            self.boolean_type_syntax()
+        } else {
+            Err(PickleError::UnsupportedTypeReference { ty })
+        }
     }
     /// The oracle's wire Unit return type for a default constructor. It never
     /// replaces the constructor's canonical class-instance semantic signature.

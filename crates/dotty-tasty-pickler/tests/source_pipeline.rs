@@ -17,6 +17,7 @@ const REFERENCES: &str = include_str!("../../../tests/fixtures/tasty_pickler/Ref
 const EXPLICIT_THIS_REFERENCES: &str =
     "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
+const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 const ANSWER_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Answer.hex");
@@ -38,6 +39,75 @@ fn supported_fixture_outputs_match_the_pre_refactor_bytes_exactly() {
     ] {
         let (_, output) = source_outputs_named(source, &format!("{name}.scala"), |_| {}).unwrap();
         assert_eq!(bytes_hex(output.bytes()), expected.trim(), "{name}");
+    }
+}
+
+#[test]
+fn boolean_literals_parameters_and_mixed_clauses_emit_the_expected_wire_shapes() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(FLAGS, "Flags.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let body = |method_index: usize| {
+        addresses
+            .get(output.declarations()[method_index].address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap()
+            .rhs
+            .unwrap()
+    };
+    assert!(matches!(
+        body(2),
+        RawTree::Leaf(SimpleTerm {
+            tag: TRUECONST_TAG,
+            value: TermValue::Boolean(true),
+            ..
+        })
+    ));
+    assert!(matches!(
+        body(3),
+        RawTree::Leaf(SimpleTerm {
+            tag: FALSECONST_TAG,
+            value: TermValue::Boolean(false),
+            ..
+        })
+    ));
+    assert!(matches!(
+        body(4),
+        RawTree::Leaf(SimpleTerm {
+            tag: TERMREFDIRECT_TAG,
+            value: TermValue::AstRef(_),
+            ..
+        })
+    ));
+    assert!(matches!(
+        body(5),
+        RawTree::Leaf(SimpleTerm {
+            tag: TERMREFDIRECT_TAG,
+            value: TermValue::AstRef(_),
+            ..
+        })
+    ));
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1311/generated/example/Flags.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1311/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 Boolean interoperability gate");
+        assert!(
+            result.success(),
+            "Boolean Scala interoperability gate failed"
+        );
     }
 }
 
@@ -158,9 +228,24 @@ fn source_outputs_named_with_tree_edits(
         let method = index.symbol_at(source, tree).unwrap();
         typer.complete_symbol(method).unwrap();
         let context = typer.expression_context_for(method).unwrap();
+        let method_name = typer
+            .store()
+            .names
+            .resolve(definition.name.as_name().text());
+        let is_boolean_result = text.lines().any(|line| {
+            line.contains(&format!("def {method_name}"))
+                && (line.contains("): Boolean") || line.contains(": Boolean ="))
+        });
+        let expected_result = if is_boolean_result {
+            definitions.boolean
+        } else {
+            // Keep malformed and not-yet-supported signatures on the old Int
+            // expectation path so these tests reach pickler validation.
+            definitions.int
+        };
         let body = definition.rhs.map(|rhs| {
             typer
-                .type_expression_expected(rhs, context, definitions.int)
+                .type_expression_expected(rhs, context, expected_result)
                 .unwrap()
         });
         if let (Some(rhs), Some(body)) = (definition.rhs, body) {
@@ -250,7 +335,7 @@ fn source_outputs_named_with_tree_edits(
         assert!(matches!(
             typer.typed_ast().get(body).kind,
             TreeKind::Literal(Literal {
-                value: Constant::Int(_)
+                value: Constant::Int(_) | Constant::Boolean(_)
             }) | TreeKind::Ident(_)
                 | TreeKind::Select(_)
                 | TreeKind::Apply(_)
@@ -258,9 +343,7 @@ fn source_outputs_named_with_tree_edits(
     }
     let body = checked.plan().methods[0].body.unwrap();
     let expected_literal = match &typer.typed_ast().get(body).kind {
-        TreeKind::Literal(Literal {
-            value: Constant::Int(value),
-        }) => Some(*value),
+        TreeKind::Literal(Literal { value }) => Some(value.clone()),
         TreeKind::Ident(_) | TreeKind::Select(_) | TreeKind::Apply(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
@@ -278,9 +361,17 @@ fn source_outputs_named_with_tree_edits(
         .decode_defdef_body()
         .unwrap();
     match (expected_literal, wire_method.rhs) {
-        (Some(value), Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
+        (Some(Constant::Int(value)), Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
             assert_eq!(rhs.tag, dotty_tasty::tasty::INTCONST_TAG);
             assert_eq!(rhs.value, dotty_tasty::tasty::TermValue::Int(value));
+        }
+        (Some(Constant::Boolean(true)), Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
+            assert_eq!(rhs.tag, dotty_tasty::tasty::TRUECONST_TAG);
+            assert_eq!(rhs.value, dotty_tasty::tasty::TermValue::Boolean(true));
+        }
+        (Some(Constant::Boolean(false)), Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
+            assert_eq!(rhs.tag, dotty_tasty::tasty::FALSECONST_TAG);
+            assert_eq!(rhs.value, dotty_tasty::tasty::TermValue::Boolean(false));
         }
         (None, Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
             assert_eq!(rhs.tag, dotty_tasty::tasty::TERMREFDIRECT_TAG);

@@ -431,6 +431,7 @@ impl<'a> Validator<'_, 'a> {
             self.scope(method)?;
         }
         let int = self.builtin(Builtin::Int, self.plan.definitions.int, "Int")?;
+        let boolean = self.builtin(Builtin::Boolean, self.plan.definitions.boolean, "Boolean")?;
         let mut seen = HashSet::new();
         for (clause, (symbols, trees)) in clauses
             .iter()
@@ -462,11 +463,15 @@ impl<'a> Validator<'_, 'a> {
                         self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
                     );
                 };
-                if parameter_type.name != self.symbol(int)?.name {
-                    return Err(
-                        self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
-                    );
-                }
+                let declared_type = match parameter_type.name {
+                    name if name == self.symbol(int)?.name => self.plan.definitions.int,
+                    name if name == self.symbol(boolean)?.name => self.plan.definitions.boolean,
+                    _ => {
+                        return Err(
+                            self.unsupported(UnsupportedFeature::ParameterClauses, Some(symbol))
+                        );
+                    }
+                };
                 self.source_symbol(
                     symbol,
                     tree,
@@ -475,7 +480,7 @@ impl<'a> Validator<'_, 'a> {
                 )?;
                 self.owner(symbol, Some(method))?;
                 let ty = self.complete(symbol)?;
-                if ty != self.plan.definitions.int {
+                if ty != declared_type {
                     return Err(PickleError::UnsupportedTypeReference { ty });
                 }
                 if self.scope(method)?.lookup_all(parameter.name.as_name()) != [symbol] {
@@ -511,6 +516,7 @@ impl<'a> Validator<'_, 'a> {
             });
         }
         self.builtin(Builtin::Int, p.definitions.int, "Int")?;
+        self.builtin(Builtin::Boolean, p.definitions.boolean, "Boolean")?;
         self.builtin(Builtin::Unit, p.definitions.unit, "Unit")?;
         if self.builtin(Builtin::Object, p.definitions.object_type, "Object")?
             != p.definitions.object_class
@@ -817,12 +823,15 @@ impl<'a> Validator<'_, 'a> {
                     ty: p.definitions.int,
                     role: TypeRole::Builtin(Builtin::Int),
                 })?;
+        let boolean = self.ty(p.definitions.boolean)?.reference_symbol().ok_or(
+            PickleError::MalformedType {
+                ty: p.definitions.boolean,
+                role: TypeRole::Builtin(Builtin::Boolean),
+            },
+        )?;
         self.name(result.name)?;
-        if result.name != self.symbol(int)?.name {
-            return Err(PickleError::UnsupportedTypeReference { ty });
-        }
         match definition.value_param_clauses.as_slice() {
-            [] if ty == p.definitions.int => {}
+            [] if ty == p.definitions.int || ty == p.definitions.boolean => {}
             [] => {
                 return Err(PickleError::MalformedType {
                     ty,
@@ -848,7 +857,9 @@ impl<'a> Validator<'_, 'a> {
                         role: TypeRole::Parameter,
                     });
                 }
-                if signature.result != p.definitions.int {
+                if signature.result != p.definitions.int
+                    && signature.result != p.definitions.boolean
+                {
                     return Err(PickleError::MalformedType {
                         ty,
                         role: TypeRole::MethodResult,
@@ -858,7 +869,8 @@ impl<'a> Validator<'_, 'a> {
                     signature.params.iter().zip(&method.parameter_clauses[0])
                 {
                     if formal.name.as_name() != &self.symbol(parameter)?.name
-                        || formal.ty != p.definitions.int
+                        || (formal.ty != p.definitions.int && formal.ty != p.definitions.boolean)
+                        || self.complete(parameter)? != formal.ty
                         || formal.erased
                         || formal.varargs
                     {
@@ -875,6 +887,23 @@ impl<'a> Validator<'_, 'a> {
                 );
             }
         }
-        self.validate_method_expression(definition.rhs, method.body, method)
+        let result_type = match self.ty(ty)? {
+            Type::Method(signature) => signature.result,
+            _ => ty,
+        };
+        let expected_result_name = if result_type == p.definitions.int {
+            self.symbol(int)?.name
+        } else if result_type == p.definitions.boolean {
+            self.symbol(boolean)?.name
+        } else {
+            return Err(PickleError::MalformedType {
+                ty: result_type,
+                role: TypeRole::MethodResult,
+            });
+        };
+        if result.name != expected_result_name {
+            return Err(PickleError::UnsupportedTypeReference { ty });
+        }
+        self.validate_method_expression(definition.rhs, method.body, method, result_type)
     }
 }

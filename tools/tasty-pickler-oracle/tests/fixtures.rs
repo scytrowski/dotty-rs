@@ -36,6 +36,7 @@ fn independent_fixtures_match_normalized_snapshots() {
         "example/ParameterDecl",
         "example/Blocks",
         "example/Decisions",
+        "example/Flags",
     ] {
         let expected: Value = serde_json::from_slice(
             &fs::read(
