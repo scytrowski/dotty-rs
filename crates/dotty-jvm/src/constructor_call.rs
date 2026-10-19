@@ -369,6 +369,17 @@ fn planned_argument_type(
     class_identities: &[crate::JvmClassIdentity],
 ) -> Option<JvmType> {
     let store = unit.store;
+    if let TreeKind::This(this) = &argument_tree.kind {
+        return (this.qual.is_none()
+            && class_identities
+                .iter()
+                .any(|identity| identity.symbol() == caller_class)
+            && matches!(
+                store.types.try_get(argument_tree.ty),
+                Some(Type::ThisType { class }) if *class == caller_class
+            ))
+        .then_some(JvmType::Reference(caller_class));
+    }
     if matches!(argument_tree.kind, TreeKind::Select(_))
         && crate::resolve_boolean_intrinsic(store, unit.typed_ast, argument, definitions).ok()
             == Some(Some(crate::JvmBooleanIntrinsic::Not))
@@ -404,7 +415,7 @@ fn planned_argument_type(
                 definitions,
                 class_identities,
             };
-            primitive_term_reference_type(
+            term_reference_type(
                 unit,
                 caller_class,
                 caller_method,
@@ -418,7 +429,7 @@ fn planned_argument_type(
     }
 }
 
-fn primitive_term_reference_type(
+fn term_reference_type(
     unit: &JvmCompilationUnit<'_>,
     caller_class: SymbolId,
     caller_method: &JvmMethodPlan,
@@ -501,13 +512,27 @@ fn primitive_term_reference_type(
         )
         .ok()
     } else {
-        planned_term_value_type(
+        let found = planned_term_value_type(
             unit,
             symbol,
             *semantic_type,
             reference_context.definitions,
             reference_context.class_identities,
-        )
+        )?;
+        if target.kind == SymbolKind::Local
+            && matches!(found, JvmType::Reference(_))
+            && (caller_method
+                .locals
+                .iter()
+                .find(|binding| binding.symbol == symbol)
+                .is_none_or(|binding| binding.mutable)
+                || target
+                    .flags
+                    .contains(dotty_core::symbols::SymbolFlags::MUTABLE))
+        {
+            return None;
+        }
+        Some(found)
     }
 }
 

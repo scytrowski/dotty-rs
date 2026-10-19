@@ -1659,18 +1659,6 @@ fn emit_object_creation(
         });
     }
 
-    if let Some(argument) = arguments
-        .iter()
-        .copied()
-        .zip(target.argument_types())
-        .find_map(|(argument, ty)| matches!(ty, JvmType::Reference(_)).then_some(argument))
-    {
-        return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
-            tree: tree_id,
-            argument,
-        });
-    }
-
     let mut budget = 0;
     for argument in arguments {
         validate_constructor_argument(context, tree_id, *argument, depth + 1, &mut budget)?;
@@ -1772,12 +1760,24 @@ fn validate_constructor_argument(
                 .parameters()
                 .iter()
                 .any(|parameter| parameter.symbol() == *symbol);
-            let is_initialized_primitive_local = local_reference_slot(context, tree_id, *symbol)?
+            let is_initialized_local = local_reference_slot(context, tree_id, *symbol)?
                 .is_some_and(|local| {
                     context.initialized_locals.contains(symbol)
-                        && matches!(local.ty(), JvmType::Int | JvmType::Boolean)
+                        && (matches!(local.ty(), JvmType::Int | JvmType::Boolean)
+                            || (matches!(local.ty(), JvmType::Reference(_)) && !local.is_mutable()))
                 });
-            if !is_parameter && !is_initialized_primitive_local {
+            if !is_parameter && !is_initialized_local {
+                return Err(unsupported());
+            }
+            Ok(())
+        }
+        TreeKind::This(this) => {
+            if this.qual.is_some()
+                || !matches!(
+                    current_this_value_type(context, tree_id, tree.ty)?,
+                    JvmType::Reference(_)
+                )
+            {
                 return Err(unsupported());
             }
             Ok(())
