@@ -845,3 +845,13 @@ does not complete object members or semantic value types until
 `complete_module` is requested. The completion API currently covers top-level
 package members; nested objects and identities proved only by JVM classfiles
 remain unsupported.
+
+The pinned Scala 3.9 compiler fixtures (TASTy 28.8.0) exercise this path
+without a `$`-name heuristic. `dotty.tools.dotc.core.Types`, `Contexts`,
+`Symbols`, and `dotty.tools.dotc.parsing.Tokens` each provide an authoritative
+package-owned Object/ModuleClass pair. `Contexts` completes through its real
+TASTy hierarchy and exposes `withFreshTyperState` through the Object term
+prefix; repeated lookup reuses the same declaration. The other three retain
+their exact unsupported-parent errors (`TypeUtils`, `SymUtils`, and
+`TokensCommon`, respectively), and failed completion rolls back store and
+session changes while preserving the already established identity shells.

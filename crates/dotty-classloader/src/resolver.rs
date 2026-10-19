@@ -2011,6 +2011,298 @@ mod tests {
     }
 
     #[test]
+    fn real_scala39_compiler_objects_have_canonical_module_identities() {
+        let targets = [
+            "dotty/tools/dotc/core/Types",
+            "dotty/tools/dotc/core/Contexts",
+            "dotty/tools/dotc/core/Symbols",
+            "dotty/tools/dotc/parsing/Tokens",
+        ];
+        let compiler_root = fixture_path("../dotty-tasty/tests/fixtures/scala3-compiler");
+        let library_root = fixture_path("../dotty-tasty/tests/fixtures/scala3-library");
+
+        for binary_name in targets {
+            let binary = BinaryName::from_internal(binary_name);
+            let package_path = binary.package_path().split('/').collect::<Vec<_>>();
+            let mut store = SemanticStore::new();
+            let definitions = Definitions::bootstrap(&mut store);
+            let class_path = CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(compiler_root.clone())),
+                Box::new(DirectoryClassPath::new(library_root.clone())),
+                Box::new(ModuleTastyPath {
+                    entries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                }),
+            ]);
+            let resource = class_path
+                .find_class(&binary)
+                .unwrap()
+                .expect("the pinned compiler resource should exist");
+            assert_eq!(resource.format(), ClassFormat::Tasty, "{binary}");
+            assert_eq!(
+                resource.origin(),
+                &ClassOrigin::Directory(compiler_root.clone()),
+                "{binary}"
+            );
+            let mut resolver =
+                ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new())
+                    .with_module_resolution_profile_collection();
+            let package = resolver
+                .resolve_package(&mut store, &package_path)
+                .unwrap()
+                .expect("the real compiler package should be present");
+            let prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, package));
+            let simple_name = binary.simple_name();
+            let object_name = Name::new(store.names.intern(simple_name), Namespace::Term);
+            let object = resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix,
+                        name: object_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap()
+                .unwrap_or_else(|| panic!("{binary} should prove a top-level Object"));
+            assert_eq!(
+                resolver.resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix,
+                        name: object_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                ),
+                Ok(Some(object)),
+                "repeated Object lookup must reuse its canonical identity"
+            );
+            let module_class = resolver
+                .module_class_of_object(&store, object)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{binary} should prove a ModuleClass"));
+
+            assert_eq!(
+                store.symbols.get(object).kind,
+                SymbolKind::Object,
+                "{binary}"
+            );
+            assert_eq!(
+                store.symbols.get(module_class).kind,
+                SymbolKind::ModuleClass,
+                "{binary}"
+            );
+            assert_eq!(store.symbols.get(object).owner, Some(package), "{binary}");
+            assert_eq!(
+                store.symbols.get(module_class).owner,
+                Some(package),
+                "{binary}"
+            );
+            assert_eq!(
+                store.symbols.get(module_class).info,
+                SymbolInfo::Missing,
+                "identity lookup must stay lazy for {binary}"
+            );
+
+            let package_scope = resolver.package_scope(package).unwrap();
+            let object_name = Name::new(store.names.intern(binary.simple_name()), Namespace::Term);
+            let module_name = Name::new(
+                store.names.intern(&format!("{}$", binary.simple_name())),
+                Namespace::Type,
+            );
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&object_name),
+                [object]
+            );
+            assert_eq!(
+                store.scopes.get(package_scope).lookup_all(&module_name),
+                [module_class]
+            );
+            assert!(matches!(
+                store.symbols.get(object).origin,
+                dotty_core::SymbolOrigin::Tasty(_)
+            ));
+            assert!(matches!(
+                store.symbols.get(module_class).origin,
+                dotty_core::SymbolOrigin::Tasty(_)
+            ));
+
+            let identity = resolver.session.modules.get(&binary).unwrap();
+            assert_eq!(identity.object, object);
+            assert_eq!(identity.module_class, module_class);
+            if let Some(companion_class) = identity.companion_class {
+                assert_ne!(companion_class, object);
+                assert_ne!(companion_class, module_class);
+                assert_eq!(store.symbols.get(companion_class).kind, SymbolKind::Class);
+                assert_eq!(
+                    store.symbols.get(companion_class).links.companion,
+                    Some(object)
+                );
+                assert_eq!(
+                    store.symbols.get(object).links.companion,
+                    Some(companion_class)
+                );
+                assert_eq!(store.symbols.get(module_class).links.companion, None);
+            }
+
+            if binary.simple_name() == "Contexts" {
+                let object_ref = store.types.alloc(Type::TermRef {
+                    prefix,
+                    target: dotty_core::TermRefTarget::Symbol(object),
+                });
+                let missing_name =
+                    Name::new(store.names.intern("notAContextsMember"), Namespace::Term);
+                let store_mark = store.checkpoint();
+                let session_mark = resolver.session.checkpoint();
+                assert_eq!(
+                    resolver.resolve_member(
+                        &mut store,
+                        &MemberRequest {
+                            prefix: object_ref,
+                            name: missing_name,
+                            selector: MemberSelector::Unique,
+                            space: MemberSpace::Prefix,
+                        },
+                    ),
+                    Ok(None),
+                    "a missing member on a proven Object must remain absent"
+                );
+                assert_eq!(store.checkpoint(), store_mark);
+                assert_eq!(resolver.session.checkpoint(), session_mark);
+                assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+
+                let member_name =
+                    Name::new(store.names.intern("withFreshTyperState"), Namespace::Term);
+                let member = resolver
+                    .resolve_member(
+                        &mut store,
+                        &MemberRequest {
+                            prefix: object_ref,
+                            name: member_name,
+                            selector: MemberSelector::Unique,
+                            space: MemberSpace::Prefix,
+                        },
+                    )
+                    .unwrap()
+                    .expect("Contexts declares withFreshTyperState");
+                assert_eq!(store.symbols.get(member).kind, SymbolKind::Method);
+                assert_eq!(store.symbols.get(member).owner, Some(module_class));
+                assert!(matches!(
+                    store.symbols.get(member).origin,
+                    dotty_core::SymbolOrigin::Tasty(_)
+                ));
+                let SymbolInfo::Complete(module_info) = store.symbols.get(module_class).info else {
+                    panic!("Contexts ModuleClass should complete in place");
+                };
+                let Type::ClassInfo(module_info) = store.types.get(module_info) else {
+                    panic!("Contexts should complete to ClassInfo");
+                };
+                assert_eq!(module_info.class, module_class);
+                assert_eq!(
+                    store.scopes.get(module_info.declarations).owner,
+                    Some(module_class)
+                );
+                assert_eq!(
+                    store
+                        .scopes
+                        .get(module_info.declarations)
+                        .lookup_all(&member_name),
+                    [member]
+                );
+                let after_first_lookup = store.checkpoint();
+                assert_eq!(
+                    resolver.complete_module_class(&mut store, module_class),
+                    Ok(true)
+                );
+                assert_eq!(store.checkpoint(), after_first_lookup);
+                assert_eq!(
+                    resolver.resolve_member(
+                        &mut store,
+                        &MemberRequest {
+                            prefix: object_ref,
+                            name: member_name,
+                            selector: MemberSelector::Unique,
+                            space: MemberSpace::Prefix,
+                        },
+                    ),
+                    Ok(Some(member)),
+                    "repeat member lookup must reuse the declaration identity"
+                );
+                let profile = resolver.take_module_resolution_profile();
+                assert_eq!(profile.package_term_requests, 2);
+                assert_eq!(profile.package_term_successes, 2);
+                assert_eq!(profile.new_object_identities, 1);
+                assert_eq!(profile.reused_object_identities, 1);
+                assert_eq!(profile.module_member_successes, 2);
+                assert_eq!(
+                    profile.completed_module_classes,
+                    std::collections::BTreeSet::from([binary.as_internal().to_owned()])
+                );
+
+                let class_path = resolver.class_path.take().unwrap();
+                let session = std::mem::replace(&mut resolver.session, LoadingSession::new());
+                let mut next_resolver =
+                    ClasspathSymbolResolver::new(class_path, definitions, session);
+                assert_eq!(
+                    next_resolver.module_class_of_object(&store, object),
+                    Ok(Some(module_class)),
+                    "a later resolver over the same store/session must retain the pair"
+                );
+                assert_eq!(
+                    next_resolver.resolve_member(
+                        &mut store,
+                        &MemberRequest {
+                            prefix: object_ref,
+                            name: member_name,
+                            selector: MemberSelector::Unique,
+                            space: MemberSpace::Prefix,
+                        },
+                    ),
+                    Ok(Some(member))
+                );
+            } else {
+                let store_mark = store.checkpoint();
+                let session_mark = resolver.session.checkpoint();
+                let error = resolver
+                    .complete_module_class(&mut store, module_class)
+                    .expect_err("unsupported parent shapes must remain explicit errors");
+                let reason = error.to_string();
+                let expected_parent = match binary.simple_name() {
+                    "Types" => "TypeUtils",
+                    "Symbols" => "SymUtils",
+                    "Tokens" => "TokensCommon",
+                    other => panic!("unexpected target {other}"),
+                };
+                assert!(
+                    reason.contains("unresolved supertype reference"),
+                    "{reason}"
+                );
+                assert!(reason.contains(expected_parent), "{reason}");
+                assert_eq!(
+                    store.checkpoint(),
+                    store_mark,
+                    "failed {binary} must roll back"
+                );
+                assert_eq!(
+                    resolver.session.checkpoint(),
+                    session_mark,
+                    "failed {binary} must roll back session state"
+                );
+                assert_eq!(store.symbols.get(object).info, SymbolInfo::Missing);
+                assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+                let retry = resolver
+                    .complete_module_class(&mut store, module_class)
+                    .expect_err("retry must report the same unresolved parent");
+                assert_eq!(retry.to_string(), reason);
+                assert_eq!(store.checkpoint(), store_mark);
+            }
+        }
+    }
+
+    #[test]
     fn stable_object_term_prefix_resolves_a_declared_field() {
         let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Constants");
         let bytes = std::fs::read(fixture_path(
