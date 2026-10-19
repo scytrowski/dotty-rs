@@ -83,8 +83,12 @@ resolution.
   multi-release JAR version selection, JEP 238), `JdkClassPath`/
   `JmodClassPath` (`$JAVA_HOME/jmods`), and `CompositeClassPath`
   (ordered, first-match-wins). JAR/JMOD reading includes this crate's
-  own ZIP central-directory reader and DEFLATE inflater — no external
-  archive dependency.
+  own ZIP central-directory reader and index. Raw DEFLATE streams use
+  `flate2`'s `zlib-rs` backend. Decoding uses a fixed-size output buffer and
+  enforces the entry output limit incrementally; CRC verification remains in
+  the ZIP layer. Malformed DEFLATE streams use a general invalid-data error
+  under the existing `classpath.zip.invalid_deflate_data` diagnostic code;
+  truncated streams and output-limit violations keep separate errors.
 - The crate-private `ZipArchive` supports memory-backed and file-backed
   storage. The file-backed constructor reads only the bounded EOCD window
   and central-directory index while opening; entry reads fetch the local
