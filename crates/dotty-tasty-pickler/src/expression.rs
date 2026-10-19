@@ -6,7 +6,7 @@ use dotty_core::ast::{ApplyKind, TypedAst};
 use dotty_core::{Constant, SemanticStore, SymbolId, TermRefTarget, TreeId, TreeKind, Type, Typed};
 use dotty_tasty::tasty::{
     APPLY_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, IF_TAG, INTCONST_TAG, SimpleTerm,
-    TRUECONST_TAG, TermValue,
+    TRUECONST_TAG, TermValue, UNITCONST_TAG,
 };
 
 use crate::{
@@ -373,6 +373,7 @@ fn lower_expression_inner(
                 TermValue::Boolean(*value),
             )
         }
+        (Constant::Unit, Some(Type::Constant(Constant::Unit))) => (UNITCONST_TAG, TermValue::Unit),
         _ => {
             return Err(PickleError::BodyType {
                 tree: root,

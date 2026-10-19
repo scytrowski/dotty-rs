@@ -477,6 +477,49 @@ fn local_int_values_emit_ordered_valdefs_and_exact_direct_references() {
 }
 
 #[test]
+fn local_value_can_be_an_int_if_branch() {
+    let source = "package example\nclass StoredBranch:\n  def stored(flag: Boolean, value: Int): Int = { val saved: Int = value; if flag then saved else 0 }\n";
+    source_outputs_named(source, "StoredBranch.scala", |_| {})
+        .expect("an in-scope canonical local reference is accepted as an Int branch");
+}
+
+#[test]
+fn unit_literal_method_roundtrips_as_a_supported_result() {
+    use dotty_tasty::tasty::*;
+
+    let source = "package example\nclass UnitResult:\n  def unit: Unit = ()\n";
+    let (_, output) = source_outputs_named(source, "UnitResult.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let method = output
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            file.ast_address_index()
+                .unwrap()
+                .get(declaration.address)
+                .and_then(|node| node.decode_defdef_body().ok())
+                .and_then(|body| file.render_name(body.name).ok())
+                .as_deref()
+                == Some("unit")
+        })
+        .unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let body = addresses
+        .get(method.address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    assert!(matches!(
+        body.rhs,
+        Some(RawTree::Leaf(SimpleTerm {
+            tag: UNITCONST_TAG,
+            value: TermValue::Unit,
+            ..
+        }))
+    ));
+}
+
+#[test]
 fn local_values_require_exact_source_typer_bindings() {
     let missing = source_outputs_named(LOCALS, "Locals.scala", |plan| {
         plan.local_values = &[];
@@ -1018,8 +1061,14 @@ fn source_outputs_named_with_tree_edits(
             line.contains(&format!("def {method_name}"))
                 && (line.contains("): Boolean") || line.contains(": Boolean ="))
         });
+        let is_unit_result = text.lines().any(|line| {
+            line.contains(&format!("def {method_name}"))
+                && (line.contains("): Unit") || line.contains(": Unit ="))
+        });
         let expected_result = if is_boolean_result {
             definitions.boolean
+        } else if is_unit_result {
+            definitions.unit
         } else {
             // Keep malformed and not-yet-supported signatures on the old Int
             // expectation path so these tests reach pickler validation.
@@ -1134,7 +1183,7 @@ fn source_outputs_named_with_tree_edits(
         assert!(matches!(
             typer.typed_ast().get(body).kind,
             TreeKind::Literal(Literal {
-                value: Constant::Int(_) | Constant::Boolean(_)
+                value: Constant::Int(_) | Constant::Boolean(_) | Constant::Unit
             }) | TreeKind::Ident(_)
                 | TreeKind::Select(_)
                 | TreeKind::Apply(_)
@@ -1177,6 +1226,10 @@ fn source_outputs_named_with_tree_edits(
         (Some(Constant::Boolean(false)), Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
             assert_eq!(rhs.tag, dotty_tasty::tasty::FALSECONST_TAG);
             assert_eq!(rhs.value, dotty_tasty::tasty::TermValue::Boolean(false));
+        }
+        (Some(Constant::Unit), Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
+            assert_eq!(rhs.tag, dotty_tasty::tasty::UNITCONST_TAG);
+            assert_eq!(rhs.value, dotty_tasty::tasty::TermValue::Unit);
         }
         (None, Some(dotty_tasty::tasty::RawTree::Leaf(rhs))) => {
             assert_eq!(rhs.tag, dotty_tasty::tasty::TERMREFDIRECT_TAG);
