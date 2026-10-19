@@ -193,6 +193,7 @@ impl JvmPrimaryConstructorPlan {
         store: &SemanticStore,
         definitions: &Definitions,
         owner: SymbolId,
+        class_identities: Option<&[crate::JvmClassIdentity]>,
     ) -> Result<JvmConstructorMetadata, JvmCodegenError> {
         let fail = |issue| JvmCodegenError::InvalidPrimaryConstructor {
             constructor: self.constructor,
@@ -244,7 +245,18 @@ impl JvmPrimaryConstructorPlan {
             locals: Vec::new(),
             body: None,
         };
-        let descriptor = crate::descriptor::descriptor_for(&plan, store, owner, definitions, true)?;
+        let descriptor = match class_identities {
+            Some(class_identities) => {
+                crate::descriptor::constructor_descriptor_with_class_identities(
+                    &plan,
+                    store,
+                    owner,
+                    definitions,
+                    class_identities,
+                )?
+            }
+            None => crate::descriptor::descriptor_for(&plan, store, owner, definitions, true)?,
+        };
         let SymbolInfo::Complete(ty) = constructor.info else {
             unreachable!("descriptor validated info")
         };
@@ -260,13 +272,25 @@ impl JvmPrimaryConstructorPlan {
             .enumerate()
         {
             let parameter = store.symbols.get(*id);
+            let signature_type_matches = match (ty, store.types.try_get(signature_param.ty)) {
+                (crate::JvmType::Int, Some(dotty_core::Type::TypeRef { .. })) => {
+                    exact_type_matches(store, signature_param.ty, definitions.int)
+                }
+                (crate::JvmType::Boolean, Some(dotty_core::Type::TypeRef { .. })) => {
+                    exact_type_matches(store, signature_param.ty, definitions.boolean)
+                }
+                (
+                    crate::JvmType::Reference(class),
+                    Some(dotty_core::Type::TypeRef {
+                        target: dotty_core::TypeRefTarget::Symbol(symbol),
+                        ..
+                    }),
+                ) => *class == *symbol,
+                _ => false,
+            };
             if !parameter.flags.is_empty()
                 || parameter.name.text() != signature_param.name.as_name().text()
-                || ![
-                    store.types.try_get(definitions.int),
-                    store.types.try_get(definitions.boolean),
-                ]
-                .contains(&store.types.try_get(signature_param.ty))
+                || !signature_type_matches
             {
                 return Err(fail(JvmConstructorIssue::ParameterSignature));
             }
@@ -290,6 +314,17 @@ impl JvmPrimaryConstructorPlan {
             access_flags,
         })
     }
+}
+
+fn exact_type_matches(
+    store: &SemanticStore,
+    actual: dotty_core::TypeId,
+    expected: dotty_core::TypeId,
+) -> bool {
+    matches!(
+        (store.types.try_get(actual), store.types.try_get(expected)),
+        (Some(actual), Some(expected)) if actual == expected
+    )
 }
 
 impl JvmConstructorMetadata {
@@ -319,6 +354,68 @@ impl JvmConstructorMetadata {
 mod tests {
     use super::*;
     use dotty_core::{MethodType, Name, Namespace, Scope, Symbol, SymbolLinks, SymbolOrigin, Type};
+
+    #[test]
+    fn primitive_constructor_type_match_rejects_noncanonical_prefixes() {
+        for is_int in [true, false] {
+            let (mut store, definitions, mut plan) = fixture();
+            let canonical = if is_int {
+                definitions.int
+            } else {
+                definitions.boolean
+            };
+            let malformed_prefix = store.types.alloc(Type::NoType);
+            let Type::TypeRef { target, .. } = store.types.get(canonical) else {
+                panic!("primitive definition is a TypeRef")
+            };
+            let malformed = store.types.alloc(Type::TypeRef {
+                prefix: malformed_prefix,
+                target: *target,
+            });
+            assert!(exact_type_matches(&store, canonical, canonical));
+            assert!(!exact_type_matches(&store, malformed, canonical));
+
+            let parameter_name = store.names.intern("value");
+            let parameter = store.symbols.alloc(Symbol {
+                name: Name::new(parameter_name, Namespace::Term),
+                owner: Some(plan.constructor),
+                kind: SymbolKind::Parameter,
+                flags: dotty_core::SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(malformed),
+                origin: SymbolOrigin::Source(plan.source),
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            let SymbolInfo::Complete(constructor_type) = store.symbols.get(plan.constructor).info
+            else {
+                panic!("fixture constructor is complete")
+            };
+            let Type::Method(mut signature) = store.types.get(constructor_type).clone() else {
+                panic!("fixture constructor has a method signature")
+            };
+            signature.params.push(dotty_core::MethodParam {
+                name: dotty_core::TermName::new(parameter_name),
+                ty: malformed,
+                erased: false,
+                varargs: false,
+            });
+            let constructor_type = store.types.alloc(Type::Method(signature));
+            store
+                .symbols
+                .set_info(plan.constructor, SymbolInfo::Complete(constructor_type));
+            plan.parameters.push(parameter);
+
+            assert!(matches!(
+                plan.metadata(&store, &definitions, plan.class, None),
+                Err(JvmCodegenError::InvalidPrimaryConstructor {
+                    issue: JvmConstructorIssue::ParameterSignature,
+                    ..
+                })
+            ));
+        }
+    }
 
     fn fixture() -> (SemanticStore, Definitions, JvmPrimaryConstructorPlan) {
         let mut store = SemanticStore::new();
@@ -389,7 +486,7 @@ mod tests {
         let (mut store, definitions, plan) = fixture();
         let checkpoint = store.checkpoint();
         assert_eq!(
-            plan.metadata(&store, &definitions, plan.class)
+            plan.metadata(&store, &definitions, plan.class, None)
                 .unwrap()
                 .descriptor()
                 .as_str(),
@@ -399,7 +496,7 @@ mod tests {
         let original = store.symbols.get(plan.constructor).clone();
         store.symbols.get_mut(plan.constructor).owner = None;
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::SourceIdentity,
                 ..
@@ -408,7 +505,7 @@ mod tests {
         *store.symbols.get_mut(plan.constructor) = original.clone();
         store.symbols.get_mut(plan.constructor).kind = SymbolKind::Method;
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::SourceIdentity,
                 ..
@@ -417,7 +514,7 @@ mod tests {
         *store.symbols.get_mut(plan.constructor) = original.clone();
         store.symbols.get_mut(plan.constructor).visibility = Visibility::Private;
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::Visibility,
                 ..
@@ -431,7 +528,10 @@ mod tests {
             SymbolInfo::Complete(unfilled),
         ] {
             store.symbols.set_info(plan.constructor, info);
-            assert!(plan.metadata(&store, &definitions, plan.class).is_err());
+            assert!(
+                plan.metadata(&store, &definitions, plan.class, None)
+                    .is_err()
+            );
             let ast = dotty_core::ast::TypedAst::new();
             let unit = crate::JvmCompilationUnit {
                 store: &store,
@@ -460,7 +560,7 @@ mod tests {
             .symbols
             .set_info(plan.constructor, SymbolInfo::Complete(wrong_result));
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::ResultType,
                 ..
@@ -472,7 +572,7 @@ mod tests {
         let (mut store, definitions, mut plan) = fixture();
         plan.parameters.push(plan.class);
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::ParameterIdentity,
                 ..
@@ -502,13 +602,13 @@ mod tests {
         };
         plan.parameters.push(stale);
         assert_eq!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::UnknownParameter { parameter: stale })
         );
         plan.parameters.clear();
         plan.constructor = stale;
         assert!(matches!(
-            plan.metadata(&store, &definitions, plan.class),
+            plan.metadata(&store, &definitions, plan.class, None),
             Err(JvmCodegenError::InvalidPrimaryConstructor {
                 issue: JvmConstructorIssue::SourceIdentity,
                 ..
@@ -519,7 +619,7 @@ mod tests {
             .symbols
             .set_info(valid.class, SymbolInfo::Complete(definitions.int));
         assert!(matches!(
-            valid.metadata(&store, &definitions, valid.class),
+            valid.metadata(&store, &definitions, valid.class, None),
             Err(JvmCodegenError::InvalidJvmClassInfo { .. })
         ));
     }

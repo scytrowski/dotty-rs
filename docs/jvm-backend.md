@@ -178,9 +178,11 @@ passed to virtual calls, used as call results or receivers, and discarded with
 initializer's `Flow::Value`; read-before-store and mutable reference locals
 fail with typed errors. Reference values may be discarded as category-one
 block statements with `pop`. Planned reference parameters and results, plus
-reference virtual-call arguments and results, are supported. Constructor
-parameters and field descriptors remain primitive-only. Constructor reference arguments remain
-rejected. Exact initialized references may stay
+reference virtual-call arguments and results, are supported. Primary
+constructor metadata accepts exact references to classes in the same
+compilation unit. The constructor-call resolver checks those argument types,
+but method-body lowering still rejects reference-valued constructor arguments.
+Exact initialized references may stay
 live through `if` joins and `while` headers/back-edges. A reference stack join
 must have the same planned class on every incoming edge; different classes do
 not merge to `Object`. A local that is not initialized on every path becomes
@@ -723,17 +725,23 @@ typed IDs themselves do not encode session identity.
 symbol, owner internal name, descriptor, access flags, and ordered
 `JvmParameterLocal` values. Semantic constructor results are class types; JVM
 constructor results are always `V`. Plain `Int`/`Boolean` parameters occupy
-one slot each starting at 1, with slot 0 reserved for `this`. At most 254
-parameters are supported. Exact constructor-owned parameter identities are
-preserved; class-owned parameter copies and `val`/`var` accessor fields never
-substitute for them.
+one slot each starting at 1, with slot 0 reserved for `this`. A reference
+parameter occupies one slot and is accepted only when its exact class has a
+plan in the same `JvmCompilationUnit`; its descriptor uses that class's
+validated internal name. Mixed primitive/reference clauses preserve source
+order and canonical constructor-owned parameter symbols. At most 254
+category-one parameters are supported. Class-owned parameter copies and
+`val`/`var` accessor fields never substitute for constructor parameters.
 
 Projection checks the live constructor kind, source origin, owner, declaration
-scope, complete plain monomorphic signature, primitive parameter types, and
+scope, complete plain monomorphic signature, primitive or exact planned-class
+parameter types, and
 proven public/private visibility. Private constructors stay private. Generic,
 secondary, contextual, defaulted, by-name, erased and repeated parameters,
-parameter accessors, annotations, qualified visibility, and non-primitive
-parameters fail with structured errors. Source proof rejection does not
+parameter accessors, annotations, qualified visibility, arrays, applied
+references, and references outside the unit fail with structured errors.
+Store-only `JvmClassPlan::metadata` entry points remain primitive-only because
+they cannot prove a complete emission unit. Source proof rejection does not
 publish partial metadata or mutate semantic state. Emission creates only the
 proved constructor, with its exact descriptor and access flags; it does not add
 a fallback constructor, Scala accessors, field stores outside the approved
@@ -743,10 +751,12 @@ initializer path, or `new` expressions.
 `Apply(Select(New(TypeTree(C)), <init>), args)` to a planned class and its
 approved primary constructor metadata. It accepts the proved explicit primary
 constructor or a declared public empty `ImplicitNoArg` constructor, requires
-the class/result/prefix identities and primitive `Int`/`Boolean` arguments to
-match, and rejects private cross-class calls. The returned target is read-only
-metadata for a later emitter; it does not emit allocation or invocation
-instructions. Other application forms and argument types remain unsupported.
+the class/result/prefix identities and primitive arguments or exact planned
+reference arguments to match, and rejects private cross-class calls. The
+returned target is read-only metadata. Constructor-call lowering still rejects
+reference-valued arguments; this increment does not emit those argument
+instructions. Other application forms and unsupported argument types remain
+rejected.
 
 ### Constructor field initializer fragments
 

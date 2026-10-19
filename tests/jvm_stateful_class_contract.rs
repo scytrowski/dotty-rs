@@ -3279,6 +3279,269 @@ fn field_metadata_distinguishes_private_this_from_plain_private() {
 }
 
 #[test]
+fn primary_constructor_metadata_projects_exact_unit_references_and_mixed_slots() {
+    with_source(
+        "package sample\nclass Counter {}\nclass Holder(initial: Counter) {}\nclass Duo(value: Int, counter: Counter, enabled: Boolean) {}\nclass Client { def make(counter: Counter): Unit = { new Holder(counter); () } }",
+        |ast, source, index, definitions, typer| {
+            let counter = symbol_named(ast, index, source, typer, "Counter");
+            let holder = symbol_named(ast, index, source, typer, "Holder");
+            let duo = symbol_named(ast, index, source, typer, "Duo");
+            let client = symbol_named(ast, index, source, typer, "Client");
+            for class in [counter, holder, duo, client] {
+                typer.complete_symbol(class).unwrap();
+            }
+
+            let source_constructor = |class| {
+                let (constructor, parameter_trees) = ast
+                    .iter()
+                    .find_map(|(tree, node)| {
+                        if index.symbol_at(source, tree) != Some(class) {
+                            return None;
+                        }
+                        let TreeKind::TypeDef(definition) = &node.kind else {
+                            return None;
+                        };
+                        let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                            return None;
+                        };
+                        let TreeKind::DefDef(constructor) = &ast.get(template.constructor).kind
+                        else {
+                            return None;
+                        };
+                        Some((
+                            index.symbol_at(source, template.constructor)?,
+                            constructor
+                                .value_param_clauses
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .collect::<Vec<_>>(),
+                        ))
+                    })
+                    .expect("class has source primary constructor");
+                let parameters = parameter_trees
+                    .iter()
+                    .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                    .collect::<Vec<_>>();
+                let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                    class,
+                    constructor,
+                    parameters,
+                    ast,
+                    index,
+                )
+                .unwrap();
+                (constructor, parameter_trees, proof)
+            };
+            let (holder_constructor, holder_parameter_trees, holder_proof) =
+                source_constructor(holder);
+            let (duo_constructor, duo_parameter_trees, duo_proof) = source_constructor(duo);
+            typer.complete_symbol(holder_constructor).unwrap();
+            typer.complete_symbol(duo_constructor).unwrap();
+
+            let (client_method, client_parameters, client_rhs) = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    let method = index.symbol_at(source, tree)?;
+                    if typer.store().symbols.get(method).owner != Some(client) {
+                        return None;
+                    }
+                    let parameter_trees = definition
+                        .value_param_clauses
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let parameters = parameter_trees
+                        .iter()
+                        .map(|tree| index.symbol_at(source, *tree).unwrap())
+                        .collect::<Vec<_>>();
+                    Some((method, parameters, definition.rhs?))
+                })
+                .expect("Client.make source method");
+            typer.complete_symbol(client_method).unwrap();
+            let context = typer.expression_context_for(client_method).unwrap();
+            let client_body = typer.type_expression(client_rhs, context).unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![
+                    JvmClassPlan {
+                        class: counter,
+                        methods: Vec::new(),
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    },
+                    JvmClassPlan {
+                        class: holder,
+                        methods: Vec::new(),
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                            holder_proof,
+                        ),
+                    },
+                    JvmClassPlan {
+                        class: duo,
+                        methods: Vec::new(),
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::PrimaryConstructor(duo_proof),
+                    },
+                    JvmClassPlan {
+                        class: client,
+                        methods: vec![JvmMethodPlan {
+                            method: client_method,
+                            parameters: client_parameters.clone(),
+                            locals: Vec::new(),
+                            body: Some(client_body),
+                        }],
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::Unsupported,
+                    },
+                ],
+            };
+
+            let metadata = unit.metadata(definitions).unwrap();
+            let holder_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == holder)
+                .unwrap()
+                .constructor()
+                .unwrap();
+            let holder_parameter = &holder_metadata.parameters()[0];
+            assert_eq!(holder_metadata.descriptor().as_str(), "(Lsample/Counter;)V");
+            assert_eq!(holder_metadata.owner_internal_name(), "sample/Holder");
+            assert_eq!(holder_metadata.symbol(), holder_constructor);
+            assert_eq!(
+                holder_parameter.symbol(),
+                index
+                    .derived_symbol_at(holder_constructor, source, holder_parameter_trees[0])
+                    .unwrap()
+            );
+            assert_eq!(
+                holder_parameter.ty(),
+                dotty_jvm::JvmType::Reference(counter)
+            );
+            assert_eq!(holder_parameter.slot(), 1);
+            assert_eq!(holder_parameter.width(), 1);
+
+            let duo_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == duo)
+                .unwrap()
+                .constructor()
+                .unwrap();
+            assert_eq!(duo_metadata.descriptor().as_str(), "(ILsample/Counter;Z)V");
+            assert_eq!(duo_metadata.symbol(), duo_constructor);
+            assert_eq!(
+                duo_metadata
+                    .parameters()
+                    .iter()
+                    .map(|parameter| (parameter.ty(), parameter.slot(), parameter.width()))
+                    .collect::<Vec<_>>(),
+                [
+                    (dotty_jvm::JvmType::Int, 1, 1),
+                    (dotty_jvm::JvmType::Reference(counter), 2, 1),
+                    (dotty_jvm::JvmType::Boolean, 3, 1),
+                ]
+            );
+            for (parameter, tree) in duo_metadata.parameters().iter().zip(duo_parameter_trees) {
+                assert_eq!(
+                    parameter.symbol(),
+                    index
+                        .derived_symbol_at(duo_constructor, source, tree)
+                        .unwrap()
+                );
+                assert_eq!(
+                    typer.store().symbols.get(parameter.symbol()).owner,
+                    Some(duo_constructor)
+                );
+            }
+
+            assert!(matches!(
+                unit.classes[1].metadata_with_typed_ast(unit.store, unit.typed_ast, definitions),
+                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmType {
+                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
+                    ..
+                })
+            ));
+
+            let unplanned_unit = JvmCompilationUnit {
+                store: unit.store,
+                typed_ast: unit.typed_ast,
+                classes: unit.classes.iter().skip(1).cloned().collect(),
+            };
+            assert_eq!(
+                unplanned_unit.metadata(definitions),
+                Err(dotty_jvm::JvmCodegenError::ReferenceClassNotInJvmPlan { class: counter })
+            );
+
+            let JvmClassInitializationPlan::PrimaryConstructor(holder_proof) =
+                &unit.classes[1].initialization
+            else {
+                unreachable!()
+            };
+            let wrong_owner_plan = JvmClassPlan {
+                class: counter,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                    holder_proof.clone(),
+                ),
+            };
+            assert_eq!(
+                wrong_owner_plan.metadata(unit.store, definitions),
+                Err(dotty_jvm::JvmCodegenError::InvalidPrimaryConstructor {
+                    constructor: holder_constructor,
+                    issue: dotty_jvm::JvmConstructorIssue::SourceIdentity,
+                })
+            );
+
+            let application = unit
+                .typed_ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::Apply(application) = &node.kind else {
+                        return None;
+                    };
+                    let function = unit.typed_ast.try_get(application.function)?;
+                    let TreeKind::Select(select) = &function.kind else {
+                        return None;
+                    };
+                    let qualifier = unit.typed_ast.try_get(select.qualifier)?;
+                    (unit.store.names.resolve(select.name.text()) == "<init>"
+                        && matches!(qualifier.kind, TreeKind::New(_)))
+                    .then_some(tree)
+                })
+                .expect("typed new Holder(counter) application");
+            let target = unit
+                .resolve_constructor_call(client, client_method, application, definitions)
+                .unwrap();
+            assert_eq!(target.descriptor().as_str(), "(Lsample/Counter;)V");
+            assert_eq!(
+                target.argument_types(),
+                &[dotty_jvm::JvmType::Reference(counter)]
+            );
+            assert_eq!(target.owner_class(), holder);
+            let TreeKind::Apply(application_tree) = &unit.typed_ast.get(application).kind else {
+                unreachable!()
+            };
+            assert!(matches!(
+                unit.lower_method_body(client, client_method, definitions),
+                Err(
+                    dotty_jvm::JvmCodegenError::UnsupportedJvmConstructorArgument {
+                        tree,
+                        argument,
+                    }
+                ) if tree == application && argument == application_tree.args[0]
+            ));
+        },
+    );
+}
+
+#[test]
 fn ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result() {
     for (text, descriptor) in [
         ("class C()", "()V"),

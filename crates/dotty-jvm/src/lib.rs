@@ -1374,8 +1374,10 @@ impl JvmClassPlan {
         identity::class_identity(store, self.class)
     }
 
-    /// Derives this class and its selected public instance-method metadata.
-    /// This legacy entry point supports only empty field plans; use
+    /// Derives this class, constructor, and selected instance-method metadata.
+    /// This store-only entry point supports primitive constructor parameters
+    /// because it cannot prove a complete unit for reference signatures. It
+    /// also supports only empty field plans; use
     /// [`Self::metadata_with_typed_ast`] when planned fields are present.
     pub fn metadata(
         &self,
@@ -1385,11 +1387,11 @@ impl JvmClassPlan {
         identity::class_metadata(self, store, None, definitions, None)
     }
 
-    /// Derives class, primitive-field, and selected method metadata while
-    /// validating each frontend-issued field/RHS binding against this exact
-    /// typed AST. Reference-valued fields require
-    /// [`JvmCompilationUnit::metadata`], which can prove that their classes
-    /// are planned in the same emission unit.
+    /// Derives class, primitive-field, constructor, and selected method
+    /// metadata while validating each frontend-issued field/RHS binding
+    /// against this exact typed AST. Reference-valued fields and constructor
+    /// parameters require [`JvmCompilationUnit::metadata`], which can prove
+    /// that their classes are planned in the same emission unit.
     pub fn metadata_with_typed_ast(
         &self,
         store: &SemanticStore,
@@ -1775,7 +1777,8 @@ impl JvmCompilationUnit<'_> {
         }
     }
 
-    /// Projects all planned class, field, and method metadata in plan order.
+    /// Projects all planned class, field, constructor, and method metadata in
+    /// plan order.
     ///
     /// Duplicate JVM class names and duplicate `(method name, descriptor)`
     /// pairs are rejected before the metadata is returned.

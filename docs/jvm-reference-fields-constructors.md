@@ -2,7 +2,8 @@
 
 This is a characterization of the current source-to-JVM boundary for
 reference-valued fields and primary-constructor arguments. It does not enable
-reference field or constructor emission. The executable frontend evidence is
+reference field emission or reference-valued constructor-call argument
+lowering. The executable frontend evidence is
 `tests/fixtures/jvm/ReferenceFieldsAndConstructors.scala` and
 `reference_fields_and_constructor_parameters_keep_real_source_identity` in
 `tests/jvm_stateful_class_contract.rs`.
@@ -18,8 +19,8 @@ visibility, types, and canonical `TermRef` targets.
 | `private val ref: Counter = initial` | A `Field` owned by `Holder`, entered in its `ClassInfo.declarations` scope, with `Visibility::Private`; the AST retains plain `private`. Its type is `TypeRef` to canonical `Class:Counter`. The typed initializer is a `TermRef` to the constructor-owned `initial` parameter. | Stops in `dotty-jvm` field metadata: `identity::field_metadata` asks for a primitive semantic value type. `getfield`/`putfield` descriptor and lowering paths currently cover primitive field values. |
 | `private[this] val own: Counter = initial` | Same semantic `Visibility::Private` and field ownership/type as `ref`; the source `VisibilitySyntax` retains the `this` qualifier. | Also a reference-field metadata/type blocker. Current field metadata additionally requires source visibility `PlainPrivate`, so the syntax distinction is not lost or silently accepted. |
 | `private var current: Counter = initial` | Mutable `Field` owned by `MutableHolder`, private in the semantic model, exact `Counter` `TypeRef`, initialized from the exact constructor parameter symbol. `current.get()` is rejected by the source typer with `UnstableSelectionPrefix`; direct `current` read and assignment in `get`/`replace` type. | Reference field emission is unsupported regardless. The mutable selection failure is a typer boundary, before JVM planning or classfile verification. |
-| `class Holder(initial: Counter)` | The source parameter symbol belongs to `Holder` and is private. The constructor-owned parameter is a distinct canonical `Parameter` symbol owned by `<init>`, public, and its constructor signature parameter type is a `TypeRef` to `Counter`. Both preserve the source range. | Constructor signature projection in `dotty-jvm` is primitive-only (`constructor.rs` / `descriptor.rs`); the reference argument does not reach a constructor descriptor or invocation plan. |
-| `new Holder(c)` in `Client.construct(c: Counter)` | The typed constructor selection is a `TermRef` to `Holder.<init>`, the result is `TypeRef` to `Holder`, and the argument is a `TermRef` to the exact canonical `Client.construct` parameter. | The source typer succeeds. In the shown plan, unit metadata fails first while projecting `Holder.ref` as a primitive field. With that field removed, metadata still fails on the reference constructor signature before constructor target or argument validation. Primitive argument projection is an additional downstream blocker after field and constructor metadata support is added. |
+| `class Holder(initial: Counter)` | The source parameter symbol belongs to `Holder` and is private. The constructor-owned parameter is a distinct canonical `Parameter` symbol owned by `<init>`, public, and its constructor signature parameter type is a `TypeRef` to `Counter`. Both preserve the source range. | `JvmCompilationUnit::metadata` accepts the signature only when `Counter` is a planned class and preserves its exact `SymbolId`; store-only constructor metadata remains primitive-only. |
+| `new Holder(c)` in `Client.construct(c: Counter)` | The typed constructor selection is a `TermRef` to `Holder.<init>`, the result is `TypeRef` to `Holder`, and the argument is a `TermRef` to the exact canonical `Client.construct` parameter. | The resolver validates its exact `LCounter;` argument against the planned caller parameter and returns read-only target metadata. Constructor-call lowering still rejects reference-valued argument instructions. |
 | `def read(): Int = ref.get()` | Types successfully. The selected method `TermRef` targets the canonical `Counter.get`; its qualifier is an `Ident` whose `TermRef` targets exactly `Holder.ref`. Result type is `Int`. | Source typing success is not JVM support: lowering cannot plan or emit a reference field load, and the reference field has no supported JVM field metadata. |
 
 `Counter`, `Holder`, `MutableHolder`, and `Client` each retain a `ClassInfo`
@@ -28,7 +29,7 @@ indexed by `SourceSemanticIndex`, and whose parent is the canonical root
 `Object` type. This is the source evidence required for planning; it does not
 imply that those plans currently accept reference fields.
 
-## Narrow constructor subset to target
+## Narrow constructor field-initializer subset to target
 
 The smallest safe future increment is a straight-line primary constructor
 which first invokes the direct superclass constructor, then initializes a
