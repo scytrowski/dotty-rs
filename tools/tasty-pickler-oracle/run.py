@@ -255,6 +255,32 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Flags = true, false, true, false, 17, 42", 42,
             ),
+            "example/Conditionals.tasty": (
+                "example.Conditionals", r"public int choose\(boolean, int, int\)", "ConditionalsRuntime.java",
+                """public final class ConditionalsRuntime {
+  public static void main(String[] args) {
+    example.Conditionals values = new example.Conditionals();
+    int chooseTrue = values.choose(true, 17, 42);
+    int chooseFalse = values.choose(false, 17, 42);
+    int nestedTrueTrue = values.nested(true, true);
+    int nestedTrueFalse = values.nested(true, false);
+    int nestedFalse = values.nested(false, true);
+    int constant = values.constant();
+    int mixedTrue = values.mixed(true, 19);
+    int mixedFalse = values.mixed(false, 19);
+    int callTrue = values.callBranch(true, 31);
+    int callFalse = values.callBranch(false, 31);
+    if (chooseTrue != 17 || chooseFalse != 42 || nestedTrueTrue != 1 ||
+        nestedTrueFalse != 2 || nestedFalse != 3 || constant != 17 ||
+        mixedTrue != 19 || mixedFalse != 42 || callTrue != 31 || callFalse != 42)
+      throw new AssertionError("unexpected Conditionals results");
+    System.out.println("Conditionals = " + chooseTrue + ", " + chooseFalse + ", " +
+        nestedTrueTrue + ", " + nestedTrueFalse + ", " + nestedFalse + ", " + constant +
+        ", " + mixedTrue + ", " + mixedFalse + ", " + callTrue + ", " + callFalse);
+  }
+}
+""", "Conditionals = 17, 42, 1, 2, 3, 17, 19, 42, 31, 42", 17,
+            ),
             "example/References.tasty": (
                 "example.References", r"public int first\(\)", "ReferencesRuntime.java",
                 """public final class ReferencesRuntime {
@@ -316,6 +342,16 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Flags class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Conditionals.tasty":
+                signatures = (
+                    r"public int choose\(boolean, int, int\)",
+                    r"public int nested\(boolean, boolean\)",
+                    r"public int constant\(\)",
+                    r"public int mixed\(boolean, int\)",
+                    r"public int callBranch\(boolean, int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Conditionals class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":

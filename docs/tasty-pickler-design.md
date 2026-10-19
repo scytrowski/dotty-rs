@@ -218,7 +218,7 @@ It is compiler-generated, not evidence of a source annotation in the core store.
 | Class | Public, no type/value parameters, no self type, no fields, no explicit extends or initialization statements; exact canonical implicit Object parent | Traits, objects, companions, nesting, enums, arbitrary inheritance/constructors |
 | Method | One or more public ordinary monomorphic concrete methods, declared Int or Boolean result, no clause, one explicit empty clause, or one plain clause of ordinary Int/Boolean parameters | Multiple/curried/contextual/erased/repeated/defaulted clauses, abstract methods |
 | Signature/types | Int/Boolean result and parameter types; canonical Int/Boolean literal RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
-| Body | Actual typed Int/Boolean literal or a `TermRef` to a same-typed formal of the same method; literal value/type, source binding and parameter identity must agree | Calls with Boolean results/arguments, blocks, if/match, locals, functions, returns and all other expressions |
+| Body | Actual typed Int/Boolean literal, a `TermRef` to a same-typed formal, or an `IF` with a Boolean literal/formal condition and supported Int branches; nested `IF` preserves condition/then/else order | Calls with Boolean results/arguments, blocks, match, locals, functions, returns and all other expressions |
 | Metadata | Public/no extra source flags or annotations; required constructor marker; normalized source identity | General annotations/modifiers, full position/comment preservation, outline/best-effort/Java TASTy |
 
 An empty class is an oracle control, not an automatic broadening of the first
@@ -285,8 +285,14 @@ constructor still has a normalized empty value clause and class-instance result.
 
 The current accepted boundary is one ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
-methods with an Int or Boolean result and actual typed Int/Boolean literal or
-same-typed formal-reference bodies. Each method has no value clause, one
+methods with an Int or Boolean result and actual typed Int/Boolean literal,
+same-typed formal-reference, or Int conditional bodies. Conditional tests accept
+Boolean literals and canonical Boolean formal references; branches accept Int
+literals, raw whole-number literals, canonical Int formal references, nested
+conditionals and already supported Int-returning expressions. The typed `IF`
+result must be canonical Int or an Int singleton agreeing with both singleton
+branches. This relies on the source typer's recorded join and performs no new
+subtyping or condition folding. Each method has no value clause, one
 explicit empty ordinary clause, or one plain clause of ordinary Int/Boolean
 parameters. Clause shapes retain distinct semantic and wire forms;
 parameter identities, source order, ownership, declared types and completed

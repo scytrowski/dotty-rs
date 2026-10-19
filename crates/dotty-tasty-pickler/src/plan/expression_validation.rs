@@ -400,6 +400,228 @@ impl Validator<'_, '_> {
         Ok(())
     }
 
+    fn validate_if_condition(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        self.charge(1)?;
+        if !visited.insert(typed_id) {
+            return Err(PickleError::RepeatedExpression { tree: typed_id });
+        }
+        let source = self.source_tree(source_id)?;
+        let typed = self
+            .plan
+            .typed_ast
+            .try_get(typed_id)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        self.source_typed_binding(source_id, typed_id)?;
+        self.paired_source_typed_span(source.position, typed.position, typed_id)?;
+        match (&source.kind, &typed.kind) {
+            (TreeKind::Literal(source), TreeKind::Literal(literal))
+                if source.value == literal.value =>
+            {
+                match (&literal.value, self.ty(typed.ty)?) {
+                    (Constant::Boolean(expected), Type::Constant(Constant::Boolean(actual)))
+                        if expected == actual =>
+                    {
+                        Ok(())
+                    }
+                    _ => Err(PickleError::BodyType {
+                        tree: typed_id,
+                        ty: typed.ty,
+                    }),
+                }
+            }
+            (TreeKind::Ident(source), TreeKind::Ident(ident))
+                if source.name == ident.name && source.backquoted == ident.backquoted =>
+            {
+                let Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                } = self.ty(typed.ty)?
+                else {
+                    return Err(PickleError::BodyType {
+                        tree: typed_id,
+                        ty: typed.ty,
+                    });
+                };
+                if !matches!(self.ty(*prefix)?, Type::NoPrefix) {
+                    return Err(PickleError::Reference {
+                        symbol: *symbol,
+                        reason: crate::ReferenceError::Owner,
+                    });
+                }
+                self.kind(*symbol, SymbolKind::Parameter)?;
+                self.owner(*symbol, Some(method.symbol))?;
+                if !method
+                    .parameter_clauses
+                    .iter()
+                    .flatten()
+                    .any(|parameter| parameter == symbol)
+                    || self.symbol(*symbol)?.name != source.name
+                    || self.complete(*symbol)? != self.plan.definitions.boolean
+                {
+                    return Err(PickleError::BodyType {
+                        tree: typed_id,
+                        ty: typed.ty,
+                    });
+                }
+                Ok(())
+            }
+            _ => Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))),
+        }
+    }
+
+    fn validate_if_branch(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<TypeId, PickleError> {
+        let depth_limit = self.limits.expression_depth_limit();
+        if depth > depth_limit {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: depth_limit,
+            });
+        }
+        let source = self.source_tree(source_id)?;
+        let typed = self
+            .plan
+            .typed_ast
+            .try_get(typed_id)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if matches!(source.kind, TreeKind::If(_)) || matches!(typed.kind, TreeKind::If(_)) {
+            return self.validate_if_expression(source_id, typed_id, method, depth + 1, visited);
+        }
+        if matches!(source.kind, TreeKind::Apply(_)) && matches!(typed.kind, TreeKind::Apply(_)) {
+            self.validate_nested_application(source_id, typed_id, method, depth, visited)?;
+            return Ok(typed.ty);
+        }
+        self.charge(1)?;
+        if !visited.insert(typed_id) {
+            return Err(PickleError::RepeatedExpression { tree: typed_id });
+        }
+        self.validate_method_expression(
+            Some(source_id),
+            Some(typed_id),
+            method,
+            self.plan.definitions.int,
+        )?;
+        Ok(typed.ty)
+    }
+
+    fn validate_if_expression(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<TypeId, PickleError> {
+        let depth_limit = self.limits.expression_depth_limit();
+        if depth > depth_limit {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: depth_limit,
+            });
+        }
+        self.charge(1)?;
+        if !visited.insert(typed_id) {
+            return Err(PickleError::RepeatedExpression { tree: typed_id });
+        }
+        let source = self.source_tree(source_id)?;
+        let typed = self
+            .plan
+            .typed_ast
+            .try_get(typed_id)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        self.source_typed_binding(source_id, typed_id)?;
+        self.paired_source_typed_span(source.position, typed.position, typed_id)?;
+        let (TreeKind::If(source_if), TreeKind::If(typed_if)) = (&source.kind, &typed.kind) else {
+            return Err(PickleError::SourceShape {
+                tree: source_id,
+                expected: SourceRole::Body,
+            });
+        };
+        let source_if = *source_if;
+        let typed_if = *typed_if;
+        self.validate_if_condition(source_if.cond, typed_if.cond, method, visited)?;
+        let then_type = self.validate_if_branch(
+            source_if.then_branch,
+            typed_if.then_branch,
+            method,
+            depth,
+            visited,
+        )?;
+        let else_type = self.validate_if_branch(
+            source_if.else_branch,
+            typed_if.else_branch,
+            method,
+            depth,
+            visited,
+        )?;
+
+        let branch_join = match self.ty(typed.ty)? {
+            Type::Constant(Constant::Int(value)) => {
+                let then_join = self.int_branch_constant(typed_if.then_branch, then_type)?;
+                let else_join = self.int_branch_constant(typed_if.else_branch, else_type)?;
+                if then_join != Some(*value) || else_join != Some(*value) {
+                    return Err(PickleError::BodyType {
+                        tree: typed_id,
+                        ty: typed.ty,
+                    });
+                }
+                typed.ty
+            }
+            _ if typed.ty == self.plan.definitions.int => typed.ty,
+            _ => {
+                return Err(PickleError::BodyType {
+                    tree: typed_id,
+                    ty: typed.ty,
+                });
+            }
+        };
+        if branch_join == self.plan.definitions.int {
+            self.int_branch_constant(typed_if.then_branch, then_type)?;
+            self.int_branch_constant(typed_if.else_branch, else_type)?;
+        }
+        Ok(branch_join)
+    }
+
+    /// Returns `Some(value)` for an Int singleton and `None` for a widened Int
+    /// (including a previously validated Int formal or parameterless method reference).
+    fn int_branch_constant(
+        &self,
+        tree: TreeId<Typed>,
+        ty: TypeId,
+    ) -> Result<Option<i32>, PickleError> {
+        if ty == self.plan.definitions.int {
+            return Ok(None);
+        }
+        match self.ty(ty)? {
+            Type::Constant(Constant::Int(value)) => Ok(Some(*value)),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if self.plan.store.symbols.contains(*symbol)
+                && matches!(
+                    self.plan.store.symbols.get(*symbol).kind,
+                    SymbolKind::Parameter | SymbolKind::Method
+                )
+                && self.complete(*symbol)? == self.plan.definitions.int =>
+            {
+                Ok(None)
+            }
+            _ => Err(PickleError::BodyType { tree, ty }),
+        }
+    }
+
     pub(super) fn validate_method_expression(
         &mut self,
         rhs: Option<TreeId<Untyped>>,
@@ -590,6 +812,17 @@ impl Validator<'_, '_> {
                     Constant::Int(value) => Some(value),
                     _ => None,
                 }
+            }
+            (TreeKind::If(_), TreeKind::If(_)) => {
+                if result_type != p.definitions.int {
+                    return Err(PickleError::BodyType {
+                        tree: body,
+                        ty: node.ty,
+                    });
+                }
+                let mut visited = HashSet::new();
+                self.validate_if_expression(rhs, body, method, 0, &mut visited)?;
+                None
             }
             (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) => {
                 if result_type != p.definitions.int {

@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use dotty_core::ast::{ApplyKind, TypedAst};
 use dotty_core::{Constant, SemanticStore, SymbolId, TermRefTarget, TreeId, TreeKind, Type, Typed};
 use dotty_tasty::tasty::{
-    APPLY_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, INTCONST_TAG, SimpleTerm,
+    APPLY_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, IF_TAG, INTCONST_TAG, SimpleTerm,
     TRUECONST_TAG, TermValue,
 };
 
@@ -96,6 +96,65 @@ fn lower_expression_inner(
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::If(if_expr) = tree.kind {
+        let condition = lower_expression_inner(
+            store,
+            ast,
+            if_expr.cond,
+            method,
+            parameters,
+            ExpressionState { depth, budget },
+            context,
+        )?;
+        let then_depth = if matches!(
+            ast.try_get(if_expr.then_branch).map(|tree| &tree.kind),
+            Some(TreeKind::If(_))
+        ) {
+            depth + 1
+        } else {
+            depth
+        };
+        let then_branch = lower_expression_inner(
+            store,
+            ast,
+            if_expr.then_branch,
+            method,
+            parameters,
+            ExpressionState {
+                depth: then_depth,
+                budget,
+            },
+            context,
+        )?;
+        let else_depth = if matches!(
+            ast.try_get(if_expr.else_branch).map(|tree| &tree.kind),
+            Some(TreeKind::If(_))
+        ) {
+            depth + 1
+        } else {
+            depth
+        };
+        let else_branch = lower_expression_inner(
+            store,
+            ast,
+            if_expr.else_branch,
+            method,
+            parameters,
+            ExpressionState {
+                depth: else_depth,
+                budget,
+            },
+            context,
+        )?;
+        return context.wire_node(AstNode::Length {
+            tag: IF_TAG,
+            fields: vec![
+                AstField::Tree(condition),
+                AstField::Tree(then_branch),
+                AstField::Tree(else_branch),
+            ],
+        });
+    }
     if let TreeKind::Apply(application) = &tree.kind {
         if application.kind != ApplyKind::Regular || application.args.is_empty() {
             return Err(PickleError::Unsupported {
