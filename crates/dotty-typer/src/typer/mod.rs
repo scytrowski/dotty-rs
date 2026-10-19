@@ -1922,6 +1922,36 @@ mod tests {
     }
 
     #[test]
+    fn top_level_class_references_accept_equivalent_canonical_package_prefixes() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package p { class C }; package q { class D }");
+        let class = class_symbol(&parsed, &store, &index, source, "C");
+        let package = packages.symbol(&["p"]).unwrap();
+        let other_package = packages.symbol(&["q"]).unwrap();
+        let canonical_package = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let other_package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, other_package));
+        let unqualified = nominal_type_ref(&mut store, definitions, class);
+        let canonical = nominal_type_ref_with_prefix(&mut store, class, canonical_package);
+        let incorrect = nominal_type_ref_with_prefix(&mut store, class, other_package_prefix);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.is_subtype(unqualified, canonical).unwrap());
+        assert!(typer.is_subtype(canonical, unqualified).unwrap());
+        assert!(!typer.is_subtype(unqualified, incorrect).unwrap());
+    }
+
+    #[test]
     fn this_type_conforms_to_its_own_class_reference() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name("class C");
         let class = class_symbol(&parsed, &store, &index, source, "C");

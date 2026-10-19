@@ -325,6 +325,31 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         }
     }
 
+    fn is_canonical_top_level_class_prefix(
+        &self,
+        class: SymbolId,
+        prefix: TypeId,
+    ) -> Result<bool, TypeRelationError> {
+        let Some(package) = self.typer.store.symbols.get(class).owner.filter(|owner| {
+            self.typer.store.symbols.contains(*owner)
+                && self.typer.store.symbols.get(*owner).kind == SymbolKind::Package
+        }) else {
+            return Ok(false);
+        };
+        if matches!(self.type_at(prefix)?, Type::NoPrefix) {
+            return Ok(true);
+        }
+        match self.type_at(prefix)? {
+            Type::TypeRef {
+                prefix: package_prefix,
+                target: TypeRefTarget::Symbol(found_package),
+            } if *found_package == package => {
+                self.is_canonical_package_prefix(package, *package_prefix, 0)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn normalize(&mut self, ty: TypeId) -> Result<TypeId, TypeRelationError> {
         TypeNormalizer::new(self.typer.store)
             .normalize_for_relation(ty)
@@ -741,6 +766,11 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             ) => {
                 if left_symbol != right_symbol {
                     return Ok(false);
+                }
+                if self.is_canonical_top_level_class_prefix(left_symbol, left_prefix)?
+                    && self.is_canonical_top_level_class_prefix(left_symbol, right_prefix)?
+                {
+                    return Ok(true);
                 }
                 self.equivalent(left_prefix, right_prefix, depth + 1)
             }

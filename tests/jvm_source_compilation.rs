@@ -5079,6 +5079,9 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "reference-field" => matches!(
                 &error,
                 PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
+                    | PipelineFailure::Codegen(
+                        JvmCodegenError::UnsupportedJvmReferenceFieldInitializer { .. }
+                    )
             ),
             "generic-class" => matches!(
                 &error,
@@ -5210,6 +5213,62 @@ fn reference_constructor_arguments_lower_in_order_and_verify_initialized_values(
         assert!(
             java.status.success(),
             "java -Xverify:all rejected reference constructor arguments\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn allocated_immutable_reference_local_can_be_a_constructor_argument() {
+    let output = TestOutputDirectory::new("allocated-reference-constructor-argument");
+    let artifacts = compile_planned_constructor_source(
+        "class Counter(seed: Int)\nclass Holder(counter: Counter)\nclass Client:\n  def local(): Holder =\n    val c = new Counter(1)\n    new Holder(c)\n",
+        output.path(),
+    )
+    .unwrap();
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .unwrap();
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode generated Client class");
+    let local = emitted_method_code(&class, "local");
+    assert_opcode_sequence(
+        local,
+        &[0xbb, 0x59, 0x04, 0xb7, 0x4c, 0xbb, 0x59, 0x2b, 0xb7, 0xb0],
+    );
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("AllocatedLocalHarness.java");
+        fs::write(
+            &harness,
+            "public final class AllocatedLocalHarness { public static void main(String[] args) { if (new Client().local() == null) throw new AssertionError(\"allocated local constructor argument\"); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .unwrap();
+        assert!(
+            javac.status.success(),
+            "javac rejected allocated-local constructor argument harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "AllocatedLocalHarness",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected allocated-local constructor argument\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );
