@@ -451,20 +451,188 @@ impl SourceTyper<'_> {
             )
         }) {
             has_canonical_root |= candidate.origin == LexicalPackageCandidateOrigin::Root;
-            if let Some(symbol) =
-                self.unique_scoped_symbol(candidate.scope, name, tree_index, position)?
-            {
-                return Ok(Some(symbol));
+            let scoped = self.scoped_symbols(candidate.scope, name);
+            let source_symbols: Vec<_> = scoped
+                .iter()
+                .copied()
+                .filter(|symbol| {
+                    matches!(
+                        self.store.symbols.get(*symbol).origin,
+                        dotty_core::SymbolOrigin::Source(_)
+                    )
+                })
+                .collect();
+            if !source_symbols.is_empty() {
+                return self.unique_symbol_candidate(&source_symbols, name, tree_index, position);
             }
+
+            let external_symbols: Vec<_> = scoped
+                .iter()
+                .copied()
+                .filter(|symbol| {
+                    !matches!(
+                        self.store.symbols.get(*symbol).origin,
+                        dotty_core::SymbolOrigin::Source(_)
+                    )
+                })
+                .collect();
+            let cached_object = external_symbols.iter().copied().find(|symbol| {
+                let entry = self.store.symbols.get(*symbol);
+                entry.kind == SymbolKind::Object && entry.owner == Some(candidate.package)
+            });
+            let cached_package = external_symbols.iter().copied().find(|symbol| {
+                let entry = self.store.symbols.get(*symbol);
+                entry.kind == SymbolKind::Package && entry.owner == Some(candidate.package)
+            });
+
+            let store_checkpoint = self.store.checkpoint();
+            let resolver_checkpoint = self.resolver.checkpoint();
             let mut path = candidate.package_path.clone();
             path.push(self.store.names.resolve(name.text()).to_owned());
-            if let Some(package) = self.resolve_external_package(&path, tree_index)? {
+
+            if let Some(object) = cached_object {
+                let package = match self.resolve_external_package(&path, tree_index) {
+                    Ok(package) => package,
+                    Err(TyperError::SymbolResolution {
+                        error: ResolutionError::Ambiguous { .. },
+                        ..
+                    }) => {
+                        self.resolver.rollback_to(self.store, resolver_checkpoint);
+                        self.store.rollback_to(store_checkpoint);
+                        return Err(TyperError::AmbiguousTypeName {
+                            source: self.source,
+                            tree_index,
+                            name,
+                            position,
+                        });
+                    }
+                    Err(error) => {
+                        self.resolver.rollback_to(self.store, resolver_checkpoint);
+                        self.store.rollback_to(store_checkpoint);
+                        return Err(error);
+                    }
+                };
+                if package.is_some() {
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                    return Err(TyperError::AmbiguousTypeName {
+                        source: self.source,
+                        tree_index,
+                        name,
+                        position,
+                    });
+                }
+                self.validate_package_object_identity(object, candidate.package, tree_index)?;
+                return Ok(Some(object));
+            }
+
+            if let Some(package) = cached_package {
+                let collision = match self.resolver.package_object_collision(
+                    self.store,
+                    candidate.package,
+                    name,
+                ) {
+                    Ok(collision) => collision,
+                    Err(ResolutionError::Ambiguous { .. }) => {
+                        self.resolver.rollback_to(self.store, resolver_checkpoint);
+                        self.store.rollback_to(store_checkpoint);
+                        return Err(TyperError::AmbiguousTypeName {
+                            source: self.source,
+                            tree_index,
+                            name,
+                            position,
+                        });
+                    }
+                    Err(error) => {
+                        self.resolver.rollback_to(self.store, resolver_checkpoint);
+                        self.store.rollback_to(store_checkpoint);
+                        return Err(TyperError::SymbolResolution {
+                            source: self.source,
+                            tree_index,
+                            error,
+                        });
+                    }
+                };
+                if collision {
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                    return Err(TyperError::AmbiguousTypeName {
+                        source: self.source,
+                        tree_index,
+                        name,
+                        position,
+                    });
+                }
                 return Ok(Some(package));
             }
-            if let Some(object) =
-                self.resolve_external_package_object(candidate.package, name, tree_index)?
-            {
-                return Ok(Some(object));
+
+            let package = match self.resolve_external_package(&path, tree_index) {
+                Ok(package) => package,
+                Err(error) => {
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                    return Err(error);
+                }
+            };
+            // Resolve the package first to preserve its established precedence.
+            // The classpath resolver arbitrates a package child against TASTy
+            // Object evidence without changing ordinary package-term lookup.
+            let object = if package.is_some() {
+                match self
+                    .resolver
+                    .package_object_collision(self.store, candidate.package, name)
+                {
+                    Ok(true) | Err(ResolutionError::Ambiguous { .. }) => {
+                        self.resolver.rollback_to(self.store, resolver_checkpoint);
+                        self.store.rollback_to(store_checkpoint);
+                        return Err(TyperError::AmbiguousTypeName {
+                            source: self.source,
+                            tree_index,
+                            name,
+                            position,
+                        });
+                    }
+                    Ok(false) => None,
+                    Err(error) => {
+                        self.resolver.rollback_to(self.store, resolver_checkpoint);
+                        self.store.rollback_to(store_checkpoint);
+                        return Err(TyperError::SymbolResolution {
+                            source: self.source,
+                            tree_index,
+                            error,
+                        });
+                    }
+                }
+            } else {
+                match self.resolve_external_package_object(candidate.package, name, tree_index) {
+                    Ok(object) => object,
+                    Err(error) => {
+                        self.resolver.rollback_to(self.store, resolver_checkpoint);
+                        self.store.rollback_to(store_checkpoint);
+                        return Err(error);
+                    }
+                }
+            };
+            match (package, object) {
+                (Some(_), Some(_)) => {
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                    return Err(TyperError::AmbiguousTypeName {
+                        source: self.source,
+                        tree_index,
+                        name,
+                        position,
+                    });
+                }
+                (Some(package), None) => return Ok(Some(package)),
+                (None, Some(object)) => return Ok(Some(object)),
+                (None, None) => {
+                    if let Some(symbol) =
+                        self.unique_symbol_candidate(&external_symbols, name, tree_index, position)?
+                    {
+                        return Ok(Some(symbol));
+                    }
+                }
             }
         }
         if !has_canonical_root {
@@ -477,10 +645,54 @@ impl SourceTyper<'_> {
         Ok(None)
     }
 
-    /// Looks up a package-owned Object only after the same candidate's
-    /// subpackage lookup misses. This preserves the established package
-    /// precedence while allowing a validated TASTy Object to bind the first
-    /// unrooted import segment.
+    /// Validates that a resolved Object and its ModuleClass share the expected
+    /// package owner.
+    fn validate_package_object_identity(
+        &self,
+        object: SymbolId,
+        package: SymbolId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let invalid = |reason: &'static str| TyperError::SymbolResolution {
+            source: self.source,
+            tree_index,
+            error: ResolutionError::Malformed {
+                reason: reason.to_owned(),
+            },
+        };
+        if !self.store.symbols.contains(object) {
+            return Err(TyperError::UnknownSymbol { symbol: object });
+        }
+        let entry = self.store.symbols.get(object);
+        if entry.kind != SymbolKind::Object || entry.owner != Some(package) {
+            return Err(invalid(
+                "package-term resolution returned a non-object or an object with the wrong owner",
+            ));
+        }
+        let module_class = self
+            .resolver
+            .module_class_of_object(self.store, object)
+            .map_err(|error| TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error,
+            })?
+            .ok_or_else(|| invalid("package Object has no validated ModuleClass identity"))?;
+        if !self.store.symbols.contains(module_class) {
+            return Err(TyperError::UnknownSymbol {
+                symbol: module_class,
+            });
+        }
+        let module = self.store.symbols.get(module_class);
+        if module.kind != SymbolKind::ModuleClass || module.owner != Some(package) {
+            return Err(invalid(
+                "package Object's validated ModuleClass has the wrong kind or owner",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Looks up a package-owned Object for a relative import segment.
     fn resolve_external_package_object(
         &mut self,
         package: SymbolId,
@@ -522,6 +734,16 @@ impl SourceTyper<'_> {
                 reason: reason.to_owned(),
             },
         };
+        if self.store.symbols.contains(object)
+            && matches!(
+                self.store.symbols.get(object).kind,
+                SymbolKind::Class | SymbolKind::Trait | SymbolKind::ModuleClass
+            )
+        {
+            self.resolver.rollback_to(self.store, resolver_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+            return Ok(None);
+        }
         let validation = (|| {
             if !self.store.symbols.contains(object) {
                 return Err(TyperError::UnknownSymbol { symbol: object });

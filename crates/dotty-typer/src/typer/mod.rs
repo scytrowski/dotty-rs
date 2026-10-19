@@ -740,6 +740,9 @@ mod tests {
     #[derive(Clone, Copy)]
     struct JavaObjectStubPath;
 
+    #[derive(Clone, Copy)]
+    struct ContextsPackagePath;
+
     struct ProfiledCompilerResolver {
         inner: dotty_classloader::classloader::ClasspathSymbolResolver<
             dotty_classloader::classloader::CompositeClassPath,
@@ -853,6 +856,23 @@ mod tests {
 
         fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
             Ok(["java", "lang"].starts_with(package))
+        }
+    }
+
+    impl ClassPathEntry for ContextsPackagePath {
+        fn find_class(
+            &self,
+            _name: &dotty_classloader::classloader::BinaryName,
+        ) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["dotty", "tools", "dotc", "core", "Contexts"])
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(["dotty", "tools", "dotc", "core", "Contexts"].starts_with(package))
         }
     }
 
@@ -8696,7 +8716,14 @@ mod tests {
 
         assert_eq!(type_symbol(typer.store(), projected), external_type);
         assert_eq!(*package_requests.borrow(), vec![vec!["p".to_owned()]]);
-        assert_eq!(member_requests.borrow().len(), 1);
+        assert_eq!(
+            member_requests
+                .borrow()
+                .iter()
+                .map(|name| typer.store().names.resolve(name.text()).to_owned())
+                .collect::<Vec<_>>(),
+            ["C"]
+        );
         let Type::TypeRef {
             target: TypeRefTarget::Symbol(found_package),
             ..
@@ -9387,6 +9414,105 @@ mod tests {
             typer.store().scopes.get(package_scope).lookup_all(&name),
             [child_package, object]
         );
+    }
+
+    #[test]
+    fn classpath_package_object_collision_is_ambiguous_before_and_after_object_warmup() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        for warm_object in [false, true] {
+            let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+                "package dotty.tools\npackage dotc\npackage core\nimport Contexts.*\nclass Use",
+            );
+            let import = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::Import(import) => Some((tree, import.expr)),
+                    _ => None,
+                })
+                .unwrap();
+            let use_symbol = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let context = index
+                .source_context(index.declaration_context_of(use_symbol).unwrap())
+                .parent
+                .expect("Use is declared in the stacked core package");
+            let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+            let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let class_path = CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(compiler_root)),
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+                Box::new(ContextsPackagePath),
+            ]);
+            let resolver = ClasspathSymbolResolver::new(
+                class_path,
+                definitions,
+                LoadingSession::with_packages(packages.snapshot()),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let package = packages
+                .symbol(&["dotty", "tools", "dotc", "core"])
+                .unwrap();
+
+            if warm_object {
+                let prefix = typer.package_type_prefix(package);
+                let name = Name::new(typer.store.names.intern("Contexts"), Namespace::Term);
+                let request = MemberRequest {
+                    prefix,
+                    name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                };
+                let object = typer
+                    .resolver
+                    .resolve_member(typer.store, &request)
+                    .unwrap()
+                    .expect("the TASTy classpath exposes Contexts as an Object");
+                assert_eq!(typer.store.symbols.get(object).kind, SymbolKind::Object);
+            }
+
+            let checkpoint = typer.store().checkpoint();
+            let error = typer
+                .import_qualifier_symbol(import.1, context, import.0.index(), None)
+                .expect_err("mixed classpath Package and Object evidence is ambiguous");
+            assert!(
+                matches!(error, TyperError::AmbiguousTypeName { name, .. }
+                if typer.store().names.resolve(name.text()) == "Contexts"),
+                "{error:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+
+            let retry = typer
+                .import_qualifier_symbol(import.1, context, import.0.index(), None)
+                .expect_err("retry must make the same choice without cache-history effects");
+            assert!(matches!(retry, TyperError::AmbiguousTypeName { name, .. }
+                if typer.store().names.resolve(name.text()) == "Contexts"));
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+        }
     }
 
     #[test]
