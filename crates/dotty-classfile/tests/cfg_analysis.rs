@@ -1,14 +1,366 @@
 use dotty_classfile::bytecode::{
-    AnalysisError, BranchInstruction, CfgCodeAnalyzer, CodeSequence, ControlFlowGraph,
-    ControlFlowGraphError, FlowLocalState, FlowValue, Instruction, LocalIndex, SmallIntConstant,
-    SmallLongConstant, UnsupportedFlowInstructionKind, ValueKind, VerificationTypeInfo,
-    assemble_labeled, generate_stack_map_frames,
+    AnalysisError, BranchInstruction, CfgCodeAnalyzer, ClassHierarchy, ClassHierarchyError,
+    CodeSequence, ControlFlowGraph, ControlFlowGraphError, FlowLocalState, FlowValue, Instruction,
+    LocalIndex, SmallIntConstant, SmallLongConstant, UnsupportedFlowInstructionKind, ValueKind,
+    VerificationTypeInfo, assemble_labeled, generate_stack_map_frames,
 };
 use dotty_classfile::classfile::ConstantPool;
 use dotty_classfile::constant_pool_builder::ConstantPoolBuilder;
 
 fn local(index: u16) -> LocalIndex {
     LocalIndex::new(index)
+}
+
+#[test]
+fn explicit_superclass_proofs_cover_calls_fields_and_reference_returns() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let call = pool_builder
+        .method_ref("example/Base", "call", "(Lexample/Base;)Lexample/Base;")
+        .unwrap();
+    let receiver_call = pool_builder
+        .method_ref("example/Base", "touch", "()V")
+        .unwrap();
+    let field = pool_builder
+        .field_ref("example/Base", "value", "Lexample/Base;")
+        .unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges(vec![(
+        "example/Derived".to_owned(),
+        "example/Base".to_owned(),
+    )])
+    .unwrap();
+
+    let mut call_sequence = CodeSequence::new();
+    call_sequence
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::InvokeVirtual(
+            dotty_classfile::bytecode::VirtualMethodReference::new(
+                dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(call).unwrap(),
+            ),
+        ))
+        .instruction(Instruction::AReturn);
+    let call_graph = ControlFlowGraph::build(&call_sequence).unwrap();
+    let call_result = CfgCodeAnalyzer::analyze_with_hierarchy(
+        &call_graph,
+        "callBase",
+        "(Lexample/Derived;)Lexample/Base;",
+        false,
+        &pool,
+        owner,
+        &hierarchy,
+    );
+    assert!(call_result.is_ok(), "{call_result:?}");
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &call_graph,
+            "callBase",
+            "(Lexample/Derived;)Lexample/Base;",
+            false,
+            &pool,
+            owner,
+        ),
+        Err(AnalysisError::WrongExactMethodArgument { .. })
+    ));
+    let mut receiver_sequence = CodeSequence::new();
+    receiver_sequence
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::InvokeVirtual(
+            dotty_classfile::bytecode::VirtualMethodReference::new(
+                dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(receiver_call)
+                    .unwrap(),
+            ),
+        ))
+        .instruction(Instruction::Return);
+    let receiver_graph = ControlFlowGraph::build(&receiver_sequence).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &receiver_graph,
+            "touchBase",
+            "(Lexample/Derived;)V",
+            false,
+            &pool,
+            owner,
+        ),
+        Err(AnalysisError::MethodOwnerMismatch { .. })
+    ));
+    assert!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &receiver_graph,
+            "touchBase",
+            "(Lexample/Derived;)V",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .is_ok()
+    );
+    let reverse_hierarchy = ClassHierarchy::from_edges(vec![(
+        "example/Base".to_owned(),
+        "example/Derived".to_owned(),
+    )])
+    .unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &call_graph,
+            "callBase",
+            "(Lexample/Derived;)Lexample/Base;",
+            false,
+            &pool,
+            owner,
+            &reverse_hierarchy,
+        ),
+        Err(AnalysisError::WrongExactMethodArgument { .. })
+    ));
+    let unrelated_hierarchy = ClassHierarchy::from_edges(vec![(
+        "example/Other".to_owned(),
+        "example/Base".to_owned(),
+    )])
+    .unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &call_graph,
+            "callBase",
+            "(Lexample/Derived;)Lexample/Base;",
+            false,
+            &pool,
+            owner,
+            &unrelated_hierarchy,
+        ),
+        Err(AnalysisError::WrongExactMethodArgument { .. })
+    ));
+
+    let mut field_sequence = CodeSequence::new();
+    field_sequence
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::GetField(
+            dotty_classfile::bytecode::FieldReference::new(
+                dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(field).unwrap(),
+            ),
+        ))
+        .instruction(Instruction::AReturn);
+    let field_graph = ControlFlowGraph::build(&field_sequence).unwrap();
+    assert!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &field_graph,
+            "readBaseField",
+            "(Lexample/Derived;)Lexample/Base;",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .is_ok()
+    );
+
+    let mut write_sequence = CodeSequence::new();
+    write_sequence
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::ALoad(local(2)))
+        .instruction(Instruction::PutField(
+            dotty_classfile::bytecode::FieldReference::new(
+                dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(field).unwrap(),
+            ),
+        ))
+        .instruction(Instruction::Return);
+    let write_graph = ControlFlowGraph::build(&write_sequence).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &write_graph,
+            "writeBaseField",
+            "(Lexample/Derived;Lexample/Derived;)V",
+            false,
+            &pool,
+            owner,
+        ),
+        Err(AnalysisError::WrongExactFieldValue { .. })
+    ));
+    assert!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &write_graph,
+            "writeBaseField",
+            "(Lexample/Derived;Lexample/Derived;)V",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .is_ok()
+    );
+
+    let mut return_sequence = CodeSequence::new();
+    return_sequence
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::AReturn);
+    let return_graph = ControlFlowGraph::build(&return_sequence).unwrap();
+    assert!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &return_graph,
+            "returnBase",
+            "(Lexample/Derived;)Lexample/Base;",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .is_ok()
+    );
+
+    let mut loop_sequence = CodeSequence::new();
+    let head = loop_sequence.new_label().unwrap();
+    let done = loop_sequence.new_label().unwrap();
+    loop_sequence
+        .bind(head.clone())
+        .unwrap()
+        .instruction(Instruction::ALoad(local(2)))
+        .instruction(Instruction::ALoad(local(2)))
+        .instruction(Instruction::InvokeVirtual(
+            dotty_classfile::bytecode::VirtualMethodReference::new(
+                dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(call).unwrap(),
+            ),
+        ))
+        .instruction(Instruction::Pop)
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(done.clone()))
+        .instruction(Instruction::IConst(SmallIntConstant::Zero))
+        .instruction(Instruction::IStore(local(1)))
+        .branch(BranchInstruction::Goto(head))
+        .bind(done)
+        .unwrap()
+        .instruction(Instruction::Return);
+    let loop_graph = ControlFlowGraph::build(&loop_sequence).unwrap();
+    assert!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &loop_graph,
+            "callBaseInLoop",
+            "(ILexample/Derived;)V",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn object_root_assignability_requires_an_explicit_proof() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let mut sequence = CodeSequence::new();
+    sequence
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::AReturn);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "objectResult",
+            "(Lexample/Derived;)Ljava/lang/Object;",
+            false,
+            &pool,
+            owner,
+        ),
+        Err(AnalysisError::WrongExactReferenceReturn { .. })
+    ));
+    let hierarchy = ClassHierarchy::from_edges(vec![(
+        "example/Derived".to_owned(),
+        "java/lang/Object".to_owned(),
+    )])
+    .unwrap();
+    assert!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "objectResult",
+            "(Lexample/Derived;)Ljava/lang/Object;",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn hierarchy_graph_rejects_duplicates_conflicts_cycles_and_excessive_depth() {
+    assert!(matches!(
+        ClassHierarchy::from_edges(vec![("example.Bad".to_owned(), "example/Base".to_owned())]),
+        Err(ClassHierarchyError::InvalidClassName(_))
+    ));
+    let edge = ("example/Derived".to_owned(), "example/Base".to_owned());
+    assert!(matches!(
+        ClassHierarchy::from_edges(vec![edge.clone(), edge]),
+        Err(ClassHierarchyError::DuplicateEdge { .. })
+    ));
+    assert!(matches!(
+        ClassHierarchy::from_edges(vec![
+            ("example/Derived".to_owned(), "example/Base".to_owned()),
+            ("example/Derived".to_owned(), "example/Other".to_owned()),
+        ]),
+        Err(ClassHierarchyError::ConflictingSuperclass { .. })
+    ));
+    assert!(matches!(
+        ClassHierarchy::from_edges(vec![
+            ("example/Derived".to_owned(), "example/Base".to_owned()),
+            ("example/Base".to_owned(), "example/Derived".to_owned()),
+        ]),
+        Err(ClassHierarchyError::Cycle { .. })
+    ));
+    let chain = (0..9)
+        .map(|index| {
+            (
+                format!("example/C{index}"),
+                format!("example/C{}", index + 1),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        ClassHierarchy::from_edges(chain),
+        Err(ClassHierarchyError::DepthExceeded { .. })
+    ));
+}
+
+#[test]
+fn superclass_proofs_do_not_create_stack_join_types() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges(vec![
+        ("example/Derived".to_owned(), "example/Base".to_owned()),
+        ("example/Other".to_owned(), "example/Base".to_owned()),
+    ])
+    .unwrap();
+    let mut sequence = CodeSequence::new();
+    let other = sequence.new_label().unwrap();
+    let done = sequence.new_label().unwrap();
+    sequence
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(other.clone()))
+        .instruction(Instruction::ALoad(local(2)))
+        .branch(BranchInstruction::Goto(done.clone()))
+        .bind(other)
+        .unwrap()
+        .instruction(Instruction::ALoad(local(3)))
+        .bind(done)
+        .unwrap()
+        .instruction(Instruction::AReturn);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "noInferredJoin",
+            "(ILexample/Derived;Lexample/Other;)Lexample/Base;",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        ),
+        Err(AnalysisError::IncompatibleStackValue { .. })
+    ));
 }
 
 fn assert_local_object(state: &FlowLocalState, expected: &str) {

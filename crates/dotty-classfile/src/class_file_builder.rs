@@ -328,6 +328,7 @@ pub struct ClassFileBuilder {
     version: ClassFileVersion,
     access_flags: ClassAccessFlags,
     super_class: Option<String>,
+    verification_hierarchy: crate::bytecode::analysis::ClassHierarchy,
     interfaces: Vec<String>,
     fields: Vec<OwnedField>,
     methods: Vec<OwnedMethod>,
@@ -355,6 +356,7 @@ impl ClassFileBuilder {
             version,
             access_flags: ClassAccessFlags(ACC_SUPER),
             super_class,
+            verification_hierarchy: crate::bytecode::analysis::ClassHierarchy::default(),
             interfaces: Vec::new(),
             fields: Vec::new(),
             methods: Vec::new(),
@@ -391,6 +393,16 @@ impl ClassFileBuilder {
         }
         self.super_class = internal_name.map(str::to_owned);
         Ok(self)
+    }
+
+    /// Sets the explicit JVM superclass proof graph used by bounded bytecode
+    /// reference verification and stack-map frame generation.
+    pub fn set_verification_hierarchy(
+        &mut self,
+        hierarchy: crate::bytecode::analysis::ClassHierarchy,
+    ) -> &mut Self {
+        self.verification_hierarchy = hierarchy;
+        self
     }
 
     /// Adds an implemented interface in declaration order.
@@ -630,6 +642,14 @@ impl ClassFileBuilder {
             self.super_class.as_deref(),
             self.access_flags.is_interface(),
         )?;
+        let verification_hierarchy = if let Some(super_class) = self.super_class.as_deref() {
+            self.verification_hierarchy
+                .with_edge(&self.class_name, super_class)
+                .map_err(crate::bytecode::analysis::AnalysisError::InvalidClassHierarchy)
+                .map_err(ClassFileBuildError::Analysis)?
+        } else {
+            self.verification_hierarchy.clone()
+        };
         if self
             .methods
             .iter()
@@ -741,13 +761,14 @@ impl ClassFileBuilder {
                 ControlFlowGraph::build(sequence).map_err(ClassFileBuildError::ControlFlow)?;
             CfgCodeAnalyzer::validate_all_instructions_with_references(&graph)
                 .map_err(ClassFileBuildError::Analysis)?;
-            let flow = CfgCodeAnalyzer::analyze_validated_with_current_class(
+            let flow = CfgCodeAnalyzer::analyze_validated_with_current_class_and_hierarchy(
                 &graph,
                 &method.name,
                 &method.descriptor,
                 method.access_flags.is_static(),
                 &preview_pool,
                 Some(this_class),
+                &verification_hierarchy,
             )
             .map_err(ClassFileBuildError::Analysis)?;
             frame_class_identities.extend(
@@ -836,21 +857,23 @@ impl ClassFileBuilder {
                         let super_class = super_class
                             .ok_or(AnalysisError::InvalidConstructorSuperCall { instruction: 1 })
                             .map_err(ClassFileBuildError::Analysis)?;
-                        crate::bytecode::analyze_validated_constructor_body(
+                        crate::bytecode::analyze_validated_constructor_body_with_hierarchy(
                             &method.descriptor,
                             &instructions,
                             &constant_pool,
                             this_class,
                             super_class,
+                            &verification_hierarchy,
                         )
                     } else if requires_exact_references {
-                        crate::bytecode::analyze_validated_with_current_class(
+                        crate::bytecode::analyze_validated_with_current_class_and_hierarchy(
                             &method.name,
                             &method.descriptor,
                             method.access_flags.is_static(),
                             &instructions,
                             &constant_pool,
                             Some(this_class),
+                            &verification_hierarchy,
                         )
                     } else {
                         crate::bytecode::analyze_validated(
@@ -886,13 +909,14 @@ impl ClassFileBuilder {
                     }
                     CfgCodeAnalyzer::validate_all_instructions_with_references(&graph)
                         .map_err(ClassFileBuildError::Analysis)?;
-                    let flow = CfgCodeAnalyzer::analyze_validated_with_current_class(
+                    let flow = CfgCodeAnalyzer::analyze_validated_with_current_class_and_hierarchy(
                         &graph,
                         &method.name,
                         &method.descriptor,
                         method.access_flags.is_static(),
                         &constant_pool,
                         Some(this_class),
+                        &verification_hierarchy,
                     )
                     .map_err(ClassFileBuildError::Analysis)?;
                     for (block, entry) in graph.blocks().iter().zip(flow.block_entries()) {
