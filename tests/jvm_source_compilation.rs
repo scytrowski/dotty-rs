@@ -7988,6 +7988,16 @@ fn source_overrides_keep_declared_methods_separate_from_effective_dispatch() {
 }
 
 #[test]
+fn source_override_accepts_equivalent_qualified_and_unqualified_reference_types() {
+    let output = TestOutputDirectory::new("inherited-qualified-reference-override");
+    let source = "package example\nclass Counter {}\nclass Base { def value(c: example.Counter): example.Counter = c }\nclass Derived extends Base { override def value(c: Counter): Counter = c }\n";
+
+    compile_source_classes(source, "QualifiedOverride.scala", output.path())
+        .expect("equivalent canonical class references form an exact override");
+    assert_eq!(output.class_files().len(), 3);
+}
+
+#[test]
 fn same_name_different_descriptor_remains_an_overload_not_an_override() {
     let output = TestOutputDirectory::new("inherited-overload-dispatch");
     let source = "class Base { def value(): Int = 10 }\nclass Derived extends Base { def value(x: Int): Int = x }\n";
@@ -8049,6 +8059,11 @@ fn source_override_contract_rejects_missing_targets_and_signature_mismatches() {
         (
             "wrong-result-descriptor",
             "class Base { def value(): Int = 1 }\nclass Derived extends Base { override def value(): Boolean = true }\n",
+            JvmOverrideIssue::SignatureMismatch,
+        ),
+        (
+            "wrong-result-without-override",
+            "class Base { def value(): Int = 1 }\nclass Derived extends Base { def value(): Boolean = true }\n",
             JvmOverrideIssue::SignatureMismatch,
         ),
         (

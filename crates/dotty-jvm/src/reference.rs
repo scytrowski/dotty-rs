@@ -77,6 +77,25 @@ pub(super) fn project_method_signature_type(
     definitions: &Definitions,
     class_identities: &[JvmClassIdentity],
 ) -> Result<JvmType, JvmCodegenError> {
+    let class = method_signature_class_target(store, ty, definitions)?;
+    project_class(
+        None,
+        store,
+        ty,
+        class,
+        definitions,
+        None,
+        Some(class_identities),
+    )
+}
+
+/// Returns the target of a supported method-signature class reference after
+/// checking the same canonical prefix rules used by JVM type projection.
+pub(super) fn method_signature_class_target(
+    store: &SemanticStore,
+    ty: TypeId,
+    definitions: &Definitions,
+) -> Result<dotty_core::SymbolId, JvmCodegenError> {
     let Some(Type::TypeRef { prefix, target }) = store.types.try_get(ty) else {
         return Err(JvmCodegenError::UnsupportedJvmReferenceType {
             ty,
@@ -113,15 +132,7 @@ pub(super) fn project_method_signature_type(
             kind: UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
         });
     }
-    project_class(
-        None,
-        store,
-        ty,
-        *class,
-        definitions,
-        None,
-        Some(class_identities),
-    )
+    Ok(*class)
 }
 
 fn project_type_with_metadata(

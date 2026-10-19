@@ -934,12 +934,13 @@ pub(super) fn unit_metadata(
         metadata.push(class);
     }
     validate_final_parent_method_collisions(unit, &metadata)?;
-    validate_and_build_method_dispatch(unit, &mut metadata)?;
+    validate_and_build_method_dispatch(unit, definitions, &mut metadata)?;
     Ok(metadata)
 }
 
 fn validate_and_build_method_dispatch(
     unit: &crate::JvmCompilationUnit<'_>,
+    definitions: &Definitions,
     metadata: &mut [JvmClassMetadata],
 ) -> Result<(), JvmCodegenError> {
     for class in metadata.iter() {
@@ -978,6 +979,23 @@ fn validate_and_build_method_dispatch(
                 parent_method.name() == child_method.name()
                     && parent_method.descriptor().as_str() == child_method.descriptor().as_str()
             });
+            let mut same_parameter_parent = None;
+            if !has_override_modifier {
+                for parent_symbol in &same_name_declarations {
+                    if unit.store.symbols.get(*parent_symbol).visibility != Visibility::Public {
+                        continue;
+                    }
+                    if same_semantic_method_parameters(
+                        unit.store,
+                        child_method.symbol(),
+                        *parent_symbol,
+                        definitions,
+                    )? {
+                        same_parameter_parent = Some(*parent_symbol);
+                        break;
+                    }
+                }
+            }
 
             if has_override_modifier {
                 if same_name_declarations.is_empty() {
@@ -1032,6 +1050,7 @@ fn validate_and_build_method_dispatch(
                     unit.store,
                     child_method.symbol(),
                     parent_method.symbol(),
+                    definitions,
                 )? {
                     return Err(invalid_override(
                         child.identity().symbol(),
@@ -1054,6 +1073,35 @@ fn validate_and_build_method_dispatch(
                     } else {
                         JvmOverrideIssue::NarrowerVisibility
                     },
+                ));
+            } else if let Some(parent_symbol) = same_parameter_parent {
+                let parent_method = parent
+                    .methods()
+                    .iter()
+                    .find(|planned| planned.symbol() == parent_symbol);
+                let issue = match parent_method {
+                    None => JvmOverrideIssue::ParentMethodUnplanned,
+                    Some(parent_method)
+                        if !same_semantic_method_type(
+                            unit.store,
+                            child_method.symbol(),
+                            parent_method.symbol(),
+                            definitions,
+                        )? =>
+                    {
+                        JvmOverrideIssue::SignatureMismatch
+                    }
+                    Some(_) if child_symbol.visibility != Visibility::Public => {
+                        JvmOverrideIssue::NarrowerVisibility
+                    }
+                    Some(_) => JvmOverrideIssue::OverrideModifierRequired,
+                };
+                return Err(invalid_override(
+                    child.identity().symbol(),
+                    child_method.symbol(),
+                    parent.identity().symbol(),
+                    Some(parent_symbol),
+                    issue,
                 ));
             }
         }
@@ -1133,6 +1181,7 @@ fn same_semantic_method_type(
     store: &SemanticStore,
     left: dotty_core::SymbolId,
     right: dotty_core::SymbolId,
+    definitions: &Definitions,
 ) -> Result<bool, JvmCodegenError> {
     let left_type = method_info_type(store, left)?;
     let right_type = method_info_type(store, right)?;
@@ -1142,14 +1191,66 @@ fn same_semantic_method_type(
     ) else {
         return Ok(false);
     };
-    Ok(left.kind == right.kind
-        && left.params.len() == right.params.len()
-        && left.params.iter().zip(&right.params).all(|(left, right)| {
-            left.erased == right.erased
-                && left.varargs == right.varargs
-                && store.types.try_get(left.ty) == store.types.try_get(right.ty)
-        })
-        && store.types.try_get(left.result) == store.types.try_get(right.result))
+    if left.kind != right.kind || left.params.len() != right.params.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.params.iter().zip(&right.params) {
+        if left.erased != right.erased
+            || left.varargs != right.varargs
+            || !same_semantic_signature_type(store, left.ty, right.ty, definitions)?
+        {
+            return Ok(false);
+        }
+    }
+    same_semantic_signature_type(store, left.result, right.result, definitions)
+}
+
+fn same_semantic_method_parameters(
+    store: &SemanticStore,
+    left: dotty_core::SymbolId,
+    right: dotty_core::SymbolId,
+    definitions: &Definitions,
+) -> Result<bool, JvmCodegenError> {
+    let left_type = method_info_type(store, left)?;
+    let right_type = method_info_type(store, right)?;
+    let (Some(Type::Method(left)), Some(Type::Method(right))) = (
+        store.types.try_get(left_type),
+        store.types.try_get(right_type),
+    ) else {
+        return Ok(false);
+    };
+    if left.kind != right.kind || left.params.len() != right.params.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.params.iter().zip(&right.params) {
+        if left.erased != right.erased
+            || left.varargs != right.varargs
+            || !same_semantic_signature_type(store, left.ty, right.ty, definitions)?
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn same_semantic_signature_type(
+    store: &SemanticStore,
+    left: dotty_core::TypeId,
+    right: dotty_core::TypeId,
+    definitions: &Definitions,
+) -> Result<bool, JvmCodegenError> {
+    if store.types.try_get(left) == store.types.try_get(right) {
+        return Ok(true);
+    }
+    let (Some(Type::TypeRef { .. }), Some(Type::TypeRef { .. })) =
+        (store.types.try_get(left), store.types.try_get(right))
+    else {
+        return Ok(false);
+    };
+    Ok(
+        crate::reference::method_signature_class_target(store, left, definitions)?
+            == crate::reference::method_signature_class_target(store, right, definitions)?,
+    )
 }
 
 fn method_info_type(
