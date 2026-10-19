@@ -357,6 +357,44 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
     generated.mkdir()
     generate(toolchain, binary, generated, check=True)
     results = []
+    # Independently compile and execute the original Scala source. This is a
+    # source-level reference: it does not consume the checked-in TASTy fixture.
+    source_classes = directory / "source-reference"
+    source_classes.mkdir()
+    toolchain.compiler(["-d", source_classes, FIXTURES / "Decisions.scala"])
+    source_harness = directory / "DecisionsSourceRuntime.java"
+    source_harness.write_text("""public final class DecisionsSourceRuntime {
+  public static void main(String[] args) {
+    example.Decisions decisions = new example.Decisions();
+    decisions.unit();
+    boolean enabled = decisions.enabled();
+    boolean disabled = decisions.disabled();
+    int chooseTrue = decisions.choose(true, 17, 42);
+    int chooseFalse = decisions.choose(false, 17, 42);
+    int nestedTrueTrue = decisions.nested(true, true);
+    int nestedTrueFalse = decisions.nested(true, false);
+    int nestedFalse = decisions.nested(false, true);
+    int storedTrue = decisions.stored(true, 17);
+    int storedFalse = decisions.stored(false, 17);
+    if (!enabled || disabled || chooseTrue != 17 || chooseFalse != 42 ||
+        nestedTrueTrue != 1 || nestedTrueFalse != 2 || nestedFalse != 3 ||
+        storedTrue != 17 || storedFalse != 0) {
+      throw new AssertionError("unexpected Scala source results");
+    }
+    System.out.println("Decisions source = " + enabled + ", " + disabled + ", " +
+        chooseTrue + ", " + chooseFalse + ", " + nestedTrueTrue + ", " +
+        nestedTrueFalse + ", " + nestedFalse + ", " + storedTrue + ", " + storedFalse);
+  }
+}
+""")
+    execute([toolchain.javac, "-classpath", source_classes, "-d", source_classes, source_harness])
+    source_run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath", source_classes,
+                          "DecisionsSourceRuntime"])
+    expected_source_output = "Decisions source = true, false, 17, 42, 1, 2, 3, 17, 0"
+    if expected_source_output not in source_run:
+        raise RuntimeError(f"pinned Scala source reference returned unexpected values: {source_run}")
+    results.append({"source_reference": "example.Decisions", "scala_source_compile": True,
+                    "source_runtime_output": expected_source_output})
     for candidate in sorted((FIXTURES / "tasty").rglob("*.tasty")):
         results.append(verify_candidate(toolchain, binary, candidate,
                                         directory / f"verify-{candidate.stem}"))

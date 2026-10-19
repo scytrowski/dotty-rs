@@ -34,6 +34,8 @@ fn independent_fixtures_match_normalized_snapshots() {
         "example/Operations",
         "example/Multi",
         "example/ParameterDecl",
+        "example/Blocks",
+        "example/Decisions",
     ] {
         let expected: Value = serde_json::from_slice(
             &fs::read(
@@ -47,6 +49,82 @@ fn independent_fixtures_match_normalized_snapshots() {
         .unwrap();
         assert_eq!(inspect(&fixture(name), false).unwrap(), expected, "{name}");
     }
+}
+
+#[test]
+fn scala_control_flow_fixtures_pin_constants_if_order_blocks_and_local_identity() {
+    let decisions = inspect(&fixture("example/Decisions"), false).unwrap();
+    let unit = nodes(&decisions)
+        .iter()
+        .find(|n| n["tag"] == "UNITconst")
+        .unwrap();
+    assert_eq!(unit["value"], "unit");
+    let true_value = nodes(&decisions)
+        .iter()
+        .find(|n| n["tag"] == "TRUEconst")
+        .unwrap();
+    let false_value = nodes(&decisions)
+        .iter()
+        .find(|n| n["tag"] == "FALSEconst")
+        .unwrap();
+    assert_eq!(true_value["value"], true);
+    assert_eq!(false_value["value"], false);
+
+    let nested: Vec<_> = nodes(&decisions)
+        .iter()
+        .filter(|n| n["tag"] == "IF" && n["owner"] == named(&decisions, "nested")["id"])
+        .collect();
+    assert_eq!(nested.len(), 2);
+    let outer = nested
+        .iter()
+        .find(|n| n["parent"] == named(&decisions, "nested")["id"])
+        .unwrap();
+    let inner = nested.iter().find(|n| n["parent"] == outer["id"]).unwrap();
+    assert_eq!(outer["then"], inner["id"]);
+    assert_eq!(
+        outer["children"],
+        json!([outer["condition"], outer["then"], outer["else"]])
+    );
+
+    let blocks = inspect(&fixture("example/Blocks"), false).unwrap();
+    let block = nodes(&blocks).iter().find(|n| n["tag"] == "BLOCK").unwrap();
+    let discarded_if = nodes(&blocks).iter().find(|n| n["tag"] == "IF").unwrap();
+    assert_eq!(block["stats"], json!([discarded_if["id"]]));
+    assert_eq!(
+        block["children"],
+        json!([block["expression"], discarded_if["id"]])
+    );
+
+    let stored_block = nodes(&decisions)
+        .iter()
+        .find(|n| n["tag"] == "BLOCK" && n["owner"] == named(&decisions, "stored")["id"])
+        .unwrap();
+    let stored_if = nodes(&decisions)
+        .iter()
+        .find(|n| n["tag"] == "IF" && n["parent"] == stored_block["expression"])
+        .unwrap();
+    let shared_expression = nodes(&decisions)
+        .iter()
+        .find(|n| n["id"] == stored_block["expression"])
+        .unwrap();
+    let saved = nodes(&decisions)
+        .iter()
+        .find(|n| n["tag"] == "VALDEF" && n["name"] == json!({"utf8":"saved"}))
+        .unwrap();
+    assert_eq!(shared_expression["tag"], "TYPED");
+    assert!(
+        shared_expression["children"]
+            .as_array()
+            .unwrap()
+            .contains(&stored_if["id"])
+    );
+    assert_eq!(stored_block["stats"], json!([saved["id"]]));
+    let saved_reference = nodes(&decisions)
+        .iter()
+        .find(|n| n["tag"] == "TERMREFdirect" && n["reference"]["target"] == saved["id"])
+        .unwrap();
+    assert_eq!(saved_reference["id"], stored_if["then"]);
+    assert_eq!(saved_reference["reference"]["direction"], "forward");
 }
 
 #[test]
