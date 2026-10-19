@@ -129,7 +129,8 @@ impl ValidatedPicklePlan<'_, '_> {
         complete: Option<usize>,
     ) -> Result<Assembly, PickleError> {
         let p = self.plan();
-        let mut context = EncodingContext::for_plan(self, limits)?;
+        let mut context =
+            EncodingContext::for_plan_with_local_values(self, limits, complete.is_some())?;
         let package_path = context.package_reference(self.package())?;
         let class_record = symbol(self, p.class)?;
         let class_info = match class_record.info {

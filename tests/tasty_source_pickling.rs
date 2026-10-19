@@ -182,6 +182,7 @@ fn compile_source() -> Product {
             parameter_clauses: clauses(method_def),
             body: Some(typed_body),
         }],
+        local_values: &[],
     };
     let checked = plan.validate().unwrap();
     let output = checked.pickle().unwrap();
@@ -327,6 +328,7 @@ fn compile_operations() -> OperationsProduct {
             parameter_clauses: clauses(constructor_def),
         },
         methods: &methods,
+        local_values: &[],
     };
     let output = plan.validate().unwrap().pickle().unwrap();
     for method in &methods {
@@ -806,6 +808,7 @@ fn generated_parameter_reference_unpickles_to_the_exact_owned_formal() {
             parameter_clauses: clauses(constructor_def),
         },
         methods: &methods,
+        local_values: &[],
     };
     let output = plan.validate().unwrap().pickle().unwrap();
     let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();

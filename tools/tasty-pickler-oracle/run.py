@@ -297,6 +297,22 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Blocks = 42, 42, 7, 3", 3,
             ),
+            "example/Locals.tasty": (
+                "example.Locals", r"public int copy\(int\)", "LocalsRuntime.java",
+                """public final class LocalsRuntime {
+  public static void main(String[] args) {
+    example.Locals locals = new example.Locals();
+    int copy = locals.copy(17);
+    int literal = locals.literal();
+    int call = locals.call(23);
+    int multiple = locals.multiple(31);
+    if (copy != 17 || literal != 42 || call != 23 || multiple != 7)
+      throw new AssertionError("unexpected Locals results");
+    System.out.println("Locals = " + copy + ", " + literal + ", " + call + ", " + multiple);
+  }
+}
+""", "Locals = 17, 42, 23, 7", 42,
+            ),
             "example/References.tasty": (
                 "example.References", r"public int first\(\)", "ReferencesRuntime.java",
                 """public final class ReferencesRuntime {
@@ -377,6 +393,14 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Blocks class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Locals.tasty":
+                signatures = (
+                    r"public int copy\(int\)", r"public int literal\(\)",
+                    r"public int call\(int\)", r"public int multiple\(int\)",
+                    r"public int identity\(int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Locals class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":

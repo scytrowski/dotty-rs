@@ -63,6 +63,7 @@ pub struct Fixture {
     pub body: TreeId<Typed>,
     pub constructor: DefaultConstructorPlan,
     pub methods: Vec<MethodPicklePlan>,
+    pub local_values: Vec<LocalValueBinding>,
 }
 
 impl Fixture {
@@ -252,6 +253,7 @@ impl Fixture {
                 parameter_clauses: vec![],
                 body: Some(body),
             }],
+            local_values: vec![],
         }
     }
 
@@ -272,6 +274,7 @@ impl Fixture {
             class_tree: self.class_tree,
             constructor: self.constructor.clone(),
             methods: &self.methods,
+            local_values: &self.local_values,
         }
     }
 

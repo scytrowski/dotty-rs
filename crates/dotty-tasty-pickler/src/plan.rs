@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 mod expression_validation;
 mod source_binding;
@@ -64,6 +64,18 @@ pub struct MethodPicklePlan {
     pub body: Option<TreeId<Typed>>,
 }
 
+/// Exact source/typed/symbol/scope evidence for one method-local immutable value.
+///
+/// The source integration obtains this tuple from its `SourceTyper` session;
+/// the pickler never reconstructs local identity from names or allocation order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalValueBinding {
+    pub source_tree: TreeId<Untyped>,
+    pub symbol: SymbolId,
+    pub typed_declaration: TreeId<Typed>,
+    pub scope: dotty_core::ScopeId,
+}
+
 /// Borrowed, unvalidated input. No semantic records or typed trees are cloned.
 /// The explicit source root prevents silently omitting extra top-level forms.
 pub struct PicklePlan<'a> {
@@ -79,6 +91,8 @@ pub struct PicklePlan<'a> {
     pub class_tree: TreeId<Untyped>,
     pub constructor: DefaultConstructorPlan,
     pub methods: &'a [MethodPicklePlan],
+    /// Canonical bindings for supported local `val` declarations across methods.
+    pub local_values: &'a [LocalValueBinding],
 }
 
 /// Budgets checked before traversing caller-controlled collections or chains.
@@ -141,6 +155,11 @@ impl<'a> PicklePlan<'a> {
             plan: self,
             limits,
             remaining: limits.max_items,
+            local_bindings: HashMap::new(),
+            registered_local_symbols: HashSet::new(),
+            seen_local_bindings: HashSet::new(),
+            seen_local_symbols: HashSet::new(),
+            visible_locals: HashSet::new(),
         };
         let package = validator.validate()?;
         Ok(ValidatedPicklePlan {
@@ -154,6 +173,11 @@ struct Validator<'p, 'a> {
     plan: &'p PicklePlan<'a>,
     limits: ValidationLimits,
     remaining: usize,
+    local_bindings: HashMap<TreeId<Untyped>, LocalValueBinding>,
+    registered_local_symbols: HashSet<SymbolId>,
+    seen_local_bindings: HashSet<TreeId<Untyped>>,
+    seen_local_symbols: HashSet<SymbolId>,
+    visible_locals: HashSet<SymbolId>,
 }
 
 impl<'a> Validator<'_, 'a> {
@@ -494,6 +518,21 @@ impl<'a> Validator<'_, 'a> {
     fn validate(&mut self) -> Result<SymbolId, PickleError> {
         let p = self.plan;
         self.charge(1)?;
+        self.charge(p.local_values.len())?;
+        let mut local_symbols = HashSet::new();
+        for binding in p.local_values {
+            if self
+                .local_bindings
+                .insert(binding.source_tree, *binding)
+                .is_some()
+                || !local_symbols.insert(binding.symbol)
+            {
+                return Err(PickleError::DuplicateDeclaration {
+                    symbol: binding.symbol,
+                });
+            }
+            self.registered_local_symbols.insert(binding.symbol);
+        }
         if p.source.name.len() > self.limits.max_name_bytes {
             return Err(PickleError::LimitExceeded {
                 kind: LimitKind::NameBytes,
@@ -677,6 +716,16 @@ impl<'a> Validator<'_, 'a> {
         for method in p.methods {
             self.method(method)?;
         }
+        if self.seen_local_bindings.len() != p.local_values.len() {
+            let binding = p
+                .local_values
+                .iter()
+                .find(|binding| !self.seen_local_bindings.contains(&binding.source_tree))
+                .expect("binding count mismatch has an unseen binding");
+            return Err(PickleError::SourceDefinition {
+                symbol: binding.symbol,
+            });
+        }
         if p.methods.is_empty() {
             return Err(self.unsupported(UnsupportedFeature::MethodCount, Some(p.class)));
         }
@@ -780,6 +829,7 @@ impl<'a> Validator<'_, 'a> {
     }
 
     fn method(&mut self, method: &MethodPicklePlan) -> Result<(), PickleError> {
+        self.visible_locals.clear();
         self.charge(1)?;
         let p = self.plan;
         let TreeKind::DefDef(definition) = &self.source_tree(method.source_tree)?.kind else {

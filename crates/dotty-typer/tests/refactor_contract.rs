@@ -285,6 +285,12 @@ fn typed_local_binding_preserves_the_source_declaration_and_symbol_identity() {
         typer.store().symbols.get(binding.symbol()).owner,
         Some(method)
     );
+    let scope = typer.store().scopes.get(binding.scope());
+    assert_eq!(scope.owner, Some(method));
+    assert_eq!(
+        scope.lookup_all(&typer.store().symbols.get(binding.symbol()).name),
+        [binding.symbol()]
+    );
 }
 
 #[test]

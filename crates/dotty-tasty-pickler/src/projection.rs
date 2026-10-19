@@ -69,6 +69,7 @@ pub struct EncodingContext<'a> {
     name_refs: HashMap<NameKey, NameRef>,
     wire: AstBuilder,
     declarations: HashMap<SymbolId, AstLabel>,
+    local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
     types: HashMap<TypeId, AstLabel>,
     active: HashSet<TypeId>,
@@ -110,6 +111,7 @@ impl<'a> EncodingContext<'a> {
             name_refs: HashMap::new(),
             wire: AstBuilder::new(limits.wire),
             declarations: HashMap::new(),
+            local_values_by_typed_declaration: HashMap::new(),
             external: HashMap::new(),
             types: HashMap::new(),
             active: HashSet::new(),
@@ -135,6 +137,14 @@ impl<'a> EncodingContext<'a> {
         plan: &ValidatedPicklePlan<'_, 'a>,
         limits: ProjectionLimits,
     ) -> Result<Self, PickleError> {
+        Self::for_plan_with_local_values(plan, limits, true)
+    }
+
+    pub(crate) fn for_plan_with_local_values(
+        plan: &ValidatedPicklePlan<'_, 'a>,
+        limits: ProjectionLimits,
+        include_local_values: bool,
+    ) -> Result<Self, PickleError> {
         let p = plan.plan();
         let mut context = Self::new(p.store, p.definitions, p.source_index, p.source.id, limits)?;
         context.reserve_declaration(p.class)?;
@@ -145,7 +155,68 @@ impl<'a> EncodingContext<'a> {
                 context.reserve_declaration(*parameter)?;
             }
         }
+        if include_local_values {
+            for local in p.local_values {
+                let owner = context
+                    .symbol(local.symbol)?
+                    .owner
+                    .ok_or(reference(local.symbol, ReferenceError::Owner))?;
+                context.reserve_local_value(local.symbol, owner, local.scope)?;
+                if context
+                    .local_values_by_typed_declaration
+                    .insert(local.typed_declaration, local.symbol)
+                    .is_some()
+                {
+                    return Err(PickleError::DuplicateDeclaration {
+                        symbol: local.symbol,
+                    });
+                }
+            }
+        }
         Ok(context)
+    }
+
+    fn reserve_local_value(
+        &mut self,
+        symbol: SymbolId,
+        method: SymbolId,
+        scope_id: ScopeId,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            context.charge(1)?;
+            let record = context.symbol(symbol)?;
+            if record.kind != SymbolKind::Local
+                || record.origin != SymbolOrigin::Source(context.source)
+                || record.owner != Some(method)
+                || record.visibility != Visibility::Public
+                || !record.flags.is_empty()
+                || !record.annotations.is_empty()
+            {
+                return Err(reference(symbol, ReferenceError::Metadata));
+            }
+            context.namespace(symbol, false)?;
+            context.text(record.name.text())?;
+            context.complete(symbol)?;
+            if !context.store.scopes.contains(scope_id) {
+                return Err(PickleError::InvalidScope { scope: scope_id });
+            }
+            let scope = context.store.scopes.get(scope_id);
+            if scope.owner != Some(method) || scope.lookup_all(&record.name) != [symbol] {
+                return Err(reference(symbol, ReferenceError::Owner));
+            }
+            if context.declarations.contains_key(&symbol) {
+                return Err(PickleError::DuplicateDeclaration { symbol });
+            }
+            let label = context.wire.reserve().map_err(construction)?;
+            context.declarations.insert(symbol, label);
+            Ok(label)
+        })
+    }
+
+    pub(crate) fn local_value_symbol(&self, typed_declaration: TreeId<Typed>) -> Option<SymbolId> {
+        self.local_values_by_typed_declaration
+            .get(&typed_declaration)
+            .copied()
     }
     fn run<T>(
         &mut self,
