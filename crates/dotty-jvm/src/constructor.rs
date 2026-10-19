@@ -273,23 +273,11 @@ impl JvmPrimaryConstructorPlan {
         {
             let parameter = store.symbols.get(*id);
             let signature_type_matches = match (ty, store.types.try_get(signature_param.ty)) {
-                (
-                    crate::JvmType::Int,
-                    Some(dotty_core::Type::TypeRef {
-                        target: dotty_core::TypeRefTarget::Symbol(symbol),
-                        ..
-                    }),
-                ) => {
-                    matches!(store.types.try_get(definitions.int), Some(dotty_core::Type::TypeRef { target: dotty_core::TypeRefTarget::Symbol(int), .. }) if symbol == int)
+                (crate::JvmType::Int, Some(dotty_core::Type::TypeRef { .. })) => {
+                    exact_type_matches(store, signature_param.ty, definitions.int)
                 }
-                (
-                    crate::JvmType::Boolean,
-                    Some(dotty_core::Type::TypeRef {
-                        target: dotty_core::TypeRefTarget::Symbol(symbol),
-                        ..
-                    }),
-                ) => {
-                    matches!(store.types.try_get(definitions.boolean), Some(dotty_core::Type::TypeRef { target: dotty_core::TypeRefTarget::Symbol(boolean), .. }) if symbol == boolean)
+                (crate::JvmType::Boolean, Some(dotty_core::Type::TypeRef { .. })) => {
+                    exact_type_matches(store, signature_param.ty, definitions.boolean)
                 }
                 (
                     crate::JvmType::Reference(class),
@@ -328,6 +316,17 @@ impl JvmPrimaryConstructorPlan {
     }
 }
 
+fn exact_type_matches(
+    store: &SemanticStore,
+    actual: dotty_core::TypeId,
+    expected: dotty_core::TypeId,
+) -> bool {
+    matches!(
+        (store.types.try_get(actual), store.types.try_get(expected)),
+        (Some(actual), Some(expected)) if actual == expected
+    )
+}
+
 impl JvmConstructorMetadata {
     /// Canonical primary constructor symbol.
     pub fn symbol(&self) -> SymbolId {
@@ -355,6 +354,68 @@ impl JvmConstructorMetadata {
 mod tests {
     use super::*;
     use dotty_core::{MethodType, Name, Namespace, Scope, Symbol, SymbolLinks, SymbolOrigin, Type};
+
+    #[test]
+    fn primitive_constructor_type_match_rejects_noncanonical_prefixes() {
+        for is_int in [true, false] {
+            let (mut store, definitions, mut plan) = fixture();
+            let canonical = if is_int {
+                definitions.int
+            } else {
+                definitions.boolean
+            };
+            let malformed_prefix = store.types.alloc(Type::NoType);
+            let Type::TypeRef { target, .. } = store.types.get(canonical) else {
+                panic!("primitive definition is a TypeRef")
+            };
+            let malformed = store.types.alloc(Type::TypeRef {
+                prefix: malformed_prefix,
+                target: *target,
+            });
+            assert!(exact_type_matches(&store, canonical, canonical));
+            assert!(!exact_type_matches(&store, malformed, canonical));
+
+            let parameter_name = store.names.intern("value");
+            let parameter = store.symbols.alloc(Symbol {
+                name: Name::new(parameter_name, Namespace::Term),
+                owner: Some(plan.constructor),
+                kind: SymbolKind::Parameter,
+                flags: dotty_core::SymbolFlags::EMPTY,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(malformed),
+                origin: SymbolOrigin::Source(plan.source),
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            let SymbolInfo::Complete(constructor_type) = store.symbols.get(plan.constructor).info
+            else {
+                panic!("fixture constructor is complete")
+            };
+            let Type::Method(mut signature) = store.types.get(constructor_type).clone() else {
+                panic!("fixture constructor has a method signature")
+            };
+            signature.params.push(dotty_core::MethodParam {
+                name: dotty_core::TermName::new(parameter_name),
+                ty: malformed,
+                erased: false,
+                varargs: false,
+            });
+            let constructor_type = store.types.alloc(Type::Method(signature));
+            store
+                .symbols
+                .set_info(plan.constructor, SymbolInfo::Complete(constructor_type));
+            plan.parameters.push(parameter);
+
+            assert!(matches!(
+                plan.metadata(&store, &definitions, plan.class, None),
+                Err(JvmCodegenError::InvalidPrimaryConstructor {
+                    issue: JvmConstructorIssue::ParameterSignature,
+                    ..
+                })
+            ));
+        }
+    }
 
     fn fixture() -> (SemanticStore, Definitions, JvmPrimaryConstructorPlan) {
         let mut store = SemanticStore::new();
