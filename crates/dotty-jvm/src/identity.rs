@@ -460,7 +460,7 @@ fn field_descriptor(
     }
 }
 
-fn typed_expression_field_value_type(
+pub(super) fn typed_expression_field_value_type(
     store: &SemanticStore,
     definitions: &Definitions,
     symbol: dotty_core::SymbolId,

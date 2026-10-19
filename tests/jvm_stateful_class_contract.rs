@@ -1,4 +1,4 @@
-use dotty_classfile::access_flags::{ACC_PUBLIC, MethodAccessFlags};
+use dotty_classfile::access_flags::{ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, MethodAccessFlags};
 use dotty_classfile::class_file::ClassFileVersion;
 use dotty_classfile::class_file_builder::ClassFileBuilder;
 use dotty_classfile::reader::Reader;
@@ -937,6 +937,269 @@ fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
             }
         },
     );
+}
+
+#[test]
+fn constructor_field_initializer_loads_exact_reference_parameters() {
+    let source_text = "class Counter()\nclass Other()\nclass Holder(left: Counter, enabled: Boolean, right: Other):\n  private val delegate: Counter = left\n  private var current: Counter = left\n  private val active: Boolean = enabled\n  private val peer: Other = right\n";
+    with_source(source_text, |ast, source, index, definitions, typer| {
+        let mut classes = Vec::new();
+        let mut class_symbols = Vec::new();
+        let mut field_symbols = Vec::new();
+        for name in ["Counter", "Other", "Holder"] {
+            let class = symbol_named(ast, index, source, typer, name);
+            class_symbols.push(class);
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, _)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
+                panic!("class source node is a TypeDef")
+            };
+            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
+                panic!("class body is a template")
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("primary constructor source node is a DefDef")
+            };
+            let parameters = constructor_definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters,
+                ast,
+                index,
+            )
+            .unwrap();
+            let mut fields = Vec::new();
+            for tree in &template.body {
+                let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
+                    continue;
+                };
+                let field = index.symbol_at(source, *tree).unwrap();
+                let rhs = definition.rhs.unwrap();
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("field signature is complete")
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed_rhs = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                fields.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(typed_rhs),
+                });
+                field_symbols.push(field);
+            }
+            classes.push(JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields,
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            });
+        }
+
+        let unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes,
+        };
+        let metadata = unit.metadata(definitions).unwrap();
+        let holder_index = metadata
+            .iter()
+            .position(|class| class.identity().symbol() == class_symbols[2])
+            .unwrap();
+        let holder_metadata = &metadata[holder_index];
+        let constructor_parameters = holder_metadata.constructor().unwrap().parameters();
+        assert_eq!(constructor_parameters.len(), 3);
+        assert_eq!(constructor_parameters[0].slot(), 1);
+        assert_eq!(
+            constructor_parameters[0].ty(),
+            dotty_jvm::JvmType::Reference(class_symbols[0])
+        );
+        assert_eq!(constructor_parameters[1].slot(), 2);
+        assert_eq!(constructor_parameters[1].ty(), dotty_jvm::JvmType::Boolean);
+        assert_eq!(constructor_parameters[2].slot(), 3);
+        assert_eq!(
+            constructor_parameters[2].ty(),
+            dotty_jvm::JvmType::Reference(class_symbols[1])
+        );
+
+        let initializer = unit
+            .lower_constructor_field_initializers(class_symbols[2], definitions)
+            .unwrap();
+        assert_eq!(
+            initializer
+                .fields()
+                .iter()
+                .map(|field| field.field())
+                .collect::<Vec<_>>(),
+            field_symbols
+        );
+        for (field_index, (parameter_index, expected_type)) in [
+            (0, dotty_jvm::JvmType::Reference(class_symbols[0])),
+            (0, dotty_jvm::JvmType::Reference(class_symbols[0])),
+            (1, dotty_jvm::JvmType::Boolean),
+            (2, dotty_jvm::JvmType::Reference(class_symbols[1])),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let instructions = initializer.fields()[field_index].instructions();
+            assert!(matches!(
+                instructions.first(),
+                Some(JvmConstructorInitializerInstruction::LoadThis)
+            ));
+            assert!(matches!(
+                instructions.get(1),
+                Some(JvmConstructorInitializerInstruction::LoadParameter { symbol, slot, value_type })
+                    if *symbol == constructor_parameters[parameter_index].symbol()
+                        && *slot == constructor_parameters[parameter_index].slot()
+                        && *value_type == expected_type
+            ));
+            assert!(
+                matches!(instructions.last(), Some(JvmConstructorInitializerInstruction::PutField { field, .. }) if *field == field_symbols[field_index])
+            );
+        }
+
+        let generated = unit
+            .classes
+            .iter()
+            .map(|plan| emit_class(&unit, plan.class, definitions).unwrap())
+            .collect::<Vec<_>>();
+        let holder_bytes = generated
+            .iter()
+            .find(|class| class.internal_name() == "Holder")
+            .unwrap()
+            .bytes();
+        let mut reader = Reader::new(holder_bytes);
+        let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+        class_file.validate_references().unwrap();
+        let constructor = &class_file.methods[0];
+        assert_eq!(
+            class_file
+                .constant_pool
+                .utf8(constructor.descriptor_index)
+                .unwrap(),
+            "(LCounter;ZLOther;)V"
+        );
+        assert_eq!(class_file.fields.len(), 4);
+        assert_eq!(
+            class_file
+                .fields
+                .iter()
+                .map(|field| class_file
+                    .constant_pool
+                    .utf8(field.descriptor_index)
+                    .unwrap())
+                .collect::<Vec<_>>(),
+            ["LCounter;", "LCounter;", "Z", "LOther;"]
+        );
+        assert!(
+            class_file.fields[0]
+                .access_flags
+                .contains(ACC_PRIVATE | ACC_FINAL)
+        );
+        assert!(class_file.fields[1].access_flags.contains(ACC_PRIVATE));
+        assert!(!class_file.fields[1].access_flags.contains(ACC_FINAL));
+        let code = constructor
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                dotty_classfile::attribute::Attribute::Code(code) => Some(code.code),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(code.len(), 25);
+        for (offset, opcode) in [
+            (0, 0x2a),  // aload_0
+            (1, 0xb7),  // invokespecial Object.<init>
+            (4, 0x2a),  // aload_0
+            (5, 0x2b),  // aload_1
+            (6, 0xb5),  // putfield delegate
+            (9, 0x2a),  // aload_0
+            (10, 0x2b), // aload_1
+            (11, 0xb5), // putfield current
+            (14, 0x2a), // aload_0
+            (15, 0x1c), // iload_2
+            (16, 0xb5), // putfield active
+            (19, 0x2a), // aload_0
+            (20, 0x2d), // aload_3
+            (21, 0xb5), // putfield peer
+            (24, 0xb1), // return
+        ] {
+            assert_eq!(
+                code[offset], opcode,
+                "wrong opcode at bytecode offset {offset}"
+            );
+        }
+
+        if require_jdk21_or_skip() {
+            let output = std::env::temp_dir().join(format!(
+                "dotty-jvm-reference-constructor-initializer-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&output).unwrap();
+            for generated in &generated {
+                fs::write(
+                    output.join(format!("{}.class", generated.internal_name())),
+                    generated.bytes(),
+                )
+                .unwrap();
+            }
+            let harness = output.join("ReferenceConstructorHarness.java");
+            fs::write(
+                &harness,
+                "public final class ReferenceConstructorHarness { private static java.lang.reflect.Field field(String name) throws Exception { java.lang.reflect.Field field = Holder.class.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Counter counter = new Counter(); Other other = new Other(); Holder holder = new Holder(counter, true, other); if (field(\"delegate\").get(holder) != counter) throw new AssertionError(\"reference parameter\"); if (field(\"current\").get(holder) != counter) throw new AssertionError(\"mutable reference parameter\"); if (!field(\"active\").getBoolean(holder)) throw new AssertionError(\"boolean parameter\"); if (field(\"peer\").get(holder) != other) throw new AssertionError(\"second reference parameter\"); } }\n",
+            )
+            .unwrap();
+            let javac = Command::new("javac")
+                .args(["-classpath", output.to_str().unwrap(), "-d"])
+                .arg(output.to_str().unwrap())
+                .arg(&harness)
+                .output()
+                .unwrap();
+            assert!(
+                javac.status.success(),
+                "javac rejected reference constructor initializer harness\\nstdout:\\n{}\\nstderr:\\n{}",
+                String::from_utf8_lossy(&javac.stdout),
+                String::from_utf8_lossy(&javac.stderr)
+            );
+            let java = Command::new("java")
+                .args([
+                    "-Xverify:all",
+                    "-classpath",
+                    output.to_str().unwrap(),
+                    "ReferenceConstructorHarness",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                java.status.success(),
+                "java -Xverify:all rejected reference constructor initializer code\\nstdout:\\n{}\\nstderr:\\n{}",
+                String::from_utf8_lossy(&java.stdout),
+                String::from_utf8_lossy(&java.stderr)
+            );
+            fs::remove_dir_all(output).unwrap();
+        }
+    });
 }
 
 #[test]
