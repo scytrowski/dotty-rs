@@ -139,7 +139,7 @@ constructor clauses/result syntax, return-type wrapper and actual literal RHS.
 | Source-to-pickler-to-unpickler identity test | Generated `TERMREFdirect` re-enters as a `TermRef` to the exact owned second formal; no typed AST body is reconstructed |
 | Independent decompiler | Scala reader can load/print the candidate; not full compilation |
 | Independent `-from-tasty` plus new output class | Scala compiler phases accepted this candidate, without an original class masking it |
-| Opt-in `--runtime` for `Answer` and `Parameters` | A class compiled from actual Rust output returns 42, including `Parameters.pick(11, 42)` |
+| Opt-in `--runtime` for `Answer`, `Parameters` and `Blocks` | Rust-produced classes compile and run; Blocks checks the result of its last expression while its structural test separately verifies earlier ordered statements |
 
 No encoder/decoder agreement or byte-for-byte fixture roundtrip substitutes for
 the independent compiler gate. Raw fixture SHA-256 values authenticate the checked-in
