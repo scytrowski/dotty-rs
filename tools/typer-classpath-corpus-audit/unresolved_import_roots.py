@@ -72,19 +72,47 @@ def archive_resources(archives: list[Path]) -> tuple[list[dict[str, object]], di
 
 def candidate_paths(row: dict[str, str]) -> list[tuple[str, str]]:
     candidates = profile.ordered_source_package_candidates(row)
-    return [(item["origin"], (row["target_key"].split("::<", 1)[0] if item["path"] == "<root>" else item["path"]).replace(".", "/")) for item in candidates]
+    paths = [(item["origin"], (row["target_key"].split("::<", 1)[0] if item["path"] == "<root>" else item["path"]).replace(".", "/")) for item in candidates]
+    if row["target_key"].startswith("Character::<"):
+        paths.append(("scala_default_import", "java/lang/Character"))
+    if row["target_key"].startswith("collection::<"):
+        paths.append(("scala_default_import", "scala/collection"))
+    return paths
 
 
-def scan(archive_paths: list[Path], observations: list[dict[str, str]]) -> tuple[str, str, dict[str, int]]:
+def render_target_candidates(observations: list[dict[str, str]]) -> str:
+    by_target: dict[str, list[tuple[str, str]]] = {}
+    seen: dict[str, set[str]] = {}
+    for row in observations:
+        target = row["target_key"]
+        targets = by_target.setdefault(target, [])
+        known = seen.setdefault(target, set())
+        for origin, symbol_path in candidate_paths(row):
+            if symbol_path not in known:
+                known.add(symbol_path)
+                targets.append((origin, symbol_path))
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter="\t", lineterminator="\n")
+    writer.writerow(("target_key", "priority", "candidate_symbol", "origin"))
+    for target in sorted(by_target):
+        for priority, (origin, symbol_path) in enumerate(by_target[target], 1):
+            writer.writerow((target, priority, symbol_path.replace("/", "."), origin))
+    return output.getvalue()
+
+
+def scan(
+    archive_paths: list[Path], observations: list[dict[str, str]], java_version: str = "unspecified"
+) -> tuple[str, str, dict[str, int]]:
     archives, resources = archive_resources(archive_paths)
     rows_out = io.StringIO()
     writer = csv.writer(rows_out, delimiter="\t", lineterminator="\n")
-    writer.writerow(("snapshot", "source_file", "method", "line", "blocker_origin", "import_tree", "context_owner", "context_package", "target_key", "first_failing_segment", "request_kind", "ordered_candidate_evidence", "classification"))
+    writer.writerow(("snapshot", "source_file", "method", "line", "blocker_origin", "import_tree", "context_owner", "context_package", "target_key", "first_failing_segment", "request_kind", "ordered_lexical_candidates", "ordered_candidate_evidence", "classification"))
     totals: dict[str, int] = {}
     by_target: dict[str, dict[str, object]] = {}
     for row in observations:
         found = []
-        for origin, stem in candidate_paths(row):
+        candidates = candidate_paths(row)
+        for origin, stem in candidates:
             exact = []
             for suffix in (".tasty", ".class", "$.class"):
                 for artifact, path, data in resources.get(stem + suffix, []):
@@ -101,11 +129,14 @@ def scan(archive_paths: list[Path], observations: list[dict[str, str]]) -> tuple
             target["classification"] = "mixed_candidate_resource_presence"
         if found:
             target["evidence"] = found
-        writer.writerow(("#1180-frozen-1063", row["source_file"], row["method"], row["line"], row["blocker_origin"], row["import_tree"], row["context_owner"], row["context_package"], key, row["first_failing_segment"], row["request_kind"], json.dumps(found, sort_keys=True, separators=(",", ":")) or "[]", classification))
+        lexical_paths = [{"origin": origin, "candidate_symbol": symbol_path.replace("/", ".")} for origin, symbol_path in candidates]
+        writer.writerow(("#1180-frozen-1063", row["source_file"], row["method"], row["line"], row["blocker_origin"], row["import_tree"], row["context_owner"], row["context_package"], key, row["first_failing_segment"], row["request_kind"], json.dumps(lexical_paths, sort_keys=True, separators=(",", ":")), json.dumps(found, sort_keys=True, separators=(",", ":")) or "[]", classification))
 
     summary = io.StringIO()
     summary.write("# Unresolved import-root resource scan\n\n")
     summary.write("This report scans the frozen #1180 rows against the explicitly supplied, ordered JAR list. A `.class` or `.tasty` hit is resource evidence only; this scan does not prove a Scala `object`, `ModuleClass`, member completion, or selected import.\n\n")
+    summary.write("The row-level evidence is in [`typer-classpath-import-roots-1336-3.9.0.tsv`](typer-classpath-import-roots-1336-3.9.0.tsv), the deduplicated lexical candidate matrix is in [`typer-classpath-import-roots-1336-target-candidates.tsv`](typer-classpath-import-roots-1336-target-candidates.tsv), resolver outcomes are in [`typer-classpath-import-roots-1336-resolver-results.tsv`](typer-classpath-import-roots-1336-resolver-results.tsv), and object/version notes are in [`typer-classpath-import-root-fixtures-1336-3.9.0.md`](typer-classpath-import-root-fixtures-1336-3.9.0.md). Historical blocker and selector evidence remains in the unchanged [#1180 reconciliation](typer-classpath-import-prefix-profile-1180-3.9.0-reconciliation.tsv).\n\n")
+    summary.write(f"Scala: 3.9.0; JDK: {java_version}.\n\n")
     summary.write("## Pinned archives\n\n")
     summary.write("| order | archive | SHA-256 |\n|---:|---|---|\n")
     for order, item in enumerate(archives, 1):
@@ -129,14 +160,17 @@ def main() -> int:
     parser.add_argument("profile", type=Path, help="#1180 markdown profile with embedded frozen observations")
     parser.add_argument("--classpath", required=True, help="ordered path-separated pinned JARs")
     parser.add_argument("--rows", required=True, type=Path)
+    parser.add_argument("--candidates", required=True, type=Path)
     parser.add_argument("--summary", required=True, type=Path)
+    parser.add_argument("--java-version", required=True, help="pinned java -version output, for example 21.0.8+9")
     args = parser.parse_args()
     observations = profile.extract_observations(args.profile.read_text(encoding="utf-8"))
     if len(observations) != 1063:
         raise SystemExit(f"refusing non-frozen cohort: expected 1063 rows, got {len(observations)}")
     archives = [Path(value) for value in args.classpath.split(os.pathsep)]
-    rows, summary, totals = scan(archives, observations)
+    rows, summary, totals = scan(archives, observations, args.java_version)
     args.rows.write_text(rows, encoding="utf-8")
+    args.candidates.write_text(render_target_candidates(observations), encoding="utf-8")
     args.summary.write_text(summary, encoding="utf-8")
     print(f"observations={len(observations)} target_keys={len({row['target_key'] for row in observations})} classifications={totals}")
     return 0

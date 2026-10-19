@@ -1,0 +1,32 @@
+target_key	source_owner	declaration_kind	evidence_release
+Action::<first-segment-unresolved>	dotty/tools/dotc/reporting/WConf.scala:47	enum Action	Scala 3.9 compiler source
+Character::<first-segment-unresolved>	java.lang.Character	JDK class	Temurin 21.0.8+9; java.base.jmod
+Contexts::<first-segment-unresolved>	dotty/tools/dotc/core/Contexts.scala:47	object Contexts	Scala 3.9 compiler source
+Decorators::<first-segment-unresolved>	dotty/tools/dotc/core/Decorators.scala:14	object Decorators	Scala 3.9 compiler source
+Diagnostic::<first-segment-unresolved>	dotty/tools/dotc/reporting/Diagnostic.scala	object + class Diagnostic; also generated semanticdb SymbolInformation	Scala 3.9 compiler source
+FileUtils::<first-segment-unresolved>	dotty/tools/dotc/classpath/FileUtils.scala:14	object FileUtils; duplicate profile utility exists	Scala 3.9 compiler source
+Flags::<first-segment-unresolved>	dotty/tools/dotc/core/Flags.scala	object Flags	Scala 3.9 compiler source
+INodeBase::<first-segment-unresolved>	scala/collection/concurrent/INodeBase.java:17	abstract class INodeBase	Scala 3.9 library source
+JavaTokens::<first-segment-unresolved>	dotty/tools/dotc/parsing/JavaTokens.scala:7	object JavaTokens	Scala 3.9 compiler source
+Manifest::<first-segment-unresolved>	scala/reflect/Manifest.scala:51,76	trait Manifest + companion object	Scala 3.9 library source
+MegaPhase::<first-segment-unresolved>	dotty/tools/dotc/transform/MegaPhase.scala:18,145	object + class MegaPhase	Scala 3.9 compiler source
+NameKinds::<first-segment-unresolved>	dotty/tools/dotc/core/NameKinds.scala:15	object NameKinds	Scala 3.9 compiler source
+Names::<first-segment-unresolved>	dotty/tools/dotc/core/Names.scala:15	object Names	Scala 3.9 compiler source
+Parsers::<first-segment-unresolved>	dotty/tools/dotc/parsing/Parsers.scala:38	class Parsers	Scala 3.9 compiler source
+Periods::<first-segment-unresolved>	dotty/tools/dotc/core/Periods.scala:10	object Periods	Scala 3.9 compiler source
+ProtoTypes::<first-segment-unresolved>	dotty/tools/dotc/typer/ProtoTypes.scala:27	object ProtoTypes	Scala 3.9 compiler source
+Scanners::<first-segment-unresolved>	dotty/tools/dotc/parsing/Scanners.scala:27	class Scanners	Scala 3.9 compiler source
+Settings::<first-segment-unresolved>	dotty/tools/dotc/config/Settings.scala:17	class Settings	Scala 3.9 compiler source
+SymDenotations::<first-segment-unresolved>	dotty/tools/dotc/core/SymDenotations.scala:30	class SymDenotations	Scala 3.9 compiler source
+SymbolInformation::<first-segment-unresolved>	dotty/tools/dotc/semanticdb/SymbolInformation.scala:12,189	case class + companion object (generated semanticdb source)	Scala 3.9 compiler source
+Symbols::<first-segment-unresolved>	dotty/tools/dotc/core/Symbols.scala:40	object Symbols	Scala 3.9 compiler source
+Texts::<first-segment-unresolved>	dotty/tools/dotc/printing/Texts.scala:5	object Texts	Scala 3.9 compiler source
+Tokens::<first-segment-unresolved>	dotty/tools/dotc/parsing/Tokens.scala:143	object Tokens	Scala 3.9 compiler source
+Trees::<first-segment-unresolved>	dotty/tools/dotc/ast/Trees.scala:22	object Trees	Scala 3.9 compiler source
+Types::<first-segment-unresolved>	dotty/tools/dotc/core/Types.scala:50	object Types	Scala 3.9 compiler source
+ValueClasses::<first-segment-unresolved>	dotty/tools/dotc/transform/ValueClasses.scala:13	object ValueClasses	Scala 3.9 compiler source
+collection::<first-segment-unresolved>	scala/collection/package.scala:18	package object collection; resolver exposes scala.collection as Package	Scala 3.9 library source
+core::<first-segment-unresolved>	dotty/tools/dotc/semanticdb/Scala3.scala:3	source import alias `import dotty.tools.dotc.core`	Scala 3.9 compiler source
+num::<first-segment-unresolved>	scala/collection/immutable/NumericRange.scala	source-local `num` term parameter	Scala 3.9 library source
+processInternal::<first-segment-unresolved>	scala/sys/process/package.scala:226	private object processInternal	Scala 3.9 library source
+quotes::<first-segment-unresolved>	scala/quoted/Expr.scala:329	source-local contextual parameter `quotes: Quotes`	Scala 3.9 library source

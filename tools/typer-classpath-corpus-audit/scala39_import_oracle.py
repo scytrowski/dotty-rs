@@ -59,6 +59,14 @@ def main() -> int:
             "ImportStackedPackage.scala": "package a\npackage ast\nimport core.Obj\nobject ImportStackedPackage { val value = Obj.value }\n",
             "ImportRootFallback.scala": "package z.consumer\nimport b.Local.Root\nobject ImportRootFallback { val value: Root = new Root }\n",
             "ImportPackage.scala": "package fixture\nimport collision.Target.FromPackage\nobject ImportPackage { val value: FromPackage = new FromPackage }\n",
+            # Real pinned compiler-artifact controls for the #1336 cohort.
+            "ImportCompilerTypes.scala": "package fixture1336\nimport dotty.tools.dotc.core.Types\nobject ImportCompilerTypes { val value: Any = Types }\n",
+            "ImportCompilerContexts.scala": "package fixture1336\nimport dotty.tools.dotc.core.Contexts\nobject ImportCompilerContexts { val value: Any = Contexts }\n",
+            "ImportCompilerSymbols.scala": "package fixture1336\nimport dotty.tools.dotc.core.Symbols\nobject ImportCompilerSymbols { val value: Any = Symbols }\n",
+            "ImportCompilerTokens.scala": "package fixture1336\nimport dotty.tools.dotc.parsing.Tokens\nobject ImportCompilerTokens { val value: Any = Tokens }\n",
+            "ImportCompilerProtoTypes.scala": "package fixture1336\nimport dotty.tools.dotc.typer.ProtoTypes\nobject ImportCompilerProtoTypes { val value: Any = ProtoTypes }\n",
+            "ImportDefaultJavaLangCharacter.scala": "package fixture1336\nobject ImportDefaultJavaLangCharacter { val value: Character = 'x' }\n",
+            "ImportDefaultScalaCollection.scala": "package fixture1336\nobject ImportDefaultScalaCollection { val value: collection.concurrent.TrieMap[Int, Int] = collection.concurrent.TrieMap.empty }\n",
         }
         files = []
         for name, contents in fixtures.items():
@@ -248,7 +256,7 @@ def main() -> int:
             raise SystemExit("Scala 3.9 did not prefer the lexical source package when both paths exist")
 
     print(
-        "scala=3.9.0 positive_imports=class,object,object_member_with_same_named_package_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate,imported_qualifier_shadows_package "
+        "scala=3.9.0 positive_imports=class,object,object_member_with_same_named_package_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate,imported_qualifier_shadows_package,pinned_compiler_Types_Contexts_Symbols_Tokens_ProtoTypes,default_java_lang_Character,default_scala_collection "
         "negative_imports=class_import_as_term,absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision,lexical_term_missing_member_no_root_fallback;root_fallback=success "
         "root_qualification=bypasses_relative_search;lexical_term_binding=normal_priority"
     )

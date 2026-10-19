@@ -1405,6 +1405,7 @@ mod tests {
         ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
         CompositeClassPath, DirectoryClassPath,
     };
+    use crate::jar_class_path::JarClassPath;
     use crate::jdk_class_path::JdkClassPath;
     use crate::jmod_class_path::JmodClassPath;
     use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope, SourceId};
@@ -2068,6 +2069,237 @@ mod tests {
         let module_class = resolver.session.modules[&binary].module_class;
         assert_eq!(store.symbols.get(field).kind, SymbolKind::Field);
         assert_eq!(store.symbols.get(field).owner, Some(module_class));
+    }
+
+    #[test]
+    #[ignore = "requires pinned Scala 3.9.0 compiler/library JARs and JDK 21.0.8"]
+    fn issue_1336_real_compiler_roots_keep_package_term_and_type_identities_distinct() {
+        let classpath = std::env::var_os("DOTTY_ISSUE_1336_CLASSPATH")
+            .expect("set DOTTY_ISSUE_1336_CLASSPATH to the ordered Scala 3.9.0 JAR list");
+        let jmods = std::env::var_os("DOTTY_ISSUE_1336_JMODS")
+            .expect("set DOTTY_ISSUE_1336_JMODS to Temurin 21.0.8 jmods");
+        let mut entries: Vec<Box<dyn ClassPathEntry>> = std::env::split_paths(&classpath)
+            .map(|path| {
+                Box::new(JarClassPath::new(path, 21).expect("pinned JAR should open"))
+                    as Box<dyn ClassPathEntry>
+            })
+            .collect();
+        entries.push(Box::new(
+            JdkClassPath::new(jmods).expect("pinned JDK 21.0.8 modules should open"),
+        ));
+
+        let targets = [
+            ("dotty/tools/dotc/core", "Types", "TypeRef"),
+            ("dotty/tools/dotc/core", "Contexts", "FreshContext"),
+            ("dotty/tools/dotc/core", "Symbols", "NoSymbol"),
+            ("dotty/tools/dotc/parsing", "Tokens", "maxToken"),
+            ("dotty/tools/dotc/typer", "ProtoTypes", "NoViewsAllowed"),
+        ];
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver = ClasspathSymbolResolver::new(
+            CompositeClassPath::new(entries),
+            definitions,
+            LoadingSession::new(),
+        )
+        .with_module_resolution_profile_collection();
+
+        let mut candidate_term_requests = 0usize;
+        let mut candidate_type_requests = 0usize;
+        let mut candidate_term_symbols = 0usize;
+        let mut candidate_term_missing = 0usize;
+        let mut candidate_term_errors = 0usize;
+        let mut candidate_type_symbols = 0usize;
+        let mut candidate_type_missing = 0usize;
+        let mut candidate_type_errors = 0usize;
+        let mut candidate_package_paths = 0usize;
+        let mut candidate_package_hits = 0usize;
+        for row in
+            include_str!("../../../docs/typer-classpath-import-roots-1336-target-candidates.tsv")
+                .lines()
+                .skip(1)
+        {
+            let columns = row.split('\t').collect::<Vec<_>>();
+            assert_eq!(columns.len(), 4, "invalid target candidate row: {row}");
+            let candidate = columns[2];
+            let (package_path, name) = candidate.rsplit_once('.').unwrap_or(("", candidate));
+            let segments = package_path
+                .split('.')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            let package = match resolver.resolve_package(&mut store, &segments).unwrap() {
+                Some(package) => package,
+                None => {
+                    println!(
+                        "{} package=missing term/type=request-not-applicable",
+                        candidate
+                    );
+                    continue;
+                }
+            };
+            let mut full_package_segments = segments.clone();
+            full_package_segments.push(name);
+            let full_package = resolver
+                .resolve_package(&mut store, &full_package_segments)
+                .unwrap();
+            candidate_package_paths += 1;
+            if full_package.is_some() {
+                candidate_package_hits += 1;
+            }
+            println!(
+                "ISSUE1336_PACKAGE\t{}\t{}\t{}",
+                columns[0],
+                candidate,
+                if full_package.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+            );
+            let prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, package));
+            for (namespace, request_count) in [
+                (Namespace::Term, &mut candidate_term_requests),
+                (Namespace::Type, &mut candidate_type_requests),
+            ] {
+                let member_name = Name::new(store.names.intern(name), namespace);
+                let result = resolver.resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix,
+                        name: member_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                );
+                *request_count += 1;
+                let result_class = match &result {
+                    Ok(Some(symbol)) => format!("symbol:{:?}", store.symbols.get(*symbol).kind),
+                    Ok(None) => "none".to_owned(),
+                    Err(_) => "error".to_owned(),
+                };
+                match (namespace, &result) {
+                    (Namespace::Term, Ok(Some(_))) => candidate_term_symbols += 1,
+                    (Namespace::Term, Ok(None)) => candidate_term_missing += 1,
+                    (Namespace::Term, Err(_)) => candidate_term_errors += 1,
+                    (Namespace::Type, Ok(Some(_))) => candidate_type_symbols += 1,
+                    (Namespace::Type, Ok(None)) => candidate_type_missing += 1,
+                    (Namespace::Type, Err(_)) => candidate_type_errors += 1,
+                }
+                println!(
+                    "cohort_candidate={} namespace={namespace:?} result={result:?}",
+                    candidate
+                );
+                println!(
+                    "ISSUE1336_RESULT\t{}\t{}\t{namespace:?}\t{result_class}\t{result:?}",
+                    columns[0], candidate,
+                );
+            }
+        }
+        println!(
+            "cohort_candidate_term_requests={candidate_term_requests} term_symbols={candidate_term_symbols} term_missing={candidate_term_missing} term_errors={candidate_term_errors} cohort_candidate_type_requests={candidate_type_requests} type_symbols={candidate_type_symbols} type_missing={candidate_type_missing} type_errors={candidate_type_errors}"
+        );
+        println!(
+            "cohort_candidate_package_paths={candidate_package_paths} package_path_hits={candidate_package_hits}"
+        );
+        assert_eq!(candidate_term_requests, 118);
+        assert_eq!(candidate_term_symbols, 26);
+        assert_eq!(candidate_term_missing, 92);
+        assert_eq!(candidate_term_errors, 0);
+        assert_eq!(candidate_type_requests, 118);
+        assert_eq!(candidate_type_symbols, 4);
+        assert_eq!(candidate_type_missing, 91);
+        assert_eq!(candidate_type_errors, 23);
+        assert_eq!(candidate_package_paths, 118);
+        assert_eq!(candidate_package_hits, 1);
+
+        for (package_path, target, selected_member) in targets {
+            let segments = package_path.split('/').collect::<Vec<_>>();
+            let package = resolver
+                .resolve_package(&mut store, &segments)
+                .unwrap()
+                .expect("pinned package path should be present");
+            let prefix = store
+                .types
+                .alloc(Type::type_ref(definitions.no_prefix, package));
+            let term_name = Name::new(store.names.intern(target), Namespace::Term);
+            let object = resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name: term_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            );
+
+            let type_name = Name::new(store.names.intern(target), Namespace::Type);
+            let class = resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name: type_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            );
+            let term_result = match &object {
+                Ok(Some(symbol)) => format!("ok:{:?}", store.symbols.get(*symbol).kind),
+                Ok(None) => "ok:none".to_owned(),
+                Err(error) => format!("error:{error:?}"),
+            };
+            if let Ok(Some(object)) = &object {
+                let object_prefix = store.types.alloc(Type::TermRef {
+                    prefix,
+                    target: dotty_core::TermRefTarget::Symbol(*object),
+                });
+                let member_name = Name::new(store.names.intern(selected_member), Namespace::Term);
+                let member_result = resolver.resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix: object_prefix,
+                        name: member_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                );
+                println!(
+                    "  selected_member={} result={member_result:?}",
+                    selected_member
+                );
+                println!(
+                    "ISSUE1336_MEMBER\t{package_path}.{target}\t{selected_member}\tTerm\t{member_result:?}"
+                );
+            }
+            let type_result = match class {
+                Ok(Some(symbol)) => format!("ok:{:?}", store.symbols.get(symbol).kind),
+                Ok(None) => "ok:none".to_owned(),
+                Err(error) => format!("error:{error:?}"),
+            };
+            println!(
+                "{}::{} term={} type={}",
+                package_path, target, term_result, type_result
+            );
+        }
+
+        let profile = resolver.take_module_resolution_profile();
+        println!(
+            "package_term_requests={} package_term_successes={} package_term_errors={} new_objects={} completed_module_classes={} module_member_successes={} selected_member_attempts={}",
+            profile.package_term_requests,
+            profile.package_term_successes,
+            profile.package_term_errors,
+            profile.new_object_identities,
+            profile.completed_module_classes.len(),
+            profile.module_member_successes,
+            profile.member_targets.len(),
+        );
+        assert_eq!(profile.package_term_requests, 123);
+        assert_eq!(profile.package_term_successes, 30);
+        assert_eq!(profile.package_term_errors, 0);
+        assert_eq!(profile.completed_module_classes.len(), 2);
+        assert_eq!(profile.module_member_successes, 2);
+        assert_eq!(profile.member_targets.len(), 5);
     }
 
     #[test]

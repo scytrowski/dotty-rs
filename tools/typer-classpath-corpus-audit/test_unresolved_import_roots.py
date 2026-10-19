@@ -22,6 +22,20 @@ def tasty(major: int, minor: int, experimental: int) -> bytes:
 
 
 class UnresolvedImportRootTests(unittest.TestCase):
+    def test_frozen_observation_cohort_denominators(self):
+        root = SCRIPT.parents[2]
+        report = root / "docs/typer-classpath-import-prefix-profile-1180-3.9.0.md"
+        rows = audit.profile.extract_observations(report.read_text(encoding="utf-8"))
+        self.assertEqual(len(rows), 1063)
+        self.assertEqual(len({row["source_file"] for row in rows}), 81)
+        self.assertEqual(len({row["target_key"] for row in rows}), 31)
+        self.assertEqual(len({row["blocker_origin"] for row in rows}), 393)
+        candidates = audit.render_target_candidates(rows)
+        self.assertEqual(candidates.splitlines()[0], "target_key\tpriority\tcandidate_symbol\torigin")
+        self.assertEqual(len({line.split("\t", 1)[0] for line in candidates.splitlines()[1:]}), 31)
+        self.assertIn("Character::<first-segment-unresolved>\t3\tjava.lang.Character\tscala_default_import", candidates)
+        self.assertIn("collection::<first-segment-unresolved>\t4\tscala.collection\tscala_default_import", candidates)
+
     def test_parses_pinned_28_8_and_28_9_headers(self):
         self.assertEqual(audit.tasty_header(tasty(28, 8, 0)), "28.8.0")
         self.assertEqual(audit.tasty_header(tasty(28, 9, 0)), "28.9.0")
@@ -51,6 +65,7 @@ class UnresolvedImportRootTests(unittest.TestCase):
             self.assertIn("28.9.0", rows)
             self.assertIn("candidate_resource_present_identity_requires_semantic_oracle", rows)
             self.assertIn("TASTy 28.9.0", summary)
+            self.assertEqual((rows, summary), audit.scan([jar], [row])[:2])
 
             missing = dict(
                 row,
@@ -60,6 +75,29 @@ class UnresolvedImportRootTests(unittest.TestCase):
             )
             rows, _, _ = audit.scan([jar], [missing])
             self.assertIn("no_candidate_resource_in_supplied_classpath", rows)
+
+    def test_scans_jmod_class_entries_for_default_java_lang_candidate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            jmod = Path(temp) / "java.base.jmod"
+            with zipfile.ZipFile(jmod, "w") as archive:
+                archive.writestr("classes/java/lang/Character.class", b"class-bytes")
+            row = {
+                "target_key": "Character::<first-segment-unresolved>",
+                "source_file": "library/src/scala/sys/process/BasicIO.scala",
+                "method": "readCharacter",
+                "line": "1",
+                "blocker_origin": "inherited:library/src/scala/sys/process/BasicIO.scala#tree=1",
+                "import_tree": "library/src/scala/sys/process/BasicIO.scala#tree=1",
+                "context_owner": "scala.sys.process.BasicIO",
+                "context_package": "scala.sys.process",
+                "first_failing_segment": "Character",
+                "request_kind": "resolve_package",
+                "source_package_registry_lookup": "relative=missing@scala.sys.process.Character;enclosing=none;root=missing",
+            }
+            rows, _, _ = audit.scan([jmod], [row])
+            self.assertIn("java/lang/Character.class", rows)
+            self.assertIn("java.base.jmod", rows)
+            self.assertIn("candidate_resource_present_identity_requires_semantic_oracle", rows)
 
 
 if __name__ == "__main__":
