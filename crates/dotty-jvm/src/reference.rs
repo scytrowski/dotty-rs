@@ -337,7 +337,13 @@ pub(super) fn project_local_type_with_metadata(
     match crate::descriptor::primitive_semantic_value_type(unit.store, definitions, symbol, ty) {
         Ok(value) => Ok(value),
         Err(JvmCodegenError::UnsupportedJvmType { .. }) => {
-            project_type_with_metadata(unit, ty, definitions, metadata)
+            match project_type_with_metadata(unit, ty, definitions, metadata) {
+                Err(JvmCodegenError::UnsupportedJvmReferenceType {
+                    kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+                    ..
+                }) => project_constructor_type(unit, ty, definitions),
+                result => result,
+            }
         }
         Err(error) => Err(error),
     }
