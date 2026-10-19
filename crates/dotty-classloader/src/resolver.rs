@@ -1408,7 +1408,10 @@ mod tests {
     use crate::jar_class_path::JarClassPath;
     use crate::jdk_class_path::JdkClassPath;
     use crate::jmod_class_path::JmodClassPath;
-    use dotty_core::{ClassInfo, MemberSelector, Name, Namespace, Scope, SourceId};
+    use dotty_core::{
+        ClassInfo, MemberSelector, Name, Namespace, Packages, Scope, SourceId, SymbolFlags,
+        SymbolOrigin, Visibility,
+    };
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -2300,6 +2303,107 @@ mod tests {
                 assert_eq!(store.checkpoint(), store_mark);
             }
         }
+    }
+
+    #[test]
+    fn compiler_tasty_lookup_does_not_shadow_a_source_owned_module_pair() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let source_origin = SymbolOrigin::Source(SourceId::from_index(42));
+        let mut packages = Packages::new();
+        let entries = packages.enter(
+            &mut store,
+            source_origin,
+            &["dotty", "tools", "dotc", "core"],
+        );
+        let package = entries.last().unwrap().symbol;
+        let package_scope = entries.last().unwrap().scope;
+        let object_name = Name::new(store.names.intern("Contexts"), Namespace::Term);
+        let object = store.symbols.alloc(Symbol {
+            name: object_name,
+            owner: Some(package),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: source_origin,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(object_name, object);
+        let module_name = Name::new(store.names.intern("Contexts$"), Namespace::Type);
+        let module_class = store.symbols.alloc(Symbol {
+            name: module_name,
+            owner: Some(package),
+            kind: SymbolKind::ModuleClass,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: source_origin,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store
+            .scopes
+            .get_mut(package_scope)
+            .enter(module_name, module_class);
+
+        let compiler_root = fixture_path("../dotty-tasty/tests/fixtures/scala3-compiler");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(compiler_root)),
+            Box::new(ModuleTastyPath {
+                entries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            }),
+        ]);
+        let mut resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages),
+        );
+        assert_eq!(
+            resolver.resolve_package(&mut store, &["dotty", "tools", "dotc", "core"]),
+            Ok(Some(package))
+        );
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let store_mark = store.checkpoint();
+        let session_mark = resolver.session.checkpoint();
+        let error = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name: object_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .expect_err("an unregistered source Object must conflict instead of creating a twin");
+        assert!(matches!(
+            error,
+            ResolutionError::Malformed { ref reason }
+                if reason.contains("not a valid canonical module object")
+        ));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        assert!(resolver.session.modules.is_empty());
+        assert_eq!(store.symbols.get(package).origin, source_origin);
+        assert_eq!(store.symbols.get(object).origin, source_origin);
+        assert_eq!(store.symbols.get(module_class).origin, source_origin);
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&object_name),
+            [object]
+        );
+        assert_eq!(
+            store.scopes.get(package_scope).lookup_all(&module_name),
+            [module_class]
+        );
     }
 
     #[test]

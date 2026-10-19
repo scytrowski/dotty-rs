@@ -855,3 +855,6 @@ prefix; repeated lookup reuses the same declaration. The other three retain
 their exact unsupported-parent errors (`TypeUtils`, `SymUtils`, and
 `TokensCommon`, respectively), and failed completion rolls back store and
 session changes while preserving the already established identity shells.
+If a source-owned Object of the same name exists without a session-validated
+ModuleClass pair, package-term resolution reports an identity conflict and
+leaves the source package, Object, and ModuleClass entries untouched.
