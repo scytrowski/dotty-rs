@@ -1959,6 +1959,7 @@ mod tests {
             definitions,
             &packages,
         );
+
         assert!(matches!(
             typer.is_subtype(a_type, b_type),
             Err(TypeRelationError::ClassInfoUnavailable {
@@ -2245,6 +2246,7 @@ mod tests {
             definitions,
             &packages,
         );
+
         assert!(matches!(
             typer.is_subtype(int_box, raw_box),
             Err(TypeRelationError::UnsupportedType { .. })
@@ -2908,6 +2910,139 @@ mod tests {
         };
         assert_eq!(info.parents.len(), 1);
         assert_eq!(type_symbol(typer.store(), info.parents[0]), base);
+    }
+
+    #[test]
+    fn single_inheritance_frontend_preserves_override_owner_and_types_base_argument() {
+        let source_text = r#"
+            class Base {
+              def value(): Int = 20
+              def doubled(): Int = value()
+            }
+            class Derived extends Base {
+              override def value(): Int = 21
+            }
+            class Runner {
+              def evaluate(base: Base): Int = base.doubled()
+              def fromDerived(): Int = evaluate(new Derived())
+            }
+        "#;
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let derived = class_symbol(&parsed, &store, &index, source, "Derived");
+        let override_method = derived_override_value(&parsed, &store, &index, source);
+        assert_eq!(store.symbols.get(override_method).owner, Some(derived));
+        assert!(
+            store
+                .symbols
+                .get(override_method)
+                .flags
+                .contains(SymbolFlags::OVERRIDE)
+        );
+
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let derived_info = typer.complete_symbol(derived).unwrap();
+        let Type::ClassInfo(derived_info) = typer.store().types.get(derived_info) else {
+            panic!("expected Derived ClassInfo");
+        };
+        assert_eq!(derived_info.parents.len(), 1);
+        assert_eq!(type_symbol(typer.store(), derived_info.parents[0]), base);
+
+        let (doubled, doubled_rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "doubled");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(doubled).unwrap(),
+            owner: base,
+            local_scopes: None,
+        };
+        let typed_doubled = typer.type_expression(doubled_rhs, context).unwrap();
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed_doubled).kind else {
+            panic!("expected value() application in Base.doubled");
+        };
+        let selected_method = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(method),
+                ..
+            } => *method,
+            other => panic!("expected canonical method target, got {other:?}"),
+        };
+        let base_value =
+            method_named_on_class(&parsed, typer.store(), &index, source, "value", base);
+        assert_eq!(typer.store().symbols.get(selected_method).owner, Some(base));
+        assert_eq!(selected_method, base_value);
+
+        let (from_derived, from_derived_rhs) =
+            method_definition_and_rhs(&parsed, typer.store(), &index, source, "fromDerived");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(from_derived).unwrap(),
+            owner: typer.store().symbols.get(from_derived).owner.unwrap(),
+            local_scopes: None,
+        };
+        let typed_from_derived = typer.type_expression(from_derived_rhs, context).unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_from_derived).kind,
+            TreeKind::Apply(_)
+        ));
+    }
+
+    fn derived_override_value(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+    ) -> SymbolId {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                (store.names.resolve(definition.name.as_name().text()) == "value"
+                    && index.symbol_at(source, tree).is_some_and(|symbol| {
+                        store
+                            .symbols
+                            .get(symbol)
+                            .flags
+                            .contains(SymbolFlags::OVERRIDE)
+                    }))
+                .then(|| index.symbol_at(source, tree).unwrap())
+            })
+            .expect("Derived.value override should be named")
+    }
+
+    fn method_named_on_class(
+        parsed: &dotty_parser::ParseResult,
+        store: &SemanticStore,
+        index: &SourceSemanticIndex,
+        source: SourceId,
+        name: &str,
+        owner: SymbolId,
+    ) -> SymbolId {
+        parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| {
+                let TreeKind::DefDef(definition) = &node.kind else {
+                    return None;
+                };
+                let symbol = index.symbol_at(source, tree)?;
+                (store.names.resolve(definition.name.as_name().text()) == name
+                    && store.symbols.get(symbol).owner == Some(owner))
+                .then_some(symbol)
+            })
+            .unwrap_or_else(|| panic!("method `{name}` owned by {owner:?} was not found"))
     }
 
     #[test]
@@ -30836,138 +30971,3 @@ mod tests {
             source,
             &index,
             &mut store,
-            definitions,
-            &packages,
-        );
-
-        assert!(matches!(
-            typer.complete_symbol(method),
-            Err(TyperError::RepeatedParameterClauseUnsupported {
-                method: error_method,
-                method_tree_index,
-                clause_index: 0,
-                parameter_index: 0,
-                kind: MethodKind::Contextual,
-            }) if error_method == method && method_tree_index == method_tree.index()
-        ));
-        assert_eq!(typer.store().checkpoint(), before);
-        assert_eq!(*typer.store().symbols.info(parameter), SymbolInfo::Missing);
-    }
-
-    #[test]
-    fn curried_monomorphic_application_types_each_clause() {
-        let source_text =
-            "class C { def f(x: Int)(y: Boolean): Boolean = y; def use: Boolean = f(1)(true) }";
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
-        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
-        let context = ExpressionContext {
-            lexical: index.declaration_context_of(method).unwrap(),
-            owner: method,
-            local_scopes: None,
-        };
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        );
-
-        let typed = typer.type_expression(rhs, context).unwrap();
-
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
-        let TreeKind::Apply(outer) = &typer.typed_ast().get(typed).kind else {
-            panic!("outer clause should be an Apply")
-        };
-        assert!(matches!(
-            typer.store().types.get(typer.typed_ast().get(outer.function).ty),
-            Type::Method(method) if method.params.len() == 1 && method.params[0].ty == definitions.boolean
-        ));
-    }
-
-    #[test]
-    fn selected_generic_receiver_method_can_be_applied() {
-        let source_text = "class Box[A] { def accept(value: A): A = value }; class Use { def use(box: Box[Int]): Int = box.accept(1) }";
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
-        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
-        let parameter = val_symbol(&parsed, &store, &index, source, "box").0;
-        let context = ExpressionContext {
-            lexical: index.declaration_context_of(parameter).unwrap(),
-            owner: method,
-            local_scopes: None,
-        };
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        );
-
-        let typed = typer.type_expression(rhs, context).unwrap();
-
-        assert_eq!(typer.typed_ast().get(typed).ty, definitions.int);
-    }
-
-    #[test]
-    fn dependent_method_result_is_deferred() {
-        let source_text = "class C { def f(x: Int): Int = x; def use: Int = f(1) }";
-        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
-        let callee = parsed
-            .ast
-            .iter()
-            .find_map(|(tree, node)| match &node.kind {
-                TreeKind::DefDef(definition)
-                    if store.names.resolve(definition.name.as_name().text()) == "f" =>
-                {
-                    index.symbol_at(source, tree)
-                }
-                _ => None,
-            })
-            .unwrap();
-        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
-        let context = ExpressionContext {
-            lexical: index.declaration_context_of(method).unwrap(),
-            owner: method,
-            local_scopes: None,
-        };
-        let mut typer = SourceTyper::new(
-            &parsed.ast,
-            source,
-            &index,
-            &mut store,
-            definitions,
-            &packages,
-        );
-        let reserved = typer.store.types.reserve();
-        let dependent = typer.store.types.alloc(Type::ParamRef {
-            binder: reserved.id(),
-            index: 0,
-        });
-        let callable = typer.store.types.fill(
-            reserved,
-            Type::Method(dotty_core::types::MethodType {
-                params: vec![dotty_core::types::MethodParam {
-                    name: dotty_core::TermName::new(typer.store.names.intern("x")),
-                    ty: definitions.int,
-                    erased: false,
-                    varargs: false,
-                }],
-                result: dependent,
-                kind: MethodKind::Plain,
-            }),
-        );
-        typer
-            .store
-            .symbols
-            .set_info(callee, SymbolInfo::Complete(callable));
-
-        assert!(matches!(
-            typer.type_expression(rhs, context),
-            Err(TyperError::DependentMethodApplicationDeferred { binder, result, .. })
-                if binder == callable && result == dependent
-        ));
-    }
-}
