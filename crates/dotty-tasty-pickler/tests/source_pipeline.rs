@@ -20,6 +20,7 @@ const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = i
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
 const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
 const BLOCKS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Blocks.scala");
+const NUMERIC_BLOCKS: &str = "package example\nclass NumericBlocks:\n  def run: Int =\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n    8\n    9\n    10\n    11\n    12\n    13\n    14\n    15\n    16\n    17\n    18\n    19\n    20\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 const ANSWER_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Answer.hex");
@@ -528,6 +529,106 @@ fn block_validation_enforces_result_depth_and_item_limits() {
             limit: 0
         }
     ));
+}
+
+#[test]
+fn raw_numeric_leaves_consume_items_and_reject_repeated_children() {
+    let minimum_budget = |source: &str| {
+        (1..=256)
+            .find(|&max_items| {
+                source_outputs_named_with_limits(
+                    source,
+                    "NumericBlocks.scala",
+                    ValidationLimits {
+                        max_items,
+                        ..ValidationLimits::default()
+                    },
+                    |_| {},
+                )
+                .is_ok()
+            })
+            .expect("numeric block validates within the test budget range")
+    };
+    let one_numeric_statement = "package example\nclass NumericBlocks:\n  def run: Int =\n    20\n";
+    let single_budget = minimum_budget(one_numeric_statement);
+    let block_budget = minimum_budget(NUMERIC_BLOCKS);
+    assert!(
+        block_budget > single_budget,
+        "numeric statements used no additional validation items: {single_budget} / {block_budget}"
+    );
+    assert_eq!(
+        source_outputs_named_with_limits(
+            NUMERIC_BLOCKS,
+            "NumericBlocks.scala",
+            ValidationLimits {
+                max_items: block_budget - 1,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        )
+        .unwrap_err(),
+        PickleError::LimitExceeded {
+            kind: LimitKind::Items,
+            limit: block_budget - 1,
+        }
+    );
+
+    let mut shared_statement = None;
+    let repeated_statement = source_outputs_named_with_tree_edits(
+        NUMERIC_BLOCKS,
+        "NumericBlocks.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (source_block, typed_block, _, _) =
+                blocks_with_stat_count_in(source_ast, typed_ast, bindings, 19);
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(typed_block).kind else {
+                unreachable!()
+            };
+            shared_statement = Some(block.stats[0]);
+            block.stats[1] = block.stats[0];
+            let TreeKind::Block(source) = &source_ast.get(source_block).kind else {
+                unreachable!()
+            };
+            assert_ne!(source.stats[0], source.stats[1]);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        repeated_statement,
+        PickleError::RepeatedExpression {
+            tree: shared_statement.unwrap(),
+        }
+    );
+
+    const NUMERIC_IF: &str = "package example\nclass NumericIf:\n  def choose(flag: Boolean): Int = if flag then 1 else 2\n";
+    let mut shared = None;
+    let repeated = source_outputs_named_with_tree_edits(
+        NUMERIC_IF,
+        "NumericIf.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (source_id, typed_id, mut source_if, mut typed_if) =
+                first_conditional_ids(source_ast, typed_ast, bindings);
+            shared = Some(
+                bindings
+                    .get(SourceId::from_index(7), source_if.then_branch)
+                    .unwrap(),
+            );
+            source_if.else_branch = source_if.then_branch;
+            typed_if.else_branch = typed_if.then_branch;
+            source_ast.get_mut(source_id).kind = TreeKind::If(source_if);
+            typed_ast.get_mut(typed_id).kind = TreeKind::If(typed_if);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        repeated,
+        PickleError::RepeatedExpression {
+            tree: shared.unwrap(),
+        }
+    );
 }
 
 fn source_outputs(

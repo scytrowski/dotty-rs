@@ -1148,6 +1148,12 @@ impl Validator<'_, '_> {
                 None
             }
             (TreeKind::PhaseSpecific(UntypedNode::Number(number)), TreeKind::Literal(literal)) => {
+                if let Some(seen) = visited {
+                    self.charge(1)?;
+                    if !seen.insert(body) {
+                        return Err(PickleError::RepeatedExpression { tree: body });
+                    }
+                }
                 if result_type != p.definitions.int
                     || !matches!((&literal.value, body_type), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value)
                 {
