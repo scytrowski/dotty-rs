@@ -22,6 +22,7 @@
   "sources_sha256": {
     "Answer.scala": "a6dc526f51dfce838872242246750e833ce10b77ffdb2620745503d66bfd7b22",
     "Blocks.scala": "0427146ea310fc8a70556eff1ba46e221af000bf91b2e1bf14cfa1850e18504a",
+    "Conditionals.scala": "de39ce707f835e660a3a02a489a18356960cd59e31723e8ec65705bd86930f32",
     "Decisions.scala": "fcef6a9a2c0f3cc629a94584c89cd4dde3834907ca054a19cabf0bdc94c10377",
     "Declarations.scala": "66777dae06c9fccebde35e7cf2515e5b07fe288397af07efcf759df8d845cba0",
     "Empty.scala": "ae39954e680796910cc182c92768ec8da29b98a0819a5decc468a2f2f845877a",
@@ -36,6 +37,7 @@
     "Empty.tasty": "bfacda2b842f4dcfbefe8d4dafe697847e505a2380df0a1eb0a2abdad3155eef",
     "example/Answer.tasty": "1cf021c302e2bf64fabed58cf7ea1c80689726ad3b198d01d9facb6b2776a4c4",
     "example/Blocks.tasty": "6ae446e057fa434ec47f4097ea9b01e7a0488215f260ef4a33e696bff654fd41",
+    "example/Conditionals.tasty": "25d716b62702fb0c80291e1b95368ca55e4864391fe9df4430c880521cfaffd7",
     "example/Decisions.tasty": "de88555ceb8c6c138f69853ed4cea94521b56b3fc4739f89941e2cf0089a48e3",
     "example/Declarations.tasty": "06af714d14c013aa926110768a0dc3f429361d0645b4e638094f6499138179c6",
     "example/Flags.tasty": "db56af706784e1f81d94ceec7f5282b249cd589b728dce530329c690250b9e94",

@@ -28,6 +28,10 @@ methods with an Int or Boolean result. Bodies may be typed Int/Boolean literals,
 references to a same-typed ordinary formal, ordinary parameterless references,
 or bounded recursive applications of a canonical same-class method with one
 plain clause of Int parameters.
+An Int method may also contain a typed conditional whose condition is a
+Boolean formal reference or Boolean literal and whose branches are supported
+Int expressions or nested conditionals. The condition/then/else structure is
+preserved in TASTy; the pickler does not fold constant conditions.
 Same-class method references derive their
 target from the typed `TermRef`, require a public declared Int method in the
 plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
@@ -48,6 +52,9 @@ yield typed errors.
 Call applications require the exact selected method's completed plain MethodType,
 ordered Int parameters, Int result, and corresponding canonical Int arguments;
 Boolean arguments and Boolean-returning calls remain unsupported.
+Conditional branch joins accept canonical Int, an Int singleton constant, or a
+validated Int formal reference. When the typed conditional itself has an Int
+singleton type, both branches must have that same singleton value.
 Traversal is bounded by expression-depth and item limits and rejects repeated
 typed expression IDs. Type, context, default, varargs and multi-clause
 applications remain unsupported. The wire

@@ -18,6 +18,7 @@ const EXPLICIT_THIS_REFERENCES: &str =
     "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
+const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 const ANSWER_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Answer.hex");
@@ -108,6 +109,124 @@ fn boolean_literals_parameters_and_mixed_clauses_emit_the_expected_wire_shapes()
             result.success(),
             "Boolean Scala interoperability gate failed"
         );
+    }
+}
+
+#[test]
+fn source_conditionals_preserve_typed_if_order_nested_nodes_and_boolean_literal_conditions() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(CONDITIONALS, "Conditionals.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let parameter_reference = |tree: &RawTree<'_>| {
+        let RawTree::Leaf(reference) = tree else {
+            panic!("expected a direct parameter reference")
+        };
+        assert_eq!(reference.tag, TERMREFDIRECT_TAG);
+        let target = addresses.get(reference.ast_ref().unwrap().address).unwrap();
+        assert_eq!(target.tag, PARAM_TAG);
+        file.render_name(target.decode_parameter().unwrap().name())
+            .unwrap()
+    };
+    let body = |declaration_index: usize| {
+        addresses
+            .get(output.declarations()[declaration_index].address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap()
+            .rhs
+            .unwrap()
+    };
+    let RawTree::LengthNode(choose_raw) = body(2) else {
+        panic!("choose body is not an IF node")
+    };
+    let StructuredNode::If(choose) = choose_raw.decode_structured().unwrap() else {
+        panic!("choose body did not decode as IF")
+    };
+    assert!(!choose.inline);
+    assert!(matches!(
+        choose.condition,
+        RawTree::Leaf(SimpleTerm {
+            tag: TERMREFDIRECT_TAG,
+            value: TermValue::AstRef(_),
+            ..
+        })
+    ));
+    assert_eq!(parameter_reference(&choose.condition), "flag");
+    for branch in [&choose.then_branch, &choose.else_branch] {
+        assert!(matches!(
+            branch,
+            RawTree::Leaf(SimpleTerm {
+                tag: TERMREFDIRECT_TAG,
+                value: TermValue::AstRef(_),
+                ..
+            })
+        ));
+    }
+    assert_eq!(parameter_reference(&choose.then_branch), "a");
+    assert_eq!(parameter_reference(&choose.else_branch), "b");
+
+    let RawTree::LengthNode(nested_raw) = body(3) else {
+        panic!("nested body is not an IF node")
+    };
+    let StructuredNode::If(nested) = nested_raw.decode_structured().unwrap() else {
+        panic!("nested body did not decode as IF")
+    };
+    assert_eq!(parameter_reference(&nested.condition), "a");
+    let RawTree::LengthNode(inner_raw) = nested.then_branch else {
+        panic!("then branch did not preserve the nested IF")
+    };
+    let StructuredNode::If(inner) = inner_raw.decode_structured().unwrap() else {
+        panic!("nested then branch did not decode as IF")
+    };
+    assert_eq!(parameter_reference(&inner.condition), "b");
+    let int_value = |tree: &RawTree<'_>| match tree {
+        RawTree::Leaf(SimpleTerm {
+            tag: INTCONST_TAG,
+            value: TermValue::Int(value),
+            ..
+        }) => Some(*value),
+        _ => None,
+    };
+    assert_eq!(int_value(&inner.then_branch), Some(1));
+    assert_eq!(int_value(&inner.else_branch), Some(2));
+    assert_eq!(int_value(&nested.else_branch), Some(3));
+
+    let RawTree::LengthNode(constant_raw) = body(4) else {
+        panic!("constant body is not an IF node")
+    };
+    let StructuredNode::If(constant) = constant_raw.decode_structured().unwrap() else {
+        panic!("constant body did not decode as IF")
+    };
+    assert!(matches!(
+        constant.condition,
+        RawTree::Leaf(SimpleTerm {
+            tag: TRUECONST_TAG,
+            value: TermValue::Boolean(true),
+            ..
+        })
+    ));
+    assert_eq!(int_value(&constant.then_branch), Some(17));
+    assert_eq!(int_value(&constant.else_branch), Some(23));
+
+    let (_, repeated) = source_outputs_named(CONDITIONALS, "Conditionals.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeated.bytes());
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1312/generated/example/Conditionals.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1312/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 If interoperability gate");
+        assert!(result.success(), "If Scala interoperability gate failed");
     }
 }
 
@@ -339,12 +458,13 @@ fn source_outputs_named_with_tree_edits(
             }) | TreeKind::Ident(_)
                 | TreeKind::Select(_)
                 | TreeKind::Apply(_)
+                | TreeKind::If(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
     let expected_literal = match &typer.typed_ast().get(body).kind {
         TreeKind::Literal(Literal { value }) => Some(value.clone()),
-        TreeKind::Ident(_) | TreeKind::Select(_) | TreeKind::Apply(_) => None,
+        TreeKind::Ident(_) | TreeKind::Select(_) | TreeKind::Apply(_) | TreeKind::If(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle()?;
@@ -384,7 +504,10 @@ fn source_outputs_named_with_tree_edits(
             assert_eq!(tag, dotty_tasty::tasty::SELECT_TAG);
         }
         (None, Some(dotty_tasty::tasty::RawTree::LengthNode(node))) => {
-            assert_eq!(node.tag, dotty_tasty::tasty::APPLY_TAG);
+            assert!(matches!(
+                node.tag,
+                dotty_tasty::tasty::APPLY_TAG | dotty_tasty::tasty::IF_TAG
+            ));
         }
         (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
     }
@@ -449,6 +572,28 @@ fn nested_application_ids(
             Some((source_outer, typed_outer, source_inner, typed_inner))
         })
         .expect("fixture contains a nested application")
+}
+
+fn first_conditional_ids(
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &AstArena<Typed>,
+    typed_bindings: &dotty_typer::SourceTypedIndex,
+) -> (TreeId<Untyped>, TreeId<Typed>, If<Untyped>, If<Typed>) {
+    source_ast
+        .iter()
+        .find_map(|(source_id, tree)| {
+            let TreeKind::If(source_if) = &tree.kind else {
+                return None;
+            };
+            let source_if = *source_if;
+            let typed_id = typed_bindings.get(SourceId::from_index(7), source_id)?;
+            let typed_if = match &typed_ast.try_get(typed_id)?.kind {
+                TreeKind::If(typed_if) => *typed_if,
+                _ => return None,
+            };
+            Some((source_id, typed_id, source_if, typed_if))
+        })
+        .expect("fixture contains a typed If expression")
 }
 
 #[test]
@@ -818,6 +963,246 @@ fn nested_application_binding_span_and_repeated_id_failures_keep_exact_errors() 
         repeated,
         PickleError::RepeatedExpression {
             tree: repeated_id.unwrap(),
+        }
+    );
+}
+
+#[test]
+fn if_validation_rejects_mismatched_children_types_invalid_conditions_stale_ids_and_limits() {
+    let swapped = source_outputs_named_with_tree_edits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, typed_if_id, _, typed_if) =
+                first_conditional_ids(source_ast, typed_ast, bindings);
+            let TreeKind::If(if_expr) = &mut typed_ast.get_mut(typed_if_id).kind else {
+                panic!()
+            };
+            std::mem::swap(&mut if_expr.then_branch, &mut if_expr.else_branch);
+            assert_eq!(if_expr.then_branch, typed_if.else_branch);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(swapped, PickleError::BodyBinding { .. }));
+
+    let invalid_condition = source_outputs_named_with_tree_edits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, _, _, typed_if) = first_conditional_ids(source_ast, typed_ast, bindings);
+            let bad_type = typed_ast.get(typed_if.then_branch).ty;
+            typed_ast.get_mut(typed_if.cond).ty = bad_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(invalid_condition, PickleError::BodyType { .. }));
+
+    let wrong_branch_type = source_outputs_named_with_tree_edits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, _, _, typed_if) = first_conditional_ids(source_ast, typed_ast, bindings);
+            let bad_type = typed_ast.get(typed_if.cond).ty;
+            typed_ast.get_mut(typed_if.then_branch).ty = bad_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(
+        matches!(wrong_branch_type, PickleError::NameMismatch { .. }),
+        "{wrong_branch_type:?}"
+    );
+
+    let wrong_result = source_outputs_named_with_tree_edits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, typed_if_id, _, typed_if) =
+                first_conditional_ids(source_ast, typed_ast, bindings);
+            let bad_type = typed_ast.get(typed_if.cond).ty;
+            typed_ast.get_mut(typed_if_id).ty = bad_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(wrong_result, PickleError::BodyType { .. }));
+
+    let invalid_source_child = source_outputs_named_with_tree_edits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (source_if_id, _, _, _) = first_conditional_ids(source_ast, typed_ast, bindings);
+            let foreign_index = source_ast.iter().count() as u32;
+            let mut foreign = AstArena::<Untyped>::new();
+            for _ in 0..=foreign_index {
+                foreign.alloc(Tree {
+                    kind: TreeKind::This(This { qual: None }),
+                    position: None,
+                    ty: (),
+                });
+            }
+            let stale = foreign.iter().last().unwrap().0;
+            let TreeKind::If(if_expr) = &mut source_ast.get_mut(source_if_id).kind else {
+                panic!()
+            };
+            if_expr.else_branch = stale;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        invalid_source_child,
+        PickleError::InvalidSourceTree { .. }
+    ));
+
+    let invalid_typed_child = source_outputs_named_with_tree_edits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, typed_if_id, _, _) = first_conditional_ids(source_ast, typed_ast, bindings);
+            let foreign_index = typed_ast.iter().count() as u32;
+            let condition_type = typed_ast.get(typed_if_id).ty;
+            let mut foreign = AstArena::<Typed>::new();
+            for _ in 0..=foreign_index {
+                foreign.alloc(Tree {
+                    kind: TreeKind::This(This { qual: None }),
+                    position: None,
+                    ty: condition_type,
+                });
+            }
+            let stale = foreign.iter().last().unwrap().0;
+            let TreeKind::If(if_expr) = &mut typed_ast.get_mut(typed_if_id).kind else {
+                panic!()
+            };
+            if_expr.else_branch = stale;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        invalid_typed_child,
+        PickleError::InvalidTypedTree { .. }
+    ));
+
+    let unsupported_branch = source_outputs_named_with_tree_edits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, _, source_if, typed_if) =
+                first_conditional_ids(source_ast, typed_ast, bindings);
+            source_ast.get_mut(source_if.then_branch).kind = TreeKind::This(This { qual: None });
+            typed_ast.get_mut(typed_if.then_branch).kind = TreeKind::This(This { qual: None });
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        unsupported_branch,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
+
+    let mut cycle_id = None;
+    let cycle = source_outputs_named_with_tree_edits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (source_if_id, typed_if_id, _, _) =
+                first_conditional_ids(source_ast, typed_ast, bindings);
+            cycle_id = Some(typed_if_id);
+            let TreeKind::If(if_expr) = &mut source_ast.get_mut(source_if_id).kind else {
+                panic!()
+            };
+            if_expr.then_branch = source_if_id;
+            let TreeKind::If(if_expr) = &mut typed_ast.get_mut(typed_if_id).kind else {
+                panic!()
+            };
+            if_expr.then_branch = typed_if_id;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        cycle,
+        PickleError::RepeatedExpression {
+            tree: cycle_id.unwrap(),
+        }
+    );
+
+    let depth_exhausted = source_outputs_named_with_limits(
+        CONDITIONALS,
+        "Conditionals.scala",
+        ValidationLimits {
+            max_expression_depth: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        depth_exhausted,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+}
+
+#[test]
+fn nested_if_nodes_consume_validation_item_budget() {
+    let minimum_budget = |source: &str| {
+        (1..=256)
+            .find(|&max_items| {
+                source_outputs_named_with_limits(
+                    source,
+                    "Conditionals.scala",
+                    ValidationLimits {
+                        max_items,
+                        ..ValidationLimits::default()
+                    },
+                    |_| {},
+                )
+                .is_ok()
+            })
+            .expect("conditionals fixture validates within the test budget range")
+    };
+    let nested = minimum_budget(CONDITIONALS);
+    let shallow_source = CONDITIONALS.replace(
+        "if a then\n      if b then 1 else 2\n    else 3",
+        "if a then 1 else 3",
+    );
+    let shallow = minimum_budget(&shallow_source);
+    assert!(
+        nested > shallow,
+        "nested If uses no additional items: {nested} / {shallow}"
+    );
+
+    assert_eq!(
+        source_outputs_named_with_limits(
+            CONDITIONALS,
+            "Conditionals.scala",
+            ValidationLimits {
+                max_items: nested - 1,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        )
+        .unwrap_err(),
+        PickleError::LimitExceeded {
+            kind: LimitKind::Items,
+            limit: nested - 1,
         }
     );
 }
