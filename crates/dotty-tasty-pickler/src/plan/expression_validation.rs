@@ -581,8 +581,10 @@ impl Validator<'_, '_> {
 
         let branch_join = match self.ty(typed.ty)? {
             Type::Constant(Constant::Int(value)) => {
-                let then_join = self.int_branch_constant(typed_if.then_branch, then_type)?;
-                let else_join = self.int_branch_constant(typed_if.else_branch, else_type)?;
+                let then_join =
+                    self.int_branch_constant(typed_if.then_branch, then_type, method.symbol)?;
+                let else_join =
+                    self.int_branch_constant(typed_if.else_branch, else_type, method.symbol)?;
                 if then_join != Some(*value) || else_join != Some(*value) {
                     return Err(PickleError::BodyType {
                         tree: typed_id,
@@ -600,8 +602,8 @@ impl Validator<'_, '_> {
             }
         };
         if branch_join == self.plan.definitions.int {
-            self.int_branch_constant(typed_if.then_branch, then_type)?;
-            self.int_branch_constant(typed_if.else_branch, else_type)?;
+            self.int_branch_constant(typed_if.then_branch, then_type, method.symbol)?;
+            self.int_branch_constant(typed_if.else_branch, else_type, method.symbol)?;
         }
         Ok(branch_join)
     }
@@ -612,6 +614,7 @@ impl Validator<'_, '_> {
         &self,
         tree: TreeId<Typed>,
         ty: TypeId,
+        method: SymbolId,
     ) -> Result<Option<i32>, PickleError> {
         if ty == self.plan.definitions.int {
             return Ok(None);
@@ -622,10 +625,13 @@ impl Validator<'_, '_> {
                 target: TermRefTarget::Symbol(symbol),
                 ..
             } if self.plan.store.symbols.contains(*symbol)
-                && matches!(
+                && (matches!(
                     self.plan.store.symbols.get(*symbol).kind,
                     SymbolKind::Parameter | SymbolKind::Method
-                )
+                ) || (self.plan.store.symbols.get(*symbol).kind == SymbolKind::Local
+                    && self.registered_local_symbols.contains(symbol)
+                    && self.visible_locals.contains(symbol)
+                    && self.plan.store.symbols.get(*symbol).owner == Some(method)))
                 && self.complete(*symbol)? == self.plan.definitions.int =>
             {
                 Ok(None)
@@ -859,6 +865,9 @@ impl Validator<'_, '_> {
                     }
                     (Constant::Boolean(value), Type::Constant(Constant::Boolean(typed))) => {
                         value == typed && result_type == p.definitions.boolean
+                    }
+                    (Constant::Unit, Type::Constant(Constant::Unit)) => {
+                        result_type == p.definitions.unit
                     }
                     _ => false,
                 };

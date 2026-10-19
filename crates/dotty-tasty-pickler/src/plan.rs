@@ -879,9 +879,18 @@ impl<'a> Validator<'_, 'a> {
                 role: TypeRole::Builtin(Builtin::Boolean),
             },
         )?;
+        let unit =
+            self.ty(p.definitions.unit)?
+                .reference_symbol()
+                .ok_or(PickleError::MalformedType {
+                    ty: p.definitions.unit,
+                    role: TypeRole::Builtin(Builtin::Unit),
+                })?;
         self.name(result.name)?;
         match definition.value_param_clauses.as_slice() {
-            [] if ty == p.definitions.int || ty == p.definitions.boolean => {}
+            [] if ty == p.definitions.int
+                || ty == p.definitions.boolean
+                || ty == p.definitions.unit => {}
             [] => {
                 return Err(PickleError::MalformedType {
                     ty,
@@ -909,6 +918,7 @@ impl<'a> Validator<'_, 'a> {
                 }
                 if signature.result != p.definitions.int
                     && signature.result != p.definitions.boolean
+                    && signature.result != p.definitions.unit
                 {
                     return Err(PickleError::MalformedType {
                         ty,
@@ -945,6 +955,8 @@ impl<'a> Validator<'_, 'a> {
             self.symbol(int)?.name
         } else if result_type == p.definitions.boolean {
             self.symbol(boolean)?.name
+        } else if result_type == p.definitions.unit {
+            self.symbol(unit)?.name
         } else {
             return Err(PickleError::MalformedType {
                 ty: result_type,
@@ -952,7 +964,10 @@ impl<'a> Validator<'_, 'a> {
             });
         };
         if result.name != expected_result_name {
-            return Err(PickleError::UnsupportedTypeReference { ty });
+            return Err(PickleError::MalformedType {
+                ty: result_type,
+                role: TypeRole::MethodResult,
+            });
         }
         self.validate_method_expression(definition.rhs, method.body, method, result_type)
     }

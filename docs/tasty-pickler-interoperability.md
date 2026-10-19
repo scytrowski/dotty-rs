@@ -161,3 +161,63 @@ source-to-typed binding mismatches, unsupported call shapes, and validation
 failures without publishing output. These remain complementary to the fresh
 compiler/runtime gate: that gate demonstrates acceptance and execution for the
 supported Operations subset, not broad Scala language compatibility.
+
+## Sprint 3 combined control-flow and local-value gate (issue #1315)
+
+The integration test reads the checked-in, pinned
+[`Decisions.scala`](../tests/fixtures/tasty_pickler/Decisions.scala) literally
+and runs the real Lexer → Parser → Namer → Typer → TASTy Pickler pipeline. The
+fixture retains its existing `unit` and `disabled` methods as well as the
+Sprint 3 methods; no methods are removed to make the pickler accept the class.
+`SourceTyper::typed_local_binding_at` supplies the canonical `saved` local
+symbol, typed `ValDef` and scope to the pickler plan.
+
+The test constructs two independent compiler sessions and requires identical
+complete bytes. It checks TASTy 28.9.0 validation, source-order method
+declarations, canonical class/method/formal ownership and the exact
+`TERMREFdirect` target at the emitted `saved` `VALDEF` address. The local is
+also verified as the `stored` method's block statistic; the `IF` condition,
+both branches, nested conditionals and literal tags remain in the emitted tree.
+The semantic unpickler resolves only the canonical built-in Int, Boolean and
+Unit identities and checks owner-qualified class/method identities. It does not
+reconstruct the typed body or a source-level local symbol from TASTy.
+
+Run the focused test and independent compiler/runtime gate with the pinned
+Scala 3.9.0 checkout, verified artifacts and JDK 21 or newer:
+
+```sh
+SCALA39_ROOT=/tmp/scala3-3.9.0 \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+COURSIER_MAVEN_ROOT=/tmp/dotty-coursier-cache/https/repo1.maven.org/maven2 \
+DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE=1 \
+cargo test --test tasty_source_pickling decisions_source_serializes_control_flow_and_runs_from_fresh_scala_class --locked -- --nocapture
+```
+
+For the run on 2026-10-19, the Rust-produced candidate SHA-256 was
+`0d477cc9bfb4db726e9961a929f062d5dc2132eeffa99941eee38582bf2125ab`. The
+runner staged only that file as `candidate/example/Decisions.tasty`, decompiled
+it with Scala 3.9.0, compiled it with `-from-tasty` into a separate empty
+directory and inspected the newly emitted class with `javap`. A Java harness
+loaded only that new output and passed `enabled`, both `choose` outcomes, all
+three `nested` outcomes and both `stored` outcomes. The runner also confirmed
+Rust and Scala rejection of corrupted and truncated candidate files. Its JSON
+result reported `rust_wire`, `scala_decompile`, `scala_from_tasty`, `fresh_class`,
+`javap`, all four corruption/truncation rejection flags, and runtime profile
+`standard` as successful.
+
+| Evidence | Result for `Decisions.tasty` |
+| --- | --- |
+| Rust TASTy 28.9.0 parser and validator | Passed; round-trip bytes unchanged |
+| Source/typed identity and deterministic output | Passed in two separately built frontend sessions |
+| Semantic unpickler | Passed for canonical builtins and owner-qualified class/method declarations |
+| Pinned Scala 3.9.0 decompiler and `-from-tasty` | Passed on Rust-produced bytes only |
+| Fresh JVM class and runtime assertions | Passed for Boolean, both `choose` branches, nested `if`, and local `saved` |
+| Malformed candidate controls | Rust and Scala rejected corrupt-magic and truncated candidates |
+
+This gate covers the pinned fixture and its tested Int/Boolean/Unit literal,
+parameter, `If`, ordered `Block`, local `ValDef`, and direct local-reference
+shapes. It does not establish general Scala 3 compatibility, assignment,
+closures, generic/local-polymorphic definitions, classfile-embedded TASTy
+linkage, or typed-body reconstruction by the semantic unpickler. Further work
+should add new bounded source shapes only with corresponding canonical
+identity checks and independent Scala/runtime evidence.

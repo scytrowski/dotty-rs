@@ -13,8 +13,9 @@ The source-to-classfile regression compiles a same-batch `Base` and
 constructor. In the mandatory JDK 21+ gate, `javap -c -v` inspects the child
 class and `java -Xverify:all` instantiates it and invokes inherited methods.
 The broader `SingleInheritanceAudit.scala` fixture remains a characterization
-of override and subtype behavior; its unimplemented override validation and
-inherited-reference compatibility are outside this emission increment.
+of override and subtype behavior. Exact direct-parent override validation now
+records effective dispatch identities without copying inherited bodies into a
+child plan; inherited-reference compatibility remains a later increment.
 
 ## Current pipeline and identity contracts
 
@@ -26,15 +27,22 @@ own class identity or inserting a backend cast. Member lookup returns the
 declaration symbol: an inherited selection such as `base.doubled()` retains
 the method's declaring owner, `Base`.
 
-The namer records source `override` as `SymbolFlags::OVERRIDE`. This is only
-syntax evidence: the current source namer/typer does not validate that a
-matching parent member exists or that the override's signature and
-visibility are compatible. The JVM metadata projection rejects exact
-name-and-descriptor collisions with planned non-private final methods in the
-direct parent. If a final parent method is absent from the parent's plan, a
-child method with the same name is conservatively rejected. Other override
-compatibility remains unvalidated; do not treat the flag as a validated
-override relationship.
+The namer records source `override` as `SymbolFlags::OVERRIDE`. This is syntax
+evidence, not proof by itself. Unit metadata checks that an override has a
+planned, public, nonfinal direct-parent declaration with the exact JVM name
+and descriptor, matching plain monomorphic semantic parameter/result types,
+public visibility, and a concrete body. It also rejects a same-signature
+public child method without `override`. Missing, unplanned, inaccessible,
+mismatching, and narrowed overrides return contextual typed errors. The
+existing final-method check remains conservative when the parent's final
+method is not planned.
+
+`JvmClassMetadata::methods()` continues to contain only methods declared in
+that class's plan. Its read-only `dispatch_methods()` view carries effective
+public method identities for the receiver: an inherited entry keeps the
+parent's method symbol and declaring class, while an exact override points to
+the child's distinct symbol. This metadata does not copy method bodies or
+change JVM `invokevirtual` selection.
 
 The JVM adapter accepts a canonical Object root and one same-unit edge from a
 public ordinary class to a public, non-final ordinary parent whose own parent
@@ -110,8 +118,9 @@ publish partial output.
 | Parent cycle (`A extends B`, `B extends A`) | `JvmSuperclassIssue::InheritanceCycle` | No `super_class` chain is emitted | Validated hierarchy graph in `dotty-jvm`, keyed by canonical symbols |
 | Extending a `final` class | `JvmSuperclassIssue::ParentIsFinal` | JVMS forbids extending a final class | Parent flag validation in the `dotty-jvm` hierarchy check |
 | Child method with the same JVM signature as a planned non-private final direct-parent method | `FinalJvmMethodOverride` before any class files are published; name-only conservative rejection if the parent method is unplanned | JVMS forbids overriding the final method | Exact JVM name-and-descriptor collision check in `dotty-jvm` |
-| `override` with no matching parent method | The namer records `OVERRIDE` syntax but does not prove an overridden declaration; class emission does not validate this relation | No dispatch entry may be invented | Override conformance in the source typer/namer contract, before JVM projection |
-| Override with incompatible parameter/result descriptor or reduced visibility | No validated override relation is recorded | Same JVM name+descriptor must identify the virtual entry; access cannot be narrowed incompatibly | Source override checking plus JVM descriptor/visibility validation; bridge generation remains unsupported |
+| Exact public `override def value(): Int` for public nonfinal `Base.value(): Int` | Accepted only with distinct canonical symbols, matching `()I` descriptors and a concrete child body | Child dispatch points to the child symbol; inherited methods retain the parent owner and are not re-emitted | `JvmClassMetadata::dispatch_methods()`; exact override validation in `dotty-jvm` |
+| `override` with no matching or planned direct-parent method | `InvalidJvmOverride` before any class files are published | No dispatch entry may be invented | Canonical parent declaration and plan validation in `dotty-jvm` |
+| Override with incompatible parameter/result descriptor, semantic signature, or reduced visibility | `InvalidJvmOverride` before any class files are published; final methods retain `FinalJvmMethodOverride` | Same JVM name+descriptor identifies the virtual entry; access cannot be narrowed incompatibly | Exact descriptor, semantic MethodType, and visibility checks in `dotty-jvm`; bridge generation remains unsupported |
 | Trait parent or multiple parents | The hierarchy validator rejects traits and unsupported parent-list shapes before output | JVM has one direct `super_class`; interfaces require distinct metadata and dispatch rules | Explicitly reject traits/multiple parents in `dotty-jvm`; later interface support is separate |
 | Generic or external parent | The hierarchy validator rejects unsupported class shapes and unplanned/external parents | Erased descriptor and external hierarchy facts are unavailable to this adapter | `dotty-jvm` projection/classpath boundary; keep unsupported until erasure and validated external metadata exist |
 | Missing or inaccessible parent `()V` constructor | `JvmSuperclassIssue::ParentConstructorUnavailable` | No constructor invocation or class output is emitted | Constructor metadata/access validation in `dotty-jvm`; constructor transfer in `dotty-classfile` |

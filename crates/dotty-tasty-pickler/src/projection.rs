@@ -1124,6 +1124,8 @@ impl<'a> EncodingContext<'a> {
             self.int_type_syntax()
         } else if ty == self.definitions.boolean {
             self.boolean_type_syntax()
+        } else if ty == self.definitions.unit {
+            self.constructor_return_syntax()
         } else {
             Err(PickleError::UnsupportedTypeReference { ty })
         }
