@@ -111,6 +111,7 @@ pub struct SourceTyper<'a> {
     source_type_projection_depth: usize,
     signature_parameter_in_progress: Option<SymbolId>,
     local_symbols: HashMap<(SourceId, TreeId<Untyped>), SymbolId>,
+    local_scopes: HashMap<(SourceId, TreeId<Untyped>), ScopeId>,
     patdef_expansions: expression::blocks::PatDefExpansionIndex,
     patdef_typing_attempts: HashMap<(SourceId, TreeId<Untyped>), Result<(), String>>,
     pattern_bindings: PatternBindingIndex,
@@ -139,6 +140,7 @@ pub struct SourceTyper<'a> {
 pub struct TypedLocalBinding {
     declaration: TreeId<Typed>,
     symbol: SymbolId,
+    scope: ScopeId,
 }
 
 impl TypedLocalBinding {
@@ -150,6 +152,11 @@ impl TypedLocalBinding {
     /// Canonical local symbol entered by this typer.
     pub const fn symbol(self) -> SymbolId {
         self.symbol
+    }
+
+    /// Block scope that contains this exact local declaration.
+    pub const fn scope(self) -> ScopeId {
+        self.scope
     }
 }
 
@@ -195,6 +202,7 @@ impl<'a> SourceTyper<'a> {
             source_type_projection_depth: 0,
             signature_parameter_in_progress: None,
             local_symbols: HashMap::new(),
+            local_scopes: HashMap::new(),
             patdef_expansions: expression::blocks::PatDefExpansionIndex::default(),
             patdef_typing_attempts: HashMap::new(),
             pattern_bindings: PatternBindingIndex::default(),
@@ -531,6 +539,7 @@ impl<'a> SourceTyper<'a> {
             return None;
         }
         let symbol = self.local_symbol_at(source, tree)?;
+        let scope = *self.local_scopes.get(&(source, tree))?;
         if !self
             .store
             .symbols
@@ -549,6 +558,7 @@ impl<'a> SourceTyper<'a> {
         Some(TypedLocalBinding {
             declaration,
             symbol,
+            scope,
         })
     }
 

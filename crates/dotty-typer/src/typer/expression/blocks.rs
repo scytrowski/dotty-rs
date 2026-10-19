@@ -1340,6 +1340,7 @@ impl SourceTyper<'_> {
             self.store.scopes.get_mut(scope).enter(name, symbol);
         }
         self.local_symbols.insert((self.source, tree), symbol);
+        self.local_scopes.insert((self.source, tree), scope);
 
         let typed_tpt = if inferred {
             self.reify_inferred_local_type_tree(definition.tpt, declared_type, new_mappings)?

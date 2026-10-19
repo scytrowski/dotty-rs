@@ -16,6 +16,7 @@ impl SourceTyper<'_> {
         let typed_index_checkpoint = self.typed_index.clone();
         let function_literals_checkpoint = self.function_literals.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let local_scopes_checkpoint = self.local_scopes.clone();
         let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
@@ -40,6 +41,7 @@ impl SourceTyper<'_> {
             self.typed_index = typed_index_checkpoint;
             self.function_literals = function_literals_checkpoint;
             self.local_symbols = local_symbols_checkpoint;
+            self.local_scopes = local_scopes_checkpoint;
             self.patdef_expansions = patdef_expansions_checkpoint;
             self.pattern_bindings = pattern_bindings_checkpoint;
             self.local_methods = local_methods_checkpoint;
@@ -68,6 +70,7 @@ impl SourceTyper<'_> {
         let type_index_checkpoint = self.type_index.checkpoint();
         let annotation_checkpoint = self.source_annotations.clone();
         let local_symbols_checkpoint = self.local_symbols.clone();
+        let local_scopes_checkpoint = self.local_scopes.clone();
         let patdef_expansions_checkpoint = self.patdef_expansions.clone();
         let pattern_bindings_checkpoint = self.pattern_bindings.clone();
         let local_methods_checkpoint = self.local_methods.clone();
@@ -92,6 +95,7 @@ impl SourceTyper<'_> {
                 self.type_index.restore(type_index_checkpoint);
                 self.source_annotations = annotation_checkpoint;
                 self.local_symbols = local_symbols_checkpoint;
+                self.local_scopes = local_scopes_checkpoint;
                 self.patdef_expansions = patdef_expansions_checkpoint;
                 self.pattern_bindings = pattern_bindings_checkpoint;
                 self.local_methods = local_methods_checkpoint;
