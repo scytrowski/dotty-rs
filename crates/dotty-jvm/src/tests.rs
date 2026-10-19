@@ -1044,7 +1044,7 @@ fn set_class_parents(store: &mut SemanticStore, class: SymbolId, parents: Vec<do
 
 #[test]
 fn compilation_unit_projects_one_hop_canonical_superclass_proofs_in_plan_order() {
-    let fixture = HierarchyFixture::new();
+    let mut fixture = HierarchyFixture::new();
     let unit = fixture.unit(&[fixture.base, fixture.derived]);
     let before = *fixture.store.symbols.info(fixture.base);
     let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
@@ -1107,6 +1107,23 @@ fn compilation_unit_projects_one_hop_canonical_superclass_proofs_in_plan_order()
         edges
     };
     assert_eq!(normalized(&hierarchy), normalized(&reversed_hierarchy));
+
+    let package = fixture.store.symbols.get(fixture.base).owner.unwrap();
+    let package_prefix = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(package),
+    });
+    let qualified_parent = fixture.store.types.alloc(Type::TypeRef {
+        prefix: package_prefix,
+        target: TypeRefTarget::Symbol(fixture.base),
+    });
+    set_class_parents(&mut fixture.store, fixture.derived, vec![qualified_parent]);
+    assert!(
+        fixture
+            .unit(&[fixture.base, fixture.derived])
+            .class_hierarchy(&fixture.definitions)
+            .is_ok()
+    );
 }
 
 #[test]
@@ -1229,6 +1246,93 @@ fn compilation_unit_hierarchy_rejects_multiple_parents_and_unavailable_super_con
             parent: Some(parent),
             issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
         }) if class == fixture.derived && parent == fixture.base
+    ));
+
+    let mut malformed_prefix = HierarchyFixture::new();
+    let foreign_package = malformed_prefix.store.symbols.alloc(Symbol {
+        name: Name::new(
+            malformed_prefix.store.names.intern("foreign"),
+            Namespace::Term,
+        ),
+        owner: None,
+        kind: SymbolKind::Package,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let foreign_prefix = malformed_prefix.store.types.alloc(Type::TypeRef {
+        prefix: malformed_prefix.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(foreign_package),
+    });
+    let wrong_parent = malformed_prefix.store.types.alloc(Type::TypeRef {
+        prefix: foreign_prefix,
+        target: TypeRefTarget::Symbol(malformed_prefix.base),
+    });
+    set_class_parents(
+        &mut malformed_prefix.store,
+        malformed_prefix.derived,
+        vec![wrong_parent],
+    );
+    assert!(matches!(
+        malformed_prefix
+            .unit(&[malformed_prefix.base, malformed_prefix.derived])
+            .class_hierarchy(&malformed_prefix.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            issue: crate::JvmSuperclassIssue::NonCanonicalParentType,
+            ..
+        }) if class == malformed_prefix.derived
+    ));
+
+    let mut curried_parent = HierarchyFixture::new();
+    let declarations = match curried_parent.store.symbols.info(curried_parent.base) {
+        SymbolInfo::Complete(ty) => match curried_parent.store.types.get(*ty) {
+            Type::ClassInfo(info) => info.declarations,
+            _ => panic!("Base should have ClassInfo"),
+        },
+        _ => panic!("Base should have completed info"),
+    };
+    let constructor_name = curried_parent.store.names.intern("<init>");
+    let result_clause = curried_parent.store.types.alloc(Type::Method(MethodType {
+        params: Vec::new(),
+        result: curried_parent.definitions.unit,
+        kind: MethodKind::Plain,
+    }));
+    let constructor_type = curried_parent.store.types.alloc(Type::Method(MethodType {
+        params: Vec::new(),
+        result: result_clause,
+        kind: MethodKind::Plain,
+    }));
+    let constructor = curried_parent.store.symbols.alloc(Symbol {
+        name: Name::new(constructor_name, Namespace::Term),
+        owner: Some(curried_parent.base),
+        kind: SymbolKind::Constructor,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Complete(constructor_type),
+        origin: SymbolOrigin::Synthetic,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    curried_parent
+        .store
+        .scopes
+        .get_mut(declarations)
+        .enter(Name::new(constructor_name, Namespace::Term), constructor);
+    assert!(matches!(
+        curried_parent
+            .unit(&[curried_parent.base, curried_parent.derived])
+            .class_hierarchy(&curried_parent.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
+        }) if class == curried_parent.derived && parent == curried_parent.base
     ));
 }
 

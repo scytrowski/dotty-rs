@@ -360,7 +360,7 @@ pub(super) fn unit_hierarchy(
     Ok(crate::JvmClassHierarchy { superclasses })
 }
 
-fn canonical_class_parent_prefix(
+pub(super) fn canonical_class_parent_prefix(
     store: &SemanticStore,
     prefix: dotty_core::TypeId,
     parent: dotty_core::SymbolId,
@@ -416,14 +416,8 @@ fn validate_accessible_no_arg_constructor(
         {
             false
         } else {
-            match symbol.info {
-                SymbolInfo::Missing | SymbolInfo::Deferred(_) => true,
-                SymbolInfo::Complete(ty) => matches!(
-                    unit.store.types.try_get(ty),
-                    Some(Type::Method(method)) if method.params.is_empty()
-                ),
-                SymbolInfo::Error => false,
-            }
+            crate::emission::validate_primary_constructor(unit.store, plan.class, constructor)
+                .is_ok()
         }
     };
     let declarations_valid = match (&plan.initialization, constructors.as_slice()) {

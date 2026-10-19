@@ -211,19 +211,25 @@ impl JvmPrimaryConstructorPlan {
         let identity = crate::identity::class_identity(store, owner)?;
         let info = crate::identity::class_info(store, owner)?;
         let valid_parent = match superclass {
-            Some(superclass) if superclass.class() == owner => matches!(
-                (info.parents.as_slice(), store.types.try_get(definitions.no_prefix)),
-                (
-                    [parent],
-                    Some(dotty_core::Type::NoPrefix)
-                ) if matches!(
-                    store.types.try_get(*parent),
-                    Some(dotty_core::Type::TypeRef {
-                        prefix,
-                        target: dotty_core::TypeRefTarget::Symbol(symbol),
-                    }) if *prefix == definitions.no_prefix && *symbol == superclass.parent()
+            Some(superclass) if superclass.class() == owner => {
+                matches!(
+                    info.parents.as_slice(),
+                    [parent]
+                        if matches!(
+                            store.types.try_get(*parent),
+                            Some(dotty_core::Type::TypeRef {
+                                prefix,
+                                target: dotty_core::TypeRefTarget::Symbol(symbol),
+                            }) if *symbol == superclass.parent()
+                                && crate::identity::canonical_class_parent_prefix(
+                                    store,
+                                    *prefix,
+                                    *symbol,
+                                    definitions.no_prefix,
+                                )
+                        )
                 )
-            ),
+            }
             _ => {
                 info.parents.as_slice() == [definitions.object_type]
                     && matches!(store.types.try_get(definitions.object_type), Some(dotty_core::Type::TypeRef { prefix, target: dotty_core::TypeRefTarget::Symbol(symbol) }) if *prefix == definitions.no_prefix && *symbol == definitions.object_class)

@@ -7787,6 +7787,99 @@ fn invalid_source_is_rejected_with_parser_diagnostics_without_output() {
 }
 
 #[test]
+fn package_qualified_source_parent_reaches_hierarchy_and_constructor_metadata() {
+    let source_text = "package example\nclass Base()\nclass Derived() extends example.Base";
+    let source_id = SourceId::from_index(1327);
+    let source = SourceText::new(source_text).unwrap();
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "PackageQualifiedParent.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        other => panic!("source should be named without diagnostics: {other:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("source root should be a package definition")
+    };
+    let source_classes = package
+        .stats
+        .iter()
+        .filter_map(|tree| {
+            let TreeKind::TypeDef(definition) = &parsed.ast.get(*tree).kind else {
+                return None;
+            };
+            let class = index.symbol_at(source_id, *tree)?;
+            if store.symbols.get(class).kind != SymbolKind::Class {
+                return None;
+            }
+            let TreeKind::Template(template) = &parsed.ast.get(definition.rhs).kind else {
+                panic!("source class should have a template")
+            };
+            Some((class, template.constructor))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(source_classes.len(), 2);
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (class, _) in &source_classes {
+        typer.complete_symbol(*class).unwrap();
+    }
+    let mut plans = Vec::new();
+    for (class, constructor_tree) in source_classes {
+        let constructor = index
+            .symbol_at(source_id, constructor_tree)
+            .expect("constructor should have a canonical source symbol");
+        typer.complete_symbol(constructor).unwrap();
+        plans.push(JvmClassPlan {
+            class,
+            methods: Vec::new(),
+            fields: Vec::new(),
+            initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                JvmPrimaryConstructorPlan::from_source(
+                    class,
+                    constructor,
+                    Vec::new(),
+                    &parsed.ast,
+                    &index,
+                )
+                .unwrap(),
+            ),
+        });
+    }
+    let unit = JvmCompilationUnit {
+        store: typer.store(),
+        typed_ast: typer.typed_ast(),
+        classes: plans,
+    };
+    let metadata = unit.metadata(&definitions).unwrap();
+    assert_eq!(metadata.len(), 2);
+    assert_eq!(
+        metadata[1].superclass().unwrap().parent_internal_name(),
+        "example/Base"
+    );
+}
+
+#[test]
 fn single_inheritance_audit_fixture_reaches_jvm_superclass_rejection_without_output() {
     let output = TestOutputDirectory::new("single-inheritance-audit");
     let fixture = fixture_path("SingleInheritanceAudit.scala");
