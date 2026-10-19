@@ -2501,6 +2501,14 @@ mod tests {
             .unwrap()
             .expect("the pinned Types TASTy declares an Object and ModuleClass");
 
+        let universal_type =
+            fixture_bytes("scala3-compiler/dotty/tools/dotc/semanticdb/UniversalType.tasty");
+        decode_identity(
+            &universal_type,
+            &BinaryName::from_internal("dotty/tools/dotc/semanticdb/UniversalType"),
+        )
+        .expect("the pinned compiler class identity is readable from 28.8 TASTy");
+
         let residual = decode_module_class_with_resolvers(
             &types,
             &BinaryName::from_internal("dotty/tools/dotc/core/Types$"),
