@@ -940,8 +940,8 @@ fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
 }
 
 #[test]
-fn constructor_field_initializer_loads_exact_reference_parameters() {
-    let source_text = "class Counter()\nclass Other()\nclass Holder(left: Counter, enabled: Boolean, right: Other):\n  private val delegate: Counter = left\n  private var current: Counter = left\n  private val active: Boolean = enabled\n  private val peer: Other = right\n";
+fn reference_fields_read_write_and_call_through_the_current_instance() {
+    let source_text = "class Counter():\n  def get(): Int = 7\nclass Other()\nclass Holder(left: Counter, enabled: Boolean, right: Other):\n  private val delegate: Counter = left\n  private var current: Counter = left\n  private val active: Boolean = enabled\n  private val peer: Other = right\n  def value(): Counter = delegate\n  def valueThis(): Counter = this.delegate\n  def read(): Int = delegate.get()\n  def readThis(): Int = this.delegate.get()\n  def replace(next: Counter): Unit = { current = next }\n  def replaceThis(next: Counter): Unit = { this.current = next }\n  def valueAfter(): Counter = current\n  def branch(flag: Boolean): Counter = if flag then delegate else current\n";
     with_source(source_text, |ast, source, index, definitions, typer| {
         let mut classes = Vec::new();
         let mut class_symbols = Vec::new();
@@ -1012,6 +1012,69 @@ fn constructor_field_initializer_loads_exact_reference_parameters() {
             });
         }
 
+        for name in [
+            "get",
+            "value",
+            "valueThis",
+            "read",
+            "readThis",
+            "replace",
+            "replaceThis",
+            "valueAfter",
+            "branch",
+        ] {
+            let (method, body, parameters) = ast
+                .iter()
+                .find_map(|(tree, node)| {
+                    let TreeKind::DefDef(definition) = &node.kind else {
+                        return None;
+                    };
+                    if typer
+                        .store()
+                        .names
+                        .resolve(definition.name.as_name().text())
+                        != name
+                    {
+                        return None;
+                    }
+                    let method = index.symbol_at(source, tree)?;
+                    let expected_owner = if name == "get" {
+                        class_symbols[0]
+                    } else {
+                        class_symbols[2]
+                    };
+                    if typer.store().symbols.get(method).owner != Some(expected_owner) {
+                        return None;
+                    }
+                    let parameters = definition
+                        .value_param_clauses
+                        .iter()
+                        .flatten()
+                        .map(|parameter| index.symbol_at(source, *parameter))
+                        .collect::<Option<Vec<_>>>()?;
+                    Some((method, definition.rhs?, parameters))
+                })
+                .unwrap_or_else(|| panic!("missing method {name}"));
+            typer.complete_symbol(method).unwrap();
+            let context = typer.expression_context_for(method).unwrap();
+            let typed_body = typer.type_expression(body, context).unwrap();
+            let owner = if name == "get" {
+                class_symbols[0]
+            } else {
+                class_symbols[2]
+            };
+            let owner_index = class_symbols
+                .iter()
+                .position(|class| *class == owner)
+                .unwrap();
+            classes[owner_index].methods.push(JvmMethodPlan {
+                method,
+                parameters,
+                locals: Vec::new(),
+                body: Some(typed_body),
+            });
+        }
+
         let unit = JvmCompilationUnit {
             store: typer.store(),
             typed_ast: typer.typed_ast(),
@@ -1041,6 +1104,101 @@ fn constructor_field_initializer_loads_exact_reference_parameters() {
         let initializer = unit
             .lower_constructor_field_initializers(class_symbols[2], definitions)
             .unwrap();
+        let holder_methods = &unit.classes[2].methods;
+        for name in ["value", "valueThis", "valueAfter", "branch"] {
+            let method = holder_methods
+                .iter()
+                .find(|method| {
+                    typer
+                        .store()
+                        .names
+                        .resolve(typer.store().symbols.get(method.method).name.text())
+                        == name
+                })
+                .unwrap();
+            let code = unit
+                .lower_method_body(class_symbols[2], method.method, definitions)
+                .unwrap();
+            let debug = format!("{code:?}");
+            assert!(debug.contains("ALoad"), "{name} loads this: {debug}");
+            assert!(
+                debug.contains("operation: Get"),
+                "{name} reads field: {debug}"
+            );
+            assert!(
+                debug.contains("AReturn"),
+                "{name} returns reference: {debug}"
+            );
+        }
+        let read_method = holder_methods
+            .iter()
+            .find(|method| {
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(method.method).name.text())
+                    == "read"
+            })
+            .unwrap();
+        let read_code = unit
+            .lower_method_body(class_symbols[2], read_method.method, definitions)
+            .unwrap();
+        let read_debug = format!("{read_code:?}");
+        assert!(read_debug.contains("operation: Get"), "read must getfield");
+        assert!(
+            read_debug.contains("operation: Virtual"),
+            "read must invokevirtual: {read_debug}"
+        );
+        let read_this_method = holder_methods
+            .iter()
+            .find(|method| {
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(method.method).name.text())
+                    == "readThis"
+            })
+            .unwrap();
+        let read_this = unit
+            .lower_method_body(class_symbols[2], read_this_method.method, definitions)
+            .unwrap();
+        let read_this_debug = format!("{read_this:?}");
+        assert!(read_this_debug.contains("operation: Get"));
+        assert!(read_this_debug.contains("operation: Virtual"));
+        let replace_method = holder_methods
+            .iter()
+            .find(|method| {
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(method.method).name.text())
+                    == "replace"
+            })
+            .unwrap();
+        let replace_code = unit
+            .lower_method_body(class_symbols[2], replace_method.method, definitions)
+            .unwrap();
+        let replace_debug = format!("{replace_code:?}");
+        assert!(replace_debug.contains("AStore"), "replace stores reference");
+        assert!(replace_debug.contains("ALoad"), "replace reloads reference");
+        assert!(
+            replace_debug.contains("operation: Put"),
+            "replace must putfield"
+        );
+        let replace_this_method = holder_methods
+            .iter()
+            .find(|method| {
+                typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(method.method).name.text())
+                    == "replaceThis"
+            })
+            .unwrap();
+        let replace_this = unit
+            .lower_method_body(class_symbols[2], replace_this_method.method, definitions)
+            .unwrap();
+        assert!(format!("{replace_this:?}").contains("operation: Put"));
         assert_eq!(
             initializer
                 .fields()
@@ -1167,7 +1325,7 @@ fn constructor_field_initializer_loads_exact_reference_parameters() {
             let harness = output.join("ReferenceConstructorHarness.java");
             fs::write(
                 &harness,
-                "public final class ReferenceConstructorHarness { private static java.lang.reflect.Field field(String name) throws Exception { java.lang.reflect.Field field = Holder.class.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Counter counter = new Counter(); Other other = new Other(); Holder holder = new Holder(counter, true, other); if (field(\"delegate\").get(holder) != counter) throw new AssertionError(\"reference parameter\"); if (field(\"current\").get(holder) != counter) throw new AssertionError(\"mutable reference parameter\"); if (!field(\"active\").getBoolean(holder)) throw new AssertionError(\"boolean parameter\"); if (field(\"peer\").get(holder) != other) throw new AssertionError(\"second reference parameter\"); } }\n",
+                "public final class ReferenceConstructorHarness { private static java.lang.reflect.Field field(String name) throws Exception { java.lang.reflect.Field field = Holder.class.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Counter counter = new Counter(); Counter next = new Counter(); Other other = new Other(); Holder holder = new Holder(counter, true, other); if (field(\"delegate\").get(holder) != counter) throw new AssertionError(\"reference parameter\"); if (field(\"current\").get(holder) != counter) throw new AssertionError(\"mutable reference parameter\"); if (!field(\"active\").getBoolean(holder)) throw new AssertionError(\"boolean parameter\"); if (field(\"peer\").get(holder) != other) throw new AssertionError(\"second reference parameter\"); if (holder.value() != counter || holder.valueThis() != counter || holder.valueAfter() != counter) throw new AssertionError(\"getfield identity\"); if (holder.read() != 7 || holder.readThis() != 7) throw new AssertionError(\"field call receiver\"); if (holder.branch(true) != counter || holder.branch(false) != counter) throw new AssertionError(\"reference branch join\"); holder.replace(next); if (holder.valueAfter() != next) throw new AssertionError(\"putfield identity\"); holder.replaceThis(counter); if (holder.valueAfter() != counter) throw new AssertionError(\"explicit this putfield identity\"); } }\n",
             )
             .unwrap();
             let javac = Command::new("javac")

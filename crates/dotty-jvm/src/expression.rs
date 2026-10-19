@@ -849,12 +849,7 @@ fn emit_field_read(
     }
 
     let field_type = match context.store.symbols.info(field) {
-        SymbolInfo::Complete(ty) => crate::descriptor::primitive_semantic_value_type(
-            context.store,
-            context.definitions,
-            field,
-            *ty,
-        )?,
+        SymbolInfo::Complete(_) => field_metadata.value_type(),
         SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
             return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
         }
@@ -1134,12 +1129,7 @@ fn emit_field_assignment(
     }
 
     let field_type = match context.store.symbols.info(field) {
-        SymbolInfo::Complete(ty) => crate::descriptor::primitive_semantic_value_type(
-            context.store,
-            context.definitions,
-            field,
-            *ty,
-        )?,
+        SymbolInfo::Complete(_) => field_metadata.value_type(),
         SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
             return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
         }
@@ -1168,13 +1158,19 @@ fn emit_field_assignment(
     match emit_expression(context, rhs, code, depth + 1)? {
         Flow::Diverges => Ok(Flow::Diverges),
         Flow::Value(found) if found == field_type => {
-            code.istore(value_slot)
-                .and_then(|code| code.aload(receiver_slot))
-                .and_then(|code| code.iload(value_slot))
-                .map_err(|error| JvmCodegenError::CodeBuilder {
-                    tree: tree_id,
-                    error,
-                })?;
+            match found {
+                JvmType::Reference(_) => code.astore(value_slot),
+                JvmType::Int | JvmType::Boolean => code.istore(value_slot),
+            }
+            .and_then(|code| code.aload(receiver_slot))
+            .and_then(|code| match found {
+                JvmType::Reference(_) => code.aload(value_slot),
+                JvmType::Int | JvmType::Boolean => code.iload(value_slot),
+            })
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
             code.putfield(
                 class.identity().internal_name(),
                 field_metadata.name(),
@@ -1415,8 +1411,8 @@ fn block_value_type(
                 field: *symbol,
             });
         }
-        let symbol_type = match context.store.symbols.info(*symbol) {
-            SymbolInfo::Complete(symbol_type) => *symbol_type,
+        match context.store.symbols.info(*symbol) {
+            SymbolInfo::Complete(_) => {}
             SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
                 return Err(JvmCodegenError::MissingSemanticInfo { symbol: *symbol });
             }
@@ -1424,13 +1420,16 @@ fn block_value_type(
                 return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *symbol });
             }
         };
-        return crate::descriptor::primitive_semantic_value_type(
-            context.store,
-            context.definitions,
-            *symbol,
-            symbol_type,
-        )
-        .map(Some);
+        let metadata = class
+            .fields()
+            .iter()
+            .find(|field| field.symbol() == *symbol)
+            .ok_or(JvmCodegenError::FieldNotInJvmPlan {
+                tree,
+                class: class_symbol,
+                field: *symbol,
+            })?;
+        return Ok(Some(metadata.value_type()));
     }
     parameter_value_type(context, tree, *symbol, *prefix).map(Some)
 }

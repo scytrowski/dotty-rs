@@ -204,7 +204,7 @@ unsupported states remain typed build errors.
 | Source shape | Planned JVM lowering | CFG/verifier rule |
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
-| Private `Int`/`Boolean` field on current `this` | `aload(0)` with `getfield`/`putfield` | Exact current class and primitive descriptor; receiver/temp locals must merge safely |
+| Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and value descriptor; reference types must match at CFG joins |
 | Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver, argument, and result classes must exactly match planned descriptors |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
@@ -370,14 +370,16 @@ class emission installs these fields only when a validated primary constructor
 plan proves their initialization. `ImplicitNoArg` remains restricted to
 empty-field classes and preserves the previous public `<init>()V` shape.
 
-Method-body lowering accepts assignments to planned mutable primitive fields
+Method-body lowering accepts assignments to planned mutable primitive and
+exact-reference fields
 that resolve canonically to the current class's unqualified field identifier or
 `this.field`. It validates field ownership, plan membership, mutability and
-primitive type, then emits `aload_0`, the RHS once, and `putfield`; a successful
-assignment completes with Unit and no value on the operand stack. Local
-assignments continue to use their canonical local slot and `istore`, including
-when a local shadows a field. Immutable fields, arbitrary receivers, and field
-writes in methods whose emitted code contains branches return typed errors.
+exact field value type, then emits `aload_0`, the RHS once, and `putfield`; a
+successful assignment completes with Unit and no value on the operand stack.
+Local assignments continue to use their canonical local slot and `istore`,
+including when a local shadows a field. Immutable fields and arbitrary
+receivers return typed errors; CFG validation checks temporary states across
+branch edges.
 `emit_class` carries these field references into the classfile after validating
 the field and constructor plans.
 
@@ -457,7 +459,7 @@ zero times, initialization performed only in its body is not considered
 definite after the loop; the class-file CFG analyzer verifies header/back-edge
 local states and generates stack-map frames. Nested loops and `If`/`Block`/
 `Assign` bodies are supported when their verifier states merge. Exact planned
-reference locals, current-instance private primitive fields, planned calls on
+reference locals, current-instance private fields, planned calls on
 reference receivers, and complete branch-local allocations use the same CFG
 validation. `PatDef` and other unsupported stats return structured errors.
 Standalone expression lowering remains limited by its lack of a validated
@@ -467,15 +469,20 @@ class plan and local layout.
 reads of fields in that class's validated field plan. A canonical unqualified
 field `Ident` or a `Select` whose qualifier is that class's unqualified
 `ThisType` emits `aload(0)` followed by symbolic `getfield` using the validated
-owner, field name, and `I`/`Z` descriptor. Both forms produce the matching
-int-like `Int` or Boolean flow. Resolution uses the `TermRefTarget::Symbol`
-identity, the field owner, and its planned metadata; same-spelling parameters
-and locals keep their existing loads. Other receivers, fields absent from the
-plan, stale targets, and prefixes that do not identify the current instance
-return contextual errors. Field reads and writes may occur in `If` and `While`;
-the current-instance receiver and temporary primitive locals are checked at
-branch targets and loop edges. Straight-line `Block` results may carry the type
-of a planned field into this same validated read path. Whole-class emission
+owner, field name, and exact `I`/`Z`/`L...;` descriptor. Reference reads
+produce the exact planned `JvmType::Reference(SymbolId)` flow. Assignments to
+mutable reference fields evaluate the RHS once, spill and reload it with
+`astore`/`aload`, then emit checked `putfield`; immutable fields remain
+rejected. A planned reference field can also be a receiver for a canonical
+planned `invokevirtual` method. Resolution uses the `TermRefTarget::Symbol`
+identity, field owner, current-instance prefix, and planned metadata;
+same-spelling parameters and locals keep their own loads. Other receivers,
+fields absent from the plan, stale targets, and prefixes that do not identify
+the current instance return contextual errors. Field reads and writes may
+occur in `If` and `While`; the exact field type and temporary locals are
+checked at branch targets and loop edges. Straight-line `Block` results may
+carry the type of a planned field into this same validated read path.
+Whole-class emission
 uses this lowering path for planned methods and emits no artifact if any
 method fails.
 
