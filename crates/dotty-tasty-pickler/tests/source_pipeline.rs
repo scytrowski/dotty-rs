@@ -19,6 +19,28 @@ const EXPLICIT_THIS_REFERENCES: &str =
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
+const ANSWER_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Answer.hex");
+const OPERATIONS_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Operations.hex");
+const PARAMETERS_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Parameters.hex");
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn supported_fixture_outputs_match_the_pre_refactor_bytes_exactly() {
+    // Captured from main at 8738a3a0c before issue #1310's validation refactor.
+    // Comparing the full encoding pins header UUID, name order, addresses and body bytes.
+    for (name, source, expected) in [
+        ("Answer", ANSWER, ANSWER_PRE_REFACTOR),
+        ("Operations", OPERATIONS, OPERATIONS_PRE_REFACTOR),
+        ("Parameters", PARAMETERS, PARAMETERS_PRE_REFACTOR),
+    ] {
+        let (_, output) = source_outputs_named(source, &format!("{name}.scala"), |_| {}).unwrap();
+        assert_eq!(bytes_hex(output.bytes()), expected.trim(), "{name}");
+    }
+}
+
 fn source_outputs(
     text: &str,
     edit: impl FnOnce(&mut PicklePlan<'_>),
