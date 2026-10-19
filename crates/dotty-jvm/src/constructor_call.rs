@@ -135,6 +135,13 @@ pub(super) fn resolve(
         .iter()
         .find(|metadata| metadata.identity().symbol() == owner_class)
         .ok_or(JvmCodegenError::MissingClassPlan { class: owner_class })?;
+    let superclass =
+        class_metadata
+            .superclass()
+            .ok_or(JvmCodegenError::UnsupportedJvmSuperclass {
+                class: owner_class,
+                parent: None,
+            })?;
     let class_info = crate::identity::class_info(unit.store, owner_class)?;
     crate::emission::validate_emittable_class(
         class_plan,
@@ -142,6 +149,7 @@ pub(super) fn resolve(
         unit.store,
         definitions,
         class_info,
+        superclass,
     )?;
     if !unit.store.symbols.contains(constructor) {
         return Err(JvmCodegenError::UnknownMethod {

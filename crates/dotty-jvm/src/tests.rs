@@ -1127,6 +1127,52 @@ fn compilation_unit_projects_one_hop_canonical_superclass_proofs_in_plan_order()
 }
 
 #[test]
+fn whole_class_emission_uses_the_validated_parent_for_class_and_constructor() {
+    let fixture = HierarchyFixture::new();
+    let unit = fixture.unit(&[fixture.base, fixture.derived]);
+    let base = emit_class(&unit, fixture.base, &fixture.definitions).unwrap();
+    let derived = emit_class(&unit, fixture.derived, &fixture.definitions).unwrap();
+
+    let mut base_reader = Reader::new(base.bytes());
+    let base_class = ClassFile::decode(&mut base_reader).unwrap();
+    let mut derived_reader = Reader::new(derived.bytes());
+    let derived_class = ClassFile::decode(&mut derived_reader).unwrap();
+    assert_eq!(
+        derived_class
+            .constant_pool
+            .class_name(derived_class.super_class.unwrap()),
+        Ok("example/Base")
+    );
+    let constructor = emitted_method_code(&derived_class, "<init>");
+    assert_eq!(constructor[0], 0x2a);
+    assert_eq!(constructor[1], 0xb7);
+    assert_eq!(constructor[4], 0xb1);
+    assert_special_method_ref(
+        &derived_class,
+        constructor,
+        1,
+        "example/Base",
+        "<init>",
+        "()V",
+    );
+    assert_eq!(
+        base_class
+            .constant_pool
+            .class_name(base_class.super_class.unwrap()),
+        Ok("java/lang/Object")
+    );
+    let base_constructor = emitted_method_code(&base_class, "<init>");
+    assert_special_method_ref(
+        &base_class,
+        base_constructor,
+        1,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+}
+
+#[test]
 fn compilation_unit_hierarchy_rejects_unplanned_final_cyclic_and_deep_parents() {
     let fixture = HierarchyFixture::new();
     let missing = fixture.unit(&[fixture.derived]);
