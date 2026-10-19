@@ -1412,6 +1412,75 @@ fn nested_expression_depth_budget_has_a_typed_failure() {
 }
 
 #[test]
+fn if_application_branches_share_depth_and_repeated_node_validation_state() {
+    let nested_if_with_applications = "package example\nclass Mixed:
+  def choose(flag: Boolean): Int = if flag then if flag then identity(identity(1)) else 2 else 3
+  def identity(x: Int): Int = x
+";
+    let depth_error = source_outputs_named_with_limits(
+        nested_if_with_applications,
+        "Mixed.scala",
+        ValidationLimits {
+            max_expression_depth: 1,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        depth_error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 1,
+        }
+    );
+
+    let two_application_branches = "package example\nclass Shared:
+  def choose(flag: Boolean): Int = if flag then identity(1) else identity(1)
+  def identity(x: Int): Int = x
+";
+    let mut shared_argument = None;
+    let repeated = source_outputs_named_with_tree_edits(
+        two_application_branches,
+        "Shared.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, _, source_if, typed_if) =
+                first_conditional_ids(source_ast, typed_ast, bindings);
+            let TreeKind::Apply(source_then) = &source_ast.get(source_if.then_branch).kind else {
+                panic!("expected an application in the then branch")
+            };
+            let TreeKind::Apply(source_else) = &source_ast.get(source_if.else_branch).kind else {
+                panic!("expected an application in the else branch")
+            };
+            let TreeKind::Apply(typed_then) = &typed_ast.get(typed_if.then_branch).kind else {
+                panic!("expected a typed application in the then branch")
+            };
+            let shared = typed_then.args[0];
+            let TreeKind::Apply(typed_else) = &mut typed_ast.get_mut(typed_if.else_branch).kind
+            else {
+                panic!("expected a typed application in the else branch")
+            };
+            shared_argument = Some(shared);
+            typed_else.args[0] = shared;
+            bindings.remove(SourceId::from_index(7), source_else.args[0]);
+            bindings
+                .insert(SourceId::from_index(7), source_else.args[0], shared)
+                .unwrap();
+            assert_ne!(source_then.args[0], source_else.args[0]);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        repeated,
+        PickleError::RepeatedExpression {
+            tree: shared_argument.unwrap(),
+        }
+    );
+}
+
+#[test]
 fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
     use dotty_tasty::tasty::*;
 

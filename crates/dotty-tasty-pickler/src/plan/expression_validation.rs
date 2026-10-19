@@ -499,6 +499,10 @@ impl Validator<'_, '_> {
         if matches!(source.kind, TreeKind::If(_)) || matches!(typed.kind, TreeKind::If(_)) {
             return self.validate_if_expression(source_id, typed_id, method, depth + 1, visited);
         }
+        if matches!(source.kind, TreeKind::Apply(_)) && matches!(typed.kind, TreeKind::Apply(_)) {
+            self.validate_nested_application(source_id, typed_id, method, depth + 1, visited)?;
+            return Ok(typed.ty);
+        }
         self.charge(1)?;
         if !visited.insert(typed_id) {
             return Err(PickleError::RepeatedExpression { tree: typed_id });
