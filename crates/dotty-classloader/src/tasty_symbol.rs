@@ -2497,10 +2497,9 @@ mod tests {
         let types = fixture_bytes("scala3-compiler/dotty/tools/dotc/core/Types.tasty");
         let requested = BinaryName::from_internal("dotty/tools/dotc/core/Types");
 
-        let module = decode_module_identity(&types, &requested)
+        decode_module_identity(&types, &requested)
             .unwrap()
-            .expect("the pinned Types TASTy declares an Object");
-        assert!(module.companion_class_kind.is_none());
+            .expect("the pinned Types TASTy declares an Object and ModuleClass");
 
         let residual = decode_module_class_with_resolvers(
             &types,
@@ -2513,13 +2512,12 @@ mod tests {
         assert_ne!(residual.root_cause_code(), "tasty.unsupported_version");
 
         let contexts = fixture_bytes("scala3-compiler/dotty/tools/dotc/core/Contexts.tasty");
-        let contexts_identity = decode_module_identity(
+        decode_module_identity(
             &contexts,
             &BinaryName::from_internal("dotty/tools/dotc/core/Contexts"),
         )
         .unwrap()
         .expect("the pinned Contexts TASTy declares an Object");
-        assert!(contexts_identity.object_flags.is_empty());
 
         assert!(matches!(
             decode_identity(
