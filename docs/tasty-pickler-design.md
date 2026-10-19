@@ -212,7 +212,7 @@ It is compiler-generated, not evidence of a source annotation in the core store.
 
 ### Supported and deferred surface
 
-| Surface | Implemented complete file (#1194/#1195/#1241) | Deferred / oracle-only |
+| Surface | Implemented complete file (#1194/#1195/#1241/#1313) | Deferred / oracle-only |
 | --- | --- | --- |
 | Unit/output boundary | One ordinary top-level class in explicit `package example`; one package-aligned `.tasty` per class | Default/nested packages, multiple classes, linked class/object outputs |
 | Class | Public, no type/value parameters, no self type, no fields, no explicit extends or initialization statements; exact canonical implicit Object parent | Traits, objects, companions, nesting, enums, arbitrary inheritance/constructors |
@@ -301,8 +301,9 @@ Validation does not re-type source, mutate
 stores/arenas/indices/symbols, or publish files. A separate `EncodingContext` now
 projects names/types/references into owned AST fragments. The checked plan's
 `declaration_skeleton` API assembles declaration trees into an explicitly
-incomplete structural document; completed method bodies/files and a root-facade
-export remain deferred.
+incomplete structural document, while complete method bodies are emitted as
+`PickledTasty` under the bounded expression surface described below. A
+root-facade export remains deferred.
 
 The current complete producer also accepts an Int `BLOCK` when the real source
 and typed roots are paired, every source statement and final expression has its
@@ -715,9 +716,9 @@ Tests inspect the actual method RHS, compare it to the unchanged Scala oracle,
 verify UUID hashing against that fixture, exercise signed Int boundaries and
 re-encode/decode the generated file byte-for-byte. Real Lexer/Parser/Namer/Typer
 sessions pass existing `SourceTypedIndex` roots directly, including non-42 values
-and independent deterministic sessions. **These checks do not establish Scala
-compiler interoperability**; compilation of this Rust producer's output remains
-#1241. The earlier audit and sequencing sections describe historical decisions,
+and independent deterministic sessions. These source and Rust codec checks alone
+do not establish Scala compiler interoperability; that claim is limited to the
+fixtures covered by the opt-in Scala gate below. The earlier audit and sequencing sections describe historical decisions,
 not a requirement to keep the complete producer unimplemented. The opt-in Scala
 oracle gate independently compiles and executes the current `Answer`,
 `Parameters`, and `Blocks` producer outputs; the Blocks structural test checks
