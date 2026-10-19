@@ -62,6 +62,27 @@ fn source_outputs_named_with_limits(
     validation_limits: ValidationLimits,
     edit: impl FnOnce(&mut PicklePlan<'_>),
 ) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
+    source_outputs_named_with_tree_edits(
+        text,
+        source_name,
+        validation_limits,
+        |_, _, _, _| {},
+        edit,
+    )
+}
+
+fn source_outputs_named_with_tree_edits(
+    text: &str,
+    source_name: &str,
+    validation_limits: ValidationLimits,
+    edit_trees: impl FnOnce(
+        &mut AstArena<Untyped>,
+        &mut AstArena<Typed>,
+        &mut dotty_typer::SourceTypedIndex,
+        &SemanticStore,
+    ),
+    edit: impl FnOnce(&mut PicklePlan<'_>),
+) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
     let source = SourceId::from_index(7);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -152,12 +173,29 @@ fn source_outputs_named_with_limits(
             body,
         });
     }
-    let bindings = |source, tree| typer.source_typed_index().get(source, tree);
+    // Give negative tests an isolated candidate to corrupt. The original
+    // frontend session below remains available for the read-only input check.
+    let mut source_ast = AstArena::new();
+    for (_, tree) in parsed.ast.iter() {
+        source_ast.alloc(tree.clone());
+    }
+    let mut typed_ast = AstArena::new();
+    for (_, tree) in typer.typed_ast().iter() {
+        typed_ast.alloc(tree.clone());
+    }
+    let mut typed_bindings = typer.source_typed_index().clone();
+    edit_trees(
+        &mut source_ast,
+        &mut typed_ast,
+        &mut typed_bindings,
+        typer.store(),
+    );
+    let bindings = |source, tree| typed_bindings.get(source, tree);
     let mut plan = PicklePlan {
         store: typer.store(),
         definitions: &definitions,
-        typed_ast: typer.typed_ast(),
-        source_ast: &parsed.ast,
+        typed_ast: &typed_ast,
+        source_ast: &source_ast,
         source_index: &index,
         typed_bindings: &bindings,
         source: SourceMetadata {
@@ -197,7 +235,7 @@ fn source_outputs_named_with_limits(
     );
     let checked = checked?;
     assert!(std::ptr::eq(checked.plan().store, typer.store()));
-    assert!(std::ptr::eq(checked.plan().typed_ast, typer.typed_ast()));
+    assert!(std::ptr::eq(checked.plan().typed_ast, &typed_ast));
     assert_eq!(
         checked.package(),
         index.symbol_at(source, parsed.root).unwrap()
@@ -294,6 +332,32 @@ fn source_plan(
     edit: impl FnOnce(&mut PicklePlan<'_>),
 ) -> Result<DeclarationSkeleton, PickleError> {
     source_outputs(text, edit).map(|(skeleton, _)| skeleton)
+}
+
+fn nested_application_ids(
+    source_ast: &AstArena<Untyped>,
+    typed_bindings: &dotty_typer::SourceTypedIndex,
+) -> (
+    TreeId<Untyped>,
+    TreeId<Typed>,
+    TreeId<Untyped>,
+    TreeId<Typed>,
+) {
+    source_ast
+        .iter()
+        .find_map(|(source_outer, source_tree)| {
+            let TreeKind::Apply(source_apply) = &source_tree.kind else {
+                return None;
+            };
+            let source_inner = *source_apply.args.first()?;
+            if !matches!(source_ast.get(source_inner).kind, TreeKind::Apply(_)) {
+                return None;
+            }
+            let typed_outer = typed_bindings.get(SourceId::from_index(7), source_outer)?;
+            let typed_inner = typed_bindings.get(SourceId::from_index(7), source_inner)?;
+            Some((source_outer, typed_outer, source_inner, typed_inner))
+        })
+        .expect("fixture contains a nested application")
 }
 
 #[test]
@@ -550,6 +614,291 @@ fn same_class_int_applications_preserve_selected_target_and_argument_order() {
             "Operations Scala interoperability gate failed"
         );
     }
+}
+
+#[test]
+fn nested_application_binding_span_and_repeated_id_failures_keep_exact_errors() {
+    let mut expected_binding = None;
+    let wrong_binding = source_outputs_named_with_tree_edits(
+        OPERATIONS,
+        "Operations.scala",
+        ValidationLimits::default(),
+        |source_ast, _, bindings, _| {
+            let (_, typed_outer, source_inner, typed_inner) =
+                nested_application_ids(source_ast, bindings);
+            expected_binding = Some((source_inner, typed_inner, typed_outer));
+            bindings.remove(SourceId::from_index(7), source_inner);
+            bindings
+                .insert(SourceId::from_index(7), source_inner, typed_outer)
+                .unwrap();
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    let (source_inner, typed_inner, typed_outer) = expected_binding.unwrap();
+    assert_eq!(
+        wrong_binding,
+        PickleError::BodyBinding {
+            source: SourceId::from_index(7),
+            tree: source_inner,
+            expected: typed_inner,
+            actual: Some(typed_outer),
+        }
+    );
+
+    let mut expected_span = None;
+    let wrong_span = source_outputs_named_with_tree_edits(
+        OPERATIONS,
+        "Operations.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, _, source_inner, typed_inner) = nested_application_ids(source_ast, bindings);
+            expected_span = Some(typed_inner);
+            source_ast.get_mut(source_inner).position = Some(SourceSpan::new(
+                SourceId::from_index(7),
+                Span::without_point(TextRange::new(0, 1).unwrap()),
+            ));
+            typed_ast.get_mut(typed_inner).position = Some(SourceSpan::new(
+                SourceId::from_index(7),
+                Span::without_point(TextRange::new(2, 3).unwrap()),
+            ));
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        wrong_span,
+        PickleError::BodySpan {
+            tree: expected_span.unwrap(),
+        }
+    );
+
+    for typed_side in [false, true] {
+        let mut span_tree = None;
+        let error = source_outputs_named_with_tree_edits(
+            OPERATIONS,
+            "Operations.scala",
+            ValidationLimits::default(),
+            |source_ast, typed_ast, bindings, _| {
+                let (_, _, source_inner, typed_inner) =
+                    nested_application_ids(source_ast, bindings);
+                span_tree = Some((source_inner, typed_inner));
+                let foreign_span = Some(SourceSpan::new(
+                    SourceId::from_index(8),
+                    Span::without_point(TextRange::new(0, 1).unwrap()),
+                ));
+                if typed_side {
+                    typed_ast.get_mut(typed_inner).position = foreign_span;
+                } else {
+                    source_ast.get_mut(source_inner).position = foreign_span;
+                }
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            PickleError::SourceSpan {
+                expected: SourceId::from_index(7),
+                actual: SourceId::from_index(8),
+            },
+            "typed side: {typed_side}"
+        );
+        assert!(span_tree.is_some());
+    }
+
+    let mut repeated_id = None;
+    let repeated = source_outputs_named_with_tree_edits(
+        OPERATIONS,
+        "Operations.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, typed_outer, _, _) = nested_application_ids(source_ast, bindings);
+            repeated_id = Some(typed_outer);
+            let TreeKind::Apply(outer) = &mut typed_ast.get_mut(typed_outer).kind else {
+                panic!("expected outer Apply")
+            };
+            outer.args[0] = typed_outer;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        repeated,
+        PickleError::RepeatedExpression {
+            tree: repeated_id.unwrap(),
+        }
+    );
+}
+
+#[test]
+fn nested_application_rejects_a_foreign_method_parameter_identity() {
+    const FOREIGN_PARAMETER: &str = "package example\nclass Operations:\n  def identity(x: Int): Int = x\n  def foreign(y: Int): Int = identity(identity(y))\n  def current(z: Int): Int = identity(identity(z))\n";
+
+    let mut expected_foreign_parameter = None;
+    let error = source_outputs_named_with_tree_edits(
+        FOREIGN_PARAMETER,
+        "Operations.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, store| {
+            let (_, _, source_inner, _) = nested_application_ids(source_ast, bindings);
+            let TreeKind::Apply(inner) = &source_ast.get(source_inner).kind else {
+                panic!("expected nested source Apply")
+            };
+            let source_argument = inner.args[0];
+            let typed_argument = bindings
+                .get(SourceId::from_index(7), source_argument)
+                .unwrap();
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(current_parameter),
+                ..
+            } = store.types.get(typed_ast.get(typed_argument).ty)
+            else {
+                panic!("expected a typed parameter reference")
+            };
+            let foreign_parameter = source_ast
+                .iter()
+                .filter_map(|(_, tree)| {
+                    let TreeKind::Apply(apply) = &tree.kind else {
+                        return None;
+                    };
+                    let source_argument = *apply.args.first()?;
+                    if !matches!(source_ast.get(source_argument).kind, TreeKind::Ident(_)) {
+                        return None;
+                    }
+                    let typed_argument = bindings.get(SourceId::from_index(7), source_argument)?;
+                    let Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } = store.types.get(typed_ast.get(typed_argument).ty)
+                    else {
+                        return None;
+                    };
+                    (*symbol != *current_parameter).then_some((typed_argument, *symbol))
+                })
+                .next()
+                .expect("fixture has a second method parameter");
+            expected_foreign_parameter = Some(foreign_parameter.1);
+            let foreign_type = typed_ast.get(foreign_parameter.0).ty;
+            typed_ast.get_mut(typed_argument).ty = foreign_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    let foreign_parameter = expected_foreign_parameter.unwrap();
+    let PickleError::Owner {
+        symbol,
+        expected: Some(expected_owner),
+        actual: Some(actual_owner),
+    } = error
+    else {
+        panic!("expected a misowned parameter failure, got {error:?}")
+    };
+    assert_eq!(symbol, foreign_parameter);
+    assert_ne!(expected_owner, actual_owner);
+
+    let mut expected_foreign_target = None;
+    let error = source_outputs_named_with_tree_edits(
+        FOREIGN_PARAMETER,
+        "Operations.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, store| {
+            let (_, _, source_inner, typed_inner) = nested_application_ids(source_ast, bindings);
+            let TreeKind::Apply(source_apply) = &source_ast.get(source_inner).kind else {
+                panic!("expected nested source Apply")
+            };
+            let typed_argument = bindings
+                .get(SourceId::from_index(7), source_apply.args[0])
+                .unwrap();
+            let current_parameter = match store.types.get(typed_ast.get(typed_argument).ty) {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("expected parameter term reference, got {other:?}"),
+            };
+            let (foreign_type, foreign_target) = source_ast
+                .iter()
+                .filter_map(|(_, tree)| {
+                    let TreeKind::Apply(apply) = &tree.kind else {
+                        return None;
+                    };
+                    let source_argument = *apply.args.first()?;
+                    if !matches!(source_ast.get(source_argument).kind, TreeKind::Ident(_)) {
+                        return None;
+                    }
+                    let typed_argument = bindings.get(SourceId::from_index(7), source_argument)?;
+                    let ty = typed_ast.get(typed_argument).ty;
+                    let Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } = store.types.get(ty)
+                    else {
+                        return None;
+                    };
+                    (*symbol != current_parameter).then_some((ty, *symbol))
+                })
+                .next()
+                .expect("fixture has a second method parameter");
+            let TreeKind::Apply(inner) = &typed_ast.get(typed_inner).kind else {
+                panic!("expected nested typed Apply")
+            };
+            let function = inner.function;
+            typed_ast.get_mut(function).ty = foreign_type;
+            expected_foreign_target = Some(foreign_target);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::Reference {
+            symbol: expected_foreign_target.unwrap(),
+            reason: ReferenceError::NotRegistered,
+        }
+    );
+}
+
+#[test]
+fn nested_expression_item_budget_has_a_typed_failure() {
+    let error = source_outputs_named_with_limits(
+        OPERATIONS,
+        "Operations.scala",
+        ValidationLimits {
+            max_items: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::Items,
+            limit: 0,
+        }
+    );
+}
+
+#[test]
+fn nested_expression_depth_budget_has_a_typed_failure() {
+    let error = source_outputs_named_with_limits(
+        OPERATIONS,
+        "Operations.scala",
+        ValidationLimits {
+            max_expression_depth: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
 }
 
 #[test]
