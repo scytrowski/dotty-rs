@@ -10435,11 +10435,9 @@ fn match_case_audit_reuses_selector_failure_for_every_case() {
 fn full_match_case_audit_preserves_classpath_loading_session() {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../dotty-tasty/tests/fixtures/scala3-library");
-    let jdk = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
-    let classpath = SharedClassPath::new(CompositeClassPath::new(vec![
-        Box::new(DirectoryClassPath::new(fixture)),
-        Box::new(JdkClassPath::new(jdk.join("jmods")).unwrap()),
-    ]));
+    let classpath = SharedClassPath::new(CompositeClassPath::new(vec![Box::new(
+        DirectoryClassPath::new(fixture),
+    )]));
     let source = "object C { def f(x: Int): Int = { def g(y: Int): Int = y; scala.None match { case _ => 1 } } }";
     let audit = audit_source_with_classpath_filtered(
         source,
