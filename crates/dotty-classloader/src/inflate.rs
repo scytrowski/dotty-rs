@@ -193,6 +193,10 @@ pub(crate) struct HuffmanTable {
     /// Low-bit-first lookup entries. Zero is unassigned, one means a longer
     /// code shares this prefix, and other entries encode `(length, symbol)`.
     lookup: Box<[u32; HUFFMAN_LOOKUP_SIZE]>,
+    /// Oversubscribed trees have overlapping canonical prefixes. Preserve
+    /// their historical canonical decoding instead of using an ambiguous
+    /// lookup entry.
+    lookup_usable: bool,
 }
 
 impl HuffmanTable {
@@ -206,6 +210,7 @@ impl HuffmanTable {
                 symbols: Vec::new(),
                 max_length: 0,
                 lookup: Box::new([0; HUFFMAN_LOOKUP_SIZE]),
+                lookup_usable: true,
             };
         }
 
@@ -214,6 +219,20 @@ impl HuffmanTable {
         for &length in lengths {
             if length > 0 {
                 counts[usize::from(length)] += 1;
+            }
+        }
+
+        // The Kraft-space check detects oversubscribed trees before the
+        // lookup is populated. Such malformed length sets can assign the
+        // same short prefix to multiple symbols; use canonical decoding for
+        // them so the optimization does not change existing error behavior.
+        let mut remaining_codes = 1i32;
+        let mut lookup_usable = true;
+        for &count in counts.iter().take(usize::from(max_length) + 1).skip(1) {
+            remaining_codes = remaining_codes * 2 - i32::from(count);
+            if remaining_codes < 0 {
+                lookup_usable = false;
+                break;
             }
         }
 
@@ -245,24 +264,26 @@ impl HuffmanTable {
         }
 
         let mut lookup = Box::new([0; HUFFMAN_LOOKUP_SIZE]);
-        for (symbol, &length) in lengths.iter().enumerate() {
-            if length == 0 {
-                continue;
-            }
-
-            let code = canonical_codes[symbol];
-            if length <= HUFFMAN_LOOKUP_BITS {
-                let prefix = reverse_low_bits(code, length) as usize;
-                let stride = 1usize << length;
-                let repetitions = HUFFMAN_LOOKUP_SIZE / stride;
-                let encoded = (u32::from(length) << 16) | (symbol as u32 + 2);
-                for suffix in 0..repetitions {
-                    lookup[prefix | (suffix << usize::from(length))] = encoded;
+        if lookup_usable {
+            for (symbol, &length) in lengths.iter().enumerate() {
+                if length == 0 {
+                    continue;
                 }
-            } else {
-                let high_prefix = code >> (length - HUFFMAN_LOOKUP_BITS);
-                let prefix = reverse_low_bits(high_prefix, HUFFMAN_LOOKUP_BITS) as usize;
-                lookup[prefix] = HUFFMAN_LOOKUP_LONG_CODE;
+
+                let code = canonical_codes[symbol];
+                if length <= HUFFMAN_LOOKUP_BITS {
+                    let prefix = reverse_low_bits(code, length) as usize;
+                    let stride = 1usize << length;
+                    let repetitions = HUFFMAN_LOOKUP_SIZE / stride;
+                    let encoded = (u32::from(length) << 16) | (symbol as u32 + 2);
+                    for suffix in 0..repetitions {
+                        lookup[prefix | (suffix << usize::from(length))] = encoded;
+                    }
+                } else {
+                    let high_prefix = code >> (length - HUFFMAN_LOOKUP_BITS);
+                    let prefix = reverse_low_bits(high_prefix, HUFFMAN_LOOKUP_BITS) as usize;
+                    lookup[prefix] = HUFFMAN_LOOKUP_LONG_CODE;
+                }
             }
         }
 
@@ -273,16 +294,19 @@ impl HuffmanTable {
             symbols,
             max_length,
             lookup,
+            lookup_usable,
         }
     }
 
-    /// Decodes one Huffman-coded symbol, reading one bit at a time and
-    /// extending the candidate code most-significant-bit first (§3.2.2)
-    /// until an assigned code of that length matches.
+    /// Decodes one Huffman-coded symbol with a short-code lookup where
+    /// possible, extending the candidate code most-significant-bit first
+    /// (§3.2.2) through the canonical table when it cannot use the lookup.
     pub(crate) fn decode(&self, reader: &mut BitReader<'_>) -> Result<u16, InflateError> {
         let mut code: u32 = 0;
 
-        if let Some(prefix) = reader.peek_bits_if_available(HUFFMAN_LOOKUP_BITS) {
+        if self.lookup_usable
+            && let Some(prefix) = reader.peek_bits_if_available(HUFFMAN_LOOKUP_BITS)
+        {
             match self.lookup[prefix as usize] {
                 HUFFMAN_LOOKUP_LONG_CODE => {
                     reader.advance_bits(HUFFMAN_LOOKUP_BITS);
@@ -745,6 +769,18 @@ mod tests {
             table.decode(&mut reader),
             Err(InflateError::InvalidHuffmanCode)
         );
+    }
+
+    #[test]
+    fn huffman_lookup_falls_back_for_an_oversubscribed_tree() {
+        // Three one-bit codes overlap in the two available prefixes. The
+        // historical canonical decoder selects symbol 0 for prefix `0`;
+        // building the lookup must not overwrite it with symbol 2.
+        let table = HuffmanTable::from_code_lengths(&[1, 1, 1]);
+        let mut reader = BitReader::new(&[0, 0]);
+
+        assert_eq!(table.decode(&mut reader), Ok(0));
+        assert_eq!(reader.read_bits(1), Ok(0));
     }
 
     #[test]
