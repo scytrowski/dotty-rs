@@ -49,6 +49,165 @@ impl ClassIdentity {
     }
 }
 
+/// An explicitly supplied, validated JVM superclass proof graph.
+///
+/// Each class can have one direct superclass. Proof paths are bounded to
+/// eight edges; interfaces and array covariance are not modeled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClassHierarchy {
+    superclasses: Arc<std::collections::BTreeMap<ClassIdentity, ClassIdentity>>,
+}
+
+/// A malformed or out-of-scope explicit class hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassHierarchyError {
+    /// A class name is not a valid JVM internal name.
+    InvalidClassName(String),
+    /// The same direct edge was supplied more than once.
+    DuplicateEdge {
+        subclass: String,
+        superclass: String,
+    },
+    /// One class was assigned two different direct superclasses.
+    ConflictingSuperclass { subclass: String },
+    /// The supplied graph contains a superclass cycle.
+    Cycle { class: String },
+    /// A proof path exceeds the supported depth.
+    DepthExceeded { class: String, depth: usize },
+}
+
+impl fmt::Display for ClassHierarchyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidClassName(name) => write!(formatter, "invalid JVM class name {name:?}"),
+            Self::DuplicateEdge {
+                subclass,
+                superclass,
+            } => write!(
+                formatter,
+                "duplicate superclass edge {subclass} -> {superclass}"
+            ),
+            Self::ConflictingSuperclass { subclass } => {
+                write!(formatter, "class {subclass} has conflicting superclasses")
+            }
+            Self::Cycle { class } => write!(formatter, "superclass cycle includes {class}"),
+            Self::DepthExceeded { class, depth } => write!(
+                formatter,
+                "superclass proof from {class} exceeds supported depth ({depth})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ClassHierarchyError {}
+
+impl ClassHierarchy {
+    /// Builds a bounded proof graph from direct `(subclass, superclass)` edges.
+    pub fn from_edges(
+        edges: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, ClassHierarchyError> {
+        let mut superclasses = std::collections::BTreeMap::new();
+        for (subclass, superclass) in edges {
+            if !is_valid_internal_name(&subclass) {
+                return Err(ClassHierarchyError::InvalidClassName(subclass));
+            }
+            if !is_valid_internal_name(&superclass) {
+                return Err(ClassHierarchyError::InvalidClassName(superclass));
+            }
+            if subclass == superclass {
+                return Err(ClassHierarchyError::Cycle { class: subclass });
+            }
+            let sub = ClassIdentity(Arc::from(subclass.as_str()));
+            let sup = ClassIdentity(Arc::from(superclass.as_str()));
+            if let Some(previous) = superclasses.get(&sub) {
+                if previous == &sup {
+                    return Err(ClassHierarchyError::DuplicateEdge {
+                        subclass,
+                        superclass,
+                    });
+                }
+                return Err(ClassHierarchyError::ConflictingSuperclass { subclass });
+            }
+            superclasses.insert(sub, sup);
+        }
+        let hierarchy = Self {
+            superclasses: Arc::new(superclasses),
+        };
+        hierarchy.validate()?;
+        Ok(hierarchy)
+    }
+
+    /// Returns whether `actual` is exactly `expected` or has a bounded proof
+    /// path to it in this graph.
+    pub fn is_assignable(&self, actual: &str, expected: &str) -> bool {
+        if !is_valid_internal_name(actual) || !is_valid_internal_name(expected) {
+            return false;
+        }
+        if actual == expected {
+            return true;
+        }
+        let mut current = ClassIdentity(Arc::from(actual));
+        for _ in 0..8 {
+            let Some(parent) = self.superclasses.get(&current) else {
+                return false;
+            };
+            if parent.internal_name() == expected {
+                return true;
+            }
+            current = parent.clone();
+        }
+        false
+    }
+
+    pub(crate) fn with_edge(
+        &self,
+        subclass: &str,
+        superclass: &str,
+    ) -> Result<Self, ClassHierarchyError> {
+        if let Some(existing) = self.superclasses.get(&ClassIdentity(Arc::from(subclass)))
+            && existing.internal_name() == superclass
+        {
+            return Ok(self.clone());
+        }
+        let mut edges = self
+            .superclasses
+            .iter()
+            .map(|(sub, sup)| {
+                (
+                    sub.internal_name().to_owned(),
+                    sup.internal_name().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        edges.push((subclass.to_owned(), superclass.to_owned()));
+        Self::from_edges(edges)
+    }
+
+    fn validate(&self) -> Result<(), ClassHierarchyError> {
+        for start in self.superclasses.keys() {
+            let mut current = start;
+            let mut seen = std::collections::BTreeSet::new();
+            let mut depth = 0;
+            while let Some(parent) = self.superclasses.get(current) {
+                if !seen.insert(current.clone()) {
+                    return Err(ClassHierarchyError::Cycle {
+                        class: current.internal_name().to_owned(),
+                    });
+                }
+                depth += 1;
+                if depth > 8 {
+                    return Err(ClassHierarchyError::DepthExceeded {
+                        class: start.internal_name().to_owned(),
+                        depth,
+                    });
+                }
+                current = parent;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A verifier value retained on a CFG operand stack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowValue {
@@ -91,6 +250,8 @@ pub struct CodeAnalysis {
 /// A typed failure while analyzing a method body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnalysisError {
+    /// The explicit hierarchy proof graph is malformed or exceeds its bound.
+    InvalidClassHierarchy(ClassHierarchyError),
     /// The method descriptor is malformed.
     InvalidMethodDescriptor(DescriptorError),
     /// A method descriptor exceeds the JVM's 255 parameter-slot limit.
@@ -485,6 +646,9 @@ pub enum UnsupportedFlowInstructionKind {
 impl fmt::Display for AnalysisError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidClassHierarchy(error) => {
+                write!(formatter, "invalid class hierarchy: {error}")
+            }
             Self::InvalidMethodDescriptor(error) => {
                 write!(formatter, "invalid method descriptor: {error}")
             }
@@ -932,6 +1096,26 @@ pub(crate) fn analyze_validated_with_current_class(
     constant_pool: &ConstantPool,
     current_class_index: Option<ConstantPoolIndex>,
 ) -> Result<CodeAnalysis, AnalysisError> {
+    analyze_validated_with_current_class_and_hierarchy(
+        method_name,
+        method_descriptor,
+        is_static,
+        instructions,
+        constant_pool,
+        current_class_index,
+        &ClassHierarchy::default(),
+    )
+}
+
+pub(crate) fn analyze_validated_with_current_class_and_hierarchy(
+    method_name: &str,
+    method_descriptor: &str,
+    is_static: bool,
+    instructions: &[Instruction],
+    constant_pool: &ConstantPool,
+    current_class_index: Option<ConstantPoolIndex>,
+    hierarchy: &ClassHierarchy,
+) -> Result<CodeAnalysis, AnalysisError> {
     analyze_validated_with_current_class_inner(
         method_name,
         method_descriptor,
@@ -939,18 +1123,19 @@ pub(crate) fn analyze_validated_with_current_class(
         instructions,
         constant_pool,
         current_class_index,
-        AnalysisContext::METHOD,
+        AnalysisContext::method(hierarchy),
     )
 }
 
 /// Analyzes the body of a branchless constructor after validating its first
 /// `aload_0; invokespecial DirectSuper.<init>()V` initialization sequence.
-pub(crate) fn analyze_validated_constructor_body(
+pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
     method_descriptor: &str,
     instructions: &[Instruction],
     constant_pool: &ConstantPool,
     current_class_index: ConstantPoolIndex,
     super_class_index: ConstantPoolIndex,
+    hierarchy: &ClassHierarchy,
 ) -> Result<CodeAnalysis, AnalysisError> {
     if !matches!(instructions.first(), Some(Instruction::ALoad(index)) if index.get() == 0) {
         return Err(AnalysisError::InvalidConstructorSuperCall { instruction: 0 });
@@ -960,7 +1145,7 @@ pub(crate) fn analyze_validated_constructor_body(
     };
     let empty_descriptor =
         MethodDescriptor::parse("()V").map_err(AnalysisError::InvalidMethodDescriptor)?;
-    let resolver = Frame::new(&empty_descriptor, true, None)?;
+    let resolver = Frame::new(&empty_descriptor, true, None, ClassHierarchy::default())?;
     let (actual_owner, name, descriptor) = resolver.special_method(1, reference, constant_pool)?;
     let expected_owner = class_identity_from_pool(constant_pool, super_class_index, 1)?;
     if name != "<init>"
@@ -980,6 +1165,7 @@ pub(crate) fn analyze_validated_constructor_body(
         AnalysisContext {
             after_constructor_super_call: true,
             instruction_offset: 2,
+            hierarchy,
         },
     )?;
     // The validated `aload_0` prologue reaches one stack slot before the
@@ -989,16 +1175,20 @@ pub(crate) fn analyze_validated_constructor_body(
 }
 
 #[derive(Clone, Copy)]
-struct AnalysisContext {
+struct AnalysisContext<'a> {
     after_constructor_super_call: bool,
     instruction_offset: usize,
+    hierarchy: &'a ClassHierarchy,
 }
 
-impl AnalysisContext {
-    const METHOD: Self = Self {
-        after_constructor_super_call: false,
-        instruction_offset: 0,
-    };
+impl<'a> AnalysisContext<'a> {
+    fn method(hierarchy: &'a ClassHierarchy) -> Self {
+        Self {
+            after_constructor_super_call: false,
+            instruction_offset: 0,
+            hierarchy,
+        }
+    }
 }
 
 fn analyze_validated_with_current_class_inner(
@@ -1008,7 +1198,7 @@ fn analyze_validated_with_current_class_inner(
     instructions: &[Instruction],
     constant_pool: &ConstantPool,
     current_class_index: Option<ConstantPoolIndex>,
-    context: AnalysisContext,
+    context: AnalysisContext<'_>,
 ) -> Result<CodeAnalysis, AnalysisError> {
     let descriptor = MethodDescriptor::parse(method_descriptor)
         .map_err(AnalysisError::InvalidMethodDescriptor)?;
@@ -1029,7 +1219,12 @@ fn analyze_validated_with_current_class_inner(
             is_constructor: method_name == "<init>" || method_name == "<clinit>",
         });
     }
-    let mut frame = Frame::new(&descriptor, is_static, current_class.as_ref())?;
+    let mut frame = Frame::new(
+        &descriptor,
+        is_static,
+        current_class.as_ref(),
+        context.hierarchy.clone(),
+    )?;
     let mut returned = false;
 
     for (offset, instruction) in instructions.iter().copied().enumerate() {
@@ -1161,6 +1356,7 @@ struct Frame {
     pending_allocation: Option<UninitializedAllocation>,
     locals: Vec<Option<LocalSlot>>,
     max_stack: usize,
+    hierarchy: ClassHierarchy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1174,6 +1370,7 @@ impl Frame {
         descriptor: &MethodDescriptor,
         is_static: bool,
         current_class: Option<&ClassIdentity>,
+        hierarchy: ClassHierarchy,
     ) -> Result<Self, AnalysisError> {
         let mut locals = Vec::new();
         if !is_static {
@@ -1216,6 +1413,7 @@ impl Frame {
             pending_allocation: None,
             locals,
             max_stack: 0,
+            hierarchy,
         })
     }
 
@@ -1342,7 +1540,10 @@ impl Frame {
                         let actual = actual.ok_or(AnalysisError::MissingExactFieldValue {
                             instruction: instruction_index,
                         })?;
-                        if actual != expected {
+                        if !self
+                            .hierarchy
+                            .is_assignable(actual.internal_name(), expected.internal_name())
+                        {
                             return Err(AnalysisError::WrongExactFieldValue {
                                 instruction: instruction_index,
                                 expected,
@@ -1783,7 +1984,10 @@ impl Frame {
     ) -> Result<(), AnalysisError> {
         let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
         let actual = actual.ok_or(AnalysisError::MissingExactReference { instruction })?;
-        if actual != *expected_owner {
+        if !self
+            .hierarchy
+            .is_assignable(actual.internal_name(), expected_owner.internal_name())
+        {
             return Err(AnalysisError::FieldOwnerMismatch {
                 instruction,
                 expected: expected_owner.clone(),
@@ -2209,7 +2413,10 @@ impl Frame {
                         instruction,
                         parameter,
                     })?;
-                    if actual != expected {
+                    if !self
+                        .hierarchy
+                        .is_assignable(actual.internal_name(), expected.internal_name())
+                    {
                         return Err(AnalysisError::WrongExactMethodArgument {
                             instruction,
                             parameter,
@@ -2253,7 +2460,10 @@ impl Frame {
     ) -> Result<(), AnalysisError> {
         let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
         let actual = actual.ok_or(AnalysisError::MissingExactReference { instruction })?;
-        if actual != *expected_owner {
+        if !self
+            .hierarchy
+            .is_assignable(actual.internal_name(), expected_owner.internal_name())
+        {
             return Err(AnalysisError::MethodOwnerMismatch {
                 instruction,
                 expected: expected_owner.clone(),
@@ -2350,9 +2560,10 @@ impl Frame {
                 expected,
             });
         };
-        // Every initialized reference type is assignable to the JVM root class.
-        // Other superclass relationships are not inferred without hierarchy data.
-        if actual == expected || expected.internal_name() == "java/lang/Object" {
+        if self
+            .hierarchy
+            .is_assignable(actual.internal_name(), expected.internal_name())
+        {
             Ok(())
         } else {
             Err(AnalysisError::WrongExactReferenceReturn {
@@ -2580,7 +2791,9 @@ impl CfgCodeAnalyzer {
     /// and `invokevirtual` methods with exact object or int-like parameters and
     /// exact object, int-like, or void results. Reference arguments and
     /// receivers must match their declared class names exactly; no hierarchy
-    /// conversions are inferred. It also supports in-block `new; dup;
+    /// conversions are inferred by this entry point. Use
+    /// [`Self::analyze_with_hierarchy`] to provide explicit superclass proofs.
+    /// It also supports in-block `new; dup;
     /// primitive arguments; invokespecial <init>` with an exact allocation
     /// class and owner match. Uninitialized values may not escape to locals,
     /// ordinary operations, branches, or block boundaries. Field owners must
@@ -2603,13 +2816,45 @@ impl CfgCodeAnalyzer {
                 is_constructor: method_name == "<init>" || method_name == "<clinit>",
             });
         }
-        Self::analyze_validated_with_current_class(
+        Self::analyze_with_hierarchy(
+            graph,
+            method_name,
+            method_descriptor,
+            is_static,
+            constant_pool,
+            current_class,
+            &ClassHierarchy::default(),
+        )
+    }
+
+    /// Analyzes reference transfers using an explicit, bounded superclass
+    /// proof graph in addition to the exact initialized current-class type.
+    pub fn analyze_with_hierarchy(
+        graph: &ControlFlowGraph,
+        method_name: &str,
+        method_descriptor: &str,
+        is_static: bool,
+        constant_pool: &ConstantPool,
+        current_class: ConstantPoolIndex,
+        hierarchy: &ClassHierarchy,
+    ) -> Result<FlowAnalysis, AnalysisError> {
+        constant_pool
+            .validate_for_encoding()
+            .map_err(AnalysisError::InvalidConstantPool)?;
+        if is_static || method_name == "<init>" || method_name == "<clinit>" {
+            return Err(AnalysisError::InvalidInitializationContext {
+                is_static,
+                is_constructor: method_name == "<init>" || method_name == "<clinit>",
+            });
+        }
+        Self::analyze_validated_with_current_class_and_hierarchy(
             graph,
             method_name,
             method_descriptor,
             is_static,
             constant_pool,
             Some(current_class),
+            hierarchy,
         )
     }
 
@@ -2640,6 +2885,26 @@ impl CfgCodeAnalyzer {
         constant_pool: &ConstantPool,
         current_class_index: Option<ConstantPoolIndex>,
     ) -> Result<FlowAnalysis, AnalysisError> {
+        Self::analyze_validated_with_current_class_and_hierarchy(
+            graph,
+            method_name,
+            method_descriptor,
+            is_static,
+            constant_pool,
+            current_class_index,
+            &ClassHierarchy::default(),
+        )
+    }
+
+    pub(crate) fn analyze_validated_with_current_class_and_hierarchy(
+        graph: &ControlFlowGraph,
+        method_name: &str,
+        method_descriptor: &str,
+        is_static: bool,
+        constant_pool: &ConstantPool,
+        current_class_index: Option<ConstantPoolIndex>,
+        hierarchy: &ClassHierarchy,
+    ) -> Result<FlowAnalysis, AnalysisError> {
         let is_constructor = method_name == "<init>";
         if current_class_index.is_some() && is_constructor {
             return Err(AnalysisError::InvalidInitializationContext {
@@ -2666,7 +2931,12 @@ impl CfgCodeAnalyzer {
             }
         }
 
-        let mut initial = Frame::new(&descriptor, is_static, current_class.as_ref())?;
+        let mut initial = Frame::new(
+            &descriptor,
+            is_static,
+            current_class.as_ref(),
+            hierarchy.clone(),
+        )?;
         let mut local_count = initial.locals.len();
         for block in graph.blocks() {
             for (offset, element) in block.instructions.iter().enumerate() {
@@ -2751,6 +3021,7 @@ impl CfgCodeAnalyzer {
                 .ok_or(AnalysisError::InvalidControlFlowGraph { block: block_id })?
                 .clone();
             let mut frame = frame_from_state(&state);
+            frame.hierarchy = hierarchy.clone();
 
             for (offset, element) in block.instructions.iter().enumerate() {
                 let instruction_index = block.instruction_range.start + offset;
@@ -3127,6 +3398,7 @@ fn frame_from_state(state: &BlockEntryState) -> Frame {
         pending_allocation: None,
         locals,
         max_stack: stack_slots,
+        hierarchy: ClassHierarchy::default(),
     }
 }
 

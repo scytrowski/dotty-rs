@@ -1,3 +1,4 @@
+use dotty_classfile::bytecode::ClassHierarchy;
 use dotty_classfile::classfile::{
     ACC_ABSTRACT, ACC_FINAL, ACC_INTERFACE, ACC_NATIVE, ACC_PRIVATE, ACC_PUBLIC, ACC_STATIC,
     ACC_SUPER, Attribute, ClassAccessFlags, ClassFile, ClassFileBuildError, ClassFileBuilder,
@@ -649,6 +650,77 @@ fn exact_reference_method_parameters_seed_linear_and_cfg_frames() {
         "()Lexample/ReferenceMethods;"
     );
     assert_eq!(code_attribute(self_method).code, [0x2a, 0xb0]);
+}
+
+#[test]
+fn builder_uses_explicit_hierarchy_for_reference_return_and_cfg_frames() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let hierarchy = ClassHierarchy::from_edges(vec![(
+        "example/Derived".to_owned(),
+        "example/Base".to_owned(),
+    )])
+    .unwrap();
+    let mut builder = ClassFileBuilder::new("example/HierarchyClient", version).unwrap();
+    builder.set_verification_hierarchy(hierarchy);
+    builder
+        .add_field("value", "Lexample/Base;", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    builder
+        .add_instance_method("<init>", "(Lexample/Derived;)V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/HierarchyClient", "value", "Lexample/Base;")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("returnBase", "(Lexample/Derived;)Lexample/Base;", |code| {
+            code.aload(0)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method(
+            "returnBaseFromBranch",
+            "(ZLexample/Derived;)Lexample/Base;",
+            |code| {
+                let otherwise = code.new_label()?;
+                code.iload(0)?;
+                code.ifeq(otherwise.clone())?;
+                code.aload(1)?;
+                code.areturn()?;
+                code.mark(otherwise)?;
+                code.aload(1)?;
+                code.areturn()?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    assert_eq!(
+        code_attribute(method_named(&class_file, "returnBase")).code,
+        [0x2a, 0xb0]
+    );
+    assert!(
+        code_attribute(method_named(&class_file, "returnBaseFromBranch"))
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, Attribute::Other(_)))
+    );
+    assert!(
+        !code_attribute(method_named(&class_file, "<init>"))
+            .code
+            .is_empty()
+    );
 }
 
 #[test]

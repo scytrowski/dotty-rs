@@ -87,12 +87,13 @@ pub mod stack_map;
 pub mod stack_map_frames;
 
 pub use analysis::{
-    AnalysisError, BlockEntryState, CfgCodeAnalyzer, ClassIdentity, CodeAnalysis, FlowAnalysis,
-    FlowLocalState, FlowValue, LinearCodeAnalyzer, UnsupportedFlowInstructionKind, ValueKind,
-    analyze,
+    AnalysisError, BlockEntryState, CfgCodeAnalyzer, ClassHierarchy, ClassHierarchyError,
+    ClassIdentity, CodeAnalysis, FlowAnalysis, FlowLocalState, FlowValue, LinearCodeAnalyzer,
+    UnsupportedFlowInstructionKind, ValueKind, analyze,
 };
 pub(crate) use analysis::{
-    analyze_validated, analyze_validated_constructor_body, analyze_validated_with_current_class,
+    analyze_validated, analyze_validated_constructor_body_with_hierarchy,
+    analyze_validated_with_current_class_and_hierarchy,
 };
 pub(crate) use assembler::assemble_validated;
 pub use assembler::{
