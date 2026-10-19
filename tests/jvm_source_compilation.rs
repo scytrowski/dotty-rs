@@ -15,7 +15,7 @@ use dotty_core::{
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmFieldPlan, JvmFieldSourceVisibility, JvmLocalBinding,
-    JvmMethodPlan, JvmNameKind, JvmPrimaryConstructorPlan, emit_class,
+    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -7900,6 +7900,282 @@ fn package_qualified_source_parent_reaches_hierarchy_and_constructor_metadata() 
         metadata[1].superclass().unwrap().parent_internal_name(),
         "example/Base"
     );
+}
+
+#[test]
+fn source_overrides_keep_declared_methods_separate_from_effective_dispatch() {
+    let output = TestOutputDirectory::new("inherited-method-dispatch");
+    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2 }\nclass Derived extends Base { override def value(): Int = 21 }\n";
+    let mut observed_metadata = None;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        observed_metadata = Some(
+            unit.metadata(definitions)
+                .expect("validated override metadata"),
+        );
+    };
+    compile_source_batch_observed(
+        source,
+        "InheritedDispatch.scala",
+        output.path(),
+        SourceId::from_index(1330),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut observe),
+    )
+    .expect("an exact public override should emit both classes");
+
+    let metadata = observed_metadata.expect("observer captures the class metadata");
+    let base = metadata
+        .iter()
+        .find(|class| class.identity().internal_name() == "Base")
+        .expect("Base metadata");
+    let derived = metadata
+        .iter()
+        .find(|class| class.identity().internal_name() == "Derived")
+        .expect("Derived metadata");
+    let base_value = base
+        .methods()
+        .iter()
+        .find(|method| method.name() == "value")
+        .expect("Base declares value");
+    let base_doubled = base
+        .methods()
+        .iter()
+        .find(|method| method.name() == "doubled")
+        .expect("Base declares doubled");
+    let derived_value = derived
+        .methods()
+        .iter()
+        .find(|method| method.name() == "value")
+        .expect("Derived declares value");
+
+    assert_ne!(base_value.symbol(), derived_value.symbol());
+    assert_eq!(base_value.descriptor().as_str(), "()I");
+    assert_eq!(derived_value.descriptor().as_str(), "()I");
+    assert_eq!(
+        derived.methods().len(),
+        1,
+        "inherited bodies are not copied"
+    );
+
+    let inherited_doubled = derived
+        .dispatch_methods()
+        .iter()
+        .find(|method| method.name() == "doubled")
+        .expect("Base.doubled remains visible on Derived");
+    assert_eq!(
+        inherited_doubled.receiver_class(),
+        derived.identity().symbol()
+    );
+    assert_eq!(
+        inherited_doubled.declaring_class(),
+        base.identity().symbol()
+    );
+    assert_eq!(inherited_doubled.method(), base_doubled.symbol());
+    let overridden_value = derived
+        .dispatch_methods()
+        .iter()
+        .find(|method| method.name() == "value")
+        .expect("Derived.value replaces the inherited dispatch identity");
+    assert_eq!(
+        overridden_value.receiver_class(),
+        derived.identity().symbol()
+    );
+    assert_eq!(
+        overridden_value.declaring_class(),
+        derived.identity().symbol()
+    );
+    assert_eq!(overridden_value.method(), derived_value.symbol());
+}
+
+#[test]
+fn same_name_different_descriptor_remains_an_overload_not_an_override() {
+    let output = TestOutputDirectory::new("inherited-overload-dispatch");
+    let source = "class Base { def value(): Int = 10 }\nclass Derived extends Base { def value(x: Int): Int = x }\n";
+    let mut observed_metadata = None;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        observed_metadata = Some(unit.metadata(definitions).expect("valid overload metadata"));
+    };
+    compile_source_batch_observed(
+        source,
+        "InheritedOverload.scala",
+        output.path(),
+        SourceId::from_index(1333),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut observe),
+    )
+    .expect("a same-name method with another descriptor is an overload");
+
+    let metadata = observed_metadata.expect("observer captures class metadata");
+    let derived = metadata
+        .iter()
+        .find(|class| class.identity().internal_name() == "Derived")
+        .expect("Derived metadata");
+    let value_dispatches = derived
+        .dispatch_methods()
+        .iter()
+        .filter(|method| method.name() == "value")
+        .collect::<Vec<_>>();
+    assert_eq!(value_dispatches.len(), 2);
+    assert!(value_dispatches.iter().any(|method| {
+        method.descriptor().as_str() == "()I"
+            && method.declaring_class()
+                == metadata
+                    .iter()
+                    .find(|class| class.identity().internal_name() == "Base")
+                    .unwrap()
+                    .identity()
+                    .symbol()
+    }));
+    assert!(
+        value_dispatches
+            .iter()
+            .any(|method| method.descriptor().as_str() == "(I)I")
+    );
+}
+
+#[test]
+fn source_override_contract_rejects_missing_targets_and_signature_mismatches() {
+    for (label, source, expected_issue) in [
+        (
+            "no-parent-method",
+            "class Base { def other(): Int = 1 }\nclass Derived extends Base { override def value(): Int = 2 }\n",
+            JvmOverrideIssue::NoParentDeclaration,
+        ),
+        (
+            "wrong-descriptor",
+            "class Base { def value(x: Int): Int = x }\nclass Derived extends Base { override def value(): Int = 2 }\n",
+            JvmOverrideIssue::SignatureMismatch,
+        ),
+        (
+            "wrong-result-descriptor",
+            "class Base { def value(): Int = 1 }\nclass Derived extends Base { override def value(): Boolean = true }\n",
+            JvmOverrideIssue::SignatureMismatch,
+        ),
+        (
+            "missing-override-modifier",
+            "class Base { def value(): Int = 1 }\nclass Derived extends Base { def value(): Int = 2 }\n",
+            JvmOverrideIssue::OverrideModifierRequired,
+        ),
+        (
+            "narrower-override-visibility",
+            "class Base { def value(): Int = 1 }\nclass Derived extends Base { private override def value(): Int = 2 }\n",
+            JvmOverrideIssue::NarrowerVisibility,
+        ),
+        (
+            "private-parent-override",
+            "class Base { private def value(): Int = 1 }\nclass Derived extends Base { override def value(): Int = 2 }\n",
+            JvmOverrideIssue::InaccessibleParentMethod,
+        ),
+    ] {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, "InvalidOverride.scala", output.path())
+            .expect_err("invalid override metadata must fail before publishing classes");
+        assert!(
+            matches!(
+                error,
+                PipelineFailure::Codegen(JvmCodegenError::InvalidJvmOverride {
+                    issue,
+                    ..
+                }) if issue == expected_issue
+            ),
+            "{label}: expected {expected_issue:?}, got {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label}: no partial output"
+        );
+    }
+}
+
+#[test]
+fn source_override_rejects_an_unplanned_parent_declaration() {
+    let output = TestOutputDirectory::new("unplanned-parent-override");
+    let source = "class Base { def value(): Int = 1 }\nclass Derived extends Base { override def value(): Int = 2 }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let base = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == base)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedParentOverride.scala",
+        output.path(),
+        SourceId::from_index(1331),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("an override must target a planned direct-parent method");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(JvmCodegenError::InvalidJvmOverride {
+                issue: JvmOverrideIssue::ParentMethodUnplanned,
+                ..
+            })
+        ),
+        "expected a typed unplanned-parent override error, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn source_override_requires_a_concrete_child_body() {
+    let output = TestOutputDirectory::new("missing-override-body");
+    let source = "class Base { def value(): Int = 1 }\nclass Derived extends Base { override def value(): Int = 2 }\n";
+    let mut omit_child_body = |unit: &mut JvmCompilationUnit<'_>, _definitions: &Definitions| {
+        let derived = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Derived")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Derived");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == derived)
+            .and_then(|plan| {
+                plan.methods.iter_mut().find(|method| {
+                    unit.store
+                        .names
+                        .try_resolve(unit.store.symbols.get(method.method).name.text())
+                        == Some("value")
+                })
+            })
+            .expect("Derived declares value")
+            .body = None;
+    };
+    let pipeline_error = compile_source_batch_observed(
+        source,
+        "MissingOverrideBody.scala",
+        output.path(),
+        SourceId::from_index(1332),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_child_body),
+    )
+    .expect_err("a concrete override cannot lose its body");
+    assert!(
+        matches!(
+            pipeline_error,
+            PipelineFailure::Codegen(JvmCodegenError::MissingTypedBody { .. })
+        ),
+        "a bodyless concrete override must fail with a typed body error: {pipeline_error:?}"
+    );
+    assert!(output.class_files().is_empty());
 }
 
 #[test]

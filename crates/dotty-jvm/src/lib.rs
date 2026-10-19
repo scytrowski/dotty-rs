@@ -263,7 +263,23 @@ pub struct JvmMethodMetadata {
     parameters: Vec<JvmParameterLocal>,
 }
 
-/// Class identity paired with its selected method metadata in plan order.
+/// Read-only effective method identity for a planned receiver class.
+///
+/// Inherited entries retain the canonical symbol and declaring class from the
+/// parent. An overriding entry points at the child's distinct declaration;
+/// this metadata never copies a method body into a child class plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmMethodDispatchMetadata {
+    receiver_class: SymbolId,
+    declaring_class: SymbolId,
+    method: SymbolId,
+    name: String,
+    descriptor: JvmMethodDescriptor,
+}
+
+/// Class identity paired with declared method metadata and an effective
+/// dispatch view. `methods` remains in class-plan order and excludes inherited
+/// declarations; unit-aware projections populate `dispatch_methods`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmClassMetadata {
     identity: JvmClassIdentity,
@@ -271,6 +287,7 @@ pub struct JvmClassMetadata {
     fields: Vec<JvmFieldMetadata>,
     constructor: Option<JvmConstructorMetadata>,
     methods: Vec<JvmMethodMetadata>,
+    dispatch_methods: Vec<JvmMethodDispatchMetadata>,
 }
 
 /// A frontend-issued binding from one canonical field to its exact typed
@@ -1225,6 +1242,15 @@ pub enum JvmCodegenError {
         name: String,
         descriptor: Option<String>,
     },
+    /// The source declares an override that is absent, incompatible, or
+    /// outside the bounded planned-class contract.
+    InvalidJvmOverride {
+        class: SymbolId,
+        method: SymbolId,
+        parent: SymbolId,
+        parent_method: Option<SymbolId>,
+        issue: JvmOverrideIssue,
+    },
     /// The class declares a self type outside this emission subset.
     UnsupportedJvmSelfType { class: SymbolId, self_type: TypeId },
     /// A declared field, initializer, nested type, or other member is outside
@@ -1248,6 +1274,23 @@ pub enum JvmCodegenError {
         class: SymbolId,
         error: dotty_classfile::bytecode::CodeBuilderError,
     },
+}
+
+/// Reason a source method cannot form an exact inherited JVM override.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmOverrideIssue {
+    /// The source uses `override` but the direct parent declares no same-name method.
+    NoParentDeclaration,
+    /// A same-name declaration exists, but it was not included in the parent plan.
+    ParentMethodUnplanned,
+    /// The only candidate is private or otherwise inaccessible.
+    InaccessibleParentMethod,
+    /// The method's JVM descriptor or semantic MethodType differs.
+    SignatureMismatch,
+    /// The child attempts to reduce the public parent's visibility.
+    NarrowerVisibility,
+    /// The matching declaration is public, but the child lacks source `override` evidence.
+    OverrideModifierRequired,
 }
 
 /// Unsupported typed constructor application shape or metadata relation.
@@ -1489,6 +1532,15 @@ impl JvmClassMetadata {
         &self.methods
     }
 
+    /// Effective public methods reachable on this receiver through the
+    /// validated direct-parent edge. Inherited entries retain their original
+    /// owner and symbol; this does not add them to [`Self::methods`]. The
+    /// store-only [`JvmClassPlan::metadata`] projection has no unit hierarchy,
+    /// so its dispatch view is empty.
+    pub fn dispatch_methods(&self) -> &[JvmMethodDispatchMetadata] {
+        &self.dispatch_methods
+    }
+
     /// Validated instance field metadata in the class plan's source order.
     pub fn fields(&self) -> &[JvmFieldMetadata] {
         &self.fields
@@ -1692,6 +1744,33 @@ impl JvmMethodMetadata {
     /// Formal parameter identities and local slots in JVM/source order.
     pub fn parameters(&self) -> &[JvmParameterLocal] {
         &self.parameters
+    }
+}
+
+impl JvmMethodDispatchMetadata {
+    /// Receiver class whose effective method view contains this entry.
+    pub const fn receiver_class(&self) -> SymbolId {
+        self.receiver_class
+    }
+
+    /// Class that declares the canonical method symbol.
+    pub const fn declaring_class(&self) -> SymbolId {
+        self.declaring_class
+    }
+
+    /// Canonical method symbol; inherited entries keep the parent's identity.
+    pub const fn method(&self) -> SymbolId {
+        self.method
+    }
+
+    /// JVM-safe method name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Exact JVM method descriptor.
+    pub const fn descriptor(&self) -> &JvmMethodDescriptor {
+        &self.descriptor
     }
 }
 
