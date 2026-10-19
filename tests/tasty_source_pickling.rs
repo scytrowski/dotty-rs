@@ -59,6 +59,22 @@ struct CanonicalScalaResolver {
     symbols: Vec<SymbolId>,
 }
 
+fn assert_builtin_type(store: &SemanticStore, actual: TypeId, expected: TypeId) {
+    let actual = match store.types.get(actual) {
+        Type::ByName { result } => *result,
+        _ => actual,
+    };
+    let expected_symbol = store
+        .types
+        .get(expected)
+        .reference_symbol()
+        .expect("builtin definition has a canonical type symbol");
+    assert_eq!(
+        store.types.get(actual).reference_symbol(),
+        Some(expected_symbol)
+    );
+}
+
 impl SymbolResolver for CanonicalScalaResolver {
     fn checkpoint(&self) -> ResolverCheckpoint {
         ResolverCheckpoint::new(0)
@@ -1093,6 +1109,34 @@ fn decisions_source_serializes_control_flow_and_runs_from_fresh_scala_class() {
         .symbol_at(first.output.declarations()[0].address)
         .unwrap();
     let semantic_stored = semantic_index.symbol_at(stored.1.address).unwrap();
+
+    let completed = first
+        .output
+        .declarations()
+        .iter()
+        .filter(|declaration| declaration.owner == class)
+        .filter_map(|declaration| {
+            let body = addresses
+                .get(declaration.address)?
+                .decode_defdef_body()
+                .ok()?;
+            let name = file.render_name(body.name).ok()?;
+            (name != "<init>").then_some((name, *declaration))
+        })
+        .map(|(name, declaration)| {
+            let method_info = unpickler.complete_symbol(declaration.address).unwrap();
+            let parameter_infos = first
+                .output
+                .declarations()
+                .iter()
+                .filter(|parameter| parameter.owner == declaration.symbol)
+                .map(|parameter| unpickler.complete_symbol(parameter.address).unwrap())
+                .collect::<Vec<_>>();
+            (name, method_info, parameter_infos)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed.len(), 6);
+    drop(unpickler);
     assert_eq!(
         semantic_store.symbols.get(semantic_stored).owner,
         Some(semantic_class)
@@ -1103,6 +1147,46 @@ fn decisions_source_serializes_control_flow_and_runs_from_fresh_scala_class() {
             .resolve(semantic_store.symbols.get(semantic_stored).name.text()),
         "stored"
     );
+
+    for (name, info, parameter_infos) in completed {
+        let expected_result = match name.as_str() {
+            "unit" => semantic_definitions.unit,
+            "enabled" | "disabled" => semantic_definitions.boolean,
+            _ => semantic_definitions.int,
+        };
+        let expected_parameters: &[TypeId] = match name.as_str() {
+            "choose" => &[
+                semantic_definitions.boolean,
+                semantic_definitions.int,
+                semantic_definitions.int,
+            ],
+            "nested" => &[semantic_definitions.boolean, semantic_definitions.boolean],
+            "stored" => &[semantic_definitions.boolean, semantic_definitions.int],
+            _ => &[],
+        };
+        assert_eq!(parameter_infos.len(), expected_parameters.len(), "{name}");
+        match (name.as_str(), semantic_store.types.get(info)) {
+            ("unit" | "enabled" | "disabled", Type::ByName { result }) => {
+                assert_builtin_type(&semantic_store, *result, expected_result);
+            }
+            (_, Type::Method(method_type)) => {
+                assert_eq!(method_type.kind, MethodKind::Plain, "{name}");
+                assert_eq!(
+                    method_type.params.len(),
+                    expected_parameters.len(),
+                    "{name}"
+                );
+                assert_builtin_type(&semantic_store, method_type.result, expected_result);
+                for (parameter, expected) in method_type.params.iter().zip(expected_parameters) {
+                    assert_builtin_type(&semantic_store, parameter.ty, *expected);
+                }
+            }
+            (_, ty) => panic!("unexpected completed method type for {name}: {ty:?}"),
+        }
+        for (parameter, expected) in parameter_infos.iter().zip(expected_parameters) {
+            assert_builtin_type(&semantic_store, *parameter, *expected);
+        }
+    }
 
     if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
