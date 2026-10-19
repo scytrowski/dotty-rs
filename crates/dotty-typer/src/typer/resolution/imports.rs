@@ -354,6 +354,12 @@ impl SourceTyper<'_> {
                         position,
                     ) {
                         Ok(candidates) => {
+                            self.arbitrate_expression_package_objects(
+                                &candidates,
+                                ident.name,
+                                tree_index,
+                                position,
+                            )?;
                             return self.unique_symbol_candidate(
                                 &candidates,
                                 ident.name,
@@ -566,6 +572,13 @@ impl SourceTyper<'_> {
                 return Ok(Some(package));
             }
 
+            // Existing external class/type identities already answer this
+            // qualifier. Avoid repeating classpath package and Object probes;
+            // only cached Objects need collision arbitration above.
+            if !external_symbols.is_empty() {
+                return self.unique_symbol_candidate(&external_symbols, name, tree_index, position);
+            }
+
             let package = match self.resolve_external_package(&path, tree_index) {
                 Ok(package) => package,
                 Err(error) => {
@@ -688,6 +701,78 @@ impl SourceTyper<'_> {
             return Err(invalid(
                 "package Object's validated ModuleClass has the wrong kind or owner",
             ));
+        }
+        Ok(())
+    }
+
+    fn arbitrate_expression_package_objects(
+        &mut self,
+        candidates: &[SymbolId],
+        name: dotty_core::Name,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<(), TyperError> {
+        for &object in candidates {
+            if !self.store.symbols.contains(object) {
+                continue;
+            }
+            let entry = self.store.symbols.get(object);
+            let Some(package) = entry.owner else {
+                continue;
+            };
+            if entry.kind != SymbolKind::Object
+                || !matches!(
+                    entry.origin,
+                    dotty_core::SymbolOrigin::Classfile(_) | dotty_core::SymbolOrigin::Tasty(_)
+                )
+                || !self.store.symbols.contains(package)
+                || self.store.symbols.get(package).kind != SymbolKind::Package
+            {
+                continue;
+            }
+
+            let store_checkpoint = self.store.checkpoint();
+            let resolver_checkpoint = self.resolver.checkpoint();
+            let mut path = self.package_path(package);
+            path.push(self.store.names.resolve(name.text()).to_owned());
+            let package_candidate = self.resolve_external_package(&path, tree_index);
+            let collision = match package_candidate {
+                Ok(Some(_)) => self
+                    .resolver
+                    .package_object_collision(self.store, package, name),
+                Ok(None) => Ok(false),
+                Err(TyperError::SymbolResolution { error, .. }) => Err(error),
+                Err(error) => {
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                    return Err(error);
+                }
+            };
+            match collision {
+                Ok(true) | Err(ResolutionError::Ambiguous { .. }) => {
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                    return Err(TyperError::AmbiguousTypeName {
+                        source: self.source,
+                        tree_index,
+                        name,
+                        position,
+                    });
+                }
+                Ok(false) => {
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                }
+                Err(error) => {
+                    self.resolver.rollback_to(self.store, resolver_checkpoint);
+                    self.store.rollback_to(store_checkpoint);
+                    return Err(TyperError::SymbolResolution {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -1697,20 +1782,3 @@ impl SourceTyper<'_> {
                 && self.store.scopes.get(info.declarations).owner == Some(module_class)
             {
                 insert_scope(&mut scopes, info.declarations);
-            }
-            return scopes;
-        }
-        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
-        else {
-            return scopes;
-        };
-        if source == self.source
-            && let Some(module_class) = self.index.derived_symbol_at(owner, source, tree)
-            && self.store.symbols.get(module_class).kind == SymbolKind::ModuleClass
-            && let Some(scope) = self.index.scope_of(module_class)
-        {
-            insert_scope(&mut scopes, scope);
-        }
-        scopes
-    }
-}

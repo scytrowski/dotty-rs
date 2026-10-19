@@ -9516,6 +9516,78 @@ mod tests {
     }
 
     #[test]
+    fn local_import_expression_arbitrates_package_object_collision_before_and_after_warmup() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        for warm_object in [false, true] {
+            let source_text = "package dotty.tools\npackage dotc\npackage core\nclass Use { def run(): Int = { import Contexts.*; 1 } }";
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (run_method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "run");
+            let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+            let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let class_path = CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(compiler_root)),
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+                Box::new(ContextsPackagePath),
+            ]);
+            let resolver = ClasspathSymbolResolver::new(
+                class_path,
+                definitions,
+                LoadingSession::with_packages(packages.snapshot()),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let expression_context = typer.expression_context_for(run_method).unwrap();
+
+            if warm_object {
+                let package = packages
+                    .symbol(&["dotty", "tools", "dotc", "core"])
+                    .unwrap();
+                let prefix = typer.package_type_prefix(package);
+                let name = Name::new(typer.store.names.intern("Contexts"), Namespace::Term);
+                let request = MemberRequest {
+                    prefix,
+                    name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                };
+                let object = typer
+                    .resolver
+                    .resolve_member(typer.store, &request)
+                    .unwrap()
+                    .expect("the TASTy classpath exposes Contexts as an Object");
+                assert_eq!(typer.store.symbols.get(object).kind, SymbolKind::Object);
+            }
+
+            let error = typer
+                .type_expression(rhs, expression_context)
+                .expect_err("the local import qualifier is ambiguous");
+            assert!(
+                matches!(
+                    error,
+                    TyperError::AmbiguousTypeName { name, .. }
+                        if typer.store().names.resolve(name.text()) == "Contexts"
+                ),
+                "{error:?}"
+            );
+        }
+    }
+
+    #[test]
     fn wildcard_package_import_resolves_a_type_name() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package lib { class Imported }\npackage app { import lib.*; val x: Imported = 1 }",
