@@ -5776,7 +5776,7 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
 #[test]
 fn inherited_virtual_calls_keep_the_declaring_methodref_and_dispatch_dynamically() {
     let output = TestOutputDirectory::new("inherited-virtual-call-targets");
-    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2 }\nclass Derived extends Base { override def value(): Int = 21 }\nclass Runner { def read(base: Base): Int = base.doubled(); def viaDerived(derived: Derived): Int = derived.doubled(); def forward(derived: Derived): Int = read(derived) }\n";
+    let source = "class Base { def get(): Int = 1; def value(): Int = 10; def doubled(): Int = value() * 2 }\nclass Derived extends Base { override def value(): Int = 21; def read(): Int = this.get() }\nclass Runner { def read(base: Base): Int = base.doubled(); def viaDerived(derived: Derived): Int = derived.doubled(); def forward(derived: Derived): Int = read(derived) }\n";
     let artifacts = compile_source_classes(source, "InheritedVirtualCalls.scala", output.path())
         .expect("inherited methods and subtype arguments compile as virtual calls");
 
@@ -5831,15 +5831,24 @@ fn inherited_virtual_calls_keep_the_declaring_methodref_and_dispatch_dynamically
     let derived = decode_class("Derived");
     let runner = decode_class("Runner");
     assert_invokevirtual_owner(&base, "doubled", "Base", "value", "()I");
+    assert_invokevirtual_owner(&derived, "read", "Base", "get", "()I");
+    assert_eq!(
+        decode_subset_instructions(emitted_method_code(&derived, "read"))
+            .into_iter()
+            .map(|(_, opcode)| opcode)
+            .collect::<Vec<_>>(),
+        [0x2a, 0xb6, 0xac],
+        "explicit this call loads aload_0, invokes Base.get, and returns its Int result"
+    );
     assert_invokevirtual_owner(&runner, "read", "Base", "doubled", "()I");
     assert_invokevirtual_owner(&runner, "viaDerived", "Base", "doubled", "()I");
     assert_invokevirtual_owner(&runner, "forward", "Runner", "read", "(LBase;)I");
     assert!(
-        derived
-            .methods
-            .iter()
-            .all(|method| derived.constant_pool.utf8(method.name_index) != Ok("doubled")),
-        "inherited Base.doubled is not copied into Derived"
+        derived.methods.iter().all(|method| !matches!(
+            derived.constant_pool.utf8(method.name_index),
+            Ok("doubled" | "get")
+        )),
+        "inherited Base.doubled and Base.get are not copied into Derived"
     );
 
     if require_jdk_or_skip() {
@@ -5847,7 +5856,7 @@ fn inherited_virtual_calls_keep_the_declaring_methodref_and_dispatch_dynamically
         let harness = output.path().join("InheritedVirtualCallsHarness.java");
         fs::write(
             &harness,
-            "public final class InheritedVirtualCallsHarness { public static void main(String[] args) { Runner runner = new Runner(); Base base = new Base(); Derived derived = new Derived(); if (runner.read(base) != 20 || runner.read(derived) != 42 || runner.viaDerived(derived) != 42 || runner.forward(derived) != 42) throw new AssertionError(); System.out.println(\"inherited virtual dispatch verified\"); } }\n",
+            "public final class InheritedVirtualCallsHarness { public static void main(String[] args) { Runner runner = new Runner(); Base base = new Base(); Derived derived = new Derived(); if (runner.read(base) != 20 || runner.read(derived) != 42 || runner.viaDerived(derived) != 42 || runner.forward(derived) != 42 || derived.read() != 1) throw new AssertionError(); System.out.println(\"inherited virtual dispatch verified\"); } }\n",
         )
         .expect("write inherited-call harness");
         let javac = Command::new("javac")

@@ -68,11 +68,28 @@ fn append_current_receiver(
             method: caller.symbol(),
         });
     }
-    if !class
+    let target_is_declared_here = class
         .methods()
         .iter()
         .any(|method| method.symbol() == target.method_symbol())
-        || target.owner_internal_name() != class.identity().internal_name()
+        && target.owner_internal_name() == class.identity().internal_name();
+    let target_is_inherited_from_direct_parent = class
+        .superclass()
+        .filter(|superclass| {
+            superclass.class() == class_symbol
+                && superclass.parent_internal_name() == target.owner_internal_name()
+        })
+        .is_some_and(|superclass| {
+            class.dispatch_methods().iter().any(|entry| {
+                entry.receiver_class() == class_symbol
+                    && entry.declaring_class() == superclass.parent()
+                    && entry.method() == target.method_symbol()
+                    && entry.name() == target.method_name()
+                    && entry.descriptor().as_str() == target.descriptor().as_str()
+            })
+        });
+    if target.receiver_class() != class_symbol
+        || (!target_is_declared_here && !target_is_inherited_from_direct_parent)
     {
         return Err(JvmCodegenError::MethodNotInJvmPlan {
             tree: call_id,
