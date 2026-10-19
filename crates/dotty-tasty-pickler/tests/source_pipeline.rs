@@ -861,11 +861,33 @@ fn nested_application_rejects_a_foreign_method_parameter_identity() {
 
 #[test]
 fn nested_expression_item_budget_has_a_typed_failure() {
+    let minimum_budget = |source: &str| {
+        (1..=256)
+            .find(|&max_items| {
+                source_outputs_named_with_limits(
+                    source,
+                    "Operations.scala",
+                    ValidationLimits {
+                        max_items,
+                        ..ValidationLimits::default()
+                    },
+                    |_| {},
+                )
+                .is_ok()
+            })
+            .expect("fixture validates within the test budget range")
+    };
+    let nested_budget = minimum_budget(OPERATIONS);
+    let shallow = OPERATIONS.replace("identity(identity(42))", "identity(42)");
+    let shallow_budget = minimum_budget(&shallow);
+    assert_eq!(nested_budget, shallow_budget + 1);
+    assert!(shallow_budget > 0);
+
     let error = source_outputs_named_with_limits(
         OPERATIONS,
         "Operations.scala",
         ValidationLimits {
-            max_items: 0,
+            max_items: nested_budget - 1,
             ..ValidationLimits::default()
         },
         |_| {},
@@ -875,8 +897,20 @@ fn nested_expression_item_budget_has_a_typed_failure() {
         error,
         PickleError::LimitExceeded {
             kind: LimitKind::Items,
-            limit: 0,
+            limit: nested_budget - 1,
         }
+    );
+    assert!(
+        source_outputs_named_with_limits(
+            OPERATIONS,
+            "Operations.scala",
+            ValidationLimits {
+                max_items: nested_budget,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        )
+        .is_ok()
     );
 }
 
