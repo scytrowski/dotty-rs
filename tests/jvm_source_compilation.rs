@@ -5774,6 +5774,160 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
 }
 
 #[test]
+fn inherited_virtual_calls_keep_the_declaring_methodref_and_dispatch_dynamically() {
+    let output = TestOutputDirectory::new("inherited-virtual-call-targets");
+    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2 }\nclass Derived extends Base { override def value(): Int = 21 }\nclass Runner { def read(base: Base): Int = base.doubled(); def viaDerived(derived: Derived): Int = derived.doubled(); def forward(derived: Derived): Int = read(derived) }\n";
+    let artifacts = compile_source_classes(source, "InheritedVirtualCalls.scala", output.path())
+        .expect("inherited methods and subtype arguments compile as virtual calls");
+
+    let decode_class = |name: &str| {
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("{name} class is emitted"));
+        let mut reader = Reader::new(artifact.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("decode emitted class");
+        class.validate_references().expect("valid class references");
+        class
+    };
+    let assert_invokevirtual_owner =
+        |class: &ClassFile<'_>, method: &str, owner: &str, name: &str, descriptor: &str| {
+            let code = emitted_method_code(class, method);
+            let offset = decode_subset_instructions(code)
+                .into_iter()
+                .find_map(|(offset, opcode)| (opcode == 0xb6).then_some(offset))
+                .expect("method contains invokevirtual");
+            let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+            let ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            } = class
+                .constant_pool
+                .get(ConstantPoolIndex(index))
+                .expect("invokevirtual Methodref")
+            else {
+                panic!("invokevirtual references a Methodref")
+            };
+            assert_eq!(class.constant_pool.class_name(*class_index), Ok(owner));
+            assert_eq!(
+                class
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap()
+                    .0,
+                name
+            );
+            assert_eq!(
+                class
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap()
+                    .1,
+                descriptor
+            );
+        };
+
+    let base = decode_class("Base");
+    let derived = decode_class("Derived");
+    let runner = decode_class("Runner");
+    assert_invokevirtual_owner(&base, "doubled", "Base", "value", "()I");
+    assert_invokevirtual_owner(&runner, "read", "Base", "doubled", "()I");
+    assert_invokevirtual_owner(&runner, "viaDerived", "Base", "doubled", "()I");
+    assert_invokevirtual_owner(&runner, "forward", "Runner", "read", "(LBase;)I");
+    assert!(
+        derived
+            .methods
+            .iter()
+            .all(|method| derived.constant_pool.utf8(method.name_index) != Ok("doubled")),
+        "inherited Base.doubled is not copied into Derived"
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("InheritedVirtualCallsHarness.java");
+        fs::write(
+            &harness,
+            "public final class InheritedVirtualCallsHarness { public static void main(String[] args) { Runner runner = new Runner(); Base base = new Base(); Derived derived = new Derived(); if (runner.read(base) != 20 || runner.read(derived) != 42 || runner.viaDerived(derived) != 42 || runner.forward(derived) != 42) throw new AssertionError(); System.out.println(\"inherited virtual dispatch verified\"); } }\n",
+        )
+        .expect("write inherited-call harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected inherited-call harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "InheritedVirtualCallsHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected inherited-call classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "inherited virtual dispatch verified"
+        );
+    }
+}
+
+#[test]
+fn inherited_virtual_call_rejects_an_unplanned_declaring_method() {
+    let output = TestOutputDirectory::new("unplanned-inherited-call-target");
+    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2 }\nclass Derived extends Base {}\nclass Runner { def read(derived: Derived): Int = derived.doubled() }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let base = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch has Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == base)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedInheritedCall.scala",
+        output.path(),
+        SourceId::from_index(1331),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("the selected parent declaration must remain in its class plan");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(
+                JvmCodegenError::MethodNotInJvmPlan { .. }
+                    | JvmCodegenError::MethodNotInJvmPlanForBody { .. }
+            )
+        ),
+        "expected a typed inherited target plan error, got {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
 fn reference_parameters_and_call_results_flow_through_virtual_calls() {
     let output = TestOutputDirectory::new("reference-method-values");
     let source = "class Counter(start: Int):\n  def create(value: Int): Counter = new Counter(value)\n  def passthrough(counter: Counter): Counter = counter\n  def self(): Counter = this\n  def read(counter: Counter): Int = counter.get()\n  def forward(counter: Counter): Counter = passthrough(counter)\n  def readCreated(value: Int): Int = read(create(value))\n  def get(): Int = 42\nclass Client:\n  def accept(counter: Counter): Counter = counter\n  def read(counter: Counter): Int = counter.get()\n";

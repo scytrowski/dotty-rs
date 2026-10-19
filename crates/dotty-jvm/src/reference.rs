@@ -290,9 +290,30 @@ fn project_class(
         }
         Err(error) => return Err(error),
     };
-    let object_derived =
-        class_info.parents.len() == 1 && type_symbol(store, class_info.parents[0]) == Some(object);
-    if !object_derived {
+    let object_rooted = if class_info.parents.len() != 1 {
+        false
+    } else if let Some(parent) = type_symbol(store, class_info.parents[0]) {
+        if parent == object {
+            true
+        } else {
+            let parent_is_planned = class_identities.is_some_and(|identities| {
+                identities
+                    .iter()
+                    .any(|identity| identity.symbol() == parent)
+            }) || unit
+                .is_some_and(|unit| unit.classes.iter().any(|plan| plan.class == parent));
+            if parent_is_planned {
+                let parent_info = crate::identity::class_info(store, parent)?;
+                parent_info.parents.len() == 1
+                    && type_symbol(store, parent_info.parents[0]) == Some(object)
+            } else {
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if !object_rooted {
         return Err(JvmCodegenError::UnsupportedJvmReferenceType {
             ty,
             kind: UnsupportedJvmReferenceTypeKind::NotObjectDerived,

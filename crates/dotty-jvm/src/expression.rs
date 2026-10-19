@@ -1587,7 +1587,7 @@ fn emit_apply(
 
     for (index, (argument, expected)) in arguments.into_iter().zip(parameters).enumerate() {
         let flow = emit_expression(context, argument, code, depth + 1)?;
-        if flow != Flow::Value(expected) {
+        if !call_argument_assignable(unit, flow, expected, context.definitions)? {
             return Err(JvmCodegenError::JvmCallArgumentMismatch {
                 tree: tree_id,
                 argument,
@@ -2614,6 +2614,26 @@ fn public_flow(flow: Flow) -> JvmExpressionFlow {
         Flow::Unit => JvmExpressionFlow::Unit,
         Flow::Diverges => JvmExpressionFlow::Diverges,
     }
+}
+
+fn call_argument_assignable(
+    unit: &JvmCompilationUnit<'_>,
+    found: Flow,
+    expected: JvmType,
+    definitions: &Definitions,
+) -> Result<bool, JvmCodegenError> {
+    if found == Flow::Value(expected) {
+        return Ok(true);
+    }
+    let (Flow::Value(JvmType::Reference(found)), JvmType::Reference(expected)) = (found, expected)
+    else {
+        return Ok(false);
+    };
+    Ok(unit
+        .class_hierarchy(definitions)?
+        .superclasses()
+        .iter()
+        .any(|superclass| superclass.class() == found && superclass.parent() == expected))
 }
 
 fn reference_type_mismatch(expected: JvmType, found: JvmType) -> Option<JvmCodegenError> {

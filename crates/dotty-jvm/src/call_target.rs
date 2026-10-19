@@ -211,15 +211,38 @@ fn resolve_instance_call_body(
     let receiver = receiver_tree
         .map(|receiver| tree(unit.store, unit.typed_ast, receiver))
         .transpose()?;
+    let method_symbol = unit
+        .store
+        .symbols
+        .contains(method)
+        .then(|| unit.store.symbols.get(method))
+        .ok_or(JvmCodegenError::UnknownMethod { method })?;
+    if method_symbol.kind != SymbolKind::Method {
+        return Err(JvmCodegenError::UnsupportedSymbolKind {
+            symbol: method,
+            expected: SymbolRole::Method,
+            found: method_symbol.kind,
+        });
+    }
+    let method_owner = method_symbol.owner.ok_or(JvmCodegenError::WrongOwner {
+        symbol: method,
+        expected: receiver_class,
+        actual: None,
+    })?;
     let supported_prefix = match (receiver, unit.store.types.try_get(prefix)) {
         (None, Some(Type::NoPrefix)) => true,
         (None, Some(Type::ThisType { class })) => *class == caller_class,
         (Some(_receiver), Some(Type::ThisType { class })) => {
             *class == caller_class && receiver_class == caller_class
         }
-        (Some(receiver), _) => {
-            prefix_matches_receiver(unit, prefix, receiver.ty, receiver_class, definitions)
-        }
+        (Some(receiver), _) => prefix_matches_receiver(
+            unit,
+            prefix,
+            receiver.ty,
+            receiver_class,
+            method_owner,
+            definitions,
+        ),
         _ => false,
     };
     if !supported_prefix {
@@ -228,46 +251,46 @@ fn resolve_instance_call_body(
             UnsupportedJvmCallShapeKind::UnsupportedReceiverPrefix,
         ));
     }
-    if !unit.store.symbols.contains(method) {
-        return Err(JvmCodegenError::UnknownMethod { method });
-    }
-    let method_symbol = unit.store.symbols.get(method);
-    if method_symbol.kind != SymbolKind::Method {
-        return Err(JvmCodegenError::UnsupportedSymbolKind {
-            symbol: method,
-            expected: SymbolRole::Method,
-            found: method_symbol.kind,
-        });
-    }
-    if method_symbol.owner != Some(receiver_class) {
+    if method_owner != receiver_class
+        && !unit
+            .class_hierarchy(definitions)?
+            .superclasses()
+            .iter()
+            .any(|superclass| {
+                superclass.class() == receiver_class && superclass.parent() == method_owner
+            })
+    {
         return Err(JvmCodegenError::WrongOwner {
             symbol: method,
             expected: receiver_class,
-            actual: method_symbol.owner,
+            actual: Some(method_owner),
         });
     }
     let owner_plan = unit
         .classes
         .iter()
-        .find(|plan| plan.class == receiver_class)
+        .find(|plan| plan.class == method_owner)
         .ok_or(JvmCodegenError::MissingClassPlan {
-            class: receiver_class,
+            class: method_owner,
         })?;
-    if !owner_plan
+    let Some(owner_method_plan) = owner_plan
         .methods
         .iter()
-        .any(|method_plan| method_plan.method == method)
-    {
+        .find(|method_plan| method_plan.method == method)
+    else {
         return Err(JvmCodegenError::MethodNotInJvmPlan {
             tree: function_id,
-            class: receiver_class,
+            class: method_owner,
             method,
         });
+    };
+    if owner_method_plan.body.is_none() {
+        return Err(JvmCodegenError::MissingTypedBody { method });
     }
 
     match method_symbol.visibility {
         Visibility::Public => {}
-        Visibility::Private if receiver_class == caller_class => {}
+        Visibility::Private if method_owner == caller_class && receiver_class == caller_class => {}
         visibility => {
             return Err(JvmCodegenError::UnsupportedJvmVisibility {
                 symbol: method,
@@ -276,7 +299,7 @@ fn resolve_instance_call_body(
         }
     }
 
-    let class_info = super::identity::class_info(unit.store, receiver_class)?;
+    let class_info = super::identity::class_info(unit.store, method_owner)?;
     if !unit
         .store
         .scopes
@@ -285,17 +308,23 @@ fn resolve_instance_call_body(
         .any(|declared| declared == method)
     {
         return Err(JvmCodegenError::MethodNotInClassDeclarations {
-            class: receiver_class,
+            class: method_owner,
             method,
         });
     }
 
     let all_metadata = unit.metadata(definitions)?;
-    let class_metadata = all_metadata
+    let receiver_metadata = all_metadata
         .iter()
         .find(|metadata| metadata.identity().symbol() == receiver_class)
         .ok_or(JvmCodegenError::MissingClassPlan {
             class: receiver_class,
+        })?;
+    let class_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == method_owner)
+        .ok_or(JvmCodegenError::MissingClassPlan {
+            class: method_owner,
         })?;
     let method_metadata = class_metadata
         .methods()
@@ -303,9 +332,29 @@ fn resolve_instance_call_body(
         .find(|metadata| metadata.symbol() == method)
         .ok_or(JvmCodegenError::MethodNotInJvmPlan {
             tree: function_id,
-            class: caller_class,
+            class: method_owner,
             method,
         })?;
+    if method_owner != receiver_class {
+        let is_direct_parent = receiver_metadata
+            .superclass()
+            .is_some_and(|superclass| superclass.parent() == method_owner);
+        let is_effective_inherited_method =
+            receiver_metadata.dispatch_methods().iter().any(|entry| {
+                entry.receiver_class() == receiver_class
+                    && entry.declaring_class() == method_owner
+                    && entry.method() == method
+                    && entry.name() == method_metadata.name()
+                    && entry.descriptor().as_str() == method_metadata.descriptor().as_str()
+            });
+        if !is_direct_parent || !is_effective_inherited_method {
+            return Err(JvmCodegenError::WrongOwner {
+                symbol: method,
+                expected: receiver_class,
+                actual: Some(method_owner),
+            });
+        }
+    }
     let found = project_result_type(unit, call_tree.ty, definitions);
     let expected = method_metadata.descriptor().result();
     if found != Some(expected) {
@@ -631,12 +680,16 @@ fn prefix_matches_receiver(
     prefix: TypeId,
     receiver_type: TypeId,
     receiver_class: SymbolId,
+    method_owner: SymbolId,
     definitions: &Definitions,
 ) -> bool {
     if prefix == receiver_type {
         return true;
     }
-    project_reference_class(unit, prefix, definitions) == Some(receiver_class)
+    matches!(
+        project_reference_class(unit, prefix, definitions),
+        Some(class) if class == receiver_class || class == method_owner
+    )
 }
 
 fn project_reference_class(
