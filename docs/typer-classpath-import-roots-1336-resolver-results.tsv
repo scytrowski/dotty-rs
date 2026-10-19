@@ -1,0 +1,360 @@
+target_key	candidate_symbol	request_kind	namespace	selected_member	resolver_result_kind	resolver_detail
+Action::<first-segment-unresolved>	Action	package_member	Term		none	Ok(None)
+Action::<first-segment-unresolved>	Action	package_member	Type		none	Ok(None)
+Action::<first-segment-unresolved>	dotty.tools.Action	package_member	Term		none	Ok(None)
+Action::<first-segment-unresolved>	dotty.tools.Action	package_member	Type		none	Ok(None)
+Action::<first-segment-unresolved>	dotty.tools.dotc.Action	package_member	Term		none	Ok(None)
+Action::<first-segment-unresolved>	dotty.tools.dotc.Action	package_member	Type		none	Ok(None)
+Action::<first-segment-unresolved>	dotty.tools.dotc.reporting.Action	package_member	Term		symbol:Object	Ok(Some(SymbolId(36)))
+Action::<first-segment-unresolved>	dotty.tools.dotc.reporting.Action	package_member	Type		symbol:Class	Ok(Some(SymbolId(38)))
+Action::<first-segment-unresolved>	Action	package_path			absent	absent
+Action::<first-segment-unresolved>	dotty.tools.Action	package_path			absent	absent
+Action::<first-segment-unresolved>	dotty.tools.dotc.Action	package_path			absent	absent
+Action::<first-segment-unresolved>	dotty.tools.dotc.reporting.Action	package_path			absent	absent
+Character::<first-segment-unresolved>	Character	package_member	Term		none	Ok(None)
+Character::<first-segment-unresolved>	Character	package_member	Type		none	Ok(None)
+Character::<first-segment-unresolved>	java.lang.Character	package_member	Term		none	Ok(None)
+Character::<first-segment-unresolved>	java.lang.Character	package_member	Type		symbol:Class	Ok(Some(SymbolId(85)))
+Character::<first-segment-unresolved>	scala.sys.process.Character	package_member	Term		none	Ok(None)
+Character::<first-segment-unresolved>	scala.sys.process.Character	package_member	Type		none	Ok(None)
+Character::<first-segment-unresolved>	Character	package_path			absent	absent
+Character::<first-segment-unresolved>	java.lang.Character	package_path			absent	absent
+Character::<first-segment-unresolved>	scala.sys.process.Character	package_path			absent	absent
+Contexts::<first-segment-unresolved>	Contexts	package_member	Term		none	Ok(None)
+Contexts::<first-segment-unresolved>	Contexts	package_member	Type		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.Contexts	package_member	Term		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.Contexts	package_member	Type		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.Contexts	package_member	Term		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.Contexts	package_member	Type		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.Contexts	package_member	Term		symbol:Object	Ok(Some(SymbolId(277)))
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.Contexts	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/Contexts: no matching TypeDef found in .tasty file"" })"
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.classfile.Contexts	package_member	Term		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.classfile.Contexts	package_member	Type		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.Contexts	package_member	Term		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.Contexts	package_member	Type		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Contexts	package_member	Term		none	Ok(None)
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Contexts	package_member	Type		none	Ok(None)
+Contexts::<first-segment-unresolved>	Contexts	package_path			absent	absent
+Contexts::<first-segment-unresolved>	dotty.tools.Contexts	package_path			absent	absent
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.Contexts	package_path			absent	absent
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.Contexts	package_path			absent	absent
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.classfile.Contexts	package_path			absent	absent
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.Contexts	package_path			absent	absent
+Contexts::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Contexts	package_path			absent	absent
+Decorators::<first-segment-unresolved>	Decorators	package_member	Term		none	Ok(None)
+Decorators::<first-segment-unresolved>	Decorators	package_member	Type		none	Ok(None)
+Decorators::<first-segment-unresolved>	dotty.tools.Decorators	package_member	Term		none	Ok(None)
+Decorators::<first-segment-unresolved>	dotty.tools.Decorators	package_member	Type		none	Ok(None)
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.Decorators	package_member	Term		none	Ok(None)
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.Decorators	package_member	Type		none	Ok(None)
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.core.Decorators	package_member	Term		symbol:Object	Ok(Some(SymbolId(282)))
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.core.Decorators	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/Decorators: no matching TypeDef found in .tasty file"" })"
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.Decorators	package_member	Term		none	Ok(None)
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.Decorators	package_member	Type		none	Ok(None)
+Decorators::<first-segment-unresolved>	Decorators	package_path			absent	absent
+Decorators::<first-segment-unresolved>	dotty.tools.Decorators	package_path			absent	absent
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.Decorators	package_path			absent	absent
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.core.Decorators	package_path			absent	absent
+Decorators::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.Decorators	package_path			absent	absent
+Diagnostic::<first-segment-unresolved>	Diagnostic	package_member	Term		none	Ok(None)
+Diagnostic::<first-segment-unresolved>	Diagnostic	package_member	Type		none	Ok(None)
+Diagnostic::<first-segment-unresolved>	dotty.tools.Diagnostic	package_member	Term		none	Ok(None)
+Diagnostic::<first-segment-unresolved>	dotty.tools.Diagnostic	package_member	Type		none	Ok(None)
+Diagnostic::<first-segment-unresolved>	dotty.tools.dotc.Diagnostic	package_member	Term		none	Ok(None)
+Diagnostic::<first-segment-unresolved>	dotty.tools.dotc.Diagnostic	package_member	Type		none	Ok(None)
+Diagnostic::<first-segment-unresolved>	dotty.tools.dotc.reporting.Diagnostic	package_member	Term		symbol:Object	Ok(Some(SymbolId(284)))
+Diagnostic::<first-segment-unresolved>	dotty.tools.dotc.reporting.Diagnostic	package_member	Type		error	"Err(Malformed { reason: ""external class completion failed for dotty/tools/dotc/reporting/Diagnostic: class dotty/tools/dotc/reporting/Diagnostic failed to load because dotty/tools/dotc/reporting/Diagnostic failed: circular inheritance involving dotty/tools/dotc/reporting/Diagnostic"" })"
+Diagnostic::<first-segment-unresolved>	Diagnostic	package_path			absent	absent
+Diagnostic::<first-segment-unresolved>	dotty.tools.Diagnostic	package_path			absent	absent
+Diagnostic::<first-segment-unresolved>	dotty.tools.dotc.Diagnostic	package_path			absent	absent
+Diagnostic::<first-segment-unresolved>	dotty.tools.dotc.reporting.Diagnostic	package_path			absent	absent
+FileUtils::<first-segment-unresolved>	FileUtils	package_member	Term		none	Ok(None)
+FileUtils::<first-segment-unresolved>	FileUtils	package_member	Type		none	Ok(None)
+FileUtils::<first-segment-unresolved>	dotty.tools.dotc.classpath.FileUtils	package_member	Term		symbol:Object	Ok(Some(SymbolId(288)))
+FileUtils::<first-segment-unresolved>	dotty.tools.dotc.classpath.FileUtils	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/classpath/FileUtils: no matching TypeDef found in .tasty file"" })"
+FileUtils::<first-segment-unresolved>	FileUtils	package_path			absent	absent
+FileUtils::<first-segment-unresolved>	dotty.tools.dotc.classpath.FileUtils	package_path			absent	absent
+Flags::<first-segment-unresolved>	Flags	package_member	Term		none	Ok(None)
+Flags::<first-segment-unresolved>	Flags	package_member	Type		none	Ok(None)
+Flags::<first-segment-unresolved>	dotty.tools.Flags	package_member	Term		none	Ok(None)
+Flags::<first-segment-unresolved>	dotty.tools.Flags	package_member	Type		none	Ok(None)
+Flags::<first-segment-unresolved>	dotty.tools.dotc.Flags	package_member	Term		none	Ok(None)
+Flags::<first-segment-unresolved>	dotty.tools.dotc.Flags	package_member	Type		none	Ok(None)
+Flags::<first-segment-unresolved>	dotty.tools.dotc.core.Flags	package_member	Term		symbol:Object	Ok(Some(SymbolId(290)))
+Flags::<first-segment-unresolved>	dotty.tools.dotc.core.Flags	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/Flags: no matching TypeDef found in .tasty file"" })"
+Flags::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Flags	package_member	Term		none	Ok(None)
+Flags::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Flags	package_member	Type		none	Ok(None)
+Flags::<first-segment-unresolved>	Flags	package_path			absent	absent
+Flags::<first-segment-unresolved>	dotty.tools.Flags	package_path			absent	absent
+Flags::<first-segment-unresolved>	dotty.tools.dotc.Flags	package_path			absent	absent
+Flags::<first-segment-unresolved>	dotty.tools.dotc.core.Flags	package_path			absent	absent
+Flags::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Flags	package_path			absent	absent
+INodeBase::<first-segment-unresolved>	INodeBase	package_member	Term		none	Ok(None)
+INodeBase::<first-segment-unresolved>	INodeBase	package_member	Type		none	Ok(None)
+INodeBase::<first-segment-unresolved>	scala.INodeBase	package_member	Term		none	Ok(None)
+INodeBase::<first-segment-unresolved>	scala.INodeBase	package_member	Type		none	Ok(None)
+INodeBase::<first-segment-unresolved>	scala.collection.INodeBase	package_member	Term		none	Ok(None)
+INodeBase::<first-segment-unresolved>	scala.collection.INodeBase	package_member	Type		none	Ok(None)
+INodeBase::<first-segment-unresolved>	scala.collection.concurrent.INodeBase	package_member	Term		none	Ok(None)
+INodeBase::<first-segment-unresolved>	scala.collection.concurrent.INodeBase	package_member	Type		symbol:Class	Ok(Some(SymbolId(294)))
+INodeBase::<first-segment-unresolved>	INodeBase	package_path			absent	absent
+INodeBase::<first-segment-unresolved>	scala.INodeBase	package_path			absent	absent
+INodeBase::<first-segment-unresolved>	scala.collection.INodeBase	package_path			absent	absent
+INodeBase::<first-segment-unresolved>	scala.collection.concurrent.INodeBase	package_path			absent	absent
+JavaTokens::<first-segment-unresolved>	JavaTokens	package_member	Term		none	Ok(None)
+JavaTokens::<first-segment-unresolved>	JavaTokens	package_member	Type		none	Ok(None)
+JavaTokens::<first-segment-unresolved>	dotty.tools.JavaTokens	package_member	Term		none	Ok(None)
+JavaTokens::<first-segment-unresolved>	dotty.tools.JavaTokens	package_member	Type		none	Ok(None)
+JavaTokens::<first-segment-unresolved>	dotty.tools.dotc.JavaTokens	package_member	Term		none	Ok(None)
+JavaTokens::<first-segment-unresolved>	dotty.tools.dotc.JavaTokens	package_member	Type		none	Ok(None)
+JavaTokens::<first-segment-unresolved>	dotty.tools.dotc.parsing.JavaTokens	package_member	Term		symbol:Object	Ok(Some(SymbolId(313)))
+JavaTokens::<first-segment-unresolved>	dotty.tools.dotc.parsing.JavaTokens	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/parsing/JavaTokens: no matching TypeDef found in .tasty file"" })"
+JavaTokens::<first-segment-unresolved>	JavaTokens	package_path			absent	absent
+JavaTokens::<first-segment-unresolved>	dotty.tools.JavaTokens	package_path			absent	absent
+JavaTokens::<first-segment-unresolved>	dotty.tools.dotc.JavaTokens	package_path			absent	absent
+JavaTokens::<first-segment-unresolved>	dotty.tools.dotc.parsing.JavaTokens	package_path			absent	absent
+Manifest::<first-segment-unresolved>	Manifest	package_member	Term		none	Ok(None)
+Manifest::<first-segment-unresolved>	Manifest	package_member	Type		none	Ok(None)
+Manifest::<first-segment-unresolved>	scala.Manifest	package_member	Term		none	Ok(None)
+Manifest::<first-segment-unresolved>	scala.Manifest	package_member	Type		none	Ok(None)
+Manifest::<first-segment-unresolved>	scala.reflect.Manifest	package_member	Term		symbol:Object	Ok(Some(SymbolId(315)))
+Manifest::<first-segment-unresolved>	scala.reflect.Manifest	package_member	Type		symbol:Trait	Ok(Some(SymbolId(317)))
+Manifest::<first-segment-unresolved>	Manifest	package_path			absent	absent
+Manifest::<first-segment-unresolved>	scala.Manifest	package_path			absent	absent
+Manifest::<first-segment-unresolved>	scala.reflect.Manifest	package_path			absent	absent
+MegaPhase::<first-segment-unresolved>	MegaPhase	package_member	Term		none	Ok(None)
+MegaPhase::<first-segment-unresolved>	MegaPhase	package_member	Type		none	Ok(None)
+MegaPhase::<first-segment-unresolved>	dotty.tools.MegaPhase	package_member	Term		none	Ok(None)
+MegaPhase::<first-segment-unresolved>	dotty.tools.MegaPhase	package_member	Type		none	Ok(None)
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.MegaPhase	package_member	Term		none	Ok(None)
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.MegaPhase	package_member	Type		none	Ok(None)
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.transform.MegaPhase	package_member	Term		symbol:Object	Ok(Some(SymbolId(360)))
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.transform.MegaPhase	package_member	Type		error	"Err(Malformed { reason: ""external class completion failed for dotty/tools/dotc/transform/MegaPhase: invalid .tasty file for dotty/tools/dotc/transform/MegaPhase: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\""Phase\"", \""Phases\"", \""dotty/tools/dotc/core\""], raw=LengthNode(tag=136)"" })"
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.transform.sjs.MegaPhase	package_member	Term		none	Ok(None)
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.transform.sjs.MegaPhase	package_member	Type		none	Ok(None)
+MegaPhase::<first-segment-unresolved>	MegaPhase	package_path			absent	absent
+MegaPhase::<first-segment-unresolved>	dotty.tools.MegaPhase	package_path			absent	absent
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.MegaPhase	package_path			absent	absent
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.transform.MegaPhase	package_path			absent	absent
+MegaPhase::<first-segment-unresolved>	dotty.tools.dotc.transform.sjs.MegaPhase	package_path			absent	absent
+NameKinds::<first-segment-unresolved>	NameKinds	package_member	Term		none	Ok(None)
+NameKinds::<first-segment-unresolved>	NameKinds	package_member	Type		none	Ok(None)
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.NameKinds	package_member	Term		none	Ok(None)
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.NameKinds	package_member	Type		none	Ok(None)
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.core.NameKinds	package_member	Term		symbol:Object	Ok(Some(SymbolId(364)))
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.core.NameKinds	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/NameKinds: no matching TypeDef found in .tasty file"" })"
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.NameKinds	package_member	Term		none	Ok(None)
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.NameKinds	package_member	Type		none	Ok(None)
+NameKinds::<first-segment-unresolved>	NameKinds	package_path			absent	absent
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.NameKinds	package_path			absent	absent
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.core.NameKinds	package_path			absent	absent
+NameKinds::<first-segment-unresolved>	dotty.tools.dotc.core.tasty.NameKinds	package_path			absent	absent
+Names::<first-segment-unresolved>	Names	package_member	Term		none	Ok(None)
+Names::<first-segment-unresolved>	Names	package_member	Type		none	Ok(None)
+Names::<first-segment-unresolved>	dotty.tools.Names	package_member	Term		none	Ok(None)
+Names::<first-segment-unresolved>	dotty.tools.Names	package_member	Type		none	Ok(None)
+Names::<first-segment-unresolved>	dotty.tools.dotc.Names	package_member	Term		none	Ok(None)
+Names::<first-segment-unresolved>	dotty.tools.dotc.Names	package_member	Type		none	Ok(None)
+Names::<first-segment-unresolved>	dotty.tools.dotc.core.Names	package_member	Term		symbol:Object	Ok(Some(SymbolId(366)))
+Names::<first-segment-unresolved>	dotty.tools.dotc.core.Names	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/Names: no matching TypeDef found in .tasty file"" })"
+Names::<first-segment-unresolved>	Names	package_path			absent	absent
+Names::<first-segment-unresolved>	dotty.tools.Names	package_path			absent	absent
+Names::<first-segment-unresolved>	dotty.tools.dotc.Names	package_path			absent	absent
+Names::<first-segment-unresolved>	dotty.tools.dotc.core.Names	package_path			absent	absent
+Parsers::<first-segment-unresolved>	Parsers	package_member	Term		none	Ok(None)
+Parsers::<first-segment-unresolved>	Parsers	package_member	Type		none	Ok(None)
+Parsers::<first-segment-unresolved>	dotty.tools.Parsers	package_member	Term		none	Ok(None)
+Parsers::<first-segment-unresolved>	dotty.tools.Parsers	package_member	Type		none	Ok(None)
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.Parsers	package_member	Term		none	Ok(None)
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.Parsers	package_member	Type		none	Ok(None)
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.parsing.Parsers	package_member	Term		symbol:Object	Ok(Some(SymbolId(369)))
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.parsing.Parsers	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/parsing/Parsers: no matching TypeDef found in .tasty file"" })"
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.parsing.xml.Parsers	package_member	Term		none	Ok(None)
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.parsing.xml.Parsers	package_member	Type		none	Ok(None)
+Parsers::<first-segment-unresolved>	Parsers	package_path			absent	absent
+Parsers::<first-segment-unresolved>	dotty.tools.Parsers	package_path			absent	absent
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.Parsers	package_path			absent	absent
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.parsing.Parsers	package_path			absent	absent
+Parsers::<first-segment-unresolved>	dotty.tools.dotc.parsing.xml.Parsers	package_path			absent	absent
+Periods::<first-segment-unresolved>	Periods	package_member	Term		none	Ok(None)
+Periods::<first-segment-unresolved>	Periods	package_member	Type		none	Ok(None)
+Periods::<first-segment-unresolved>	dotty.tools.Periods	package_member	Term		none	Ok(None)
+Periods::<first-segment-unresolved>	dotty.tools.Periods	package_member	Type		none	Ok(None)
+Periods::<first-segment-unresolved>	dotty.tools.dotc.Periods	package_member	Term		none	Ok(None)
+Periods::<first-segment-unresolved>	dotty.tools.dotc.Periods	package_member	Type		none	Ok(None)
+Periods::<first-segment-unresolved>	dotty.tools.dotc.core.Periods	package_member	Term		symbol:Object	Ok(Some(SymbolId(371)))
+Periods::<first-segment-unresolved>	dotty.tools.dotc.core.Periods	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/Periods: no matching TypeDef found in .tasty file"" })"
+Periods::<first-segment-unresolved>	Periods	package_path			absent	absent
+Periods::<first-segment-unresolved>	dotty.tools.Periods	package_path			absent	absent
+Periods::<first-segment-unresolved>	dotty.tools.dotc.Periods	package_path			absent	absent
+Periods::<first-segment-unresolved>	dotty.tools.dotc.core.Periods	package_path			absent	absent
+ProtoTypes::<first-segment-unresolved>	ProtoTypes	package_member	Term		none	Ok(None)
+ProtoTypes::<first-segment-unresolved>	ProtoTypes	package_member	Type		none	Ok(None)
+ProtoTypes::<first-segment-unresolved>	dotty.tools.ProtoTypes	package_member	Term		none	Ok(None)
+ProtoTypes::<first-segment-unresolved>	dotty.tools.ProtoTypes	package_member	Type		none	Ok(None)
+ProtoTypes::<first-segment-unresolved>	dotty.tools.dotc.ProtoTypes	package_member	Term		none	Ok(None)
+ProtoTypes::<first-segment-unresolved>	dotty.tools.dotc.ProtoTypes	package_member	Type		none	Ok(None)
+ProtoTypes::<first-segment-unresolved>	dotty.tools.dotc.typer.ProtoTypes	package_member	Term		symbol:Object	Ok(Some(SymbolId(374)))
+ProtoTypes::<first-segment-unresolved>	dotty.tools.dotc.typer.ProtoTypes	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/typer/ProtoTypes: no matching TypeDef found in .tasty file"" })"
+ProtoTypes::<first-segment-unresolved>	ProtoTypes	package_path			absent	absent
+ProtoTypes::<first-segment-unresolved>	dotty.tools.ProtoTypes	package_path			absent	absent
+ProtoTypes::<first-segment-unresolved>	dotty.tools.dotc.ProtoTypes	package_path			absent	absent
+ProtoTypes::<first-segment-unresolved>	dotty.tools.dotc.typer.ProtoTypes	package_path			absent	absent
+Scanners::<first-segment-unresolved>	Scanners	package_member	Term		none	Ok(None)
+Scanners::<first-segment-unresolved>	Scanners	package_member	Type		none	Ok(None)
+Scanners::<first-segment-unresolved>	dotty.tools.Scanners	package_member	Term		none	Ok(None)
+Scanners::<first-segment-unresolved>	dotty.tools.Scanners	package_member	Type		none	Ok(None)
+Scanners::<first-segment-unresolved>	dotty.tools.dotc.Scanners	package_member	Term		none	Ok(None)
+Scanners::<first-segment-unresolved>	dotty.tools.dotc.Scanners	package_member	Type		none	Ok(None)
+Scanners::<first-segment-unresolved>	dotty.tools.dotc.parsing.Scanners	package_member	Term		symbol:Object	Ok(Some(SymbolId(376)))
+Scanners::<first-segment-unresolved>	dotty.tools.dotc.parsing.Scanners	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/parsing/Scanners: no matching TypeDef found in .tasty file"" })"
+Scanners::<first-segment-unresolved>	Scanners	package_path			absent	absent
+Scanners::<first-segment-unresolved>	dotty.tools.Scanners	package_path			absent	absent
+Scanners::<first-segment-unresolved>	dotty.tools.dotc.Scanners	package_path			absent	absent
+Scanners::<first-segment-unresolved>	dotty.tools.dotc.parsing.Scanners	package_path			absent	absent
+Settings::<first-segment-unresolved>	Settings	package_member	Term		none	Ok(None)
+Settings::<first-segment-unresolved>	Settings	package_member	Type		none	Ok(None)
+Settings::<first-segment-unresolved>	dotty.tools.dotc.Settings	package_member	Term		none	Ok(None)
+Settings::<first-segment-unresolved>	dotty.tools.dotc.Settings	package_member	Type		none	Ok(None)
+Settings::<first-segment-unresolved>	dotty.tools.dotc.config.Settings	package_member	Term		symbol:Object	Ok(Some(SymbolId(379)))
+Settings::<first-segment-unresolved>	dotty.tools.dotc.config.Settings	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/config/Settings: no matching TypeDef found in .tasty file"" })"
+Settings::<first-segment-unresolved>	Settings	package_path			absent	absent
+Settings::<first-segment-unresolved>	dotty.tools.dotc.Settings	package_path			absent	absent
+Settings::<first-segment-unresolved>	dotty.tools.dotc.config.Settings	package_path			absent	absent
+SymDenotations::<first-segment-unresolved>	SymDenotations	package_member	Term		none	Ok(None)
+SymDenotations::<first-segment-unresolved>	SymDenotations	package_member	Type		none	Ok(None)
+SymDenotations::<first-segment-unresolved>	dotty.tools.SymDenotations	package_member	Term		none	Ok(None)
+SymDenotations::<first-segment-unresolved>	dotty.tools.SymDenotations	package_member	Type		none	Ok(None)
+SymDenotations::<first-segment-unresolved>	dotty.tools.dotc.SymDenotations	package_member	Term		none	Ok(None)
+SymDenotations::<first-segment-unresolved>	dotty.tools.dotc.SymDenotations	package_member	Type		none	Ok(None)
+SymDenotations::<first-segment-unresolved>	dotty.tools.dotc.core.SymDenotations	package_member	Term		symbol:Object	Ok(Some(SymbolId(381)))
+SymDenotations::<first-segment-unresolved>	dotty.tools.dotc.core.SymDenotations	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/SymDenotations: no matching TypeDef found in .tasty file"" })"
+SymDenotations::<first-segment-unresolved>	SymDenotations	package_path			absent	absent
+SymDenotations::<first-segment-unresolved>	dotty.tools.SymDenotations	package_path			absent	absent
+SymDenotations::<first-segment-unresolved>	dotty.tools.dotc.SymDenotations	package_path			absent	absent
+SymDenotations::<first-segment-unresolved>	dotty.tools.dotc.core.SymDenotations	package_path			absent	absent
+SymbolInformation::<first-segment-unresolved>	SymbolInformation	package_member	Term		none	Ok(None)
+SymbolInformation::<first-segment-unresolved>	SymbolInformation	package_member	Type		none	Ok(None)
+SymbolInformation::<first-segment-unresolved>	dotty.tools.dotc.semanticdb.SymbolInformation	package_member	Term		symbol:Object	Ok(Some(SymbolId(384)))
+SymbolInformation::<first-segment-unresolved>	dotty.tools.dotc.semanticdb.SymbolInformation	package_member	Type		error	"Err(Malformed { reason: ""external class completion failed for dotty/tools/dotc/semanticdb/SymbolInformation: class dotty/tools/dotc/semanticdb/SymbolInformation failed to load because scala/Serializable failed: class not found: scala/Serializable"" })"
+SymbolInformation::<first-segment-unresolved>	SymbolInformation	package_path			absent	absent
+SymbolInformation::<first-segment-unresolved>	dotty.tools.dotc.semanticdb.SymbolInformation	package_path			absent	absent
+Symbols::<first-segment-unresolved>	Symbols	package_member	Term		none	Ok(None)
+Symbols::<first-segment-unresolved>	Symbols	package_member	Type		none	Ok(None)
+Symbols::<first-segment-unresolved>	dotty.tools.Symbols	package_member	Term		none	Ok(None)
+Symbols::<first-segment-unresolved>	dotty.tools.Symbols	package_member	Type		none	Ok(None)
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.Symbols	package_member	Term		none	Ok(None)
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.Symbols	package_member	Type		none	Ok(None)
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.core.Symbols	package_member	Term		symbol:Object	Ok(Some(SymbolId(387)))
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.core.Symbols	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/Symbols: no matching TypeDef found in .tasty file"" })"
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Symbols	package_member	Term		none	Ok(None)
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Symbols	package_member	Type		none	Ok(None)
+Symbols::<first-segment-unresolved>	Symbols	package_path			absent	absent
+Symbols::<first-segment-unresolved>	dotty.tools.Symbols	package_path			absent	absent
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.Symbols	package_path			absent	absent
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.core.Symbols	package_path			absent	absent
+Symbols::<first-segment-unresolved>	dotty.tools.dotc.core.unpickleScala2.Symbols	package_path			absent	absent
+Texts::<first-segment-unresolved>	Texts	package_member	Term		none	Ok(None)
+Texts::<first-segment-unresolved>	Texts	package_member	Type		none	Ok(None)
+Texts::<first-segment-unresolved>	dotty.tools.Texts	package_member	Term		none	Ok(None)
+Texts::<first-segment-unresolved>	dotty.tools.Texts	package_member	Type		none	Ok(None)
+Texts::<first-segment-unresolved>	dotty.tools.dotc.Texts	package_member	Term		none	Ok(None)
+Texts::<first-segment-unresolved>	dotty.tools.dotc.Texts	package_member	Type		none	Ok(None)
+Texts::<first-segment-unresolved>	dotty.tools.dotc.printing.Texts	package_member	Term		symbol:Object	Ok(Some(SymbolId(390)))
+Texts::<first-segment-unresolved>	dotty.tools.dotc.printing.Texts	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/printing/Texts: no matching TypeDef found in .tasty file"" })"
+Texts::<first-segment-unresolved>	Texts	package_path			absent	absent
+Texts::<first-segment-unresolved>	dotty.tools.Texts	package_path			absent	absent
+Texts::<first-segment-unresolved>	dotty.tools.dotc.Texts	package_path			absent	absent
+Texts::<first-segment-unresolved>	dotty.tools.dotc.printing.Texts	package_path			absent	absent
+Tokens::<first-segment-unresolved>	Tokens	package_member	Term		none	Ok(None)
+Tokens::<first-segment-unresolved>	Tokens	package_member	Type		none	Ok(None)
+Tokens::<first-segment-unresolved>	dotty.tools.Tokens	package_member	Term		none	Ok(None)
+Tokens::<first-segment-unresolved>	dotty.tools.Tokens	package_member	Type		none	Ok(None)
+Tokens::<first-segment-unresolved>	dotty.tools.dotc.Tokens	package_member	Term		none	Ok(None)
+Tokens::<first-segment-unresolved>	dotty.tools.dotc.Tokens	package_member	Type		none	Ok(None)
+Tokens::<first-segment-unresolved>	dotty.tools.dotc.parsing.Tokens	package_member	Term		symbol:Object	Ok(Some(SymbolId(392)))
+Tokens::<first-segment-unresolved>	dotty.tools.dotc.parsing.Tokens	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/parsing/Tokens: no matching TypeDef found in .tasty file"" })"
+Tokens::<first-segment-unresolved>	Tokens	package_path			absent	absent
+Tokens::<first-segment-unresolved>	dotty.tools.Tokens	package_path			absent	absent
+Tokens::<first-segment-unresolved>	dotty.tools.dotc.Tokens	package_path			absent	absent
+Tokens::<first-segment-unresolved>	dotty.tools.dotc.parsing.Tokens	package_path			absent	absent
+Trees::<first-segment-unresolved>	Trees	package_member	Term		none	Ok(None)
+Trees::<first-segment-unresolved>	Trees	package_member	Type		none	Ok(None)
+Trees::<first-segment-unresolved>	dotty.tools.Trees	package_member	Term		none	Ok(None)
+Trees::<first-segment-unresolved>	dotty.tools.Trees	package_member	Type		none	Ok(None)
+Trees::<first-segment-unresolved>	dotty.tools.dotc.Trees	package_member	Term		none	Ok(None)
+Trees::<first-segment-unresolved>	dotty.tools.dotc.Trees	package_member	Type		none	Ok(None)
+Trees::<first-segment-unresolved>	dotty.tools.dotc.ast.Trees	package_member	Term		symbol:Object	Ok(Some(SymbolId(395)))
+Trees::<first-segment-unresolved>	dotty.tools.dotc.ast.Trees	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/ast/Trees: no matching TypeDef found in .tasty file"" })"
+Trees::<first-segment-unresolved>	Trees	package_path			absent	absent
+Trees::<first-segment-unresolved>	dotty.tools.Trees	package_path			absent	absent
+Trees::<first-segment-unresolved>	dotty.tools.dotc.Trees	package_path			absent	absent
+Trees::<first-segment-unresolved>	dotty.tools.dotc.ast.Trees	package_path			absent	absent
+Types::<first-segment-unresolved>	Types	package_member	Term		none	Ok(None)
+Types::<first-segment-unresolved>	Types	package_member	Type		none	Ok(None)
+Types::<first-segment-unresolved>	dotty.tools.Types	package_member	Term		none	Ok(None)
+Types::<first-segment-unresolved>	dotty.tools.Types	package_member	Type		none	Ok(None)
+Types::<first-segment-unresolved>	dotty.tools.dotc.Types	package_member	Term		none	Ok(None)
+Types::<first-segment-unresolved>	dotty.tools.dotc.Types	package_member	Type		none	Ok(None)
+Types::<first-segment-unresolved>	dotty.tools.dotc.core.Types	package_member	Term		symbol:Object	Ok(Some(SymbolId(397)))
+Types::<first-segment-unresolved>	dotty.tools.dotc.core.Types	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/core/Types: no matching TypeDef found in .tasty file"" })"
+Types::<first-segment-unresolved>	Types	package_path			absent	absent
+Types::<first-segment-unresolved>	dotty.tools.Types	package_path			absent	absent
+Types::<first-segment-unresolved>	dotty.tools.dotc.Types	package_path			absent	absent
+Types::<first-segment-unresolved>	dotty.tools.dotc.core.Types	package_path			absent	absent
+ValueClasses::<first-segment-unresolved>	ValueClasses	package_member	Term		none	Ok(None)
+ValueClasses::<first-segment-unresolved>	ValueClasses	package_member	Type		none	Ok(None)
+ValueClasses::<first-segment-unresolved>	dotty.tools.dotc.ValueClasses	package_member	Term		none	Ok(None)
+ValueClasses::<first-segment-unresolved>	dotty.tools.dotc.ValueClasses	package_member	Type		none	Ok(None)
+ValueClasses::<first-segment-unresolved>	dotty.tools.dotc.transform.ValueClasses	package_member	Term		symbol:Object	Ok(Some(SymbolId(399)))
+ValueClasses::<first-segment-unresolved>	dotty.tools.dotc.transform.ValueClasses	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for dotty/tools/dotc/transform/ValueClasses: no matching TypeDef found in .tasty file"" })"
+ValueClasses::<first-segment-unresolved>	ValueClasses	package_path			absent	absent
+ValueClasses::<first-segment-unresolved>	dotty.tools.dotc.ValueClasses	package_path			absent	absent
+ValueClasses::<first-segment-unresolved>	dotty.tools.dotc.transform.ValueClasses	package_path			absent	absent
+collection::<first-segment-unresolved>	collection	package_member	Term		none	Ok(None)
+collection::<first-segment-unresolved>	collection	package_member	Type		none	Ok(None)
+collection::<first-segment-unresolved>	dotty.tools.dotc.collection	package_member	Term		none	Ok(None)
+collection::<first-segment-unresolved>	dotty.tools.dotc.collection	package_member	Type		none	Ok(None)
+collection::<first-segment-unresolved>	dotty.tools.dotc.rewrites.collection	package_member	Term		none	Ok(None)
+collection::<first-segment-unresolved>	dotty.tools.dotc.rewrites.collection	package_member	Type		none	Ok(None)
+collection::<first-segment-unresolved>	scala.collection	package_member	Term		symbol:Package	Ok(Some(SymbolId(292)))
+collection::<first-segment-unresolved>	scala.collection	package_member	Type		none	Ok(None)
+collection::<first-segment-unresolved>	collection	package_path			absent	absent
+collection::<first-segment-unresolved>	dotty.tools.dotc.collection	package_path			absent	absent
+collection::<first-segment-unresolved>	dotty.tools.dotc.rewrites.collection	package_path			absent	absent
+collection::<first-segment-unresolved>	scala.collection	package_path			present	present
+core::<first-segment-unresolved>	core	package_member	Term		none	Ok(None)
+core::<first-segment-unresolved>	core	package_member	Type		none	Ok(None)
+core::<first-segment-unresolved>	dotty.tools.dotc.semanticdb.core	package_member	Term		none	Ok(None)
+core::<first-segment-unresolved>	dotty.tools.dotc.semanticdb.core	package_member	Type		none	Ok(None)
+core::<first-segment-unresolved>	core	package_path			absent	absent
+core::<first-segment-unresolved>	dotty.tools.dotc.semanticdb.core	package_path			absent	absent
+dotty/tools/dotc/core.Contexts	dotty/tools/dotc/core.Contexts	selected_member	Term	FreshContext	selected	Ok(Some(SymbolId(431)))
+dotty/tools/dotc/core.Symbols	dotty/tools/dotc/core.Symbols	selected_member	Term	NoSymbol	error	"Err(Malformed { reason: ""module completion failed: invalid .tasty file for dotty/tools/dotc/core/Symbols$: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\""SymUtils\"", \""dotty/tools/dotc/core\""], raw=LengthNode(tag=136)"" })"
+dotty/tools/dotc/core.Types	dotty/tools/dotc/core.Types	selected_member	Term	TypeRef	error	"Err(Malformed { reason: ""module completion failed: invalid .tasty file for dotty/tools/dotc/core/Types$: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\""TypeUtils\"", \""dotty/tools/dotc/core\""], raw=LengthNode(tag=136)"" })"
+dotty/tools/dotc/parsing.Tokens	dotty/tools/dotc/parsing.Tokens	selected_member	Term	maxToken	error	"Err(Malformed { reason: ""module completion failed: invalid .tasty file for dotty/tools/dotc/parsing/Tokens$: unresolved supertype reference at parent 0: shape=package-qualified, semantic_reference=true, reference_prefix=true, names=[\""TokensCommon\"", \""dotty/tools/dotc/parsing\""], raw=LengthNode(tag=136)"" })"
+dotty/tools/dotc/typer.ProtoTypes	dotty/tools/dotc/typer.ProtoTypes	selected_member	Term	NoViewsAllowed	selected	Ok(Some(SymbolId(467)))
+num::<first-segment-unresolved>	num	package_member	Term		none	Ok(None)
+num::<first-segment-unresolved>	num	package_member	Type		none	Ok(None)
+num::<first-segment-unresolved>	scala.collection.immutable.num	package_member	Term		none	Ok(None)
+num::<first-segment-unresolved>	scala.collection.immutable.num	package_member	Type		none	Ok(None)
+num::<first-segment-unresolved>	num	package_path			absent	absent
+num::<first-segment-unresolved>	scala.collection.immutable.num	package_path			absent	absent
+processInternal::<first-segment-unresolved>	processInternal	package_member	Term		none	Ok(None)
+processInternal::<first-segment-unresolved>	processInternal	package_member	Type		none	Ok(None)
+processInternal::<first-segment-unresolved>	scala.processInternal	package_member	Term		none	Ok(None)
+processInternal::<first-segment-unresolved>	scala.processInternal	package_member	Type		none	Ok(None)
+processInternal::<first-segment-unresolved>	scala.sys.process.processInternal	package_member	Term		symbol:Object	Ok(Some(SymbolId(403)))
+processInternal::<first-segment-unresolved>	scala.sys.process.processInternal	package_member	Type		error	"Err(Malformed { reason: ""invalid .tasty file for scala/sys/process/processInternal: no matching TypeDef found in .tasty file"" })"
+processInternal::<first-segment-unresolved>	scala.sys.processInternal	package_member	Term		none	Ok(None)
+processInternal::<first-segment-unresolved>	scala.sys.processInternal	package_member	Type		none	Ok(None)
+processInternal::<first-segment-unresolved>	processInternal	package_path			absent	absent
+processInternal::<first-segment-unresolved>	scala.processInternal	package_path			absent	absent
+processInternal::<first-segment-unresolved>	scala.sys.process.processInternal	package_path			absent	absent
+processInternal::<first-segment-unresolved>	scala.sys.processInternal	package_path			absent	absent
+quotes::<first-segment-unresolved>	quotes	package_member	Term		none	Ok(None)
+quotes::<first-segment-unresolved>	quotes	package_member	Type		none	Ok(None)
+quotes::<first-segment-unresolved>	scala.quoted.quotes	package_member	Term		none	Ok(None)
+quotes::<first-segment-unresolved>	scala.quoted.quotes	package_member	Type		none	Ok(None)
+quotes::<first-segment-unresolved>	quotes	package_path			absent	absent
+quotes::<first-segment-unresolved>	scala.quoted.quotes	package_path			absent	absent
