@@ -192,6 +192,35 @@ pub struct JvmClassIdentity {
     access_flags: dotty_classfile::access_flags::ClassAccessFlags,
 }
 
+/// Validated direct-superclass relation for one canonical planned class.
+///
+/// The source symbols remain authoritative inside `dotty-jvm`; the two names
+/// are checked projections for class-file consumers. Constructed only by a
+/// validated [`JvmClassHierarchy`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmSuperclassPlan {
+    class: SymbolId,
+    parent: SymbolId,
+    class_internal_name: String,
+    parent_internal_name: String,
+}
+
+/// Read-only, deterministic direct-superclass proofs for one compilation unit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct JvmClassHierarchy {
+    superclasses: Vec<JvmSuperclassPlan>,
+}
+
+/// A validated superclass edge projected only to JVM internal names.
+///
+/// This is the Scala-independent view intended for a later class-file
+/// verifier. It contains no source symbols or mutable registry reference.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmInternalNameHierarchyEdge {
+    child_internal_name: String,
+    parent_internal_name: String,
+}
+
 /// One canonical parameter's JVM local-variable layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JvmParameterLocal {
@@ -238,6 +267,7 @@ pub struct JvmMethodMetadata {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmClassMetadata {
     identity: JvmClassIdentity,
+    superclass: Option<JvmSuperclassPlan>,
     fields: Vec<JvmFieldMetadata>,
     constructor: Option<JvmConstructorMetadata>,
     methods: Vec<JvmMethodMetadata>,
@@ -325,6 +355,24 @@ pub enum UnsupportedJvmClassKind {
     Synthetic,
     Case,
     Sealed,
+}
+
+/// Why a canonical class parent cannot be accepted in the bounded unit graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmSuperclassIssue {
+    MissingOrMultipleParents,
+    NonCanonicalParentType,
+    WrongParentKind,
+    SelfParent,
+    ParentNotPlanned,
+    ParentUnsupportedShape,
+    ParentIsFinal,
+    ParentNotPublic,
+    ParentHasSelfType,
+    InheritanceCycle,
+    InheritanceTooDeep,
+    MissingObjectRoot,
+    ParentConstructorUnavailable,
 }
 
 /// A symbol flag with no conservative mapping in this JVM metadata subset.
@@ -1159,6 +1207,12 @@ pub enum JvmCodegenError {
         class: SymbolId,
         parent: Option<TypeId>,
     },
+    /// A source class parent is not proven by the bounded canonical unit graph.
+    InvalidJvmSuperclass {
+        class: SymbolId,
+        parent: Option<SymbolId>,
+        issue: JvmSuperclassIssue,
+    },
     /// The class declares a self type outside this emission subset.
     UnsupportedJvmSelfType { class: SymbolId, self_type: TypeId },
     /// A declared field, initializer, nested type, or other member is outside
@@ -1384,7 +1438,7 @@ impl JvmClassPlan {
         store: &SemanticStore,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, None, definitions, None)
+        identity::class_metadata(self, store, None, definitions, None, None)
     }
 
     /// Derives class, primitive-field, constructor, and selected method
@@ -1398,7 +1452,7 @@ impl JvmClassPlan {
         typed_ast: &TypedAst,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, Some(typed_ast), definitions, None)
+        identity::class_metadata(self, store, Some(typed_ast), definitions, None, None)
     }
 }
 
@@ -1412,6 +1466,12 @@ impl JvmClassMetadata {
         &self.identity
     }
 
+    /// Validated direct parent for unit-aware metadata; absent for the legacy
+    /// store-only class projection that has no whole-unit hierarchy proof.
+    pub fn superclass(&self) -> Option<&JvmSuperclassPlan> {
+        self.superclass.as_ref()
+    }
+
     /// Selected method metadata in the class plan's order.
     pub fn methods(&self) -> &[JvmMethodMetadata] {
         &self.methods
@@ -1420,6 +1480,58 @@ impl JvmClassMetadata {
     /// Validated instance field metadata in the class plan's source order.
     pub fn fields(&self) -> &[JvmFieldMetadata] {
         &self.fields
+    }
+}
+
+impl JvmSuperclassPlan {
+    /// Canonical child class identity.
+    pub const fn class(&self) -> SymbolId {
+        self.class
+    }
+
+    /// Canonical immediate parent identity.
+    pub const fn parent(&self) -> SymbolId {
+        self.parent
+    }
+
+    /// Checked JVM internal name of the child.
+    pub fn class_internal_name(&self) -> &str {
+        &self.class_internal_name
+    }
+
+    /// Checked JVM internal name of the immediate parent.
+    pub fn parent_internal_name(&self) -> &str {
+        &self.parent_internal_name
+    }
+}
+
+impl JvmClassHierarchy {
+    /// Direct-superclass proofs in deterministic compilation-unit plan order.
+    pub fn superclasses(&self) -> &[JvmSuperclassPlan] {
+        &self.superclasses
+    }
+
+    /// Returns the Scala-independent hierarchy edges for class-file consumers.
+    pub fn internal_name_edges(&self) -> Vec<JvmInternalNameHierarchyEdge> {
+        self.superclasses
+            .iter()
+            .map(|parent| JvmInternalNameHierarchyEdge {
+                child_internal_name: parent.class_internal_name.clone(),
+                parent_internal_name: parent.parent_internal_name.clone(),
+            })
+            .collect()
+    }
+}
+
+impl JvmInternalNameHierarchyEdge {
+    /// JVM internal name on the subclass side of this edge.
+    pub fn child_internal_name(&self) -> &str {
+        &self.child_internal_name
+    }
+
+    /// JVM internal name on the superclass side of this edge.
+    pub fn parent_internal_name(&self) -> &str {
+        &self.parent_internal_name
     }
 }
 
@@ -1787,6 +1899,18 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
         identity::unit_metadata(self, definitions)
+    }
+
+    /// Builds the validated direct-superclass proof for every planned class.
+    ///
+    /// The graph accepts Object-rooted classes and one planned subclass hop.
+    /// It is an owned snapshot: the semantic store is never modified, and
+    /// names are projected only after canonical parent identities validate.
+    pub fn class_hierarchy(
+        &self,
+        definitions: &Definitions,
+    ) -> Result<JvmClassHierarchy, JvmCodegenError> {
+        identity::unit_hierarchy(self, definitions)
     }
 
     /// Builds the deterministic JVM local layout for one planned method.

@@ -165,12 +165,291 @@ pub(super) fn unit_class_identities(
     Ok(identities)
 }
 
+pub(super) fn unit_hierarchy(
+    unit: &crate::JvmCompilationUnit<'_>,
+    definitions: &Definitions,
+) -> Result<crate::JvmClassHierarchy, JvmCodegenError> {
+    unit.validate()?;
+    let plans = unit
+        .classes
+        .iter()
+        .map(|plan| (plan.class, plan))
+        .collect::<HashMap<_, _>>();
+    for plan in &unit.classes {
+        let info = class_info(unit.store, plan.class)?;
+        if let [parent_type] = info.parents.as_slice()
+            && let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(parent),
+                ..
+            }) = unit.store.types.try_get(*parent_type)
+            && plans.contains_key(parent)
+            && unit.store.symbols.get(*parent).visibility != Visibility::Public
+        {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(*parent),
+                issue: crate::JvmSuperclassIssue::ParentNotPublic,
+            });
+        }
+    }
+    let identities = unit_class_identities(unit)?;
+    let identity_by_symbol = identities
+        .iter()
+        .map(|identity| (identity.symbol(), identity))
+        .collect::<HashMap<_, _>>();
+    let mut parents = HashMap::<dotty_core::SymbolId, dotty_core::SymbolId>::new();
+
+    for plan in &unit.classes {
+        let info = class_info(unit.store, plan.class)?;
+        if let Some(self_type) = info.self_type {
+            return Err(JvmCodegenError::UnsupportedJvmSelfType {
+                class: plan.class,
+                self_type,
+            });
+        }
+        let [parent_type] = info.parents.as_slice() else {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: None,
+                issue: crate::JvmSuperclassIssue::MissingOrMultipleParents,
+            });
+        };
+        let parent = match unit.store.types.try_get(*parent_type) {
+            Some(Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(parent),
+            }) if canonical_class_parent_prefix(
+                unit.store,
+                *prefix,
+                *parent,
+                definitions.no_prefix,
+            ) =>
+            {
+                *parent
+            }
+            _ => {
+                return Err(JvmCodegenError::InvalidJvmSuperclass {
+                    class: plan.class,
+                    parent: None,
+                    issue: crate::JvmSuperclassIssue::NonCanonicalParentType,
+                });
+            }
+        };
+        if parent == plan.class {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::SelfParent,
+            });
+        }
+        if !unit.store.symbols.contains(parent) {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::WrongParentKind,
+            });
+        }
+        let parent_symbol = unit.store.symbols.get(parent);
+        if parent_symbol.kind != SymbolKind::Class {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::WrongParentKind,
+            });
+        }
+        if parent == definitions.object_class && *parent_type != definitions.object_type {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::MissingObjectRoot,
+            });
+        }
+        if parent != definitions.object_class && !plans.contains_key(&parent) {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::ParentNotPlanned,
+            });
+        }
+        parents.insert(plan.class, parent);
+    }
+
+    for plan in &unit.classes {
+        let mut cursor = plan.class;
+        let mut path = HashSet::new();
+        loop {
+            if !path.insert(cursor) {
+                return Err(JvmCodegenError::InvalidJvmSuperclass {
+                    class: plan.class,
+                    parent: parents.get(&cursor).copied(),
+                    issue: crate::JvmSuperclassIssue::InheritanceCycle,
+                });
+            }
+            let Some(parent) = parents.get(&cursor).copied() else {
+                break;
+            };
+            if parent == definitions.object_class {
+                break;
+            }
+            cursor = parent;
+        }
+    }
+
+    for plan in &unit.classes {
+        let parent = parents[&plan.class];
+        if parent == definitions.object_class {
+            continue;
+        }
+        let parent_symbol = unit.store.symbols.get(parent);
+        if parent_symbol.visibility != Visibility::Public {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::ParentNotPublic,
+            });
+        }
+        if parent_symbol.flags.contains(SymbolFlags::FINAL) {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::ParentIsFinal,
+            });
+        }
+        let parent_info = class_info(unit.store, parent)?;
+        if parent_info.self_type.is_some() {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::ParentHasSelfType,
+            });
+        }
+        if parents.get(&parent) != Some(&definitions.object_class) {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::InheritanceTooDeep,
+            });
+        }
+        let parent_plan = plans[&parent];
+        validate_accessible_no_arg_constructor(unit, plan.class, parent_plan, parent_info)?;
+        if class_identity(unit.store, parent).is_err() {
+            return Err(JvmCodegenError::InvalidJvmSuperclass {
+                class: plan.class,
+                parent: Some(parent),
+                issue: crate::JvmSuperclassIssue::ParentUnsupportedShape,
+            });
+        }
+    }
+
+    let mut superclasses = Vec::with_capacity(unit.classes.len());
+    for plan in &unit.classes {
+        let parent = parents[&plan.class];
+        let parent_internal_name = if parent == definitions.object_class {
+            "java/lang/Object".to_owned()
+        } else {
+            identity_by_symbol[&parent].internal_name().to_owned()
+        };
+        let class_identity = identity_by_symbol[&plan.class];
+        superclasses.push(crate::JvmSuperclassPlan {
+            class: plan.class,
+            parent,
+            class_internal_name: class_identity.internal_name().to_owned(),
+            parent_internal_name,
+        });
+    }
+    Ok(crate::JvmClassHierarchy { superclasses })
+}
+
+pub(super) fn canonical_class_parent_prefix(
+    store: &SemanticStore,
+    prefix: dotty_core::TypeId,
+    parent: dotty_core::SymbolId,
+    no_prefix: dotty_core::TypeId,
+) -> bool {
+    if prefix == no_prefix {
+        return true;
+    }
+    let Some(Type::TypeRef {
+        prefix: package_prefix,
+        target: TypeRefTarget::Symbol(package),
+    }) = store.types.try_get(prefix)
+    else {
+        return false;
+    };
+    *package_prefix == no_prefix
+        && store.symbols.contains(parent)
+        && store.symbols.contains(*package)
+        && store.symbols.get(parent).owner == Some(*package)
+        && store.symbols.get(*package).kind == SymbolKind::Package
+}
+
+fn validate_accessible_no_arg_constructor(
+    unit: &crate::JvmCompilationUnit<'_>,
+    child: dotty_core::SymbolId,
+    plan: &crate::JvmClassPlan,
+    info: &dotty_core::types::ClassInfo,
+) -> Result<(), JvmCodegenError> {
+    let valid_primary = match &plan.initialization {
+        crate::JvmClassInitializationPlan::ImplicitNoArg => true,
+        crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
+            constructor.parameters().is_empty() && constructor.visibility() == Visibility::Public
+        }
+        crate::JvmClassInitializationPlan::Unsupported => false,
+    };
+    let constructors = unit
+        .store
+        .scopes
+        .get(info.declarations)
+        .entered_symbols()
+        .filter(|symbol| {
+            unit.store.symbols.contains(*symbol)
+                && unit.store.symbols.get(*symbol).kind == SymbolKind::Constructor
+        })
+        .collect::<Vec<_>>();
+    let valid_declared_constructor = |constructor: dotty_core::SymbolId| {
+        let symbol = unit.store.symbols.get(constructor);
+        if symbol.owner != Some(plan.class)
+            || symbol.name.namespace() != dotty_core::Namespace::Term
+            || unit.store.names.try_resolve(symbol.name.text()) != Some("<init>")
+            || symbol.visibility != Visibility::Public
+            || !symbol.flags.is_empty()
+        {
+            false
+        } else {
+            crate::emission::validate_primary_constructor(unit.store, plan.class, constructor)
+                .is_ok()
+        }
+    };
+    let declarations_valid = match (&plan.initialization, constructors.as_slice()) {
+        (crate::JvmClassInitializationPlan::ImplicitNoArg, []) => true,
+        (crate::JvmClassInitializationPlan::ImplicitNoArg, [constructor]) => {
+            valid_declared_constructor(*constructor)
+        }
+        (crate::JvmClassInitializationPlan::PrimaryConstructor(primary), [constructor])
+            if *constructor == primary.symbol() =>
+        {
+            valid_declared_constructor(*constructor)
+        }
+        _ => false,
+    };
+    if valid_primary && declarations_valid {
+        Ok(())
+    } else {
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class: child,
+            parent: Some(plan.class),
+            issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
+        })
+    }
+}
+
 pub(super) fn class_metadata(
     plan: &crate::JvmClassPlan,
     store: &SemanticStore,
     typed_ast: Option<&dotty_core::ast::TypedAst>,
     definitions: &Definitions,
     descriptor_context: Option<(&SemanticStore, &[JvmClassIdentity])>,
+    superclass: Option<&crate::JvmSuperclassPlan>,
 ) -> Result<JvmClassMetadata, JvmCodegenError> {
     let identity = class_identity(store, plan.class)?;
     let mut fields = Vec::with_capacity(plan.fields.len());
@@ -237,13 +516,20 @@ pub(super) fn class_metadata(
     let constructor = match &plan.initialization {
         crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
             let class_identities = descriptor_context.map(|(_, identities)| identities);
-            Some(constructor.metadata(store, definitions, plan.class, class_identities)?)
+            Some(constructor.metadata(
+                store,
+                definitions,
+                plan.class,
+                class_identities,
+                superclass,
+            )?)
         }
         _ => None,
     };
     Ok(JvmClassMetadata {
         constructor,
         identity,
+        superclass: superclass.cloned(),
         fields,
         methods,
     })
@@ -601,15 +887,22 @@ pub(super) fn unit_metadata(
     unit: &crate::JvmCompilationUnit<'_>,
     definitions: &Definitions,
 ) -> Result<Vec<JvmClassMetadata>, JvmCodegenError> {
+    let hierarchy = unit_hierarchy(unit, definitions)?;
     let class_identities = unit_class_identities(unit)?;
     let mut metadata = Vec::with_capacity(unit.classes.len());
     for class_plan in &unit.classes {
+        let superclass = hierarchy
+            .superclasses()
+            .iter()
+            .find(|superclass| superclass.class() == class_plan.class)
+            .expect("every validated class has one direct superclass");
         let class = class_metadata(
             class_plan,
             unit.store,
             Some(unit.typed_ast),
             definitions,
             Some((unit.store, &class_identities)),
+            Some(superclass),
         )?;
         metadata.push(class);
     }

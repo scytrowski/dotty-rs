@@ -89,6 +89,19 @@ walk or validate references nested inside semantic types, since that is the
 responsibility of the canonical semantic model's producers. All operations
 are read-only; the lifetime-bound references keep the caller as the owner.
 
+`JvmCompilationUnit::class_hierarchy` projects a read-only proof for each
+planned class in plan order. Each parent must be one canonical, unqualified
+`TypeRef` to a class symbol. `java/lang/Object` is the required root; a
+planned subclass may have one planned parent whose own parent is Object. The
+bounded graph rejects cycles, self or multiple parents, missing plans,
+unsupported/final/non-public parents, parent self types, and parents without
+an accessible no-argument constructor. The proof retains child and parent
+`SymbolId`s alongside their checked JVM internal names, and can also be
+projected to internal-name-only edges for downstream class-file checks.
+Unit-aware class metadata carries the matching direct-parent proof. This is
+metadata only: class emission still accepts Object as the direct superclass,
+so this increment does not generate subclass bytecode.
+
 ## Method descriptor projection
 
 `JvmCompilationUnit::metadata` supports method parameters and results that

@@ -283,7 +283,7 @@ pub(super) fn validate_emittable_class(
     Ok(())
 }
 
-fn validate_primary_constructor(
+pub(super) fn validate_primary_constructor(
     store: &SemanticStore,
     class: SymbolId,
     constructor: SymbolId,
