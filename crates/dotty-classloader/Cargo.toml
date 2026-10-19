@@ -7,6 +7,7 @@ edition = "2024"
 dotty-tasty = { path = "../dotty-tasty" }
 dotty-classfile = { path = "../dotty-classfile" }
 dotty-core = { path = "../dotty-core" }
+crc32fast = "1.5.2"
 
 [dev-dependencies]
 dotty-tasty-unpickler = { path = "../dotty-tasty-unpickler" }
