@@ -218,7 +218,7 @@ It is compiler-generated, not evidence of a source annotation in the core store.
 | Class | Public, no type/value parameters, no self type, no fields, no explicit extends or initialization statements; exact canonical implicit Object parent | Traits, objects, companions, nesting, enums, arbitrary inheritance/constructors |
 | Method | One or more public ordinary monomorphic concrete methods, declared Int or Boolean result, no clause, one explicit empty clause, or one plain clause of ordinary Int/Boolean parameters | Multiple/curried/contextual/erased/repeated/defaulted clauses, abstract methods |
 | Signature/types | Int/Boolean result and parameter types; canonical Int/Boolean literal RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
-| Body | Actual typed Int/Boolean literal, a `TermRef` to a same-typed formal, or an `IF` with a Boolean literal/formal condition and supported Int branches; nested `IF` preserves condition/then/else order | Calls with Boolean results/arguments, blocks, match, locals, functions, returns and all other expressions |
+| Body | Actual typed Int/Boolean literal, a `TermRef` to a same-typed formal, an `IF` with a Boolean literal/formal condition and supported Int branches, or a bounded `BLOCK` of supported Int statements and final expression | Boolean calls, nested source blocks, match, local declarations, functions, returns and all other expressions |
 | Metadata | Public/no extra source flags or annotations; required constructor marker; normalized source identity | General annotations/modifiers, full position/comment preservation, outline/best-effort/Java TASTy |
 
 An empty class is an oracle control, not an automatic broadening of the first
@@ -303,6 +303,20 @@ projects names/types/references into owned AST fragments. The checked plan's
 `declaration_skeleton` API assembles declaration trees into an explicitly
 incomplete structural document; completed method bodies/files and a root-facade
 export remain deferred.
+
+The current complete producer also accepts an Int `BLOCK` when the real source
+and typed roots are paired, every source statement and final expression has its
+exact `SourceTypedIndex` mapping, and source statement order agrees with
+`typed_block.stats`. Each statement and final expression must independently
+pass the existing bounded Int expression validator. The typed block type must
+equal the final expression type, which must match the declared Int result; no
+statement is discarded or converted to Unit. Scala 3.9 encodes the final
+expression first and the ordered statement list second, although the shared AST
+stores `stats` before `expr`. Local `ValDef`, local methods, assignments,
+throws, Typer expansions without a one-to-one authenticated mapping, and nested
+source blocks remain unsupported. The pinned oracle fixture confirms that Scala
+3.9 flattens its nested source-block example, so the producer does not guess at
+that normalization.
 
 The crate's only normal dependencies are `dotty-core` and `dotty-tasty`. A test-only
 closure implements the binding port with `SourceTyper::source_typed_index().get`;
@@ -705,9 +719,9 @@ and independent deterministic sessions. **These checks do not establish Scala
 compiler interoperability**; compilation of this Rust producer's output remains
 #1241. The earlier audit and sequencing sections describe historical decisions,
 not a requirement to keep the complete producer unimplemented. The opt-in Scala
-oracle gate independently compiles and executes the current `Answer` and
-`Parameters` producer outputs; it does not establish compatibility for other
-expression or declaration forms.
+oracle gate independently compiles and executes the current `Answer`,
+`Parameters`, and `Blocks` producer outputs; the Blocks structural test checks
+the ordered statement list separately from its final expression.
 
 ## Validation module ownership (#1310)
 

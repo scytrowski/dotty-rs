@@ -19,6 +19,7 @@ const EXPLICIT_THIS_REFERENCES: &str =
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
 const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
+const BLOCKS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Blocks.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 const ANSWER_PRE_REFACTOR: &str = include_str!("fixtures/pre_refactor/Answer.hex");
@@ -228,6 +229,305 @@ fn source_conditionals_preserve_typed_if_order_nested_nodes_and_boolean_literal_
             .expect("start explicitly requested Scala 3.9 If interoperability gate");
         assert!(result.success(), "If Scala interoperability gate failed");
     }
+}
+
+#[test]
+fn source_blocks_preserve_ordered_statements_and_final_expression() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(BLOCKS, "Blocks.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let body = |declaration_index: usize| {
+        addresses
+            .get(output.declarations()[declaration_index].address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap()
+            .rhs
+            .unwrap()
+    };
+
+    let RawTree::LengthNode(ordered_node) = body(2) else {
+        panic!("ordered body is not a BLOCK")
+    };
+    let ordered = ordered_node.decode_block().unwrap();
+    assert_eq!(ordered.stats.len(), 1);
+    assert!(matches!(ordered.expression, RawTree::Leaf(_)));
+    assert!(matches!(ordered.stats[0], RawTree::LengthNode(ref stat) if stat.tag == IF_TAG));
+
+    let RawTree::LengthNode(single_node) = body(3) else {
+        panic!("single body is not a BLOCK")
+    };
+    let single = single_node.decode_block().unwrap();
+    assert!(single.stats.is_empty());
+    assert!(matches!(single.expression, RawTree::LengthNode(ref call) if call.tag == APPLY_TAG));
+
+    let RawTree::LengthNode(calls_node) = body(4) else {
+        panic!("calls body is not a BLOCK")
+    };
+    let calls = calls_node.decode_block().unwrap();
+    assert_eq!(calls.stats.len(), 2);
+    let call_value = |tree: &RawTree<'_>| {
+        let RawTree::LengthNode(call) = tree else {
+            panic!("expected an APPLY")
+        };
+        let arguments = call.decode_apply().unwrap().arguments;
+        let [
+            RawTree::Leaf(SimpleTerm {
+                tag: INTCONST_TAG,
+                value: TermValue::Int(value),
+                ..
+            }),
+        ] = arguments.as_slice()
+        else {
+            panic!("expected one integer call argument")
+        };
+        *value
+    };
+    for stat in &calls.stats {
+        let RawTree::LengthNode(call) = stat else {
+            panic!("a call statement was not retained")
+        };
+        assert_eq!(call.tag, APPLY_TAG);
+    }
+    assert_eq!(
+        calls.stats.iter().map(call_value).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let RawTree::LengthNode(last_call) = &calls.expression else {
+        panic!("the final call expression was not retained")
+    };
+    assert_eq!(last_call.tag, APPLY_TAG);
+    assert_eq!(call_value(&calls.expression), 3);
+
+    let (_, repeated) = source_outputs_named(BLOCKS, "Blocks.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeated.bytes());
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1313/generated/example/Blocks.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1313/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 Block interoperability gate");
+        assert!(result.success(), "Block Scala interoperability gate failed");
+    }
+}
+
+#[test]
+fn block_validation_rejects_unmapped_reordered_repeated_and_unsupported_statements() {
+    let mut expected = None;
+    let reordered = source_outputs_named_with_tree_edits(
+        BLOCKS,
+        "Blocks.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (source_block, typed_block, _, _) =
+                blocks_with_stat_count_in(source_ast, typed_ast, bindings, 2);
+            let source_stat = match &source_ast.get(source_block).kind {
+                TreeKind::Block(block) => block.stats[0],
+                _ => unreachable!(),
+            };
+            let mapped_typed = bindings.get(SourceId::from_index(7), source_stat).unwrap();
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(typed_block).kind else {
+                unreachable!()
+            };
+            expected = Some((source_stat, block.stats[1], mapped_typed));
+            block.stats.swap(0, 1);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    let (source_stat, expected_typed, actual_typed) = expected.unwrap();
+    assert_eq!(
+        reordered,
+        PickleError::BodyBinding {
+            source: SourceId::from_index(7),
+            tree: source_stat,
+            expected: expected_typed,
+            actual: Some(actual_typed),
+        }
+    );
+
+    let mut shared_argument = None;
+    let repeated = source_outputs_named_with_tree_edits(
+        BLOCKS,
+        "Blocks.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (source_block, typed_block, _, _) =
+                blocks_with_stat_count_in(source_ast, typed_ast, bindings, 2);
+            let TreeKind::Block(source) = &source_ast.get(source_block).kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(typed) = &typed_ast.get(typed_block).kind else {
+                unreachable!()
+            };
+            let TreeKind::Apply(source_second) = &source_ast.get(source.stats[1]).kind else {
+                unreachable!()
+            };
+            let TreeKind::Apply(typed_first) = &typed_ast.get(typed.stats[0]).kind else {
+                unreachable!()
+            };
+            let shared = typed_first.args[0];
+            let TreeKind::Apply(typed_second) = &mut typed_ast.get_mut(typed.stats[1]).kind else {
+                unreachable!()
+            };
+            shared_argument = Some(shared);
+            typed_second.args[0] = shared;
+            bindings.remove(SourceId::from_index(7), source_second.args[0]);
+            bindings
+                .insert(SourceId::from_index(7), source_second.args[0], shared)
+                .unwrap();
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        repeated,
+        PickleError::RepeatedExpression {
+            tree: shared_argument.unwrap(),
+        }
+    );
+
+    let mut cycle_id = None;
+    let cycle = source_outputs_named_with_tree_edits(
+        BLOCKS,
+        "Blocks.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (source_block, typed_block, _, _) =
+                blocks_with_stat_count_in(source_ast, typed_ast, bindings, 2);
+            cycle_id = Some(typed_block);
+            let TreeKind::Block(block) = &mut source_ast.get_mut(source_block).kind else {
+                unreachable!()
+            };
+            block.stats[0] = source_block;
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(typed_block).kind else {
+                unreachable!()
+            };
+            block.stats[0] = typed_block;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        cycle,
+        PickleError::RepeatedExpression {
+            tree: cycle_id.unwrap(),
+        }
+    );
+
+    let missing_typed_stat = source_outputs_named_with_tree_edits(
+        BLOCKS,
+        "Blocks.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, typed_block, _, _) =
+                blocks_with_stat_count_in(source_ast, typed_ast, bindings, 2);
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(typed_block).kind else {
+                unreachable!()
+            };
+            block.stats.pop();
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        missing_typed_stat,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
+
+    let local_value = "package example\nclass LocalBlock:
+  def local: Int =
+    val saved: Int = 1
+    saved
+";
+    let forbidden_local =
+        source_outputs_named(local_value, "LocalBlock.scala", |_| {}).unwrap_err();
+    assert!(matches!(
+        forbidden_local,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn block_validation_enforces_result_depth_and_item_limits() {
+    let wrong_result = source_outputs_named_with_tree_edits(
+        BLOCKS,
+        "Blocks.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let (_, typed_block, _, _) =
+                blocks_with_stat_count_in(source_ast, typed_ast, bindings, 2);
+            let TreeKind::Block(block) = &typed_ast.get(typed_block).kind else {
+                unreachable!()
+            };
+            let TreeKind::Apply(final_call) = &typed_ast.get(block.expr).kind else {
+                unreachable!()
+            };
+            let bad_type = typed_ast.get(final_call.args[0]).ty;
+            typed_ast.get_mut(typed_block).ty = bad_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(wrong_result, PickleError::BodyType { .. }));
+
+    let nested_application = "package example\nclass NestedBlock:
+  def identity(x: Int): Int = x
+  def run: Int =
+    identity(identity(1))
+    identity(2)
+";
+    let depth = source_outputs_named_with_limits(
+        nested_application,
+        "NestedBlock.scala",
+        ValidationLimits {
+            max_expression_depth: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        depth,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+
+    let items = source_outputs_named_with_limits(
+        BLOCKS,
+        "Blocks.scala",
+        ValidationLimits {
+            max_items: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        items,
+        PickleError::LimitExceeded {
+            kind: LimitKind::Items,
+            limit: 0
+        }
+    ));
 }
 
 fn source_outputs(
@@ -459,12 +759,17 @@ fn source_outputs_named_with_tree_edits(
                 | TreeKind::Select(_)
                 | TreeKind::Apply(_)
                 | TreeKind::If(_)
+                | TreeKind::Block(_)
         ));
     }
     let body = checked.plan().methods[0].body.unwrap();
     let expected_literal = match &typer.typed_ast().get(body).kind {
         TreeKind::Literal(Literal { value }) => Some(value.clone()),
-        TreeKind::Ident(_) | TreeKind::Select(_) | TreeKind::Apply(_) | TreeKind::If(_) => None,
+        TreeKind::Ident(_)
+        | TreeKind::Select(_)
+        | TreeKind::Apply(_)
+        | TreeKind::If(_)
+        | TreeKind::Block(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
     let output = checked.pickle()?;
@@ -506,7 +811,9 @@ fn source_outputs_named_with_tree_edits(
         (None, Some(dotty_tasty::tasty::RawTree::LengthNode(node))) => {
             assert!(matches!(
                 node.tag,
-                dotty_tasty::tasty::APPLY_TAG | dotty_tasty::tasty::IF_TAG
+                dotty_tasty::tasty::APPLY_TAG
+                    | dotty_tasty::tasty::IF_TAG
+                    | dotty_tasty::tasty::BLOCK_TAG
             ));
         }
         (expected, actual) => panic!("body shape changed: {expected:?} / {actual:?}"),
@@ -594,6 +901,35 @@ fn first_conditional_ids(
             Some((source_id, typed_id, source_if, typed_if))
         })
         .expect("fixture contains a typed If expression")
+}
+
+fn blocks_with_stat_count_in(
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &AstArena<Typed>,
+    bindings: &dotty_typer::SourceTypedIndex,
+    stat_count: usize,
+) -> (TreeId<Untyped>, TreeId<Typed>, Block<Untyped>, Block<Typed>) {
+    source_ast
+        .iter()
+        .find_map(|(source_id, tree)| {
+            let TreeKind::Block(source_block) = &tree.kind else {
+                return None;
+            };
+            if source_block.stats.len() != stat_count {
+                return None;
+            }
+            let typed_id = bindings.get(SourceId::from_index(7), source_id)?;
+            let TreeKind::Block(typed_block) = &typed_ast.try_get(typed_id)?.kind else {
+                return None;
+            };
+            Some((
+                source_id,
+                typed_id,
+                source_block.clone(),
+                typed_block.clone(),
+            ))
+        })
+        .expect("fixture contains a typed Block with the requested stat count")
 }
 
 #[test]

@@ -1,5 +1,7 @@
 use super::*;
 
+mod block;
+
 impl Validator<'_, '_> {
     fn same_class_method_target(
         &mut self,
@@ -503,15 +505,24 @@ impl Validator<'_, '_> {
             self.validate_nested_application(source_id, typed_id, method, depth, visited)?;
             return Ok(typed.ty);
         }
-        self.charge(1)?;
-        if !visited.insert(typed_id) {
-            return Err(PickleError::RepeatedExpression { tree: typed_id });
+        if matches!(source.kind, TreeKind::Block(_)) && matches!(typed.kind, TreeKind::Block(_)) {
+            self.validate_method_expression_inner(
+                Some(source_id),
+                Some(typed_id),
+                method,
+                self.plan.definitions.int,
+                depth + 1,
+                Some(visited),
+            )?;
+            return Ok(typed.ty);
         }
-        self.validate_method_expression(
+        self.validate_method_expression_inner(
             Some(source_id),
             Some(typed_id),
             method,
             self.plan.definitions.int,
+            depth,
+            Some(visited),
         )?;
         Ok(typed.ty)
     }
@@ -629,6 +640,18 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         result_type: TypeId,
     ) -> Result<(), PickleError> {
+        self.validate_method_expression_inner(rhs, body, method, result_type, 0, None)
+    }
+
+    fn validate_method_expression_inner(
+        &mut self,
+        rhs: Option<TreeId<Untyped>>,
+        body: Option<TreeId<Typed>>,
+        method: &MethodPicklePlan,
+        result_type: TypeId,
+        depth: usize,
+        mut visited: Option<&mut HashSet<TreeId<Typed>>>,
+    ) -> Result<(), PickleError> {
         let Some(rhs) = rhs else {
             return Err(self.unsupported(UnsupportedFeature::AbstractMethod, Some(method.symbol)));
         };
@@ -646,6 +669,12 @@ impl Validator<'_, '_> {
         let body_type = self.ty(node.ty)?;
         let expected = match (&source_rhs.kind, &node.kind) {
             (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) => {
+                if let Some(seen) = visited.as_deref_mut() {
+                    self.charge(1)?;
+                    if !seen.insert(body) {
+                        return Err(PickleError::RepeatedExpression { tree: body });
+                    }
+                }
                 if source_ident.name != typed_ident.name
                     || source_ident.backquoted != typed_ident.backquoted
                 {
@@ -712,6 +741,17 @@ impl Validator<'_, '_> {
                 }
             }
             (TreeKind::Select(source_select), TreeKind::Select(typed_select)) => {
+                if let Some(seen) = visited.as_deref_mut() {
+                    self.charge(2)?;
+                    if !seen.insert(body) {
+                        return Err(PickleError::RepeatedExpression { tree: body });
+                    }
+                    if !seen.insert(typed_select.qualifier) {
+                        return Err(PickleError::RepeatedExpression {
+                            tree: typed_select.qualifier,
+                        });
+                    }
+                }
                 if source_select.name != typed_select.name
                     || source_select.backquoted != typed_select.backquoted
                 {
@@ -777,6 +817,12 @@ impl Validator<'_, '_> {
                 None
             }
             (TreeKind::Literal(source_literal), TreeKind::Literal(literal)) => {
+                if let Some(seen) = visited.as_deref_mut() {
+                    self.charge(1)?;
+                    if !seen.insert(body) {
+                        return Err(PickleError::RepeatedExpression { tree: body });
+                    }
+                }
                 let literal_type_matches = match (&literal.value, body_type) {
                     (Constant::Int(value), Type::Constant(Constant::Int(typed))) => {
                         value == typed && result_type == p.definitions.int
@@ -820,8 +866,21 @@ impl Validator<'_, '_> {
                         ty: node.ty,
                     });
                 }
-                let mut visited = HashSet::new();
-                self.validate_if_expression(rhs, body, method, 0, &mut visited)?;
+                let mut local_visited = HashSet::new();
+                let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+                self.validate_if_expression(rhs, body, method, depth, seen)?;
+                None
+            }
+            (TreeKind::Block(_), TreeKind::Block(_)) => {
+                if result_type != p.definitions.int {
+                    return Err(PickleError::BodyType {
+                        tree: body,
+                        ty: node.ty,
+                    });
+                }
+                let mut local_visited = HashSet::new();
+                let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+                self.validate_block_expression(rhs, body, method, result_type, depth, seen)?;
                 None
             }
             (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) => {
@@ -832,7 +891,11 @@ impl Validator<'_, '_> {
                     });
                 }
                 self.charge(1)?;
-                let mut visited = HashSet::from([body]);
+                let mut local_visited = HashSet::new();
+                let visited = visited.take().unwrap_or(&mut local_visited);
+                if !visited.insert(body) {
+                    return Err(PickleError::RepeatedExpression { tree: body });
+                }
                 if source_apply.kind != ApplyKind::Regular
                     || typed_apply.kind != ApplyKind::Regular
                     || source_apply.args.len() != typed_apply.args.len()
@@ -956,8 +1019,8 @@ impl Validator<'_, '_> {
                             source_arg,
                             typed_arg,
                             method,
-                            1,
-                            &mut visited,
+                            depth + 1,
+                            visited,
                         )?;
                         continue;
                     }
