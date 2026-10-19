@@ -1018,9 +1018,9 @@ fn constructor_field_initializer_loads_exact_reference_parameters() {
             classes,
         };
         let metadata = unit.metadata(definitions).unwrap();
-        let holder_index = class_symbols
+        let holder_index = metadata
             .iter()
-            .position(|class| *class == class_symbols[2])
+            .position(|class| class.identity().symbol() == class_symbols[2])
             .unwrap();
         let holder_metadata = &metadata[holder_index];
         let constructor_parameters = holder_metadata.constructor().unwrap().parameters();
