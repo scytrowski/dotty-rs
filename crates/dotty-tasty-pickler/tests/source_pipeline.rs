@@ -20,6 +20,7 @@ const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = i
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
 const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
 const BLOCKS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Blocks.scala");
+const LOCALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Locals.scala");
 const NUMERIC_BLOCKS: &str = "package example\nclass NumericBlocks:\n  def run: Int =\n    1\n    2\n    3\n    4\n    5\n    6\n    7\n    8\n    9\n    10\n    11\n    12\n    13\n    14\n    15\n    16\n    17\n    18\n    19\n    20\n";
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
@@ -323,6 +324,174 @@ fn source_blocks_preserve_ordered_statements_and_final_expression() {
 }
 
 #[test]
+fn local_int_values_emit_ordered_valdefs_and_exact_direct_references() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(LOCALS, "Locals.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let body = |declaration_index: usize| {
+        addresses
+            .get(output.declarations()[declaration_index].address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap()
+            .rhs
+            .unwrap()
+    };
+    let local_stat = |stat: &RawTree<'_>| {
+        let RawTree::LengthNode(node) = stat else {
+            panic!("local statement was not a VALDEF")
+        };
+        assert_eq!(node.tag, VALDEF_TAG);
+        let DefinitionBody::ValDef { name, rhs, .. } = node.decode_definition_body().unwrap()
+        else {
+            panic!("local statement decoded as a non-VALDEF")
+        };
+        let rhs = rhs.expect("supported local initializer");
+        let (rhs_tag, rhs_reference, rhs_int) = match rhs {
+            RawTree::Leaf(term) => match term.value {
+                TermValue::AstRef(address) => (term.tag, Some(address), None),
+                TermValue::Int(value) => (term.tag, None, Some(value)),
+                other => panic!("unexpected local initializer leaf: {other:?}"),
+            },
+            other => panic!("unexpected local initializer tree: {other:?}"),
+        };
+        (
+            file.names().get_utf8(name).unwrap().to_owned(),
+            rhs_tag,
+            rhs_reference,
+            rhs_int,
+        )
+    };
+
+    let RawTree::LengthNode(copy_body) = body(2) else {
+        panic!("copy body is not a BLOCK")
+    };
+    assert_eq!(copy_body.tag, BLOCK_TAG);
+    let copy = copy_body.decode_block().unwrap();
+    assert_eq!(copy.stats.len(), 1);
+    let (saved_name, saved_tag, saved_ref, _) = local_stat(&copy.stats[0]);
+    assert_eq!(saved_name, "saved");
+    assert_eq!(saved_tag, TERMREFDIRECT_TAG);
+    assert!(saved_ref.is_some());
+    let RawTree::Leaf(SimpleTerm {
+        tag: TERMREFDIRECT_TAG,
+        value: TermValue::AstRef(saved_address),
+        ..
+    }) = copy.expression
+    else {
+        panic!("unexpected final local reference: {:?}", copy.expression)
+    };
+    let saved_declaration = addresses
+        .get(saved_address)
+        .expect("the direct local reference resolves in the global AST index");
+    assert_eq!(saved_declaration.tag, VALDEF_TAG);
+    let DefinitionBody::ValDef { name, .. } = saved_declaration.decode_definition_body().unwrap()
+    else {
+        panic!("local reference target is not a value definition")
+    };
+    assert_eq!(file.names().get_utf8(name).unwrap(), "saved");
+
+    let RawTree::LengthNode(call_body) = body(4) else {
+        panic!("call body is not a BLOCK")
+    };
+    assert_eq!(call_body.tag, BLOCK_TAG);
+    let call = call_body.decode_block().unwrap();
+    assert_eq!(call.stats.len(), 1);
+    let RawTree::LengthNode(call_local) = &call.stats[0] else {
+        panic!("call local statement was not a VALDEF")
+    };
+    assert_eq!(call_local.tag, VALDEF_TAG);
+    let DefinitionBody::ValDef { rhs: Some(rhs), .. } =
+        call_local.decode_definition_body().unwrap()
+    else {
+        panic!("call local has no initializer")
+    };
+    assert!(matches!(rhs, RawTree::LengthNode(node) if node.tag == APPLY_TAG));
+
+    let RawTree::LengthNode(multiple_body) = body(5) else {
+        panic!("multiple body is not a BLOCK")
+    };
+    assert_eq!(multiple_body.tag, BLOCK_TAG);
+    let multiple = multiple_body.decode_block().unwrap();
+    assert_eq!(multiple.stats.len(), 2);
+    let (first_name, first_tag, first_ref, _) = local_stat(&multiple.stats[0]);
+    let (second_name, second_tag, _, second_int) = local_stat(&multiple.stats[1]);
+    let first_address = addresses
+        .iter_nodes_with_tag(VALDEF_TAG)
+        .find_map(|node| {
+            let declaration = addresses.get(node.offset as u32)?;
+            let DefinitionBody::ValDef { name, .. } = declaration.decode_definition_body().ok()?
+            else {
+                return None;
+            };
+            (file.names().get_utf8(name)? == "first").then_some(node.offset as u32)
+        })
+        .expect("the first local has a global AST address");
+    assert_eq!(first_name, "first");
+    assert_eq!(second_name, "second");
+    assert_eq!(first_tag, TERMREFDIRECT_TAG);
+    assert!(first_ref.is_some());
+    assert_eq!(second_tag, INTCONST_TAG);
+    assert_eq!(second_int, Some(7));
+    let RawTree::Leaf(SimpleTerm {
+        tag: TERMREFDIRECT_TAG,
+        value: TermValue::AstRef(second_address),
+        ..
+    }) = multiple.expression
+    else {
+        panic!("unexpected final reference in multiple-local block")
+    };
+    let first_parent = addresses.parent_of(first_address).unwrap();
+    assert_eq!(first_parent.tag, BLOCK_TAG);
+    assert_eq!(addresses.parent_of(second_address), Some(first_parent));
+    let second_declaration = addresses.get(second_address).unwrap();
+    let DefinitionBody::ValDef { name, .. } = second_declaration.decode_definition_body().unwrap()
+    else {
+        panic!("second local reference target is not a value definition")
+    };
+    assert_eq!(file.names().get_utf8(name).unwrap(), "second");
+
+    let (_, repeated) = source_outputs_named(LOCALS, "Locals.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeated.bytes());
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1314/generated/example/Locals.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1314/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 local-value interoperability gate");
+        assert!(
+            result.success(),
+            "Local value Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
+fn local_values_require_exact_source_typer_bindings() {
+    let missing = source_outputs_named(LOCALS, "Locals.scala", |plan| {
+        plan.local_values = &[];
+    })
+    .unwrap_err();
+    assert!(matches!(
+        missing,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
+}
+
+#[test]
 fn block_validation_rejects_unmapped_reordered_repeated_and_unsupported_statements() {
     let mut expected = None;
     let reordered = source_outputs_named_with_tree_edits(
@@ -449,17 +618,17 @@ fn block_validation_rejects_unmapped_reordered_repeated_and_unsupported_statemen
         }
     ));
 
-    let local_value = "package example\nclass LocalBlock:
+    let mutable_local = "package example\nclass LocalBlock:
   def local: Int =
-    val saved: Int = 1
+    var saved: Int = 1
     saved
 ";
     let forbidden_local =
-        source_outputs_named(local_value, "LocalBlock.scala", |_| {}).unwrap_err();
+        source_outputs_named(mutable_local, "LocalBlock.scala", |_| {}).unwrap_err();
     assert!(matches!(
         forbidden_local,
         PickleError::Unsupported {
-            feature: UnsupportedFeature::BodyExpression,
+            feature: UnsupportedFeature::SourceMetadata,
             ..
         }
     ));
@@ -788,6 +957,22 @@ fn source_outputs_named_with_tree_edits(
             body,
         });
     }
+    let local_values = parsed
+        .ast
+        .iter()
+        .filter_map(|(source_tree, tree)| {
+            if !matches!(tree.kind, TreeKind::ValDef(_)) {
+                return None;
+            }
+            let binding = typer.typed_local_binding_at(source, source_tree)?;
+            Some(LocalValueBinding {
+                source_tree,
+                symbol: binding.symbol(),
+                typed_declaration: binding.declaration(),
+                scope: binding.scope(),
+            })
+        })
+        .collect::<Vec<_>>();
     // Give negative tests an isolated candidate to corrupt. The original
     // frontend session below remains available for the read-only input check.
     let mut source_ast = AstArena::new();
@@ -826,6 +1011,7 @@ fn source_outputs_named_with_tree_edits(
             parameter_clauses: clauses(constructor_definition),
         },
         methods: &methods,
+        local_values: &local_values,
     };
     edit(&mut plan);
     let before = format!(

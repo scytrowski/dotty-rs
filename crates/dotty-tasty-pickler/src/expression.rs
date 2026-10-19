@@ -270,6 +270,18 @@ fn lower_expression_inner(
             }
             return context.local_reference(*target, None);
         }
+        if store.symbols.contains(*target)
+            && store.symbols.get(*target).kind == dotty_core::SymbolKind::Local
+            && store.symbols.get(*target).owner == Some(method)
+        {
+            if !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) {
+                return Err(PickleError::Reference {
+                    symbol: *target,
+                    reason: crate::ReferenceError::Owner,
+                });
+            }
+            return context.local_reference(*target, None);
+        }
         let class = store
             .symbols
             .contains(method)

@@ -73,6 +73,18 @@ impl Validator<'_, '_> {
                 .typed_ast
                 .try_get(typed_stat)
                 .ok_or(PickleError::InvalidTypedTree { tree: typed_stat })?;
+            if matches!(source_stat_node.kind, TreeKind::ValDef(_))
+                || matches!(stat.kind, TreeKind::ValDef(_))
+            {
+                self.validate_local_value_statement(
+                    source_stat,
+                    typed_stat,
+                    method,
+                    depth + 1,
+                    visited,
+                )?;
+                continue;
+            }
             if matches!(source_stat_node.kind, TreeKind::Block(_))
                 || matches!(stat.kind, TreeKind::Block(_))
             {

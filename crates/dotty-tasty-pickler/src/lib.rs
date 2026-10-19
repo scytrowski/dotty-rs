@@ -41,8 +41,8 @@ pub use error::{
     Builtin, LimitKind, PickleError, ReferenceError, SourceRole, TypeRole, UnsupportedFeature,
 };
 pub use plan::{
-    DefaultConstructorPlan, MethodPicklePlan, PicklePlan, SourceMetadata, SourceTypedBindings,
-    ValidatedPicklePlan, ValidationLimits,
+    DefaultConstructorPlan, LocalValueBinding, MethodPicklePlan, PicklePlan, SourceMetadata,
+    SourceTypedBindings, ValidatedPicklePlan, ValidationLimits,
 };
 pub use projection::{EncodingContext, ProjectedFragment, ProjectionLimits};
 pub use skeleton::{DeclarationSkeleton, OmittedMethodBody, SkeletonDeclaration};

@@ -1,6 +1,7 @@
 use super::*;
 
 mod block;
+mod local;
 
 impl Validator<'_, '_> {
     fn same_class_method_target(
@@ -704,6 +705,28 @@ impl Validator<'_, '_> {
                         });
                     }
                     self.same_class_method_target(*target, source_ident.name, *prefix, rhs)?;
+                    None
+                } else if self.registered_local_symbols.contains(target) {
+                    self.kind(*target, SymbolKind::Local)?;
+                    self.owner(*target, Some(method.symbol))?;
+                    if result_type != p.definitions.int
+                        || self.symbol(*target)?.name != source_ident.name
+                        || !self.visible_locals.contains(target)
+                    {
+                        return Err(PickleError::Reference {
+                            symbol: *target,
+                            reason: crate::ReferenceError::NotRegistered,
+                        });
+                    }
+                    if *prefix != p.definitions.no_prefix
+                        || !matches!(self.ty(*prefix)?, Type::NoPrefix)
+                        || self.complete(*target)? != p.definitions.int
+                    {
+                        return Err(PickleError::Reference {
+                            symbol: *target,
+                            reason: crate::ReferenceError::Owner,
+                        });
+                    }
                     None
                 } else {
                     let parameter = target;
