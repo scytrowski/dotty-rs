@@ -10,6 +10,28 @@ impl Validator<'_, '_> {
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
+        let visible_locals = self.visible_locals.clone();
+        let result = self.validate_block_expression_inner(
+            source_id,
+            typed_id,
+            method,
+            result_type,
+            depth,
+            visited,
+        );
+        self.visible_locals = visible_locals;
+        result
+    }
+
+    fn validate_block_expression_inner(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        result_type: TypeId,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
         let depth_limit = self.limits.expression_depth_limit();
         if depth > depth_limit {
             return Err(PickleError::LimitExceeded {
@@ -80,7 +102,7 @@ impl Validator<'_, '_> {
                     source_stat,
                     typed_stat,
                     method,
-                    depth + 1,
+                    depth,
                     visited,
                 )?;
                 continue;

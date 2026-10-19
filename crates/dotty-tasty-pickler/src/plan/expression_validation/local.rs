@@ -146,12 +146,20 @@ impl Validator<'_, '_> {
                     .typed_at(self.plan.source.id, source_rhs),
             });
         }
+        let rhs_depth = if matches!(
+            self.plan.typed_ast.try_get(typed_rhs).map(|rhs| &rhs.kind),
+            Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_))
+        ) {
+            depth + 1
+        } else {
+            depth
+        };
         self.validate_method_expression_inner(
             Some(source_rhs),
             Some(typed_rhs),
             method,
             self.plan.definitions.int,
-            depth + 1,
+            rhs_depth,
             Some(visited),
         )?;
 
