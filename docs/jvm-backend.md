@@ -641,6 +641,18 @@ cases cover wrong initializer types, immutable assignment, unsupported
 constructor forms, and failed compilation without partial class artifacts. See
 [`jvm-stateful-class-contract.md`](jvm-stateful-class-contract.md).
 
+`ReferenceHolder.scala` exercises a three-class source batch with private
+reference fields, constructor reference arguments, a reference-returning method
+chain (`value().get()`), a `while` loop, and an `if` result join. Its source
+integration test compares ordered class bytes from two independent frontend
+sessions, checks exact field flags and descriptors, constructor field-store
+order, call owners, and `Object(Holder)`/`Object(Counter)` frames. On JDK 21+
+the test also runs all three classes through `javap` and a Java identity and
+loop harness with `-Xverify:all`. The typer accepts a direct application
+returning a top-level class from the current source batch as a selection
+prefix; mutable reference-field prefixes such as `current.get()` remain
+rejected.
+
 These fixtures test the bounded emitted class shape. They do not establish
 Scala public accessor, bridge, or TASTy compatibility.
 
@@ -661,9 +673,9 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation --locked
 ```
 
 Without the JDK it still runs structural and negative checks and explicitly
-skips Java verification. Reference method results and call arguments,
-class-hierarchy joins, arrays, null, mutable reference locals, and branched
-constructors remain deferred.
+skips Java verification. Reference method results outside the exact current
+source class subset, reference call arguments, class-hierarchy joins, arrays,
+null, mutable reference locals, and branched constructors remain deferred.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates

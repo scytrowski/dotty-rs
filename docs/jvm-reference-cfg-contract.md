@@ -203,6 +203,16 @@ survives its back-edge. The independent-session bytes are compared in class
 output order. On JDK 21+, `javap` and the Java identity/loop harness run the
 classfiles with `-Xverify:all`; CI requires this toolchain.
 
+`ReferenceHolder.scala` adds the real source path for field-backed reference
+access: `Holder.value()` reads `current`, `initial()` reads `original`, and
+`read()` chains the returned `Counter` into `Counter.get()`. Its `while` loop
+calls both `value()` and `Counter.get`/`increment`; the emitted loop header
+retains `Object(Holder)`. The `choose` branch join retains exact
+`Object(Counter)` on the operand stack. The test checks branch targets against
+decoded frames, compares complete class batches from independent frontend
+sessions, and on JDK 21+ checks all three classes with `javap` and
+`java -Xverify:all`.
+
 The class-file unit tests exercise exact local/stack transfer, allocation
 tracking, owner and argument checks, joins, and frame projection. The JDK
 encoder gate checks virtual reference calls, chaining, and exact result frames
