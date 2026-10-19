@@ -10028,7 +10028,6 @@ fn probe_supported_match_cases(
         scanner,
         &mut store.names,
     );
-    let type_operator_spellings = source_operator_spellings(&parsed.ast, &store.names);
     let mut namer_packages = Packages::new();
     let Ok(index) = name_compilation_unit(
         &parsed.ast,
@@ -10040,8 +10039,43 @@ fn probe_supported_match_cases(
     ) else {
         return BTreeMap::new();
     };
-    let method_ranges = parsed
-        .ast
+    probe_supported_match_cases_in_index(
+        MatchProbeContext {
+            arena: &mut parsed.ast,
+            source,
+            index: &index,
+            store: &mut store,
+            definitions,
+        },
+        path,
+        classpath,
+        profile,
+    )
+}
+
+struct MatchProbeContext<'a> {
+    arena: &'a mut dotty_core::AstArena<Untyped>,
+    source: SourceId,
+    index: &'a dotty_core::SourceSemanticIndex,
+    store: &'a mut SemanticStore,
+    definitions: Definitions,
+}
+
+fn probe_supported_match_cases_in_index(
+    context: MatchProbeContext<'_>,
+    path: &str,
+    classpath: SharedClassPath,
+    profile: &mut MatchProfile,
+) -> BTreeMap<String, usize> {
+    let MatchProbeContext {
+        arena,
+        source,
+        index,
+        store,
+        definitions,
+    } = context;
+    let type_operator_spellings = source_operator_spellings(arena, &store.names);
+    let method_ranges = arena
         .iter()
         .filter_map(|(tree, node)| {
             let TreeKind::DefDef(definition) = &node.kind else {
@@ -10049,12 +10083,12 @@ fn probe_supported_match_cases(
             };
             let method = index.symbol_at(source, tree)?;
             let rhs = definition.rhs?;
-            let range = parsed.ast.get(rhs).position?.span().range();
+            let range = arena.get(rhs).position?.span().range();
             Some((method, range))
         })
         .collect::<Vec<_>>();
     let mut probe_specs = Vec::new();
-    for (_, node) in parsed.ast.iter() {
+    for (_, node) in arena.iter() {
         let TreeKind::Match(matched) = &node.kind else {
             continue;
         };
@@ -10071,13 +10105,13 @@ fn probe_supported_match_cases(
             continue;
         };
         for case_tree in &matched.cases {
-            let Some(case_node) = parsed.ast.try_get(*case_tree) else {
+            let Some(case_node) = arena.try_get(*case_tree) else {
                 continue;
             };
             let TreeKind::CaseDef(case) = &case_node.kind else {
                 continue;
             };
-            let family = pattern_root_shape(&parsed.ast, &store.names, case.pattern);
+            let family = pattern_root_shape(arena, &store.names, case.pattern);
             if !is_supported_case_family(&family) {
                 continue;
             }
@@ -10088,7 +10122,7 @@ fn probe_supported_match_cases(
                 node.position,
                 family,
                 case.guard.is_some(),
-                extractor_protocol_success(&parsed.ast, case.pattern),
+                extractor_protocol_success(arena, case.pattern),
             ));
         }
     }
@@ -10096,7 +10130,7 @@ fn probe_supported_match_cases(
         .into_iter()
         .map(
             |(method, selector, case, position, family, guarded, protocol)| {
-                let synthetic_match = parsed.ast.alloc(Tree {
+                let synthetic_match = arena.alloc(Tree {
                     kind: TreeKind::Match(Match {
                         selector,
                         cases: vec![case],
@@ -10115,14 +10149,7 @@ fn probe_supported_match_cases(
         timing_enabled: profile_timing,
         ..ResolverMetrics::default()
     }));
-    let mut typer = SourceTyper::new(
-        &parsed.ast,
-        source,
-        &index,
-        &mut store,
-        definitions,
-        &packages,
-    );
+    let mut typer = SourceTyper::new(arena, source, index, store, definitions, &packages);
     let resolver = ClasspathSymbolResolver::new(
         classpath.clone(),
         definitions,
@@ -10177,7 +10204,7 @@ fn probe_supported_match_cases(
     let mut selector_outcomes = HashMap::new();
     let mut selector_keys = HashSet::new();
     for (method, match_tree, _, _, _) in &probes {
-        let TreeKind::Match(matched) = &parsed.ast.get(*match_tree).kind else {
+        let TreeKind::Match(matched) = &arena.get(*match_tree).kind else {
             continue;
         };
         let key = (*method, matched.selector);
@@ -10199,7 +10226,7 @@ fn probe_supported_match_cases(
         if let Err(error) = typer.type_expression(matched.selector, context) {
             let error_name = typed_case_failure_label(
                 &error,
-                &parsed.ast,
+                arena,
                 &type_operator_spellings,
                 &typer.store().names,
             );
@@ -10230,7 +10257,7 @@ fn probe_supported_match_cases(
     for (method, match_tree, family, guarded, protocol) in probes {
         let probe_started = Instant::now();
         let resolver_calls_before = probe_metrics.borrow().module_identity_resolver_calls;
-        let TreeKind::Match(matched) = &parsed.ast.get(match_tree).kind else {
+        let TreeKind::Match(matched) = &arena.get(match_tree).kind else {
             continue;
         };
         let selector_key = (method, matched.selector);
@@ -10281,7 +10308,7 @@ fn probe_supported_match_cases(
             Err(error) => {
                 let error_name = typed_case_failure_label(
                     &error,
-                    &parsed.ast,
+                    arena,
                     &type_operator_spellings,
                     &typer.store().names,
                 );
@@ -10500,7 +10527,7 @@ fn audit_source_inner_filtered(
             };
         }
     };
-    let parsed = parse_compilation_unit(
+    let mut parsed = parse_compilation_unit(
         SourceText::new(text).expect("source text should be valid"),
         source,
         scanner,
@@ -11505,9 +11532,20 @@ fn audit_source_inner_filtered(
         &mut audit.source_function_method_outcomes,
         &mut audit.source_function_outcomes,
     );
+    drop(typer);
     if let Some(classpath) = probe_classpath {
-        let successes =
-            probe_supported_match_cases(text, path, classpath, &mut audit.match_profile);
+        let successes = probe_supported_match_cases_in_index(
+            MatchProbeContext {
+                arena: &mut parsed.ast,
+                source,
+                index: &index,
+                store: &mut store,
+                definitions,
+            },
+            path,
+            classpath,
+            &mut audit.match_profile,
+        );
         audit.match_profile.typed_case_successes = successes;
     }
     if profile_timing {
