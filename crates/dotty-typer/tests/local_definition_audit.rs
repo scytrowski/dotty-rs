@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use dotty_classloader::classloader::{
     BinaryName, ClassFormat, ClassLoadProfile, ClassLoader, ClassOrigin, ClassPathEntry,
-    ClassPathError, ClassResource, ClasspathSymbolResolver, CompositeClassPath, JarClassPath,
-    JdkClassPath, LoadingSession, ModuleResolutionProfile,
+    ClassPathError, ClassResource, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
+    JarClassPath, JdkClassPath, LoadingSession, ModuleResolutionProfile,
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::ids::TreeId;
@@ -331,9 +331,29 @@ impl ResolverMetrics {
 }
 
 struct AuditResolver<E: ClassPathEntry> {
-    inner: ClasspathSymbolResolver<E>,
+    inner: Option<ClasspathSymbolResolver<E>>,
     metrics: Rc<RefCell<ResolverMetrics>>,
     class_path_probe: Option<SharedClassPath>,
+    session_out: Option<Rc<RefCell<Option<LoadingSession>>>>,
+}
+
+impl<E: ClassPathEntry> AuditResolver<E> {
+    fn resolver(&self) -> &ClasspathSymbolResolver<E> {
+        self.inner.as_ref().expect("audit resolver is available")
+    }
+
+    fn resolver_mut(&mut self) -> &mut ClasspathSymbolResolver<E> {
+        self.inner.as_mut().expect("audit resolver is available")
+    }
+}
+
+impl<E: ClassPathEntry> Drop for AuditResolver<E> {
+    fn drop(&mut self) {
+        if let Some(session_out) = &self.session_out {
+            let resolver = self.inner.take().expect("audit resolver is available");
+            *session_out.borrow_mut() = Some(resolver.into_session());
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -637,7 +657,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         object: SymbolId,
     ) -> Result<Option<SymbolId>, ResolutionError> {
         let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
-        let result = self.inner.module_class_of_object(store, object);
+        let result = self.resolver().module_class_of_object(store, object);
         if let Some(started) = resolver_started {
             self.metrics.borrow_mut().module_identity_inner_time += started.elapsed();
         }
@@ -761,11 +781,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             .unwrap_or_default();
         let object_origin = symbol_origin_category(store, module_class);
         let request = format!("module-completion::{module_class_identity}");
-        let result = self.inner.complete_module_class(store, module_class);
+        let result = self
+            .resolver_mut()
+            .complete_module_class(store, module_class);
         if let Some(started) = resolver_started {
             self.metrics.borrow_mut().module_completion_inner_time += started.elapsed();
         }
-        let profiles = self.inner.take_load_profiles();
+        let profiles = self.resolver_mut().take_load_profiles();
         let result_state = module_class_observed_state(store, module_class);
         let (outcome, error_category) = match &result {
             Ok(true) if result_state == "Complete(ClassInfo)" => ("completed", None),
@@ -821,9 +843,9 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         } else {
             "completion::unknown-symbol".to_owned()
         };
-        let result = self.inner.complete_class(store, symbol);
+        let result = self.resolver_mut().complete_class(store, symbol);
         let elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
-        let profiles = self.inner.take_load_profiles();
+        let profiles = self.resolver_mut().take_load_profiles();
         let mut metrics = self.metrics.borrow_mut();
         if let Some(origin) = format_origin {
             metrics.class_completion_calls += 1;
@@ -854,7 +876,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
     }
 
     fn checkpoint(&self) -> ResolverCheckpoint {
-        let inner_checkpoint = self.inner.checkpoint();
+        let inner_checkpoint = self.resolver().checkpoint();
         let mut metrics = self.metrics.borrow_mut();
         metrics.next_module_operation_checkpoint = metrics
             .next_module_operation_checkpoint
@@ -881,7 +903,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             return;
         };
         drop(metrics);
-        self.inner.rollback_to(store, inner_checkpoint);
+        self.resolver_mut().rollback_to(store, inner_checkpoint);
         let mut metrics = self.metrics.borrow_mut();
         for observation in metrics
             .module_operation_observations
@@ -1065,12 +1087,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             })
             .flatten();
         let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
-        let result = self.inner.resolve_member(store, request);
+        let result = self.resolver_mut().resolve_member(store, request);
         if let Some(started) = resolver_started {
             self.metrics.borrow_mut().member_lookup_inner_time += started.elapsed();
         }
-        let load_profiles = self.inner.take_load_profiles();
-        let module_profile = self.inner.take_module_resolution_profile();
+        let load_profiles = self.resolver_mut().take_load_profiles();
+        let module_profile = self.resolver_mut().take_module_resolution_profile();
         // Profiles describe work performed even when Ok(None) rolls it back.
         // Only the actual lookup owner can establish that its scope was available.
         let target_completed = target_binary.as_ref().is_some_and(|name| {
@@ -1133,7 +1155,9 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
                     if store.symbols.get(*symbol).kind == dotty_core::SymbolKind::Object {
                         let object_origin = symbol_origin_category(store, *symbol);
-                        match self.inner.module_class_of_object(store, *symbol) {
+                        let module_class_result =
+                            self.resolver().module_class_of_object(store, *symbol);
+                        match module_class_result {
                             Ok(Some(module_class)) if store.symbols.contains(module_class) => {
                                 if let (Some(object_target), Some(module_class_target)) = (
                                     audit_module_object_candidate(store, *symbol),
@@ -1442,7 +1466,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError> {
         let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
-        let result = self.inner.resolve_package(store, path);
+        let result = self.resolver_mut().resolve_package(store, path);
         if let Some(started) = resolver_started {
             self.metrics.borrow_mut().package_lookup_inner_time += started.elapsed();
         }
@@ -1561,7 +1585,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         name: dotty_core::Name,
         member: SymbolId,
     ) -> Result<bool, ResolutionError> {
-        self.inner
+        self.resolver_mut()
             .enter_synthetic_package_member(store, package, name, member)
     }
 }
@@ -1990,21 +2014,24 @@ fn module_audit_resolver(
     (
         definitions,
         AuditResolver {
-            inner: ClasspathSymbolResolver::new(
-                ModuleAuditPath {
-                    include_object_class,
-                },
-                definitions,
-                LoadingSession::new(),
-            )
-            .with_load_profile_collection()
-            .with_module_resolution_profile_collection(),
+            inner: Some(
+                ClasspathSymbolResolver::new(
+                    ModuleAuditPath {
+                        include_object_class,
+                    },
+                    definitions,
+                    LoadingSession::new(),
+                )
+                .with_load_profile_collection()
+                .with_module_resolution_profile_collection(),
+            ),
             metrics: Rc::new(RefCell::new(ResolverMetrics {
                 current_file: file.to_owned(),
                 current_method: method.to_owned(),
                 ..ResolverMetrics::default()
             })),
             class_path_probe: None,
+            session_out: None,
         },
     )
 }
@@ -2035,19 +2062,22 @@ fn source_audit_resolver(
     (
         definitions,
         AuditResolver {
-            inner: ClasspathSymbolResolver::new(
-                ScalaSourceAuditPath,
-                definitions,
-                LoadingSession::new(),
-            )
-            .with_load_profile_collection()
-            .with_module_resolution_profile_collection(),
+            inner: Some(
+                ClasspathSymbolResolver::new(
+                    ScalaSourceAuditPath,
+                    definitions,
+                    LoadingSession::new(),
+                )
+                .with_load_profile_collection()
+                .with_module_resolution_profile_collection(),
+            ),
             metrics: Rc::new(RefCell::new(ResolverMetrics {
                 current_file: file.to_owned(),
                 current_method: method.to_owned(),
                 ..ResolverMetrics::default()
             })),
             class_path_probe: None,
+            session_out: None,
         },
     )
 }
@@ -2524,18 +2554,21 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
     }));
     let typer_packages = namer_packages.snapshot();
     let mut resolver = AuditResolver {
-        inner: ClasspathSymbolResolver::new(
-            ScalaSourceAuditPath,
-            definitions,
-            LoadingSession::with_packages(namer_packages),
-        )
-        .with_load_profile_collection()
-        .with_module_resolution_profile_collection(),
+        inner: Some(
+            ClasspathSymbolResolver::new(
+                ScalaSourceAuditPath,
+                definitions,
+                LoadingSession::with_packages(namer_packages),
+            )
+            .with_load_profile_collection()
+            .with_module_resolution_profile_collection(),
+        ),
         metrics: Rc::clone(&metrics),
         class_path_probe: None,
+        session_out: None,
     };
     let scala_io = resolver
-        .inner
+        .resolver_mut()
         .resolve_package(&mut store, &["scala", "io"])
         .unwrap()
         .expect("Scala 3.9 fixture contains scala.io");
@@ -2544,7 +2577,7 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         .alloc(Type::type_ref(definitions.no_prefix, scala_io));
     let source_name = dotty_core::Name::new(store.names.intern("Source"), Namespace::Term);
     let source_object = resolver
-        .inner
+        .resolver_mut()
         .resolve_member(
             &mut store,
             &MemberRequest {
@@ -2557,7 +2590,7 @@ fn source_expression_failure_rolls_back_module_before_successful_member_retry() 
         .unwrap()
         .expect("Scala 3.9 fixture contains scala.io.Source");
     let source_module_class = resolver
-        .inner
+        .resolver()
         .module_class_of_object(&store, source_object)
         .unwrap()
         .expect("Source has a canonical ModuleClass identity");
@@ -2744,7 +2777,7 @@ fn audit_resolver_forwards_authoritative_module_identity_lookup() {
     // Keep these calls behind the port: concrete-method calls would not catch
     // a future AuditResolver implementation that silently inherits defaults.
     let direct = {
-        let direct: &mut dyn SymbolResolver = &mut resolver.inner;
+        let direct: &mut dyn SymbolResolver = resolver.resolver_mut();
         direct.module_class_of_object(&store, object)
     };
     assert!(direct.as_ref().unwrap().is_some());
@@ -2757,7 +2790,7 @@ fn audit_resolver_forwards_authoritative_module_identity_lookup() {
     let unowned = definitions.object_class;
     assert_eq!(
         module_class_of_object_through_port(&mut resolver, &store, unowned),
-        module_class_of_object_through_port(&mut resolver.inner, &store, unowned)
+        module_class_of_object_through_port(resolver.resolver_mut(), &store, unowned)
     );
     resolver.rollback_to(&mut store, resolver_checkpoint);
     store.rollback_to(store_checkpoint);
@@ -2765,7 +2798,7 @@ fn audit_resolver_forwards_authoritative_module_identity_lookup() {
     assert!(!store.symbols.contains(unknown));
     assert_eq!(
         module_class_of_object_through_port(&mut resolver, &store, unknown),
-        module_class_of_object_through_port(&mut resolver.inner, &store, unknown)
+        module_class_of_object_through_port(resolver.resolver_mut(), &store, unknown)
     );
 }
 
@@ -2805,7 +2838,7 @@ fn audit_resolver_forwards_module_completion_and_preserves_caller_rollback() {
     let store_checkpoint = store.checkpoint();
     let resolver_checkpoint = resolver.checkpoint();
     assert_eq!(
-        complete_module_class_through_port(&mut resolver.inner, &mut store, module_class),
+        complete_module_class_through_port(resolver.resolver_mut(), &mut store, module_class),
         Ok(true),
         "the direct resolver establishes the expected completion result"
     );
@@ -2924,16 +2957,19 @@ fn audit_module_completion_records_an_unowned_false_result() {
         ..ResolverMetrics::default()
     }));
     let mut audit = AuditResolver {
-        inner: ClasspathSymbolResolver::new(
-            ModuleAuditPath {
-                include_object_class: true,
-            },
-            definitions,
-            LoadingSession::new(),
-        )
-        .with_load_profile_collection(),
+        inner: Some(
+            ClasspathSymbolResolver::new(
+                ModuleAuditPath {
+                    include_object_class: true,
+                },
+                definitions,
+                LoadingSession::new(),
+            )
+            .with_load_profile_collection(),
+        ),
         metrics: Rc::clone(&metrics),
         class_path_probe: None,
+        session_out: None,
     };
     let checkpoint = store.checkpoint();
     assert_eq!(
@@ -3735,9 +3771,10 @@ fn class_member_metrics_use_explicit_owner_and_observe_real_shell_transition() {
     let owner = store.types.alloc(Type::type_ref(definitions.no_prefix, b));
     let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
     let mut resolver = AuditResolver {
-        inner: ClasspathSymbolResolver::new(path, definitions, session),
+        inner: Some(ClasspathSymbolResolver::new(path, definitions, session)),
         metrics: metrics.clone(),
         class_path_probe: None,
+        session_out: None,
     };
     let request = MemberRequest {
         prefix: definitions.int,
@@ -3788,10 +3825,12 @@ fn missing_shell_member_observations_survive_completion_rollback() {
         ..ResolverMetrics::default()
     }));
     let mut resolver = AuditResolver {
-        inner: ClasspathSymbolResolver::new(path, definitions, session)
-            .with_load_profile_collection(),
+        inner: Some(
+            ClasspathSymbolResolver::new(path, definitions, session).with_load_profile_collection(),
+        ),
         metrics: metrics.clone(),
         class_path_probe: None,
+        session_out: None,
     };
     let name = dotty_core::Name::new(store.names.intern("absent"), Namespace::Term);
     for space in [MemberSpace::Prefix, MemberSpace::Explicit(owner)] {
@@ -3843,14 +3882,14 @@ fn audit_module_observations_keep_nested_checkpoints_with_repeated_inner_tokens(
         module_audit_resolver(&mut store, true, "src/Fixture.scala", "Fixture.run()");
     let object = module_audit_object(&mut store, definitions, &mut resolver);
 
-    let repeated_inner_token = resolver.inner.checkpoint().token();
+    let repeated_inner_token = resolver.resolver().checkpoint().token();
     let outer = resolver.checkpoint();
     resolver
         .module_class_of_object(&store, object)
         .unwrap()
         .expect("the fixture object has a canonical module class");
     assert_eq!(
-        resolver.inner.checkpoint().token(),
+        resolver.resolver().checkpoint().token(),
         repeated_inner_token,
         "the identity lookup does not mutate the classpath resolver checkpoint"
     );
@@ -3897,10 +3936,12 @@ fn unowned_shell_member_remains_an_incomplete_identity_observation() {
         ..ResolverMetrics::default()
     }));
     let mut resolver = AuditResolver {
-        inner: ClasspathSymbolResolver::new(path, definitions, session)
-            .with_load_profile_collection(),
+        inner: Some(
+            ClasspathSymbolResolver::new(path, definitions, session).with_load_profile_collection(),
+        ),
         metrics: metrics.clone(),
         class_path_probe: None,
+        session_out: None,
     };
     // A previous completion of the same binary must not affect this request.
     assert_eq!(resolver.complete_class(&mut store, ping), Ok(true));
@@ -7876,14 +7917,17 @@ fn print_pinned_immutable_field_completion_outcomes(root: &Path, classpath: Shar
             ..ResolverMetrics::default()
         }));
         typer = typer.with_resolver(Box::new(AuditResolver {
-            inner: ClasspathSymbolResolver::new(
-                classpath.clone(),
-                definitions,
-                LoadingSession::with_packages(namer_packages),
-            )
-            .with_load_profile_collection(),
+            inner: Some(
+                ClasspathSymbolResolver::new(
+                    classpath.clone(),
+                    definitions,
+                    LoadingSession::with_packages(namer_packages),
+                )
+                .with_load_profile_collection(),
+            ),
             metrics: metrics.clone(),
             class_path_probe: None,
+            session_out: None,
         }));
         let outcome = match typer.complete_symbol(field) {
             Ok(_) => {
@@ -8075,14 +8119,17 @@ fn print_pinned_mutable_field_completion_outcomes(root: &Path, classpath: Shared
             ..ResolverMetrics::default()
         }));
         typer = typer.with_resolver(Box::new(AuditResolver {
-            inner: ClasspathSymbolResolver::new(
-                classpath.clone(),
-                definitions,
-                LoadingSession::with_packages(namer_packages),
-            )
-            .with_load_profile_collection(),
+            inner: Some(
+                ClasspathSymbolResolver::new(
+                    classpath.clone(),
+                    definitions,
+                    LoadingSession::with_packages(namer_packages),
+                )
+                .with_load_profile_collection(),
+            ),
             metrics: metrics.clone(),
             class_path_probe: None,
+            session_out: None,
         }));
         let outcome = match typer.complete_symbol(field) {
             Ok(inferred) => {
@@ -10046,6 +10093,7 @@ fn probe_supported_match_cases(
             index: &index,
             store: &mut store,
             definitions,
+            session: LoadingSession::with_packages(namer_packages),
         },
         path,
         classpath,
@@ -10059,6 +10107,7 @@ struct MatchProbeContext<'a> {
     index: &'a dotty_core::SourceSemanticIndex,
     store: &'a mut SemanticStore,
     definitions: Definitions,
+    session: LoadingSession,
 }
 
 fn probe_supported_match_cases_in_index(
@@ -10073,6 +10122,7 @@ fn probe_supported_match_cases_in_index(
         index,
         store,
         definitions,
+        session,
     } = context;
     let type_operator_spellings = source_operator_spellings(arena, &store.names);
     let method_ranges = arena
@@ -10150,12 +10200,8 @@ fn probe_supported_match_cases_in_index(
         ..ResolverMetrics::default()
     }));
     let mut typer = SourceTyper::new(arena, source, index, store, definitions, &packages);
-    let resolver = ClasspathSymbolResolver::new(
-        classpath.clone(),
-        definitions,
-        LoadingSession::with_packages(Packages::new()),
-    )
-    .with_load_profile_collection();
+    let resolver = ClasspathSymbolResolver::new(classpath.clone(), definitions, session)
+        .with_load_profile_collection();
     // Match probes only contribute typed-case outcomes. The detailed audit
     // resolver records per-request target paths and classpath evidence, but
     // those observations are discarded here; wrapping every resolver call
@@ -10163,9 +10209,10 @@ fn probe_supported_match_cases_in_index(
     // only for explicit diagnostic profiles.
     typer = if profile_timing {
         typer.with_resolver(Box::new(AuditResolver {
-            inner: resolver,
+            inner: Some(resolver),
             metrics: Rc::clone(&probe_metrics),
             class_path_probe: Some(classpath),
+            session_out: None,
         }))
     } else {
         typer.with_resolver(Box::new(resolver))
@@ -10381,6 +10428,42 @@ fn match_case_audit_reuses_selector_failure_for_every_case() {
             .typed_case_failure_files
             .values()
             .all(|files| files == &BTreeSet::from(["MatchSelectorFailure.scala".to_owned()]))
+    );
+}
+
+#[test]
+fn full_match_case_audit_preserves_classpath_loading_session() {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-tasty/tests/fixtures/scala3-library");
+    let jdk = PathBuf::from(std::env::var_os("JAVA_HOME").expect("JAVA_HOME is required"));
+    let classpath = SharedClassPath::new(CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(fixture)),
+        Box::new(JdkClassPath::new(jdk.join("jmods")).unwrap()),
+    ]));
+    let source = "object C { def f(x: Int): Int = { def g(y: Int): Int = y; scala.None match { case _ => 1 } } }";
+    let audit = audit_source_with_classpath_filtered(
+        source,
+        "MatchProbeLoadingSession.scala",
+        classpath,
+        Rc::new(RefCell::new(ResolverMetrics::default())),
+        None,
+    );
+
+    assert_eq!(audit.match_profile.typed_case_successes["wildcard"], 1);
+    assert_eq!(
+        audit
+            .match_profile
+            .typed_case_failures
+            .values()
+            .sum::<usize>(),
+        0
+    );
+    assert_eq!(
+        audit
+            .failures
+            .get("MemberNotFound")
+            .map_or(0, |bucket| bucket.count),
+        0
     );
 }
 
@@ -10773,6 +10856,7 @@ fn audit_source_inner_filtered(
         &typer_packages,
     );
     let request_metrics = classpath.as_ref().map(|(_, metrics)| Rc::clone(metrics));
+    let resolver_session_out = Rc::new(RefCell::new(None));
     if let (Some((classpath, metrics)), Some(packages)) = (classpath, resolver_packages) {
         let mut resolver = ClasspathSymbolResolver::new(
             classpath.clone(),
@@ -10786,9 +10870,10 @@ fn audit_source_inner_filtered(
             resolver = resolver.with_module_resolution_profile_collection();
         }
         typer = typer.with_resolver(Box::new(AuditResolver {
-            inner: resolver,
+            inner: Some(resolver),
             metrics,
             class_path_probe: Some(classpath),
+            session_out: Some(Rc::clone(&resolver_session_out)),
         }));
     }
     if profile_timing {
@@ -11534,6 +11619,10 @@ fn audit_source_inner_filtered(
     );
     drop(typer);
     if let Some(classpath) = probe_classpath {
+        let session = resolver_session_out
+            .borrow_mut()
+            .take()
+            .expect("classpath audit resolver returns its loading session");
         let successes = probe_supported_match_cases_in_index(
             MatchProbeContext {
                 arena: &mut parsed.ast,
@@ -11541,6 +11630,7 @@ fn audit_source_inner_filtered(
                 index: &index,
                 store: &mut store,
                 definitions,
+                session,
             },
             path,
             classpath,
@@ -15193,9 +15283,10 @@ fn isolated_impure_function_projection(
         )
         .with_load_profile_collection();
         typer = typer.with_resolver(Box::new(AuditResolver {
-            inner: resolver,
+            inner: Some(resolver),
             metrics: Rc::new(RefCell::new(ResolverMetrics::default())),
             class_path_probe: None,
+            session_out: None,
         }));
     }
     let projection = match typer.type_of_tpt(function_tree, context) {
@@ -18518,13 +18609,14 @@ mod resolver_profile_tests {
             ..ResolverMetrics::default()
         }));
         let mut resolver = AuditResolver {
-            inner: ClasspathSymbolResolver::new(
+            inner: Some(ClasspathSymbolResolver::new(
                 CompositeClassPath::new(Vec::new()),
                 definitions,
                 LoadingSession::new(),
-            ),
+            )),
             metrics: metrics.clone(),
             class_path_probe: None,
+            session_out: None,
         };
         assert_eq!(resolver.resolve_member(&mut store, &request), Ok(None));
 
