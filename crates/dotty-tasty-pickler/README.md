@@ -13,6 +13,15 @@ owned; declarations carry explicitly ordered canonical IDs and exact body roots.
 `validate()` returns an immutable `ValidatedPicklePlan` or a structured
 `PickleError`, without allocating into compiler arenas or publishing artifacts.
 
+Validation is split by responsibility inside the private `plan` module:
+`source_binding` owns source/typed identity and span checks, while
+`expression_validation` owns the supported literal, formal-reference and
+same-class application shapes. New expression forms should extend that
+validator and its focused tests; they should not add a second binding or span
+policy in serialization. Follow-up pickler increments can build on these
+boundaries without changing the borrowed input contract or current support
+surface.
+
 The accepted shape is the oracle's ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
 methods with an Int result and either a typed Int literal, a reference to one

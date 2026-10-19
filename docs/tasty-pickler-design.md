@@ -702,6 +702,19 @@ oracle gate independently compiles and executes the current `Answer` and
 `Parameters` producer outputs; it does not establish compatibility for other
 expression or declaration forms.
 
+## Validation module ownership (#1310)
+
+The private `plan` module keeps shared source-to-typed identity and span
+validation in `plan/source_binding.rs`. Expression-specific checks live in
+`plan/expression_validation.rs`, including literal/formal-reference roots and
+the currently supported bounded same-class applications. This keeps source
+binding policy single-sourced as the expression surface grows. Follow-up
+expression work (#1311–#1314) should extend the expression validator and add
+focused success and failure coverage there; declaration or file-level work
+should remain with its owning producer layer. This refactor preserves the
+current accepted shapes, errors, limits, and bytes; it adds no expression
+support.
+
 ## Sprint 2 method, clause, parameter and reference contract (#1238)
 
 The following contract is pinned by `Operations.scala` compiled with Scala
