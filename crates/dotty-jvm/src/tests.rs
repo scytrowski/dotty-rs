@@ -950,6 +950,288 @@ struct ReferenceFixture {
     classes: Vec<SymbolId>,
 }
 
+struct HierarchyFixture {
+    store: SemanticStore,
+    ast: TypedAst,
+    definitions: Definitions,
+    base: SymbolId,
+    derived: SymbolId,
+    third: SymbolId,
+}
+
+impl HierarchyFixture {
+    fn new() -> Self {
+        let mut identity = ClassIdentityFixture::new(&["example"], "Base");
+        let definitions = Definitions::bootstrap(&mut identity.store);
+        set_object_parent(
+            &mut identity.store,
+            identity.class,
+            definitions.no_prefix,
+            definitions.object_type,
+        );
+        let owner = identity.store.symbols.get(identity.class).owner.unwrap();
+        let derived = add_reference_class(
+            &mut identity.store,
+            owner,
+            "Derived",
+            definitions.no_prefix,
+            definitions.object_type,
+            SymbolOrigin::Synthetic,
+            SymbolFlags::EMPTY,
+        );
+        let third = add_reference_class(
+            &mut identity.store,
+            owner,
+            "Third",
+            definitions.no_prefix,
+            definitions.object_type,
+            SymbolOrigin::Synthetic,
+            SymbolFlags::EMPTY,
+        );
+        let base_type = identity.store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(identity.class),
+        });
+        set_class_parents(&mut identity.store, derived, vec![base_type]);
+        let derived_type = identity.store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(derived),
+        });
+        set_class_parents(&mut identity.store, third, vec![derived_type]);
+        Self {
+            store: identity.store,
+            ast: TypedAst::new(),
+            definitions,
+            base: identity.class,
+            derived,
+            third,
+        }
+    }
+
+    fn unit(&self, classes: &[SymbolId]) -> JvmCompilationUnit<'_> {
+        JvmCompilationUnit {
+            store: &self.store,
+            typed_ast: &self.ast,
+            classes: classes
+                .iter()
+                .copied()
+                .map(|class| JvmClassPlan {
+                    class,
+                    fields: Vec::new(),
+                    methods: Vec::new(),
+                    initialization: JvmClassInitializationPlan::ImplicitNoArg,
+                })
+                .collect(),
+        }
+    }
+}
+
+fn set_class_parents(store: &mut SemanticStore, class: SymbolId, parents: Vec<dotty_core::TypeId>) {
+    let info = match store.symbols.info(class) {
+        SymbolInfo::Complete(ty) => match store.types.get(*ty) {
+            Type::ClassInfo(info) => info.clone(),
+            _ => panic!("hierarchy test class should have ClassInfo"),
+        },
+        _ => panic!("hierarchy test class should have completed info"),
+    };
+    let class_info = store
+        .types
+        .alloc(Type::ClassInfo(ClassInfo { parents, ..info }));
+    store
+        .symbols
+        .set_info(class, SymbolInfo::Complete(class_info));
+}
+
+#[test]
+fn compilation_unit_projects_one_hop_canonical_superclass_proofs_in_plan_order() {
+    let fixture = HierarchyFixture::new();
+    let unit = fixture.unit(&[fixture.base, fixture.derived]);
+    let before = *fixture.store.symbols.info(fixture.base);
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+    assert_eq!(fixture.store.symbols.info(fixture.base), &before);
+    assert_eq!(
+        hierarchy
+            .superclasses()
+            .iter()
+            .map(|plan| (
+                plan.class(),
+                plan.parent(),
+                plan.class_internal_name(),
+                plan.parent_internal_name(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                fixture.base,
+                fixture.definitions.object_class,
+                "example/Base",
+                "java/lang/Object"
+            ),
+            (
+                fixture.derived,
+                fixture.base,
+                "example/Derived",
+                "example/Base"
+            ),
+        ]
+    );
+    assert_eq!(
+        hierarchy
+            .internal_name_edges()
+            .iter()
+            .map(|edge| (edge.child_internal_name(), edge.parent_internal_name()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("example/Base", "java/lang/Object"),
+            ("example/Derived", "example/Base"),
+        ]
+    );
+
+    let metadata = unit.metadata(&fixture.definitions).unwrap();
+    assert_eq!(
+        metadata[0].superclass().unwrap().parent(),
+        fixture.definitions.object_class
+    );
+    assert_eq!(metadata[1].superclass().unwrap().parent(), fixture.base);
+    assert_eq!(metadata[1].identity().symbol(), fixture.derived);
+
+    let reversed = fixture.unit(&[fixture.derived, fixture.base]);
+    let reversed_hierarchy = reversed.class_hierarchy(&fixture.definitions).unwrap();
+    let normalized = |hierarchy: &crate::JvmClassHierarchy| {
+        let mut edges = hierarchy
+            .superclasses()
+            .iter()
+            .map(|plan| (plan.class(), plan.parent()))
+            .collect::<Vec<_>>();
+        edges.sort_by_key(|(class, _)| class.index());
+        edges
+    };
+    assert_eq!(normalized(&hierarchy), normalized(&reversed_hierarchy));
+}
+
+#[test]
+fn compilation_unit_hierarchy_rejects_unplanned_final_cyclic_and_deep_parents() {
+    let fixture = HierarchyFixture::new();
+    let missing = fixture.unit(&[fixture.derived]);
+    assert!(matches!(
+        missing.class_hierarchy(&fixture.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: crate::JvmSuperclassIssue::ParentNotPlanned,
+        }) if class == fixture.derived && parent == fixture.base
+    ));
+
+    let mut final_parent = HierarchyFixture::new();
+    final_parent.store.symbols.get_mut(final_parent.base).flags = SymbolFlags::FINAL;
+    assert!(matches!(
+        final_parent
+            .unit(&[final_parent.base, final_parent.derived])
+            .class_hierarchy(&final_parent.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: crate::JvmSuperclassIssue::ParentIsFinal,
+        }) if class == final_parent.derived && parent == final_parent.base
+    ));
+
+    let mut cyclic = HierarchyFixture::new();
+    let derived_parent = cyclic.store.types.alloc(Type::TypeRef {
+        prefix: cyclic.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(cyclic.derived),
+    });
+    set_class_parents(&mut cyclic.store, cyclic.base, vec![derived_parent]);
+    assert!(matches!(
+        cyclic
+            .unit(&[cyclic.base, cyclic.derived])
+            .class_hierarchy(&cyclic.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            issue: crate::JvmSuperclassIssue::InheritanceCycle,
+            ..
+        })
+    ));
+
+    let too_deep = fixture.unit(&[fixture.base, fixture.derived, fixture.third]);
+    assert!(matches!(
+        too_deep.class_hierarchy(&fixture.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: crate::JvmSuperclassIssue::InheritanceTooDeep,
+        }) if class == fixture.third && parent == fixture.derived
+    ));
+
+    let mut self_parent = HierarchyFixture::new();
+    let self_type = self_parent.store.types.alloc(Type::TypeRef {
+        prefix: self_parent.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(self_parent.derived),
+    });
+    set_class_parents(&mut self_parent.store, self_parent.derived, vec![self_type]);
+    assert!(matches!(
+        self_parent
+            .unit(&[self_parent.base, self_parent.derived])
+            .class_hierarchy(&self_parent.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: crate::JvmSuperclassIssue::SelfParent,
+        }) if class == self_parent.derived && parent == self_parent.derived
+    ));
+
+    let mut private_parent = HierarchyFixture::new();
+    private_parent
+        .store
+        .symbols
+        .get_mut(private_parent.base)
+        .visibility = Visibility::Private;
+    assert!(matches!(
+        private_parent
+            .unit(&[private_parent.base, private_parent.derived])
+            .class_hierarchy(&private_parent.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: crate::JvmSuperclassIssue::ParentNotPublic,
+        }) if class == private_parent.derived && parent == private_parent.base
+    ));
+}
+
+#[test]
+fn compilation_unit_hierarchy_rejects_multiple_parents_and_unavailable_super_constructor() {
+    let mut fixture = HierarchyFixture::new();
+    let base_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(fixture.base),
+    });
+    set_class_parents(
+        &mut fixture.store,
+        fixture.derived,
+        vec![base_type, fixture.definitions.object_type],
+    );
+    assert!(matches!(
+        fixture
+            .unit(&[fixture.base, fixture.derived])
+            .class_hierarchy(&fixture.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            issue: crate::JvmSuperclassIssue::MissingOrMultipleParents,
+            ..
+        }) if class == fixture.derived
+    ));
+
+    let fixture = HierarchyFixture::new();
+    let mut unit = fixture.unit(&[fixture.base, fixture.derived]);
+    unit.classes[0].initialization = JvmClassInitializationPlan::Unsupported;
+    assert!(matches!(
+        unit.class_hierarchy(&fixture.definitions),
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
+        }) if class == fixture.derived && parent == fixture.base
+    ));
+}
+
 impl ReferenceFixture {
     fn new() -> Self {
         let mut identity = ClassIdentityFixture::new(&["example"], "Counter");
@@ -8821,11 +9103,19 @@ fn class_emission_fails_closed_for_unknown_constructor_fields_and_superclasses()
         .store
         .symbols
         .set_info(superclass.class, SymbolInfo::Complete(changed));
+    let int_parent = match superclass.store.types.get(superclass.definitions.int) {
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(parent),
+            ..
+        } => *parent,
+        other => panic!("Int definition should be a canonical type reference: {other:?}"),
+    };
     assert_eq!(
         superclass.emit(),
-        Err(JvmCodegenError::UnsupportedJvmSuperclass {
+        Err(JvmCodegenError::InvalidJvmSuperclass {
             class: superclass.class,
-            parent: Some(superclass.definitions.int)
+            parent: Some(int_parent),
+            issue: crate::JvmSuperclassIssue::ParentNotPlanned,
         })
     );
 }
