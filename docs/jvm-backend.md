@@ -146,9 +146,14 @@ match the declared field type. Classes absent from the compilation unit,
 unit; the standalone `JvmClassPlan::metadata_with_typed_ast` entry point stays
 primitive-only because it cannot prove that a referenced class is planned.
 
-This increment validates field metadata only. It does not emit constructor
-field writes or reference-valued initializer instructions. Constructor field
-initializer lowering remains limited to its documented primitive subset.
+The constructor initializer subset also supports copying an exact planned
+reference from an unqualified constructor-owned parameter into a private
+reference field of the same class. It emits `aload` from the parameter's
+validated slot and `putfield` with the field's checked `L...;` descriptor,
+after `Object.<init>()V`. Primitive literals, parameters, approved primitive
+operations, and earlier initialized primitive fields keep their existing
+behavior. Reference field reads, `this` escape, nested allocations, calls, and
+control flow in field initializers remain unsupported.
 
 No general Scala type erasure, reference boxing, Unit operand-stack
 representation, raw bytecode, source pipeline orchestration, TASTy integration,
@@ -770,13 +775,16 @@ collects fields by source template order and constructor parameters through
 not substitute one identity for another.
 
 The result is a checked instruction plan, not a complete constructor. Each
-field fragment starts with `aload_0`, lowers one primitive value, and ends with
-`putfield` for that canonical field. Supported RHS forms are Int/Boolean
-literals, constructor-owned Int/Boolean parameters, canonical `Int.+`,
-canonical Boolean negation, empty-statement blocks, and reads of fields whose
-initializer fragment precedes the current one. Self and forward field reads,
-user method calls, `this` escape, control-flow expressions, and other
-unsupported typed nodes fail with contextual `JvmCodegenError`s.
+field fragment starts with `aload_0`, lowers one value, and ends with `putfield`
+for that canonical field. Supported RHS forms are Int/Boolean literals,
+constructor-owned primitive parameters, an exact planned-reference constructor
+parameter, canonical `Int.+`, canonical Boolean negation, empty-statement
+blocks, and reads of earlier initialized primitive fields. The reference
+parameter is matched by its canonical `SymbolId`, constructor owner, exact
+class identity, and validated local slot; its load uses `aload`. Self and
+forward field reads, reference field reads, user method calls, `this` escape,
+control-flow expressions, and other unsupported typed nodes fail with
+contextual `JvmCodegenError`s.
 
 `JvmConstructorFieldInitializerPlan::append_to` appends only those field
 instructions. `emit_class` emits `aload_0; invokespecial
