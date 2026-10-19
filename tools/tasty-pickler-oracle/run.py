@@ -313,6 +313,32 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Locals = 17, 42, 23, 7", 42,
             ),
+            "example/Decisions.tasty": (
+                "example.Decisions", r"public boolean enabled\(\)", "DecisionsRuntime.java",
+                """public final class DecisionsRuntime {
+  public static void main(String[] args) {
+    example.Decisions decisions = new example.Decisions();
+    decisions.unit();
+    boolean enabled = decisions.enabled();
+    boolean disabled = decisions.disabled();
+    int chooseTrue = decisions.choose(true, 11, 22);
+    int chooseFalse = decisions.choose(false, 11, 22);
+    int nestedTrueTrue = decisions.nested(true, true);
+    int nestedTrueFalse = decisions.nested(true, false);
+    int nestedFalse = decisions.nested(false, true);
+    int storedTrue = decisions.stored(true, 17);
+    int storedFalse = decisions.stored(false, 17);
+    if (!enabled || disabled || chooseTrue != 11 || chooseFalse != 22 ||
+        nestedTrueTrue != 1 || nestedTrueFalse != 2 || nestedFalse != 3 ||
+        storedTrue != 17 || storedFalse != 0)
+      throw new AssertionError("unexpected Decisions results");
+    System.out.println("Decisions = " + enabled + ", " + disabled + ", " +
+        chooseTrue + ", " + chooseFalse + ", " + nestedTrueTrue + ", " +
+        nestedTrueFalse + ", " + nestedFalse + ", " + storedTrue + ", " + storedFalse);
+  }
+}
+""", "Decisions = true, false, 11, 22, 1, 2, 3, 17, 0", 17,
+            ),
             "example/References.tasty": (
                 "example.References", r"public int first\(\)", "ReferencesRuntime.java",
                 """public final class ReferencesRuntime {
@@ -401,6 +427,16 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Locals class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Decisions.tasty":
+                signatures = (
+                    r"public void unit\(\)", r"public boolean enabled\(\)",
+                    r"public boolean disabled\(\)",
+                    r"public int choose\(boolean, int, int\)",
+                    r"public int nested\(boolean, boolean\)",
+                    r"public int stored\(boolean, int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Decisions class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":
@@ -480,14 +516,14 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
     decisions.unit();
     boolean enabled = decisions.enabled();
     boolean disabled = decisions.disabled();
-    int chooseTrue = decisions.choose(true, 17, 42);
-    int chooseFalse = decisions.choose(false, 17, 42);
+    int chooseTrue = decisions.choose(true, 11, 22);
+    int chooseFalse = decisions.choose(false, 11, 22);
     int nestedTrueTrue = decisions.nested(true, true);
     int nestedTrueFalse = decisions.nested(true, false);
     int nestedFalse = decisions.nested(false, true);
     int storedTrue = decisions.stored(true, 17);
     int storedFalse = decisions.stored(false, 17);
-    if (!enabled || disabled || chooseTrue != 17 || chooseFalse != 42 ||
+    if (!enabled || disabled || chooseTrue != 11 || chooseFalse != 22 ||
         nestedTrueTrue != 1 || nestedTrueFalse != 2 || nestedFalse != 3 ||
         storedTrue != 17 || storedFalse != 0) {
       throw new AssertionError("unexpected Scala source results");
@@ -501,7 +537,7 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
     execute([toolchain.javac, "-classpath", source_classes, "-d", source_classes, source_harness])
     source_run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath", source_classes,
                           "DecisionsSourceRuntime"])
-    expected_source_output = "Decisions source = true, false, 17, 42, 1, 2, 3, 17, 0"
+    expected_source_output = "Decisions source = true, false, 11, 22, 1, 2, 3, 17, 0"
     if expected_source_output not in source_run:
         raise RuntimeError(f"pinned Scala source reference returned unexpected values: {source_run}")
     results.append({"source_reference": "example.Decisions", "scala_source_compile": True,
