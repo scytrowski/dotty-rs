@@ -653,6 +653,13 @@ impl Validator<'_, '_> {
         depth: usize,
         mut visited: Option<&mut HashSet<TreeId<Typed>>>,
     ) -> Result<(), PickleError> {
+        let depth_limit = self.limits.expression_depth_limit();
+        if depth > depth_limit {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: depth_limit,
+            });
+        }
         let Some(rhs) = rhs else {
             return Err(self.unsupported(UnsupportedFeature::AbstractMethod, Some(method.symbol)));
         };

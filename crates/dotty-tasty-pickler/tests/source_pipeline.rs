@@ -2214,6 +2214,42 @@ fn if_application_branches_share_depth_and_repeated_node_validation_state() {
 }
 
 #[test]
+fn local_call_initializer_obeys_expression_depth_limit() {
+    let source = "package example\nclass LocalCall:\n  def copy(value: Int): Int = { val saved: Int = identity(value); saved }\n  def identity(value: Int): Int = value\n";
+
+    let depth_zero_error = source_outputs_named_with_limits(
+        source,
+        "LocalCall.scala",
+        ValidationLimits {
+            max_expression_depth: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        depth_zero_error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+
+    assert!(
+        source_outputs_named_with_limits(
+            source,
+            "LocalCall.scala",
+            ValidationLimits {
+                max_expression_depth: 1,
+                ..ValidationLimits::default()
+            },
+            |_| {},
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn multiple_literal_methods_and_empty_clause_match_the_scala_390_oracle() {
     use dotty_tasty::tasty::*;
 
