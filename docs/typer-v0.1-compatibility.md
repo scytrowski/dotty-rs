@@ -1738,3 +1738,26 @@ class fanout 9 / 16. Current blocker
 counts and direct origins are summarized in the [#1180 blocker sidecar](typer-classpath-corpus-audit-1180-current-blockers.tsv).
 See the completion report in
 [`typer-classpath-corpus-audit-3.9.0.md`](typer-classpath-corpus-audit-3.9.0.md).
+
+### #1339 package-owned Object import qualifiers
+
+After existing lexical bindings and package-scope declarations miss, an
+unrooted import qualifier checks the corresponding child package first, then
+requests a unique Term member from the candidate package. A classpath result
+is accepted only when it is a canonical Object owned by that package and the
+resolver confirms its ModuleClass identity. Missing evidence remains a miss;
+malformed or ambiguous evidence is reported and does not continue at a lower
+package candidate. Explicit `_root_` continues to start at the canonical root.
+
+The real Scala 3.9.0 compiler `Contexts.tasty` regression resolves
+`import Contexts.*` to its package-owned Object, then resolves
+`withFreshTyperState` through the Object's ModuleClass. The focused resolver
+profile records one package-term request / Object success and one later
+module-member success; repeated qualifier lookup is satisfied by the entered
+package scope. This counts qualifier and selected-member operations
+separately, and does not count a fully typed method. A source-owned `Contexts`
+in the same package keeps its identity when the classpath also contains the
+compiler TASTy Object. Missing lookup and malformed non-Object resolver
+results leave store and resolver checkpoints unchanged. A package and Object
+both entered under the same term name in one source package scope produce an
+explicit ambiguity rather than an allocation-order choice.

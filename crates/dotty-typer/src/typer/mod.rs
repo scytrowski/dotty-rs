@@ -9047,6 +9047,214 @@ mod tests {
     }
 
     #[test]
+    fn failed_external_object_qualifier_lookup_rolls_back_store_and_resolver() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package app { import Missing.*; class Use }");
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .unwrap();
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let declaration_context = index.declaration_context_of(use_symbol).unwrap();
+        let context = index
+            .source_context(declaration_context)
+            .parent
+            .expect("Use is declared in the package context");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(JournalingResolver::default()));
+        let store_checkpoint = typer.store().checkpoint();
+        let resolver_checkpoint = typer.resolver.checkpoint();
+
+        let error = typer
+            .import_qualifier_symbol(import.1.expr, context, import.0.index(), None)
+            .expect_err("a non-Object package term is invalid evidence");
+
+        assert!(matches!(error, TyperError::SymbolResolution { .. }));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.resolver.checkpoint(), resolver_checkpoint);
+    }
+
+    #[test]
+    fn source_owned_object_keeps_priority_over_same_named_compiler_tasty_object() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let source_text = "package dotty.tools\npackage dotc\npackage core\nobject Contexts { val local: Int = 1 }\nimport Contexts.*\nclass Use";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .unwrap();
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let context = index
+            .source_context(index.declaration_context_of(use_symbol).unwrap())
+            .parent
+            .expect("Use is declared in the source core package");
+        let package = packages
+            .symbol(&["dotty", "tools", "dotc", "core"])
+            .unwrap();
+        let package_scope = packages.scope_of(package).unwrap();
+        let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(compiler_root)),
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JavaObjectStubPath),
+        ]);
+        let resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let object = typer
+            .import_qualifier_symbol(import.1.expr, context, import.0.index(), None)
+            .expect("the source Object should resolve without consulting its TASTy twin")
+            .expect("the source package declares Contexts");
+
+        assert_eq!(typer.store().symbols.get(object).kind, SymbolKind::Object);
+        assert_eq!(typer.store().symbols.get(object).owner, Some(package));
+        assert_eq!(
+            typer.store().symbols.get(object).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(package_scope)
+                .lookup_all(&Name::new(
+                    typer.store().symbols.get(object).name.text(),
+                    Namespace::Term,
+                )),
+            [object]
+        );
+    }
+
+    #[test]
+    fn package_and_object_candidates_with_the_same_term_name_are_explicitly_ambiguous() {
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name("package app { import Choice.*; class Use }");
+        let package = packages
+            .symbol(&["app"])
+            .expect("the source app package should be registered");
+        let package_scope = packages.scope_of(package).unwrap();
+        let child_package = packages
+            .enter(&mut store, SymbolOrigin::Source(source), &["app", "Choice"])
+            .pop()
+            .expect("Choice package should be entered")
+            .symbol;
+        let name = Name::new(store.names.intern("Choice"), Namespace::Term);
+        let object = store.symbols.alloc(dotty_core::Symbol {
+            name,
+            owner: Some(package),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(source),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store.scopes.get_mut(package_scope).enter(name, object);
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .unwrap();
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let context = index
+            .source_context(index.declaration_context_of(use_symbol).unwrap())
+            .parent
+            .expect("Use is declared in the source app package");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.import_qualifier_symbol(import.1.expr, context, import.0.index(), None),
+            Err(TyperError::AmbiguousTermReference { name: found, .. })
+                | Err(TyperError::AmbiguousTypeName { name: found, .. })
+                if typer.store().names.resolve(found.text()) == "Choice"
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(
+            typer.store().scopes.get(package_scope).lookup_all(&name),
+            [child_package, object]
+        );
+    }
+
+    #[test]
     fn wildcard_package_import_resolves_a_type_name() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package lib { class Imported }\npackage app { import lib.*; val x: Imported = 1 }",
