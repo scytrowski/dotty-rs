@@ -38,7 +38,20 @@ pub(super) fn emit_class(
             class: class_symbol,
         })?;
     let class_info = super::identity::class_info(unit.store, class_symbol)?;
-    validate_emittable_class(plan, metadata, unit.store, definitions, class_info)?;
+    let superclass = metadata
+        .superclass()
+        .ok_or(JvmCodegenError::UnsupportedJvmSuperclass {
+            class: class_symbol,
+            parent: class_info.parents.first().copied(),
+        })?;
+    validate_emittable_class(
+        plan,
+        metadata,
+        unit.store,
+        definitions,
+        class_info,
+        superclass,
+    )?;
 
     let constructor_initializers = match &plan.initialization {
         JvmClassInitializationPlan::ImplicitNoArg => None,
@@ -63,6 +76,11 @@ pub(super) fn emit_class(
     builder
         .set_access_flags(metadata.identity().access_flags())
         .map_err(|error| class_file_error(class_symbol, None, error))?;
+    if superclass.parent() != definitions.object_class {
+        builder
+            .set_super_class(Some(superclass.parent_internal_name()))
+            .map_err(|error| class_file_error(class_symbol, None, error))?;
+    }
 
     for field in metadata.fields() {
         builder
@@ -72,7 +90,8 @@ pub(super) fn emit_class(
 
     match constructor_initializers {
         None => {
-            let mut constructor = object_constructor_prefix(class_symbol)?;
+            let mut constructor =
+                constructor_prefix(class_symbol, superclass.parent_internal_name())?;
             constructor
                 .return_void()
                 .map_err(|error| JvmCodegenError::ConstructorCodeBuilder {
@@ -90,7 +109,8 @@ pub(super) fn emit_class(
         }
         Some(initializers) => {
             let constructor_metadata = initializers.constructor();
-            let mut constructor = object_constructor_prefix(class_symbol)?;
+            let mut constructor =
+                constructor_prefix(class_symbol, superclass.parent_internal_name())?;
             initializers.append_to(&mut constructor)?;
             constructor
                 .return_void()
@@ -141,11 +161,11 @@ pub(super) fn emit_class(
     })
 }
 
-fn object_constructor_prefix(class: SymbolId) -> Result<CodeBuilder, JvmCodegenError> {
+fn constructor_prefix(class: SymbolId, parent: &str) -> Result<CodeBuilder, JvmCodegenError> {
     let mut code = CodeBuilder::new();
     code.aload(0)
         .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
-    code.invokespecial("java/lang/Object", "<init>", "()V")
+    code.invokespecial(parent, "<init>", "()V")
         .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
     Ok(code)
 }
@@ -156,6 +176,7 @@ pub(super) fn validate_emittable_class(
     store: &SemanticStore,
     definitions: &dotty_core::definitions::Definitions,
     class_info: &dotty_core::types::ClassInfo,
+    superclass: &crate::JvmSuperclassPlan,
 ) -> Result<(), JvmCodegenError> {
     if let Some(self_type) = class_info.self_type {
         return Err(JvmCodegenError::UnsupportedJvmSelfType {
@@ -165,6 +186,13 @@ pub(super) fn validate_emittable_class(
     }
 
     let parent = class_info.parents.first().copied();
+    let parent_symbol = parent.and_then(|parent| match store.types.try_get(parent) {
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) => Some(*symbol),
+        _ => None,
+    });
     let valid_object_definition = matches!(
         store.types.try_get(definitions.object_type),
         Some(Type::TypeRef {
@@ -173,8 +201,15 @@ pub(super) fn validate_emittable_class(
         }) if *symbol == definitions.object_class
     );
     if class_info.parents.len() != 1
-        || parent != Some(definitions.object_type)
-        || !valid_object_definition
+        || superclass.class() != plan.class
+        || superclass.class_internal_name() != metadata.identity().internal_name()
+        || parent_symbol != Some(superclass.parent())
+        || (superclass.parent() == definitions.object_class
+            && (parent != Some(definitions.object_type)
+                || superclass.parent_internal_name() != "java/lang/Object"
+                || !valid_object_definition))
+        || (superclass.parent() != definitions.object_class
+            && superclass.parent_internal_name() == "java/lang/Object")
     {
         return Err(JvmCodegenError::UnsupportedJvmSuperclass {
             class: plan.class,

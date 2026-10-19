@@ -1665,7 +1665,10 @@ fn source_initialization_plan(
             ast, template, source, index, store,
         ));
     }
-    if !template.parents.is_empty() || template.self_val.is_some() || !no_template_initializers {
+    if !has_supported_noarg_parent(ast, template)
+        || template.self_val.is_some()
+        || !no_template_initializers
+    {
         return Ok(JvmClassInitializationPlan::Unsupported);
     }
     let parameters = definition
@@ -1720,13 +1723,33 @@ fn prove_implicit_noarg_constructor(
         .iter()
         .all(|tree| matches!(ast.get(*tree).kind, TreeKind::DefDef(_)));
     if constructor_matches_emitted_shape
-        && template.parents.is_empty()
+        && has_supported_noarg_parent(ast, template)
         && template.self_val.is_none()
         && body_contains_methods_only
     {
         JvmClassInitializationPlan::ImplicitNoArg
     } else {
         JvmClassInitializationPlan::Unsupported
+    }
+}
+
+fn has_supported_noarg_parent(
+    ast: &dotty_core::AstArena<Untyped>,
+    template: &Template<Untyped>,
+) -> bool {
+    match template.parents.as_slice() {
+        [] => true,
+        [parent] => match &ast.get(*parent).kind {
+            TreeKind::Ident(_) | TreeKind::Select(_) => true,
+            TreeKind::Apply(application) if application.args.is_empty() => {
+                matches!(
+                    ast.get(application.function).kind,
+                    TreeKind::Ident(_) | TreeKind::Select(_)
+                )
+            }
+            _ => false,
+        },
+        _ => false,
     }
 }
 
@@ -7880,24 +7903,81 @@ fn package_qualified_source_parent_reaches_hierarchy_and_constructor_metadata() 
 }
 
 #[test]
-fn single_inheritance_audit_fixture_reaches_jvm_superclass_rejection_without_output() {
+fn source_single_inheritance_emits_and_verifies_the_noarg_super_chain() {
     let output = TestOutputDirectory::new("single-inheritance-audit");
-    let fixture = fixture_path("SingleInheritanceAudit.scala");
-    let source = fs::read_to_string(fixture).expect("read single-inheritance audit fixture");
-    let error =
-        compile_source_classes(&source, "SingleInheritanceAudit.scala", output.path()).unwrap_err();
+    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2 }\nclass Derived extends Base { private val own: Int = 7 }\n";
+    let artifacts = compile_source_classes(source, "SingleInheritanceAudit.scala", output.path())
+        .expect("one-hop source inheritance should emit the complete batch");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Derived"]
+    );
+    let derived = decode_emitted_class(&artifacts[1]);
+    assert_eq!(
+        derived
+            .constant_pool
+            .class_name(derived.super_class.unwrap()),
+        Ok("Base")
+    );
+    let constructor = emitted_method_code(&derived, "<init>");
+    assert_method_reference(&derived, constructor, 0xb7, "Base", "<init>", "()V");
+    assert_opcode_sequence(constructor, &[0x2a, 0xb7, 0x2a, 0x10, 0xb5, 0xb1]);
+    assert_field_reference(&derived, constructor, 0xb5, "Derived", "own", "I");
 
-    assert!(
-        matches!(
-            error,
-            PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmSuperclass { .. })
-        ),
-        "expected a codegen superclass rejection after lexer/parser/namer/typer, got {error:?}"
-    );
-    assert!(
-        output.class_files().is_empty(),
-        "the batch compiler must not publish partial class files"
-    );
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().unwrap();
+        let javap = Command::new("javap")
+            .args(["-c", "-v", "-classpath", classpath, "Derived"])
+            .output()
+            .unwrap();
+        assert!(
+            javap.status.success(),
+            "javap rejected Derived.class\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap_output = String::from_utf8_lossy(&javap.stdout);
+        assert!(javap_output.contains("super_class: #"));
+        assert!(javap_output.contains("// Base"));
+        assert!(javap_output.contains("Base.\"<init>\":()V"));
+
+        let harness = output.path().join("InheritanceHarness.java");
+        fs::write(
+            &harness,
+            "public class InheritanceHarness { public static void main(String[] args) { Derived value = new Derived(); System.out.println(value.value() + \":\" + value.doubled()); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .unwrap();
+        assert!(
+            javac.status.success(),
+            "javac rejected inheritance harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "InheritanceHarness",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected the emitted superclass chain\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "10:20");
+    }
 }
 
 #[test]

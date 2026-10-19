@@ -1,29 +1,20 @@
 # JVM single inheritance and virtual dispatch audit
 
 This document audits the source-to-JVM boundary for ordinary Scala class
-inheritance. It records the current contract; it does not enable inheritance
-emission. Scala source is interpreted against the repository's pinned Scala
+inheritance and records the currently emitted subset. Scala source is interpreted against the repository's pinned Scala
 3.9.0 revision (`777528f19a58e794c9954a42f433373472ec57f8`). JVM rules below
 refer to the Java SE 21 specification.
 
 ## Reproducible baseline
 
-`tests/fixtures/jvm/SingleInheritanceAudit.scala` is the small end-to-end
-fixture. It contains `Base.value`, `Base.doubled`, an override in `Derived`, a
-method taking `Base`, and calls with `new Base()` and `new Derived()`. The
-typer unit test confirms the source frontend preserves `Derived`'s direct
-parent as the canonical `Base` symbol, retains the `OVERRIDE` source flag on
-the declared override, keeps `Base.value` owned by `Base` when typing the call
-inside `Base.doubled`, and accepts `Derived` where `Base` is expected.
-
-The end-to-end test runs lexer → parser → namer → typer → JVM codegen. Its
-current result is specifically
-`PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmSuperclass { .. })`
-while emitting `Derived`; no `.class` file is published. Thus the typer
-contracts are present, but neither execution result (20 for `Base`, 42 for
-`Derived`) is currently produced by this backend. A passing audit test means
-that this failure boundary remains explicit and stable, not that the fixture
-runs.
+The source-to-classfile regression compiles a same-batch `Base` and
+`Derived extends Base`, decodes `Derived.super_class`, checks the exact
+`Base.<init>()V` constructor target, and preserves `Base`'s Object-root
+constructor. In the mandatory JDK 21+ gate, `javap -c -v` inspects the child
+class and `java -Xverify:all` instantiates it and invokes inherited methods.
+The broader `SingleInheritanceAudit.scala` fixture remains a characterization
+of override and subtype behavior; its unimplemented override validation and
+inherited-reference compatibility are outside this emission increment.
 
 ## Current pipeline and identity contracts
 
@@ -41,31 +32,34 @@ matching parent member exists or that the override's signature and
 visibility are compatible. Do not treat that flag as a validated override
 relationship.
 
-The JVM adapter currently accepts only a class whose sole parent is the
-canonical `Object` definition. A source subclass is rejected with
-`UnsupportedJvmSuperclass` before class bytes are published. Its instance-call
-resolver also requires the selected method's owner to equal the receiver
-class, and reference argument projection requires exact planned class
-identity. Those checks are not a hierarchy model and must not be weakened by
-name comparison or by treating every reference as `Object`.
+The JVM adapter accepts a canonical Object root and one same-unit edge from a
+public ordinary class to a public, non-final ordinary parent whose own parent
+is Object. Its checked hierarchy proof requires a public accessible no-arg
+parent constructor and rejects cycles, deeper chains, external or missing
+parents, and unsupported class shapes before output. Emission uses the proven
+parent's canonical symbol and checked internal name. Instance-call resolution
+and reference argument projection still require exact planned class identity;
+they are not generalized by this increment and must not be weakened by name
+comparison or by treating every reference as Object.
 
-For a future validated hierarchy, keep two identities distinct:
+Keep the source and class-file identities distinct:
 
 - Within `dotty-jvm`, use canonical `SymbolId` keys and read-only records
   derived from completed `ClassInfo` and class flags. Validate the graph
   before projection; reject cycles, final parents, missing or duplicate
-  parents, and unsupported trait or multi-parent forms. Do not allocate
-  symbols, repair parent lists, or infer ancestry from names.
+  parents, deep chains, and unsupported trait or multi-parent forms. Do not
+  allocate symbols, repair parent lists, or infer ancestry from names.
 - At the `dotty-classfile` boundary, project each validated source symbol to
   its checked JVM internal name. Class-file analysis stays Scala-independent
   and reasons about internal names / constant-pool entries, not `SymbolId`s.
 
-The first future implementation slice should be only a public, concrete,
-non-generic `Base extends Object` and `Derived extends Base`, emitted together
-in one compilation unit, with public compatible methods and an accessible
-no-argument `Base` constructor. Keep traits, multiple or chained inheritance,
-generic and external parents, inaccessible constructors, bridges, and other
-forms rejected until separately specified and tested.
+The implemented emission slice is a public, concrete, non-generic `Base
+extends Object` and `Derived extends Base`, emitted together in one
+compilation unit, with an accessible public no-argument `Base` constructor.
+The `Derived` proof requires its own parent to be `Object`, so a third class
+cannot extend it in the same unit. Keep traits, multiple or deeper
+inheritance, generic and external parents, inaccessible constructors, bridges,
+and other forms rejected until separately specified and tested.
 
 ## JVM contracts to preserve
 
@@ -99,31 +93,27 @@ inheritance relationship, not just the receiver's class.
 ## Characterization and rejection matrix
 
 “Frontend” means the first lexer/parser/namer/typer stage that can diagnose the
-shape. Any resolved class with a non-`Object` parent that reaches current JVM
-emission is rejected at `Codegen` with
-`UnsupportedJvmSuperclass { class, parent }`; the audit fixture locks this
-exact baseline. Rows whose source validity is not yet checked by the frontend
-are intentionally still blocked at that same backend gate. Constructor and
-call-specific diagnostics below describe the next required gate after a
-future hierarchy implementation, not behavior already implemented.
+shape. The matrix distinguishes emitted hierarchy shapes from related source
+semantics that remain unsupported. Backend failures are typed and must not
+publish partial output.
 
 | Source shape | Frontend / current stage and diagnostic | JVM metadata and verifier state | Next explicit blocker / owner |
 | --- | --- | --- | --- |
-| `class Base { def value(): Int = 20; def doubled(): Int = value() }` | Frontend succeeds; current Object-only class emission is supported for the shape | `Base.super_class = java/lang/Object`; `doubled` uses `invokevirtual Base.value:()I`; ordinary method receiver is initialized `Base` | Baseline source/JVM integration test |
-| `class Derived extends Base { override def value(): Int = 21 }` | Typer preserves canonical parent and override syntax flag; JVM codegen reports `UnsupportedJvmSuperclass` | Intended `Derived.super_class = Base`; constructor begins with `UninitializedThis` and must invoke `Base.<init>()V` via `invokespecial` before ordinary use | Hierarchy validation and constructor lowering in `dotty-jvm`; direct-super verification in `dotty-classfile` |
-| `def evaluate(base: Base) = base.doubled(); evaluate(new Derived())` | Typer accepts the assignment-compatible argument; class emission is still blocked by `UnsupportedJvmSuperclass` | Formal descriptor remains `(LBase;)I`; `Derived` argument retains identity `Derived`, with no source-level cast | Hierarchy-aware call-argument assignability in `dotty-jvm` and verifier assignability in `dotty-classfile` |
-| Unknown/wrong parent type | If name/type resolution cannot resolve it, reject in the frontend with its unresolved-type diagnostic; never lower by name guess | No class file should be produced | Source resolution in `dotty-typer`; hierarchy projection must require a completed canonical class symbol |
-| Parent cycle (`A extends B`, `B extends A`) | No cycle-specific source/JVM hierarchy diagnostic exists; if parent records complete, current emission stops at `Codegen::UnsupportedJvmSuperclass` | No `super_class` chain may be emitted | Validated hierarchy graph in `dotty-jvm`, keyed by canonical symbols, must reject the cycle before projection |
-| Extending a `final` class | Current override/final conformance is not established by `OVERRIDE` flags; when the subclass reaches emission, current gate is `UnsupportedJvmSuperclass` | JVMS forbids a class from directly or indirectly extending a final class | Parent flag validation in the future `dotty-jvm` hierarchy check |
-| `override` with no matching parent method | The namer records `OVERRIDE` syntax but does not prove an overridden declaration; current non-Object parent still reaches `UnsupportedJvmSuperclass` | No dispatch entry may be invented | Override conformance in the source typer/namer contract, before JVM projection |
-| Override with incompatible parameter/result descriptor or reduced visibility | No validated override relation is recorded; current non-Object parent is rejected at `Codegen::UnsupportedJvmSuperclass` | Same JVM name+descriptor must identify the virtual entry; access cannot be narrowed incompatibly | Source override checking plus JVM descriptor/visibility validation; bridge generation remains unsupported |
-| Trait parent or multiple parents | Parser/typer preserve source parents (traits are represented separately); current JVM emission rejects the non-Object parent list with `Codegen::UnsupportedJvmSuperclass` | JVM has one direct `super_class`; interfaces require distinct interface metadata and dispatch rules | Explicitly reject traits/multiple parents in the first hierarchy validator; later interface support is separate |
-| Generic or external parent | Source projection may retain type arguments or external symbols, but current JVM source emission requires exact planned local classes and Object-only ancestry | Erased descriptor and external hierarchy facts are unavailable to this adapter | `dotty-jvm` projection/classpath boundary; keep unsupported until erasure and validated external metadata exist |
-| Missing or inaccessible parent `()V` constructor | Current backend rejects the subclass earlier at `Codegen::UnsupportedJvmSuperclass`, before proving constructor accessibility | `invokespecial Base.<init>()V` is invalid if absent or inaccessible; `UninitializedThis` stays uninitialized on failure | Constructor metadata/access validation in `dotty-jvm`; constructor transfer in `dotty-classfile` |
+| `class Base { def value(): Int = 20; def doubled(): Int = value() }` | Frontend and root-class emission support the shape | `Base.super_class = java/lang/Object`; `doubled` uses `invokevirtual Base.value:()I`; ordinary method receiver is initialized `Base` | Root-class source/JVM integration test |
+| `class Derived extends Base {}` | Source pipeline emits the batch when `Base` is a planned public no-arg class with Object as its parent | `Derived.super_class = Base`; constructor invokes `Base.<init>()V` exactly once before ordinary use | Covered by source-backed classfile regression and JDK verifier gate |
+| `def evaluate(base: Base) = base.doubled(); evaluate(new Derived())` | Typer accepts the source subtype argument, but exact-class JVM argument checks still reject it | The method descriptor can name `Base`; no cast or merge is emitted | Hierarchy-aware call-argument assignability is a separate `dotty-jvm` increment |
+| Unknown/wrong parent type | If name/type resolution cannot resolve it, reject in the frontend; otherwise hierarchy validation rejects noncanonical or non-class parents | No class file should be produced | Source resolution and canonical hierarchy projection; never lower by name guess |
+| Parent cycle (`A extends B`, `B extends A`) | `JvmSuperclassIssue::InheritanceCycle` | No `super_class` chain is emitted | Validated hierarchy graph in `dotty-jvm`, keyed by canonical symbols |
+| Extending a `final` class | `JvmSuperclassIssue::ParentIsFinal` | JVMS forbids extending a final class | Parent flag validation in the `dotty-jvm` hierarchy check |
+| `override` with no matching parent method | The namer records `OVERRIDE` syntax but does not prove an overridden declaration; class emission does not validate this relation | No dispatch entry may be invented | Override conformance in the source typer/namer contract, before JVM projection |
+| Override with incompatible parameter/result descriptor or reduced visibility | No validated override relation is recorded | Same JVM name+descriptor must identify the virtual entry; access cannot be narrowed incompatibly | Source override checking plus JVM descriptor/visibility validation; bridge generation remains unsupported |
+| Trait parent or multiple parents | The hierarchy validator rejects traits and unsupported parent-list shapes before output | JVM has one direct `super_class`; interfaces require distinct metadata and dispatch rules | Explicitly reject traits/multiple parents in `dotty-jvm`; later interface support is separate |
+| Generic or external parent | The hierarchy validator rejects unsupported class shapes and unplanned/external parents | Erased descriptor and external hierarchy facts are unavailable to this adapter | `dotty-jvm` projection/classpath boundary; keep unsupported until erasure and validated external metadata exist |
+| Missing or inaccessible parent `()V` constructor | `JvmSuperclassIssue::ParentConstructorUnavailable` | No constructor invocation or class output is emitted | Constructor metadata/access validation in `dotty-jvm`; constructor transfer in `dotty-classfile` |
 | `def read(): Int = super.value()` | Real source fails earlier at `PipelineFailure::Typer(TyperError::UnsupportedExpression { expression_kind: "expression or declaration tree", .. })`; method bodies are typed before JVM emission | No class file is produced, so no invocation instruction or constant-pool owner is emitted | First add source AST/typer support with the canonical selected parent declaration; only then add the separate checked `invokespecial` lowering path in `dotty-jvm` and analyzer support in `dotty-classfile` |
 
-The end-to-end tests guarantee the baseline superclass rejection and the
-earlier typer rejection for `super.method()`, both without partial output.
-Rows that name future validation gates are design constraints for follow-up
-increments and must gain a focused exact-diagnostic regression test when that
-gate is implemented.
+The end-to-end tests guarantee the supported direct-parent constructor chain
+and the earlier typer rejection for `super.method()`. Rejected hierarchy rows
+must remain typed failures without partial output. Rows that describe other
+future behavior are design constraints for follow-up increments and need
+focused exact-diagnostic regression coverage when implemented.

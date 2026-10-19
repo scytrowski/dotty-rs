@@ -474,6 +474,7 @@ pub(super) fn class_metadata(
             typed_ast,
             definitions,
             field_reference_identities,
+            superclass,
         )?;
         if let Some(previous) = field_names.insert(field.name().to_owned(), field.symbol()) {
             return Err(JvmCodegenError::DuplicateJvmFieldName {
@@ -542,6 +543,7 @@ fn field_metadata(
     typed_ast: Option<&dotty_core::ast::TypedAst>,
     definitions: &Definitions,
     class_identities: Option<&[JvmClassIdentity]>,
+    superclass: Option<&crate::JvmSuperclassPlan>,
 ) -> Result<JvmFieldMetadata, JvmCodegenError> {
     let field = store
         .symbols
@@ -590,7 +592,31 @@ fn field_metadata(
             self_type,
         });
     }
-    if class_info.parents.as_slice() != [definitions.object_type] || !valid_object_definition {
+    let parent_symbol =
+        class_info
+            .parents
+            .first()
+            .and_then(|parent| match store.types.try_get(*parent) {
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                }) => Some(*symbol),
+                _ => None,
+            });
+    let valid_parent = match superclass {
+        Some(proof) => {
+            proof.class() == owner
+                && proof.class_internal_name() == class_identity(store, owner)?.internal_name()
+                && parent_symbol == Some(proof.parent())
+                && (proof.parent() != definitions.object_class
+                    || (class_info.parents.as_slice() == [definitions.object_type]
+                        && valid_object_definition))
+        }
+        None => {
+            class_info.parents.as_slice() == [definitions.object_type] && valid_object_definition
+        }
+    };
+    if !valid_parent {
         return Err(JvmCodegenError::UnsupportedJvmSuperclass {
             class: owner,
             parent: class_info.parents.first().copied(),

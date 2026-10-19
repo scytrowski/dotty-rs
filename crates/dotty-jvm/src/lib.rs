@@ -313,9 +313,10 @@ pub enum JvmClassInitializationPlan {
     /// Validated source constructor proof used to emit its exact primary
     /// constructor and the planned primitive fields.
     PrimaryConstructor(JvmPrimaryConstructorPlan),
-    /// The frontend proved that an empty `Object.<init>()V` constructor is
+    /// The frontend proved that an empty no-argument constructor is
     /// equivalent to the source class: no constructor parameters or body,
-    /// superclass arguments, fields, or template initializers are present.
+    /// parent arguments, fields, or template initializers are present. The
+    /// unit hierarchy supplies the validated direct-parent constructor call.
     ImplicitNoArg,
     /// Constructor or class initialization is explicit or cannot be proven
     /// safe by the supplied compilation plan.
@@ -1983,7 +1984,8 @@ impl JvmCompilationUnit<'_> {
     /// constructor fragments using the validated primary-constructor slots.
     ///
     /// The returned plan excludes the superclass constructor call and final
-    /// `return`; callers must place its instructions after `Object.<init>()V`.
+    /// `return`; callers must place its instructions after the validated
+    /// direct-parent `<init>()V` call.
     /// It supports primitive literals, canonical constructor parameters,
     /// approved `Int` addition and Boolean negation, and reads of fields that
     /// were initialized earlier in this plan. Unsupported expressions and

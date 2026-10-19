@@ -98,9 +98,14 @@ unsupported/final/non-public parents, parent self types, and parents without
 an accessible no-argument constructor. The proof retains child and parent
 `SymbolId`s alongside their checked JVM internal names, and can also be
 projected to internal-name-only edges for downstream class-file checks.
-Unit-aware class metadata carries the matching direct-parent proof. This is
-metadata only: class emission still accepts Object as the direct superclass,
-so this increment does not generate subclass bytecode.
+Unit-aware class metadata carries the matching direct-parent proof. Whole-class
+emission uses that proof for both the class-file `super_class` and the
+constructor's single direct-parent `<init>()V` call. The supported graph is
+limited to the canonical Object root and one same-unit edge from a public
+ordinary class to a public, non-final ordinary parent whose own parent is
+Object. Deeper or external chains, unavailable constructors, and other
+unsupported shapes fail before bytes are returned. This does not validate
+override conformance or define hierarchy-aware reference joins.
 
 ## Method descriptor projection
 
@@ -163,7 +168,7 @@ The constructor initializer subset also supports copying an exact planned
 reference from an unqualified constructor-owned parameter into a private
 reference field of the same class. It emits `aload` from the parameter's
 validated slot and `putfield` with the field's checked `L...;` descriptor,
-after `Object.<init>()V`. Primitive literals, parameters, approved primitive
+after the validated direct-parent constructor call. Primitive literals, parameters, approved primitive
 operations, and earlier initialized primitive fields keep their existing
 behavior. Reference field reads, `this` escape, nested allocations, calls, and
 control flow in field initializers remain unsupported.
@@ -515,32 +520,34 @@ forms must be handled by a separate contract before they can be emitted.
 ## Whole-class emission
 
 `emit_class` composes one planned class into a class file at
-`JVM_CLASSFILE_MAJOR_VERSION` (65). The artifact contains an ordinary class extending canonical
-`java/lang/Object`, validated fields in frontend source order, one constructor,
-and the planned instance methods in plan order. `ImplicitNoArg` emits the
-existing public `<init>()V` and accepts no fields. `PrimaryConstructor` emits
-the exact validated descriptor and public/private access from canonical
-constructor metadata; its code calls `Object.<init>()V`, then appends each
-source-ordered primitive field initializer, then returns. No parameterized
+`JVM_CLASSFILE_MAJOR_VERSION` (65). The artifact contains an ordinary class
+with the direct parent from its validated unit proof, validated fields in
+frontend source order, one constructor, and planned instance methods in plan
+order. `ImplicitNoArg` emits the public `<init>()V` and accepts no fields.
+`PrimaryConstructor` emits the exact validated descriptor and public/private
+access from canonical constructor metadata. Both constructor forms begin with
+one `aload_0; invokespecial <direct-parent>.<init>()V`; primary constructors
+then append each source-ordered field initializer and return. No parameterized
 class gets an extra `()V`. Method bodies use the same typed lowering path as
 before. The file is encoded into an owned `GeneratedClass` only after every
 method and class-file structure has been built successfully.
 
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
-arguments, fields, or template initialization expressions. The backend checks
-that the class's completed `ClassInfo` has exactly its canonical `Object`
-parent and has no self type. It checks that every field and method declaration
+arguments, fields, or template initialization expressions. A direct parent is
+allowed only when the unit hierarchy proves its canonical no-argument
+constructor chain. The backend checks that the class's completed `ClassInfo`
+has exactly the parent from that proof and has no self type. It checks that every field and method declaration
 is represented by the supplied plan. A missing plan, a plan marked
 `Unsupported`, an unplanned member, or a class shape outside the supported
 subset returns a typed error; the backend does not infer initialization
 safety from an empty method list.
 
 The emitted class has no interfaces, class initializer, Scala/TASTy metadata,
-or unplanned methods. Additional constructors, nested types, explicit
-superclass behavior, and other class initialization semantics remain
-unsupported. The API returns only after encoding succeeds, so a failure does
-not expose a partial artifact.
+or unplanned methods. Parent constructor arguments, `super.method`, deeper or
+external parent chains, additional constructors, nested types, and other class
+initialization semantics remain unsupported. The API returns only after
+encoding succeeds, so a failure does not expose a partial artifact.
 
 The lower-level `dotty-classfile::CodeBuilder::pop` operation discards one
 category-one JVM stack value. Linear analysis accepts represented
@@ -828,6 +835,6 @@ contextual `JvmCodegenError`s.
 
 `JvmConstructorFieldInitializerPlan::append_to` appends only those field
 instructions. `emit_class` emits `aload_0; invokespecial
-java/lang/Object.<init>()V` before the plan and appends `return` afterward. It
+<direct-parent>.<init>()V` before the plan and appends `return` afterward. It
 also installs the validated private field_info entries and uses the exact
 constructor descriptor and access flags from metadata.
