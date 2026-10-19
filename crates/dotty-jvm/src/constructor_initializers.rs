@@ -1,4 +1,4 @@
-//! Constructor-local lowering for canonical primitive field initializers.
+//! Constructor-local lowering for canonical field initializers.
 
 use std::collections::HashSet;
 
@@ -7,13 +7,13 @@ use dotty_core::ast::{TreeKind, Typed, TypedAst};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::{SymbolInfo, SymbolKind};
+use dotty_core::symbols::SymbolKind;
 use dotty_core::types::{Constant, TermRefTarget, Type};
 
 use crate::{
-    JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmClassInitializationPlan,
-    JvmCodegenError, JvmCompilationUnit, JvmConstructorMetadata, JvmFieldMetadata, JvmIntIntrinsic,
-    JvmType, resolve_boolean_intrinsic, resolve_int_intrinsic,
+    JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmClassIdentity,
+    JvmClassInitializationPlan, JvmCodegenError, JvmCompilationUnit, JvmConstructorMetadata,
+    JvmFieldMetadata, JvmIntIntrinsic, JvmType, resolve_boolean_intrinsic, resolve_int_intrinsic,
 };
 
 /// A verified source-ordered list of constructor-local field initializer fragments.
@@ -44,13 +44,13 @@ pub enum JvmConstructorInitializerInstruction {
     LoadThis,
     /// Push an int-like constant using the class-file builder's compact encoding.
     Constant(i32),
-    /// Load an exact constructor-owned primitive parameter.
+    /// Load an exact constructor-owned primitive or planned-reference parameter.
     LoadParameter {
         /// Canonical constructor-owned parameter identity.
         symbol: SymbolId,
         /// Validated JVM local slot, after receiver slot zero.
         slot: u16,
-        /// Semantic primitive type of the parameter.
+        /// Exact projected JVM type of the parameter.
         value_type: JvmType,
     },
     /// Add two primitive Int operands.
@@ -102,9 +102,14 @@ impl JvmConstructorFieldInitializerPlan {
                 let result = match instruction {
                     JvmConstructorInitializerInstruction::LoadThis => code.aload(0),
                     JvmConstructorInitializerInstruction::Constant(value) => code.iconst(*value),
-                    JvmConstructorInitializerInstruction::LoadParameter { slot, .. } => {
-                        code.iload(usize::from(*slot))
-                    }
+                    JvmConstructorInitializerInstruction::LoadParameter {
+                        slot,
+                        value_type,
+                        ..
+                    } => match value_type {
+                        JvmType::Int | JvmType::Boolean => code.iload(usize::from(*slot)),
+                        JvmType::Reference(_) => code.aload(usize::from(*slot)),
+                    },
                     JvmConstructorInitializerInstruction::IntAdd => code.iadd(),
                     JvmConstructorInitializerInstruction::BooleanNot => {
                         code.iconst(1).and_then(|code| code.ixor())
@@ -157,6 +162,7 @@ struct ConstructorInitializerContext<'a> {
     store: &'a SemanticStore,
     typed_ast: &'a TypedAst,
     definitions: &'a Definitions,
+    class_identities: &'a [JvmClassIdentity],
     class: SymbolId,
     constructor: &'a JvmConstructorMetadata,
     fields: &'a [JvmFieldMetadata],
@@ -191,10 +197,15 @@ pub(super) fn lower(
         .constructor()
         .cloned()
         .ok_or(JvmCodegenError::ConstructorInitializerContextUnavailable { class })?;
+    let class_identities = all_metadata
+        .iter()
+        .map(|class| class.identity().clone())
+        .collect::<Vec<_>>();
     let mut context = ConstructorInitializerContext {
         store: unit.store,
         typed_ast: unit.typed_ast,
         definitions,
+        class_identities: &class_identities,
         class,
         constructor: &constructor,
         fields: metadata.fields(),
@@ -207,7 +218,7 @@ pub(super) fn lower(
         let initializer = field.initializer();
         context.current_field = field.symbol();
         context.node_visits = 0;
-        let expected = field_value_type(field, initializer)?;
+        let expected = field_value_type(field);
         let mut instructions = vec![JvmConstructorInitializerInstruction::LoadThis];
         let found = context.lower_expression(initializer, &mut instructions, 0)?;
         if found != expected {
@@ -409,24 +420,8 @@ impl ConstructorInitializerContext<'_> {
                     symbol: Some(symbol),
                 });
             }
-            let semantic_type = match symbol_info.info {
-                SymbolInfo::Complete(ty) => ty,
-                SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
-                    return Err(JvmCodegenError::MissingSemanticInfo { symbol });
-                }
-                SymbolInfo::Error => {
-                    return Err(JvmCodegenError::ErrorSemanticInfo { symbol });
-                }
-            };
-            let found = crate::descriptor::primitive_semantic_value_type(
-                self.store,
-                self.definitions,
-                symbol,
-                semantic_type,
-            )?;
-            if found != parameter.ty()
-                || self.tree_value_type(tree, self.typed_ast.get(tree).ty)? != found
-            {
+            let found = self.tree_value_type(tree, self.typed_ast.get(tree).ty)?;
+            if found != parameter.ty() {
                 return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
                     tree,
                     parameter: symbol,
@@ -472,7 +467,10 @@ impl ConstructorInitializerContext<'_> {
                 referenced_field: symbol,
             });
         }
-        let value_type = field_value_type(field, tree)?;
+        let value_type = field_value_type(field);
+        if matches!(value_type, JvmType::Reference(_)) {
+            return self.unsupported(tree, "reference field reads in constructor initializers");
+        }
         let found = self.tree_value_type(tree, self.typed_ast.get(tree).ty)?;
         if found != value_type {
             return self.type_mismatch(tree, value_type, found);
@@ -556,13 +554,25 @@ impl ConstructorInitializerContext<'_> {
         tree: TreeId<Typed>,
         ty: dotty_core::TypeId,
     ) -> Result<JvmType, JvmCodegenError> {
-        crate::identity::typed_expression_primitive_type(
+        match crate::identity::typed_expression_primitive_type(
             self.store,
             self.definitions,
             self.current_field,
             tree,
             ty,
-        )
+        ) {
+            Err(JvmCodegenError::UnsupportedJvmType { .. }) => {
+                crate::identity::typed_expression_field_value_type(
+                    self.store,
+                    self.definitions,
+                    self.current_field,
+                    tree,
+                    ty,
+                    Some(self.class_identities),
+                )
+            }
+            result => result,
+        }
     }
 
     fn type_mismatch(
@@ -592,19 +602,8 @@ impl ConstructorInitializerContext<'_> {
     }
 }
 
-fn field_value_type(
-    field: &JvmFieldMetadata,
-    tree: TreeId<Typed>,
-) -> Result<JvmType, JvmCodegenError> {
-    match field.descriptor() {
-        "I" => Ok(JvmType::Int),
-        "Z" => Ok(JvmType::Boolean),
-        _ => Err(JvmCodegenError::UnsupportedConstructorFieldInitializer {
-            field: field.symbol(),
-            tree,
-            node: "invalid primitive field descriptor",
-        }),
-    }
+fn field_value_type(field: &JvmFieldMetadata) -> JvmType {
+    field.value_type()
 }
 
 fn is_current_this_type(store: &SemanticStore, ty: dotty_core::TypeId, class: SymbolId) -> bool {
