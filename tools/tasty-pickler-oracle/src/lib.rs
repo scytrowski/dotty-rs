@@ -17,6 +17,7 @@ fn tag_name(tag: u8) -> String {
         TYPEDEF_TAG => "TYPEDEF",
         TEMPLATE_TAG => "TEMPLATE",
         DEFDEF_TAG => "DEFDEF",
+        VALDEF_TAG => "VALDEF",
         PARAM_TAG => "PARAM",
         APPLY_TAG => "APPLY",
         SELECTIN_TAG => "SELECTin",
@@ -36,12 +37,18 @@ fn tag_name(tag: u8) -> String {
         TERMREFDIRECT_TAG => "TERMREFdirect",
         TYPEREFDIRECT_TAG => "TYPEREFdirect",
         INTCONST_TAG => "INTconst",
+        UNITCONST_TAG => "UNITconst",
+        TRUECONST_TAG => "TRUEconst",
+        FALSECONST_TAG => "FALSEconst",
         STRINGCONST_TAG => "STRINGconst",
         ANNOTATION_TAG => "ANNOTATION",
         EMPTYCLAUSE_TAG => "EMPTYCLAUSE",
         SPLITCLAUSE_TAG => "SPLITCLAUSE",
         STABLE_TAG => "STABLE",
         ABSTRACT_TAG => "ABSTRACT",
+        BLOCK_TAG => "BLOCK",
+        IF_TAG => "IF",
+        TYPED_TAG => "TYPED",
         _ => return format!("tag-{tag}"),
     };
     name.into()
@@ -234,6 +241,10 @@ pub fn inspect(bytes: &[u8], raw_addresses: bool) -> Result<Value> {
                 }
                 TermValue::AstRef(r) => reference = Some(r),
                 TermValue::Int(n) => row["value"] = json!(n),
+                TermValue::Boolean(value) => row["value"] = json!(value),
+                TermValue::Unit => row["value"] = json!("unit"),
+                TermValue::Tag if node.tag == TRUECONST_TAG => row["value"] = json!(true),
+                TermValue::Tag if node.tag == FALSECONST_TAG => row["value"] = json!(false),
                 TermValue::Tag => (),
                 other => return Err(format!("leaf outside oracle subset: {other:?}").into()),
             },
@@ -274,6 +285,28 @@ pub fn inspect(bytes: &[u8], raw_addresses: bool) -> Result<Value> {
                     row["modifiers"] = json!(modifiers(&tail)?);
                     row["role"] = json!("source-class");
                 }
+                StructuredNode::ValDef(DefinitionBody::ValDef {
+                    name, rhs, tail, ..
+                }) => {
+                    row["name"] = names.name(name)?;
+                    row["has_rhs"] = json!(rhs.is_some());
+                    row["modifiers"] = json!(modifiers(&tail)?);
+                    row["role"] = json!("local-value");
+                }
+                StructuredNode::Block(_) => {
+                    let expression = children.first().ok_or("block is missing expression")?;
+                    row["expression"] = json!(expression);
+                    row["stats"] = json!(&children[1..]);
+                }
+                StructuredNode::If(if_tree) => {
+                    if children.len() != 3 {
+                        return Err("if must have condition and two branches".into());
+                    }
+                    row["inline"] = json!(if_tree.inline);
+                    row["condition"] = json!(children[0]);
+                    row["then"] = json!(children[1]);
+                    row["else"] = json!(children[2]);
+                }
                 StructuredNode::Parameter(p) => {
                     row["name"] = names.name(p.name())?;
                 }
@@ -283,6 +316,7 @@ pub fn inspect(bytes: &[u8], raw_addresses: bool) -> Result<Value> {
                 StructuredNode::Package(_)
                 | StructuredNode::Template(_)
                 | StructuredNode::Apply(_)
+                | StructuredNode::Typed(_)
                 | StructuredNode::Annotation(_) => (),
                 other => return Err(format!("node outside oracle subset: {other:?}").into()),
             },

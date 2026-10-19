@@ -1,0 +1,830 @@
+{
+  "attributes": [
+    "SOURCEFILEattr"
+  ],
+  "header": {
+    "tooling": "Scala 3.9.0",
+    "version": [
+      28,
+      9,
+      0
+    ]
+  },
+  "names": [
+    {
+      "parameters": [],
+      "result": {
+        "qualified": [
+          {
+            "qualified": [
+              {
+                "utf8": "java"
+              },
+              {
+                "utf8": "lang"
+              }
+            ]
+          },
+          {
+            "utf8": "Object"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "<init>"
+      }
+    },
+    {
+      "parameters": [
+        {
+          "qualified": [
+            {
+              "qualified": [
+                {
+                  "utf8": "java"
+                },
+                {
+                  "utf8": "lang"
+                }
+              ]
+            },
+            {
+              "utf8": "String"
+            }
+          ]
+        }
+      ],
+      "result": {
+        "qualified": [
+          {
+            "qualified": [
+              {
+                "qualified": [
+                  {
+                    "utf8": "scala"
+                  },
+                  {
+                    "utf8": "annotation"
+                  }
+                ]
+              },
+              {
+                "utf8": "internal"
+              }
+            ]
+          },
+          {
+            "utf8": "SourceFile"
+          }
+        ]
+      },
+      "signed": {
+        "utf8": "<init>"
+      }
+    },
+    {
+      "qualified": [
+        {
+          "qualified": [
+            {
+              "qualified": [
+                {
+                  "utf8": "scala"
+                },
+                {
+                  "utf8": "annotation"
+                }
+              ]
+            },
+            {
+              "utf8": "internal"
+            }
+          ]
+        },
+        {
+          "utf8": "SourceFile"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "qualified": [
+            {
+              "utf8": "java"
+            },
+            {
+              "utf8": "lang"
+            }
+          ]
+        },
+        {
+          "utf8": "Object"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "qualified": [
+            {
+              "utf8": "java"
+            },
+            {
+              "utf8": "lang"
+            }
+          ]
+        },
+        {
+          "utf8": "String"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "qualified": [
+            {
+              "utf8": "scala"
+            },
+            {
+              "utf8": "annotation"
+            }
+          ]
+        },
+        {
+          "utf8": "internal"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "utf8": "java"
+        },
+        {
+          "utf8": "lang"
+        }
+      ]
+    },
+    {
+      "qualified": [
+        {
+          "utf8": "scala"
+        },
+        {
+          "utf8": "annotation"
+        }
+      ]
+    },
+    {
+      "utf8": "<init>"
+    },
+    {
+      "utf8": "<source>"
+    },
+    {
+      "utf8": "ASTs"
+    },
+    {
+      "utf8": "Attributes"
+    },
+    {
+      "utf8": "Blocks"
+    },
+    {
+      "utf8": "Boolean"
+    },
+    {
+      "utf8": "Comments"
+    },
+    {
+      "utf8": "Int"
+    },
+    {
+      "utf8": "Object"
+    },
+    {
+      "utf8": "Positions"
+    },
+    {
+      "utf8": "SourceFile"
+    },
+    {
+      "utf8": "String"
+    },
+    {
+      "utf8": "Unit"
+    },
+    {
+      "utf8": "annotation"
+    },
+    {
+      "utf8": "example"
+    },
+    {
+      "utf8": "flag"
+    },
+    {
+      "utf8": "internal"
+    },
+    {
+      "utf8": "java"
+    },
+    {
+      "utf8": "lang"
+    },
+    {
+      "utf8": "ordered"
+    },
+    {
+      "utf8": "scala"
+    },
+    {
+      "utf8": "value"
+    }
+  ],
+  "nodes": [
+    {
+      "children": [
+        "n1",
+        "n2"
+      ],
+      "id": "n0",
+      "owner": null,
+      "parent": null,
+      "tag": "PACKAGE"
+    },
+    {
+      "children": [],
+      "id": "n1",
+      "name": {
+        "utf8": "example"
+      },
+      "owner": "n0",
+      "parent": "n0",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [
+        "n3",
+        "n30"
+      ],
+      "id": "n2",
+      "modifiers": [
+        "ANNOTATION"
+      ],
+      "name": {
+        "utf8": "Blocks"
+      },
+      "owner": "n0",
+      "parent": "n0",
+      "role": "source-class",
+      "tag": "TYPEDEF"
+    },
+    {
+      "children": [
+        "n4",
+        "n10",
+        "n13"
+      ],
+      "id": "n3",
+      "owner": "n2",
+      "parent": "n2",
+      "tag": "TEMPLATE"
+    },
+    {
+      "children": [
+        "n5"
+      ],
+      "id": "n4",
+      "owner": "n2",
+      "parent": "n3",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n6",
+        "n9"
+      ],
+      "id": "n5",
+      "name": {
+        "parameters": [],
+        "result": {
+          "qualified": [
+            {
+              "qualified": [
+                {
+                  "utf8": "java"
+                },
+                {
+                  "utf8": "lang"
+                }
+              ]
+            },
+            {
+              "utf8": "Object"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "<init>"
+        }
+      },
+      "owner": "n2",
+      "parent": "n4",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [
+        "n7"
+      ],
+      "id": "n6",
+      "owner": "n2",
+      "parent": "n5",
+      "tag": "NEW"
+    },
+    {
+      "children": [
+        "n8"
+      ],
+      "id": "n7",
+      "name": {
+        "utf8": "Object"
+      },
+      "owner": "n2",
+      "parent": "n6",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n8",
+      "name": {
+        "qualified": [
+          {
+            "utf8": "java"
+          },
+          {
+            "utf8": "lang"
+          }
+        ]
+      },
+      "owner": "n2",
+      "parent": "n7",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [],
+      "id": "n9",
+      "owner": "n2",
+      "parent": "n5",
+      "reference": {
+        "direction": "backward",
+        "target": "n7"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n11"
+      ],
+      "has_rhs": false,
+      "header": [
+        {
+          "clause": "EMPTYCLAUSE"
+        }
+      ],
+      "id": "n10",
+      "modifiers": [
+        "STABLE"
+      ],
+      "name": {
+        "utf8": "<init>"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "compiler-default-constructor",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n12"
+      ],
+      "id": "n11",
+      "name": {
+        "utf8": "Unit"
+      },
+      "owner": "n10",
+      "parent": "n10",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n12",
+      "name": {
+        "utf8": "scala"
+      },
+      "owner": "n10",
+      "parent": "n11",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [
+        "n14",
+        "n18",
+        "n22",
+        "n24"
+      ],
+      "has_rhs": true,
+      "header": [
+        {
+          "parameter": {
+            "utf8": "flag"
+          }
+        },
+        {
+          "parameter": {
+            "utf8": "value"
+          }
+        }
+      ],
+      "id": "n13",
+      "modifiers": [],
+      "name": {
+        "utf8": "ordered"
+      },
+      "owner": "n2",
+      "parent": "n3",
+      "role": "source-method",
+      "tag": "DEFDEF"
+    },
+    {
+      "children": [
+        "n15"
+      ],
+      "id": "n14",
+      "name": {
+        "utf8": "flag"
+      },
+      "owner": "n13",
+      "parent": "n13",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n16"
+      ],
+      "id": "n15",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n13",
+      "parent": "n14",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [
+        "n17"
+      ],
+      "id": "n16",
+      "name": {
+        "utf8": "Boolean"
+      },
+      "owner": "n13",
+      "parent": "n15",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n17",
+      "name": {
+        "utf8": "scala"
+      },
+      "owner": "n13",
+      "parent": "n16",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [
+        "n19"
+      ],
+      "id": "n18",
+      "name": {
+        "utf8": "value"
+      },
+      "owner": "n13",
+      "parent": "n13",
+      "tag": "PARAM"
+    },
+    {
+      "children": [
+        "n20"
+      ],
+      "id": "n19",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n13",
+      "parent": "n18",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [
+        "n21"
+      ],
+      "id": "n20",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n13",
+      "parent": "n19",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n21",
+      "owner": "n13",
+      "parent": "n20",
+      "reference": {
+        "direction": "backward",
+        "target": "n17"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n23"
+      ],
+      "id": "n22",
+      "name": {
+        "utf8": "Int"
+      },
+      "owner": "n13",
+      "parent": "n13",
+      "tag": "IDENTtpt"
+    },
+    {
+      "children": [],
+      "id": "n23",
+      "owner": "n13",
+      "parent": "n22",
+      "reference": {
+        "direction": "backward",
+        "target": "n20"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [
+        "n25",
+        "n26"
+      ],
+      "expression": "n25",
+      "id": "n24",
+      "owner": "n13",
+      "parent": "n13",
+      "stats": [
+        "n26"
+      ],
+      "tag": "BLOCK"
+    },
+    {
+      "children": [],
+      "id": "n25",
+      "owner": "n13",
+      "parent": "n24",
+      "reference": {
+        "direction": "backward",
+        "target": "n18"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [
+        "n27",
+        "n28",
+        "n29"
+      ],
+      "condition": "n27",
+      "else": "n29",
+      "id": "n26",
+      "inline": false,
+      "owner": "n13",
+      "parent": "n24",
+      "tag": "IF",
+      "then": "n28"
+    },
+    {
+      "children": [],
+      "id": "n27",
+      "owner": "n13",
+      "parent": "n26",
+      "reference": {
+        "direction": "backward",
+        "target": "n14"
+      },
+      "tag": "TERMREFdirect"
+    },
+    {
+      "children": [],
+      "id": "n28",
+      "owner": "n13",
+      "parent": "n26",
+      "tag": "INTconst",
+      "value": 1
+    },
+    {
+      "children": [],
+      "id": "n29",
+      "owner": "n13",
+      "parent": "n26",
+      "tag": "INTconst",
+      "value": 2
+    },
+    {
+      "children": [
+        "n31",
+        "n33"
+      ],
+      "id": "n30",
+      "owner": "n2",
+      "parent": "n2",
+      "tag": "ANNOTATION"
+    },
+    {
+      "children": [
+        "n32"
+      ],
+      "id": "n31",
+      "name": {
+        "utf8": "SourceFile"
+      },
+      "owner": "n2",
+      "parent": "n30",
+      "tag": "TYPEREF"
+    },
+    {
+      "children": [],
+      "id": "n32",
+      "name": {
+        "qualified": [
+          {
+            "qualified": [
+              {
+                "utf8": "scala"
+              },
+              {
+                "utf8": "annotation"
+              }
+            ]
+          },
+          {
+            "utf8": "internal"
+          }
+        ]
+      },
+      "owner": "n2",
+      "parent": "n31",
+      "tag": "TERMREFpkg"
+    },
+    {
+      "children": [
+        "n34",
+        "n38"
+      ],
+      "id": "n33",
+      "owner": "n2",
+      "parent": "n30",
+      "tag": "APPLY"
+    },
+    {
+      "children": [
+        "n35",
+        "n37"
+      ],
+      "id": "n34",
+      "name": {
+        "parameters": [
+          {
+            "qualified": [
+              {
+                "qualified": [
+                  {
+                    "utf8": "java"
+                  },
+                  {
+                    "utf8": "lang"
+                  }
+                ]
+              },
+              {
+                "utf8": "String"
+              }
+            ]
+          }
+        ],
+        "result": {
+          "qualified": [
+            {
+              "qualified": [
+                {
+                  "qualified": [
+                    {
+                      "utf8": "scala"
+                    },
+                    {
+                      "utf8": "annotation"
+                    }
+                  ]
+                },
+                {
+                  "utf8": "internal"
+                }
+              ]
+            },
+            {
+              "utf8": "SourceFile"
+            }
+          ]
+        },
+        "signed": {
+          "utf8": "<init>"
+        }
+      },
+      "owner": "n2",
+      "parent": "n33",
+      "tag": "SELECTin"
+    },
+    {
+      "children": [
+        "n36"
+      ],
+      "id": "n35",
+      "owner": "n2",
+      "parent": "n34",
+      "tag": "NEW"
+    },
+    {
+      "children": [],
+      "id": "n36",
+      "owner": "n2",
+      "parent": "n35",
+      "reference": {
+        "direction": "backward",
+        "target": "n31"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n37",
+      "owner": "n2",
+      "parent": "n34",
+      "reference": {
+        "direction": "backward",
+        "target": "n31"
+      },
+      "tag": "SHAREDtype"
+    },
+    {
+      "children": [],
+      "id": "n38",
+      "name": {
+        "utf8": "<source>"
+      },
+      "owner": "n2",
+      "parent": "n33",
+      "tag": "STRINGconst"
+    }
+  ],
+  "position_nodes": [
+    "n0",
+    "n2",
+    "n33",
+    "n36",
+    "n38",
+    "n3",
+    "n10",
+    "n11",
+    "n7",
+    "n13",
+    "n14",
+    "n15",
+    "n18",
+    "n19",
+    "n22",
+    "n24",
+    "n26",
+    "n27",
+    "n28",
+    "n29",
+    "n25"
+  ],
+  "schema": 1,
+  "sections": [
+    "ASTs",
+    "Attributes",
+    "Comments",
+    "Positions"
+  ]
+}
