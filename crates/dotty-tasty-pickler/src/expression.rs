@@ -5,7 +5,8 @@ use std::collections::HashSet;
 use dotty_core::ast::{ApplyKind, TypedAst};
 use dotty_core::{Constant, SemanticStore, SymbolId, TermRefTarget, TreeId, TreeKind, Type, Typed};
 use dotty_tasty::tasty::{
-    APPLY_TAG, AstField, AstLabel, AstNode, INTCONST_TAG, SimpleTerm, TermValue,
+    APPLY_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, INTCONST_TAG, SimpleTerm,
+    TRUECONST_TAG, TermValue,
 };
 
 use crate::{
@@ -268,24 +269,34 @@ fn lower_expression_inner(
             symbol: Some(method),
         });
     };
-    // The method result is canonical Int; this expression has its own singleton
-    // type. Scala's pickleConstant encodes that value directly, without a type
-    // ascription, widening node, or second serialized constant-type tree.
-    let (Constant::Int(value), Some(Type::Constant(Constant::Int(type_value)))) =
-        (&literal.value, store.types.try_get(tree.ty))
-    else {
-        return Err(PickleError::BodyType {
-            tree: root,
-            ty: tree.ty,
-        });
+    // Primitive constants retain their singleton semantic type but serialize
+    // directly as their Scala 3.9 constant leaves.
+    let tag_and_value = match (&literal.value, store.types.try_get(tree.ty)) {
+        (Constant::Int(value), Some(Type::Constant(Constant::Int(type_value))))
+            if value == type_value =>
+        {
+            (INTCONST_TAG, TermValue::Int(*value))
+        }
+        (Constant::Boolean(value), Some(Type::Constant(Constant::Boolean(type_value))))
+            if value == type_value =>
+        {
+            (
+                if *value {
+                    TRUECONST_TAG
+                } else {
+                    FALSECONST_TAG
+                },
+                TermValue::Boolean(*value),
+            )
+        }
+        _ => {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: tree.ty,
+            });
+        }
     };
-    if value != type_value {
-        return Err(PickleError::BodyType {
-            tree: root,
-            ty: tree.ty,
-        });
-    }
-    let term = SimpleTerm::new(INTCONST_TAG, TermValue::Int(*value)).map_err(|cause| {
+    let term = SimpleTerm::new(tag_and_value.0, tag_and_value.1).map_err(|cause| {
         PickleError::Encoding {
             cause: Box::new(cause.into()),
         }

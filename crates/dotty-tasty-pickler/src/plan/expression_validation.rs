@@ -405,6 +405,7 @@ impl Validator<'_, '_> {
         rhs: Option<TreeId<Untyped>>,
         body: Option<TreeId<Typed>>,
         method: &MethodPicklePlan,
+        result_type: TypeId,
     ) -> Result<(), PickleError> {
         let Some(rhs) = rhs else {
             return Err(self.unsupported(UnsupportedFeature::AbstractMethod, Some(method.symbol)));
@@ -445,6 +446,12 @@ impl Validator<'_, '_> {
                     .iter()
                     .any(|candidate| candidate.symbol == *target)
                 {
+                    if result_type != p.definitions.int {
+                        return Err(PickleError::BodyType {
+                            tree: body,
+                            ty: node.ty,
+                        });
+                    }
                     self.same_class_method_target(*target, source_ident.name, *prefix, rhs)?;
                     None
                 } else {
@@ -476,7 +483,7 @@ impl Validator<'_, '_> {
                             reason: crate::ReferenceError::Owner,
                         });
                     }
-                    if self.complete(*parameter)? != p.definitions.int {
+                    if self.complete(*parameter)? != result_type {
                         return Err(PickleError::UnsupportedTypeReference { ty: node.ty });
                     }
                     None
@@ -531,6 +538,12 @@ impl Validator<'_, '_> {
                         reason: crate::ReferenceError::NotRegistered,
                     });
                 }
+                if result_type != p.definitions.int {
+                    return Err(PickleError::BodyType {
+                        tree: body,
+                        ty: node.ty,
+                    });
+                }
                 self.same_class_method_target(*target, source_select.name, *prefix, rhs)?;
                 if !matches!(self.ty(typed_qualifier.ty)?, Type::ThisType { class } if *class == p.class)
                 {
@@ -542,11 +555,35 @@ impl Validator<'_, '_> {
                 None
             }
             (TreeKind::Literal(source_literal), TreeKind::Literal(literal)) => {
-                if !matches!((&literal.value, body_type), (Constant::Int(value), Type::Constant(Constant::Int(ty_value))) if value == ty_value)
-                {
+                let literal_type_matches = match (&literal.value, body_type) {
+                    (Constant::Int(value), Type::Constant(Constant::Int(typed))) => {
+                        value == typed && result_type == p.definitions.int
+                    }
+                    (Constant::Boolean(value), Type::Constant(Constant::Boolean(typed))) => {
+                        value == typed && result_type == p.definitions.boolean
+                    }
+                    _ => false,
+                };
+                if !literal_type_matches {
                     return Err(PickleError::BodyType {
                         tree: body,
                         ty: node.ty,
+                    });
+                }
+                if source_literal.value != literal.value {
+                    return Err(match (&source_literal.value, &literal.value) {
+                        (Constant::Int(expected), Constant::Int(actual)) => {
+                            PickleError::BodySourceValue {
+                                source_tree: rhs,
+                                typed_tree: body,
+                                expected: *expected,
+                                actual: *actual,
+                            }
+                        }
+                        _ => PickleError::BodyType {
+                            tree: body,
+                            ty: node.ty,
+                        },
                     });
                 }
                 match source_literal.value {
@@ -555,6 +592,12 @@ impl Validator<'_, '_> {
                 }
             }
             (TreeKind::Apply(source_apply), TreeKind::Apply(typed_apply)) => {
+                if result_type != p.definitions.int {
+                    return Err(PickleError::BodyType {
+                        tree: body,
+                        ty: node.ty,
+                    });
+                }
                 self.charge(1)?;
                 let mut visited = HashSet::from([body]);
                 if source_apply.kind != ApplyKind::Regular
@@ -797,8 +840,9 @@ impl Validator<'_, '_> {
                         });
                     }
                 }
-                if node.ty != p.definitions.int
-                    && !matches!(self.ty(node.ty)?, Type::Constant(Constant::Int(_)))
+                if result_type != p.definitions.int
+                    || (node.ty != p.definitions.int
+                        && !matches!(self.ty(node.ty)?, Type::Constant(Constant::Int(_))))
                 {
                     return Err(PickleError::BodyType {
                         tree: body,

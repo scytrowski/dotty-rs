@@ -236,6 +236,25 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Parameters.pick() = 42", 42,
             ),
+            "example/Flags.tasty": (
+                "example.Flags", r"public boolean enabled\(\)", "FlagsRuntime.java",
+                """public final class FlagsRuntime {
+  public static void main(String[] args) {
+    example.Flags flags = new example.Flags();
+    boolean enabled = flags.enabled();
+    boolean disabled = flags.disabled();
+    boolean passTrue = flags.passthrough(true);
+    boolean passFalse = flags.passthrough(false);
+    int keepTrue = flags.keep(true, 17);
+    int keepFalse = flags.keep(false, 42);
+    if (!enabled || disabled || !passTrue || passFalse || keepTrue != 17 || keepFalse != 42)
+      throw new AssertionError("unexpected Flags results");
+    System.out.println("Flags = " + enabled + ", " + disabled + ", " +
+        passTrue + ", " + passFalse + ", " + keepTrue + ", " + keepFalse);
+  }
+}
+""", "Flags = true, false, true, false, 17, 42", 42,
+            ),
             "example/References.tasty": (
                 "example.References", r"public int first\(\)", "ReferencesRuntime.java",
                 """public final class ReferencesRuntime {
@@ -290,6 +309,13 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
             _, method_pattern, *_ = case
             if not re.search(method_pattern, javap):
                 raise RuntimeError(f"fresh class does not have the expected method: {javap}")
+            if relative.as_posix() == "example/Flags.tasty":
+                signatures = (
+                    r"public boolean enabled\(\)", r"public boolean disabled\(\)",
+                    r"public boolean passthrough\(boolean\)", r"public int keep\(boolean, int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Flags class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":

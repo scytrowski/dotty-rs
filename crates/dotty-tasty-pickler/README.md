@@ -24,10 +24,10 @@ surface.
 
 The accepted shape is the oracle's ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
-methods with an Int result and either a typed Int literal, a reference to one
-of its own ordinary Int formals, an ordinary parameterless reference, or a
-bounded recursive application of a canonical method of the same class with one
-plain clause of one or more Int parameters.
+methods with an Int or Boolean result. Bodies may be typed Int/Boolean literals,
+references to a same-typed ordinary formal, ordinary parameterless references,
+or bounded recursive applications of a canonical same-class method with one
+plain clause of Int parameters.
 Same-class method references derive their
 target from the typed `TermRef`, require a public declared Int method in the
 plan, and serialize as the Scala 3.9 named `SELECT` with a class-typed
@@ -35,7 +35,7 @@ receiver. An unqualified reference uses `QUALTHIS`, while an explicit `this`
 selection preserves the oracle's `THIS(TYPEREFsymbol(...))` shape; forward
 references do not create synthetic AST addresses.
 A method may have no value clause, one explicit
-empty clause, or one plain clause of ordinary Int
+empty clause, or one plain clause of ordinary Int or Boolean
 parameters. Parameter IDs, ownership, source scope, types and order must agree
 across the source AST, semantic index and completed method signature.
 Source Int literals, including the parser's raw decimal, hexadecimal and binary
@@ -46,7 +46,8 @@ declaration. Raw literal spellings are checked against the name-byte limit
 before decoding; malformed whole numbers and unsupported noninteger numbers
 yield typed errors.
 Call applications require the exact selected method's completed plain MethodType,
-ordered Int parameters, Int result, and corresponding canonical Int arguments.
+ordered Int parameters, Int result, and corresponding canonical Int arguments;
+Boolean arguments and Boolean-returning calls remain unsupported.
 Traversal is bounded by expression-depth and item limits and rejects repeated
 typed expression IDs. Type, context, default, varargs and multi-clause
 applications remain unsupported. The wire

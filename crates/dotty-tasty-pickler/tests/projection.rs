@@ -525,11 +525,11 @@ fn projection_depth_fuel_and_name_budgets_have_typed_failures() {
         ),
         (
             ProjectionLimits {
-                max_items: 3,
+                max_items: 4,
                 ..ProjectionLimits::default()
             },
             LimitKind::Items,
-            3,
+            4,
         ),
         (
             ProjectionLimits {

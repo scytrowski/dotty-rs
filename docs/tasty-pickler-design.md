@@ -216,9 +216,9 @@ It is compiler-generated, not evidence of a source annotation in the core store.
 | --- | --- | --- |
 | Unit/output boundary | One ordinary top-level class in explicit `package example`; one package-aligned `.tasty` per class | Default/nested packages, multiple classes, linked class/object outputs |
 | Class | Public, no type/value parameters, no self type, no fields, no explicit extends or initialization statements; exact canonical implicit Object parent | Traits, objects, companions, nesting, enums, arbitrary inheritance/constructors |
-| Method | One or more public ordinary monomorphic concrete methods, declared Int result, no clause, one explicit empty clause, or one plain clause of ordinary Int parameters | Multiple/curried/contextual/erased/repeated/defaulted clauses, abstract methods |
-| Signature/types | Int result and parameter types; canonical Int-literal RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
-| Body | Actual typed Int literal or a `TermRef` to a declared formal of the same method; literal value/type, source binding and parameter identity must agree | Calls, blocks, if/match, locals, functions, returns and all other expressions |
+| Method | One or more public ordinary monomorphic concrete methods, declared Int or Boolean result, no clause, one explicit empty clause, or one plain clause of ordinary Int/Boolean parameters | Multiple/curried/contextual/erased/repeated/defaulted clauses, abstract methods |
+| Signature/types | Int/Boolean result and parameter types; canonical Int/Boolean literal RHS type; Unit constructor return syntax; Object parent; canonical local source reference infrastructure | Generic/applied/refined/alias/match/capture types and arbitrary external member references |
+| Body | Actual typed Int/Boolean literal or a `TermRef` to a same-typed formal of the same method; literal value/type, source binding and parameter identity must agree | Calls with Boolean results/arguments, blocks, if/match, locals, functions, returns and all other expressions |
 | Metadata | Public/no extra source flags or annotations; required constructor marker; normalized source identity | General annotations/modifiers, full position/comment preservation, outline/best-effort/Java TASTy |
 
 An empty class is an oracle control, not an automatic broadening of the first
@@ -285,9 +285,10 @@ constructor still has a normalized empty value clause and class-instance result.
 
 The current accepted boundary is one ordinary public class in one explicit named
 package, implicit Object parent, default constructor and one or more public
-methods with an Int result and actual typed Int literal bodies. Each method has
-no value clause, one explicit empty ordinary clause, or one plain clause of
-ordinary Int parameters. Clause shapes retain distinct semantic and wire forms;
+methods with an Int or Boolean result and actual typed Int/Boolean literal or
+same-typed formal-reference bodies. Each method has no value clause, one
+explicit empty ordinary clause, or one plain clause of ordinary Int/Boolean
+parameters. Clause shapes retain distinct semantic and wire forms;
 parameter identities, source order, ownership, declared types and completed
 method signatures must agree. Other valid forms remain explicitly unsupported.
 Validation does not re-type source, mutate
