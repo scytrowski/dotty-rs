@@ -181,9 +181,38 @@ impl SourceTyper<'_> {
             .is_some_and(|tree| matches!(tree.kind, TreeKind::New(_)));
         if is_initialized_constructor_result {
             Ok(())
+        } else if self
+            .typed_arena
+            .try_get(qualifier)
+            .is_some_and(|tree| matches!(tree.kind, TreeKind::Apply(_)))
+            && self.is_direct_current_source_class_result(qualifier_type)
+        {
+            // A direct method application returning a top-level class from
+            // this source batch has a stable, exact class type. This permits
+            // call chains such as `holder.value().get()` without treating a
+            // mutable field reference like `holder.current.get()` as stable.
+            Ok(())
         } else {
             self.require_stable_selection_prefix(qualifier_type, tree_index)
         }
+    }
+
+    fn is_direct_current_source_class_result(&self, qualifier_type: TypeId) -> bool {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(qualifier_type)
+        else {
+            return false;
+        };
+        if !self.is_current_source_symbol(*symbol) {
+            return false;
+        }
+        let declaration = self.store.symbols.get(*symbol);
+        declaration.kind == SymbolKind::Class
+            && declaration
+                .owner
+                .is_some_and(|owner| self.store.symbols.get(owner).kind == SymbolKind::Package)
     }
 
     pub(in crate::typer) fn expression_type_of_symbol(

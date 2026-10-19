@@ -4900,6 +4900,241 @@ fn real_reference_object_apis_compile_and_verify_end_to_end() {
 }
 
 #[test]
+fn reference_holder_fixture_compiles_deterministically_from_fresh_frontends() {
+    let first_output = TestOutputDirectory::new("reference-holder-first");
+    let second_output = TestOutputDirectory::new("reference-holder-second");
+    let first = compile_fixture_classes("ReferenceHolder.scala", first_output.path())
+        .expect("real Scala reference holder fixture compiles");
+    let second = compile_fixture_classes("ReferenceHolder.scala", second_output.path())
+        .expect("an independent frontend session compiles the reference holder fixture");
+    let identities = |artifacts: &[EmittedArtifact]| {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(identities(&first), identities(&second));
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Counter", "Holder", "HolderClient"]
+    );
+    for (output, artifacts) in [(&first_output, &first), (&second_output, &second)] {
+        assert_eq!(
+            output.class_files(),
+            [
+                output.path().join("Counter.class"),
+                output.path().join("Holder.class"),
+                output.path().join("HolderClient.class")
+            ]
+        );
+        for artifact in artifacts {
+            decode_emitted_class(artifact);
+        }
+    }
+
+    let counter = decode_emitted_class(&first[0]);
+    let holder = decode_emitted_class(&first[1]);
+    let client = decode_emitted_class(&first[2]);
+    for class in [&counter, &holder, &client] {
+        assert!(class.access_flags.is_public());
+        assert!(
+            class.methods.iter().all(|method| {
+                method.access_flags.is_public() && !method.access_flags.is_static()
+            })
+        );
+    }
+    assert_eq!(
+        methods_with_descriptors(&counter),
+        [
+            ("<init>".to_owned(), "(I)V".to_owned()),
+            ("get".to_owned(), "()I".to_owned()),
+            ("increment".to_owned(), "()I".to_owned()),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&holder),
+        [
+            ("<init>".to_owned(), "(LCounter;Z)V".to_owned()),
+            ("value".to_owned(), "()LCounter;".to_owned()),
+            ("initial".to_owned(), "()LCounter;".to_owned()),
+            ("replace".to_owned(), "(LCounter;)V".to_owned()),
+            ("read".to_owned(), "()I".to_owned()),
+            ("isEnabled".to_owned(), "()Z".to_owned()),
+            ("choose".to_owned(), "(ZLCounter;)LCounter;".to_owned()),
+            ("incrementUntil".to_owned(), "(I)I".to_owned()),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&client),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("wrap".to_owned(), "(LCounter;)LHolder;".to_owned()),
+            ("run".to_owned(), "(II)I".to_owned()),
+        ]
+    );
+    let holder_fields = holder
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                holder.constant_pool.utf8(field.name_index).unwrap(),
+                holder.constant_pool.utf8(field.descriptor_index).unwrap(),
+                field.access_flags.is_private(),
+                field.access_flags.is_final(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        holder_fields,
+        [
+            ("original", "LCounter;", true, true),
+            ("current", "LCounter;", true, false),
+            ("enabledFlag", "Z", true, true),
+        ]
+    );
+    let counter_fields = counter
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                counter.constant_pool.utf8(field.name_index).unwrap(),
+                counter.constant_pool.utf8(field.descriptor_index).unwrap(),
+                field.access_flags.is_private(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(counter_fields, [("count", "I", true)]);
+
+    assert_invocation_sequence(
+        &holder,
+        emitted_method_code(&holder, "<init>"),
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&counter, "<init>"),
+        &[0x2a, 0xb7, 0x2a, 0x1b, 0xb5, 0xb1],
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&holder, "<init>"),
+        &[
+            0x2a, 0xb7, 0x2a, 0x2b, 0xb5, 0x2a, 0x2b, 0xb5, 0x2a, 0x1c, 0xb5, 0xb1,
+        ],
+    );
+    assert_opcode_sequence(emitted_method_code(&holder, "value"), &[0x2a, 0xb4, 0xb0]);
+    assert_opcode_sequence(emitted_method_code(&holder, "initial"), &[0x2a, 0xb4, 0xb0]);
+    assert_opcode_sequence(
+        emitted_method_code(&holder, "replace"),
+        &[0x2a, 0x4d, 0x2b, 0x4e, 0x2c, 0x2d, 0xb5, 0xb1],
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&holder, "isEnabled"),
+        &[0x2a, 0xb4, 0xac],
+    );
+    let holder_constructor = emitted_method_code(&holder, "<init>");
+    let initialized_fields = decode_subset_instructions(holder_constructor)
+        .into_iter()
+        .filter(|(_, opcode)| *opcode == 0xb5)
+        .map(|(offset, _)| {
+            let index = u16::from_be_bytes([
+                holder_constructor[offset + 1],
+                holder_constructor[offset + 2],
+            ]);
+            let ConstantPoolEntry::Fieldref {
+                class_index,
+                name_and_type_index,
+            } = holder
+                .constant_pool
+                .get(ConstantPoolIndex(index))
+                .expect("putfield references a field")
+            else {
+                panic!("putfield must reference Fieldref")
+            };
+            let owner = holder.constant_pool.class_name(*class_index).unwrap();
+            let (name, descriptor) = holder
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .unwrap();
+            (owner, name, descriptor)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        initialized_fields,
+        [
+            ("Holder", "original", "LCounter;"),
+            ("Holder", "current", "LCounter;"),
+            ("Holder", "enabledFlag", "Z"),
+        ]
+    );
+    assert_invocation_sequence(
+        &holder,
+        emitted_method_code(&holder, "read"),
+        &[
+            (0xb6, "Holder", "value", "()LCounter;"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &holder,
+        emitted_method_code(&holder, "incrementUntil"),
+        &[
+            (0xb6, "Holder", "value", "()LCounter;"),
+            (0xb6, "Counter", "get", "()I"),
+            (0xb6, "Holder", "value", "()LCounter;"),
+            (0xb6, "Counter", "increment", "()I"),
+            (0xb6, "Holder", "value", "()LCounter;"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    let increment_code = emitted_method_code(&holder, "incrementUntil");
+    let increment_frames = stack_map_frames(&holder, "incrementUntil");
+    let increment_targets = decode_branch_targets(increment_code)
+        .into_iter()
+        .map(|(_, _, target)| target)
+        .collect::<Vec<_>>();
+    assert!(!increment_targets.is_empty());
+    assert!(
+        increment_targets
+            .iter()
+            .all(|target| increment_frames.iter().any(|frame| frame.pc == *target))
+    );
+    assert!(increment_frames.iter().any(|frame| {
+        frame
+            .locals
+            .contains(&StackMapVerificationType::Object("Holder".to_owned()))
+    }));
+    let choose_frames = stack_map_frames(&holder, "choose");
+    let choose_targets = decode_branch_targets(emitted_method_code(&holder, "choose"))
+        .into_iter()
+        .map(|(_, _, target)| target)
+        .collect::<Vec<_>>();
+    assert!(!choose_targets.is_empty());
+    assert!(
+        choose_targets
+            .iter()
+            .all(|target| choose_frames.iter().any(|frame| frame.pc == *target))
+    );
+    assert!(choose_frames.iter().any(|frame| {
+        frame
+            .locals
+            .contains(&StackMapVerificationType::Object("Holder".to_owned()))
+            && frame.stack == [StackMapVerificationType::Object("Counter".to_owned())]
+    }));
+
+    if require_jdk_or_skip() {
+        verify_reference_holder_with_jdk(first_output.path());
+    }
+}
+
+#[test]
 fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
     let cases = [
         (
@@ -4961,6 +5196,10 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
         (
             "reference-var-reassignment",
             "class Counter(seed: Int)\nclass CounterClient:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    counter = new Counter(seed + 1)\n    counter.get()\n",
+        ),
+        (
+            "mutable-reference-field-call",
+            "class Counter:\n  def get(): Int = 1\nclass Holder:\n  private var current: Counter = new Counter()\n  def read(): Int = current.get()\n",
         ),
         (
             "wrong-class-reference-argument",
@@ -5058,6 +5297,10 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                     )
             ),
             "reference-var-reassignment" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::UnstableSelectionPrefix { .. })
+            ),
+            "mutable-reference-field-call" => matches!(
                 &error,
                 PipelineFailure::Typer(TyperError::UnstableSelectionPrefix { .. })
             ),
@@ -7095,6 +7338,103 @@ fn verify_reference_object_apis_with_jdk(output_directory: &Path) {
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
         "reference object APIs verified"
+    );
+}
+
+fn verify_reference_holder_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 class output path");
+    for class_name in ["Counter", "Holder", "HolderClient"] {
+        let javap = Command::new("javap")
+            .args(["-c", "-v", "-p", "-classpath", output_path, class_name])
+            .output()
+            .expect("start javap for reference-holder class");
+        assert!(
+            javap.status.success(),
+            "javap rejected {class_name}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let output = String::from_utf8_lossy(&javap.stdout);
+        assert!(
+            output.contains("major version: 65"),
+            "{class_name}: {output}"
+        );
+        assert!(output.contains("descriptor:"), "{class_name}: {output}");
+        if class_name == "Holder" {
+            assert!(output.contains("StackMapTable"), "{output}");
+            for descriptor in [
+                "(LCounter;Z)V",
+                "()LCounter;",
+                "(LCounter;)V",
+                "()I",
+                "()Z",
+                "(ZLCounter;)LCounter;",
+                "(I)I",
+            ] {
+                assert!(
+                    output.contains(&format!("descriptor: {descriptor}")),
+                    "{output}"
+                );
+            }
+        }
+    }
+
+    let harness_path = output_directory.join("ReferenceHolderHarness.java");
+    fs::write(
+        &harness_path,
+        r#"public final class ReferenceHolderHarness {
+    public static void main(String[] args) {
+        Counter original = new Counter(2);
+        Counter replacement = new Counter(7);
+        Holder holder = new Holder(original, true);
+        if (holder.value() != original || holder.initial() != original)
+            throw new AssertionError("initial identity");
+        if (holder.isEnabled() != true || holder.read() != 2)
+            throw new AssertionError("initial values");
+        if (holder.choose(true, replacement) != original
+                || holder.choose(false, original) != original)
+            throw new AssertionError("branch join identity");
+
+        holder.replace(replacement);
+        if (holder.value() != replacement || holder.initial() != original || holder.read() != 7)
+            throw new AssertionError("replacement identity");
+        if (holder.incrementUntil(10) != 10 || replacement.get() != 10 || original.get() != 2)
+            throw new AssertionError("replacement loop mutation or object isolation");
+
+        HolderClient client = new HolderClient();
+        if (client.wrap(original).value() != original)
+            throw new AssertionError("wrap identity");
+        if (client.run(0, 0) != 0 || client.run(0, 1) != 1
+                || client.run(0, 10) != 10 || client.run(12, 5) != 12)
+            throw new AssertionError("client loop boundary cases");
+    }
+}
+"#,
+    )
+    .expect("write ReferenceHolder Java harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness_path)
+        .output()
+        .expect("start javac for reference-holder harness");
+    assert!(
+        javac.status.success(),
+        "javac failed for reference holder: {:?}",
+        javac
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "ReferenceHolderHarness",
+        ])
+        .output()
+        .expect("start java verifier for reference-holder harness");
+    assert!(
+        java.status.success(),
+        "java failed for reference holder: {:?}",
+        java
     );
 }
 
