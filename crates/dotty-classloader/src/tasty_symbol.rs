@@ -181,6 +181,16 @@ pub(crate) struct DecodedTastyParameter {
 pub enum TastyDecodeError {
     /// The bytes did not parse as a Scala 3.9 `.tasty` file at all.
     Parse(TastyFileError),
+    /// The file parsed, but its format is outside the classloader's
+    /// explicitly validated Scala 3.9 input set (28.8.0 and 28.9.0).
+    UnsupportedClassloaderVersion {
+        /// File major version.
+        major: u32,
+        /// File minor version.
+        minor: u32,
+        /// File experimental version.
+        experimental: u32,
+    },
     /// The file parsed, but indexing/decoding its AST nodes failed.
     Ast(AstError),
     /// No top-level `TypeDef` in the file has the requested class's
@@ -210,6 +220,14 @@ impl fmt::Display for TastyDecodeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Parse(source) => write!(formatter, "failed to parse .tasty file: {source}"),
+            Self::UnsupportedClassloaderVersion {
+                major,
+                minor,
+                experimental,
+            } => write!(
+                formatter,
+                "TASTy version {major}.{minor}.{experimental} is not enabled for the Scala 3.9 classloader; supported versions are 28.8.0 and 28.9.0"
+            ),
             Self::Ast(source) => write!(formatter, "failed to decode .tasty AST: {source}"),
             Self::MissingTypeDef => {
                 write!(formatter, "no matching TypeDef found in .tasty file")
@@ -242,6 +260,7 @@ impl std::error::Error for TastyDecodeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Parse(source) => Some(source),
+            Self::UnsupportedClassloaderVersion { .. } => None,
             Self::Ast(source) => Some(source),
             Self::MissingTypeDef
             | Self::NoTemplateBody
@@ -257,6 +276,7 @@ impl TastyDecodeError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Parse(_) => "tasty.parse_error",
+            Self::UnsupportedClassloaderVersion { .. } => "tasty.unsupported_version",
             Self::Ast(_) => "tasty.ast_error",
             Self::MissingTypeDef => "tasty.missing_type_def",
             Self::NoTemplateBody => "tasty.no_template_body",
@@ -283,6 +303,7 @@ impl TastyDecodeError {
             Self::Parse(TastyFileError::Header(_)) => "tasty.invalid_header",
             Self::Parse(TastyFileError::Asts(error)) | Self::Ast(error) => ast_error_code(error),
             Self::Parse(_) => "tasty.parse_error",
+            Self::UnsupportedClassloaderVersion { .. } => "tasty.unsupported_version",
             other => other.code(),
         }
     }
@@ -298,6 +319,9 @@ impl TastyDecodeError {
                 ast_error_category(error)
             }
             Self::Parse(_) => ClassLoadCategory::MalformedArtifact,
+            Self::UnsupportedClassloaderVersion { .. } => {
+                ClassLoadCategory::UnsupportedFeatureOrVersion
+            }
             Self::MissingTypeDef
             | Self::NoTemplateBody
             | Self::MissingModuleSuperclass
@@ -427,11 +451,35 @@ pub(crate) fn decode_module_class_with_resolvers(
     )
 }
 
+/// Parses the two stable TASTy formats validated for Scala 3.9 classpath
+/// artifacts. This policy is intentionally narrower than the generic
+/// compatible-minor relation: the compiler artifacts used by this
+/// repository are 28.8.0, and the matching Scala 3.9 library is 28.9.0.
+pub(crate) fn parse_classloader_tasty(bytes: &[u8]) -> Result<TastyFile<'_>, TastyDecodeError> {
+    let file = TastyFile::parse(bytes)?;
+    let header = file.header();
+    if !matches!(
+        (
+            header.major_version,
+            header.minor_version,
+            header.experimental_version
+        ),
+        (28, 8, 0) | (28, 9, 0)
+    ) {
+        return Err(TastyDecodeError::UnsupportedClassloaderVersion {
+            major: header.major_version,
+            minor: header.minor_version,
+            experimental: header.experimental_version,
+        });
+    }
+    Ok(file)
+}
+
 pub(crate) fn decode_identity(
     bytes: &[u8],
     requested: &BinaryName,
 ) -> Result<DecodedTastyIdentity, TastyDecodeError> {
-    let file = TastyFile::parse_scala_3_9(bytes)?;
+    let file = parse_classloader_tasty(bytes)?;
     let index = file.ast_address_index()?;
     let requested_internal = requested.as_internal();
     let simple_name = requested_internal
@@ -485,7 +533,7 @@ pub(crate) fn decode_module_identity(
     bytes: &[u8],
     requested: &BinaryName,
 ) -> Result<Option<DecodedTastyModuleIdentity>, TastyDecodeError> {
-    let file = TastyFile::parse_scala_3_9(bytes)?;
+    let file = parse_classloader_tasty(bytes)?;
     let index = file.ast_address_index()?;
     let package_path = requested.package_path();
     let object_name = requested.simple_name();
@@ -650,7 +698,7 @@ fn decode_impl(
     strict_superclass: bool,
     module_class: bool,
 ) -> Result<DecodedTastyClass, TastyDecodeError> {
-    let file = TastyFile::parse_scala_3_9(bytes)?;
+    let file = parse_classloader_tasty(bytes)?;
     let index = file.ast_address_index()?;
     let requested_internal = requested.as_internal();
     let simple_name = requested_internal
@@ -2372,6 +2420,128 @@ mod tests {
                 .join(relative_path),
         )
         .unwrap_or_else(|error| panic!("fixture {relative_path} should exist: {error}"))
+    }
+
+    fn with_header_version(mut bytes: Vec<u8>, major: u8, minor: u8, experimental: u8) -> Vec<u8> {
+        // The pinned test versions all fit in one TASTy base-128 group; the
+        // high bit marks the final group.
+        bytes[4] = major | 0x80;
+        bytes[5] = minor | 0x80;
+        bytes[6] = experimental | 0x80;
+        bytes
+    }
+
+    #[test]
+    fn classloader_accepts_only_validated_scala_3_9_tasty_formats() {
+        let compiler_28_8 = fixture_bytes("scala3-compiler/dotty/tools/dotc/core/Types.tasty");
+        let file = parse_classloader_tasty(&compiler_28_8).unwrap();
+        assert_eq!(
+            (
+                file.header().major_version,
+                file.header().minor_version,
+                file.header().experimental_version
+            ),
+            (28, 8, 0)
+        );
+        assert!(matches!(
+            TastyFile::parse_scala_3_9(&compiler_28_8),
+            Err(TastyFileError::Header(
+                dotty_tasty::header::HeaderError::UnsupportedVersion { .. }
+            ))
+        ));
+
+        let library_28_9 = fixture_bytes("scala3-library/scala/io/Source.tasty");
+        let file = parse_classloader_tasty(&library_28_9).unwrap();
+        assert_eq!(
+            (
+                file.header().major_version,
+                file.header().minor_version,
+                file.header().experimental_version
+            ),
+            (28, 9, 0)
+        );
+
+        for (major, minor, experimental) in
+            [(28u32, 7u32, 0u32), (28, 10, 0), (27, 9, 0), (28, 8, 1)]
+        {
+            let bytes = with_header_version(
+                compiler_28_8.clone(),
+                major as u8,
+                minor as u8,
+                experimental as u8,
+            );
+            let error = parse_classloader_tasty(&bytes).unwrap_err();
+            assert!(matches!(
+                &error,
+                TastyDecodeError::UnsupportedClassloaderVersion {
+                    major: found_major,
+                    minor: found_minor,
+                    experimental: found_experimental,
+                } if (*found_major, *found_minor, *found_experimental) == (major, minor, experimental)
+            ));
+            assert_eq!(error.root_cause_code(), "tasty.unsupported_version");
+            assert_eq!(
+                error.category(),
+                ClassLoadCategory::UnsupportedFeatureOrVersion
+            );
+        }
+
+        assert!(matches!(
+            parse_classloader_tasty(&compiler_28_8[..12]),
+            Err(TastyDecodeError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn real_scala_3_9_compiler_module_identity_is_decoded_from_28_8_tasty() {
+        let types = fixture_bytes("scala3-compiler/dotty/tools/dotc/core/Types.tasty");
+        let requested = BinaryName::from_internal("dotty/tools/dotc/core/Types");
+
+        decode_module_identity(&types, &requested)
+            .unwrap()
+            .expect("the pinned Types TASTy declares an Object and ModuleClass");
+
+        let universal_type =
+            fixture_bytes("scala3-compiler/dotty/tools/dotc/semanticdb/UniversalType.tasty");
+        decode_identity(
+            &universal_type,
+            &BinaryName::from_internal("dotty/tools/dotc/semanticdb/UniversalType"),
+        )
+        .expect("the pinned compiler class identity is readable from 28.8 TASTy");
+
+        let residual = decode_module_class_with_resolvers(
+            &types,
+            &BinaryName::from_internal("dotty/tools/dotc/core/Types$"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect_err("unsupported compiler parents remain a typed semantic error");
+        assert!(matches!(residual, TastyDecodeError::UnresolvedSupertype(_)));
+        assert_ne!(residual.root_cause_code(), "tasty.unsupported_version");
+
+        let contexts = fixture_bytes("scala3-compiler/dotty/tools/dotc/core/Contexts.tasty");
+        decode_module_identity(
+            &contexts,
+            &BinaryName::from_internal("dotty/tools/dotc/core/Contexts"),
+        )
+        .unwrap()
+        .expect("the pinned Contexts TASTy declares an Object");
+
+        assert!(matches!(
+            decode_identity(
+                &types,
+                &BinaryName::from_internal("dotty/tools/dotc/core/Absent")
+            ),
+            Err(TastyDecodeError::MissingTypeDef)
+        ));
+        assert!(
+            decode_module_identity(
+                &types,
+                &BinaryName::from_internal("dotty/tools/dotc/core/Absent")
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]

@@ -24,7 +24,8 @@ pub enum ClassOrigin {
 
 /// Which decoder a [`ClassResource`]'s bytes should go through:
 /// `dotty_classfile::class_file::ClassFile::decode` for [`Self::Class`],
-/// `dotty_tasty::file::TastyFile::parse_scala_3_9` for [`Self::Tasty`].
+/// the classloader's validated Scala 3.9 TASTy reader (formats 28.8.0 and
+/// 28.9.0) for [`Self::Tasty`].
 ///
 /// A classpath entry that finds both a `.tasty` and a `.class` file for
 /// the same name reports [`Self::Tasty`] (see `docs/classloader.md` §9

@@ -140,6 +140,13 @@ resolution.
 - Dual-format loading: a classpath entry reports `ClassFormat::Class` or
   `ClassFormat::Tasty` per `ClassResource`; `.tasty` is preferred when
   both exist for the same name.
+- For the pinned Scala 3.9.0 inputs, the classloader accepts stable TASTy
+  formats 28.8.0 (compiler output) and 28.9.0 (library output). This is an
+  input policy in `dotty-classloader`; the public strict
+  `TastyFile::parse_scala_3_9` API and the pickler's 28.9.0 target remain
+  unchanged. Other minor/experimental versions are rejected until explicitly
+  validated. Accepting a wire version does not imply that every semantic tree
+  can be completed; unsupported references still produce typed errors.
 - A `ClassRepository` cache keyed by `BinaryName` with explicit states
   (missing / loading / loaded / failed) so a class already being
   completed is visible to whatever references it next, instead of being
