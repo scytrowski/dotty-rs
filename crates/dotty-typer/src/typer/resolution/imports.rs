@@ -456,10 +456,15 @@ impl SourceTyper<'_> {
             {
                 return Ok(Some(symbol));
             }
-            let mut path = candidate.package_path;
+            let mut path = candidate.package_path.clone();
             path.push(self.store.names.resolve(name.text()).to_owned());
             if let Some(package) = self.resolve_external_package(&path, tree_index)? {
                 return Ok(Some(package));
+            }
+            if let Some(object) =
+                self.resolve_external_package_object(candidate.package, name, tree_index)?
+            {
+                return Ok(Some(object));
             }
         }
         if !has_canonical_root {
@@ -470,6 +475,91 @@ impl SourceTyper<'_> {
             return self.resolve_external_package(&root_qualified, tree_index);
         }
         Ok(None)
+    }
+
+    /// Looks up a package-owned Object only after the same candidate's
+    /// subpackage lookup misses. This preserves the established package
+    /// precedence while allowing a validated TASTy Object to bind the first
+    /// unrooted import segment.
+    fn resolve_external_package_object(
+        &mut self,
+        package: SymbolId,
+        name: dotty_core::Name,
+        tree_index: u32,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        let store_checkpoint = self.store.checkpoint();
+        let resolver_checkpoint = self.resolver.checkpoint();
+        let prefix = self.package_type_prefix(package);
+        let request = MemberRequest {
+            prefix,
+            name: dotty_core::Name::new(name.text(), dotty_core::Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let resolved = self.resolver.resolve_member(self.store, &request);
+        let object = match resolved {
+            Ok(Some(object)) => object,
+            Ok(None) => {
+                self.resolver.rollback_to(self.store, resolver_checkpoint);
+                self.store.rollback_to(store_checkpoint);
+                return Ok(None);
+            }
+            Err(error) => {
+                self.resolver.rollback_to(self.store, resolver_checkpoint);
+                self.store.rollback_to(store_checkpoint);
+                return Err(TyperError::SymbolResolution {
+                    source: self.source,
+                    tree_index,
+                    error,
+                });
+            }
+        };
+
+        let invalid = |reason: &'static str| TyperError::SymbolResolution {
+            source: self.source,
+            tree_index,
+            error: ResolutionError::Malformed {
+                reason: reason.to_owned(),
+            },
+        };
+        let validation = (|| {
+            if !self.store.symbols.contains(object) {
+                return Err(TyperError::UnknownSymbol { symbol: object });
+            }
+            let entry = self.store.symbols.get(object);
+            if entry.kind != SymbolKind::Object || entry.owner != Some(package) {
+                return Err(invalid(
+                    "package-term resolution returned a non-object or an object with the wrong owner",
+                ));
+            }
+            let module_class = self
+                .resolver
+                .module_class_of_object(self.store, object)
+                .map_err(|error| TyperError::SymbolResolution {
+                    source: self.source,
+                    tree_index,
+                    error,
+                })?
+                .ok_or_else(|| invalid("package Object has no validated ModuleClass identity"))?;
+            if !self.store.symbols.contains(module_class) {
+                return Err(TyperError::UnknownSymbol {
+                    symbol: module_class,
+                });
+            }
+            let module = self.store.symbols.get(module_class);
+            if module.kind != SymbolKind::ModuleClass || module.owner != Some(package) {
+                return Err(invalid(
+                    "package Object's validated ModuleClass has the wrong kind or owner",
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(error) = validation {
+            self.resolver.rollback_to(self.store, resolver_checkpoint);
+            self.store.rollback_to(store_checkpoint);
+            return Err(error);
+        }
+        Ok(Some(object))
     }
 
     fn resolve_root_package(
