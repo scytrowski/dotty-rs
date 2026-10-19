@@ -2798,7 +2798,7 @@ mod tests {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
         let base = class_symbol(&parsed, &store, &index, source, "Base");
         let derived = class_symbol(&parsed, &store, &index, source, "Derived");
-        let override_method = override_method_for_base_value(&parsed, &store, &index, source);
+        let override_method = derived_override_value(&parsed, &store, &index, source);
         assert_eq!(store.symbols.get(override_method).owner, Some(derived));
         assert!(
             store
@@ -2864,7 +2864,7 @@ mod tests {
         ));
     }
 
-    fn override_method_for_base_value(
+    fn derived_override_value(
         parsed: &dotty_parser::ParseResult,
         store: &SemanticStore,
         index: &SourceSemanticIndex,
