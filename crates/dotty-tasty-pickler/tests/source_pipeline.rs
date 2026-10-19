@@ -549,12 +549,22 @@ fn raw_numeric_leaves_consume_items_and_reject_repeated_children() {
             })
             .expect("numeric block validates within the test budget range")
     };
-    let one_numeric_statement = "package example\nclass NumericBlocks:\n  def run: Int =\n    20\n";
-    let single_budget = minimum_budget(one_numeric_statement);
+    let one_numeric_block = "package example\nclass NumericBlocks:\n  def run: Int =\n    {\n      20\n      20\n    }\n";
+    source_outputs_named_with_tree_edits(
+        one_numeric_block,
+        "NumericBlocks.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            blocks_with_stat_count_in(source_ast, typed_ast, bindings, 1);
+        },
+        |_| {},
+    )
+    .expect("single numeric statement fixture is a one-stat Block");
+    let single_budget = minimum_budget(one_numeric_block);
     let block_budget = minimum_budget(NUMERIC_BLOCKS);
     assert!(
         block_budget > single_budget,
-        "numeric statements used no additional validation items: {single_budget} / {block_budget}"
+        "additional numeric statements used no validation items: {single_budget} / {block_budget}"
     );
     assert_eq!(
         source_outputs_named_with_limits(
