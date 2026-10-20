@@ -214,6 +214,37 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
               "fresh_class": True, "adjacent_input_classfiles": False}
     if runtime:
         runtime_cases = {
+            "example/Arithmetic.tasty": (
+                "example.Arithmetic", r"public int add\(int, int\)", "ArithmeticRuntime.java",
+                """public final class ArithmeticRuntime {
+  public static void main(String[] args) {
+    example.Arithmetic arithmetic = new example.Arithmetic();
+    int add = arithmetic.add(Integer.MAX_VALUE, 1);
+    int subtract = arithmetic.subtract(Integer.MIN_VALUE, 1);
+    int multiply = arithmetic.multiply(1_073_741_824, 2);
+    int divide = arithmetic.divide(-7, 3);
+    int overflowDivide = arithmetic.divide(Integer.MIN_VALUE, -1);
+    int remainder = arithmetic.remainder(-7, 3);
+    int overflowRemainder = arithmetic.remainder(Integer.MIN_VALUE, -1);
+    int nested = arithmetic.nested(2, 3, 4);
+    int throughCall = arithmetic.throughCall(6, 7);
+    int local = arithmetic.local(6, 7);
+    if (add != Integer.MIN_VALUE || subtract != Integer.MAX_VALUE ||
+        multiply != Integer.MIN_VALUE || divide != -2 ||
+        overflowDivide != Integer.MIN_VALUE || remainder != -1 ||
+        overflowRemainder != 0 || nested != 14 || throughCall != 13 || local != 13)
+      throw new AssertionError("unexpected Arithmetic results");
+    try {
+      arithmetic.divide(1, 0);
+      throw new AssertionError("division by zero did not throw");
+    } catch (ArithmeticException expected) { }
+    System.out.println("Arithmetic = " + add + ", " + subtract + ", " + multiply +
+        ", " + divide + ", " + overflowDivide + ", " + remainder + ", " +
+        overflowRemainder + ", " + nested + ", " + throughCall + ", " + local);
+  }
+}
+""", "Arithmetic = -2147483648, 2147483647, -2147483648, -2, -2147483648, -1, 0, 14, 13, 13", 14,
+            ),
             "example/Answer.tasty": (
                 "example.Answer", r"public int value\(\)", "AnswerRuntime.java",
                 """public final class AnswerRuntime {
@@ -473,6 +504,16 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Algorithms class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Arithmetic.tasty":
+                signatures = (
+                    r"public int add\(int, int\)", r"public int subtract\(int, int\)",
+                    r"public int multiply\(int, int\)", r"public int divide\(int, int\)",
+                    r"public int remainder\(int, int\)",
+                    r"public int nested\(int, int, int\)", r"public int throughCall\(int, int\)",
+                    r"public int local\(int, int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Arithmetic class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":
