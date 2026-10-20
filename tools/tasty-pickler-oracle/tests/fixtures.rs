@@ -38,6 +38,8 @@ fn independent_fixtures_match_normalized_snapshots() {
         "example/Decisions",
         "example/Flags",
         "example/Conditionals",
+        "example/Algorithms",
+        "example/CustomOperators",
     ] {
         let expected: Value = serde_json::from_slice(
             &fs::read(
@@ -51,6 +53,85 @@ fn independent_fixtures_match_normalized_snapshots() {
         .unwrap();
         assert_eq!(inspect(&fixture(name), false).unwrap(), expected, "{name}");
     }
+}
+
+#[test]
+fn scala_39_primitive_control_flow_fixture_pins_mutable_while_and_assignment_wire_edges() {
+    let snapshot = inspect(&fixture("example/Algorithms"), false).unwrap();
+    let sum_to = named(&snapshot, "sumTo");
+    let nodes = nodes(&snapshot);
+    let by_id = |id: &Value| {
+        nodes
+            .iter()
+            .find(|node| node["id"] == *id)
+            .unwrap_or_else(|| panic!("missing node {id}"))
+    };
+    let reference_target = |id: &Value| {
+        let mut current = id.as_str().unwrap().to_owned();
+        loop {
+            let node = nodes
+                .iter()
+                .find(|node| node["id"].as_str() == Some(&current))
+                .unwrap();
+            if node["tag"] == "SHAREDtype" || node["tag"] == "SHAREDterm" {
+                current = node["reference"]["target"].as_str().unwrap().to_owned();
+                continue;
+            }
+            return node["reference"]["target"].clone();
+        }
+    };
+    let loop_node = nodes
+        .iter()
+        .find(|node| node["tag"] == "WHILE" && node["owner"] == sum_to["id"])
+        .unwrap();
+    let condition = by_id(&loop_node["condition"]);
+    assert_eq!(condition["tag"], "APPLY");
+    let less = by_id(&condition["children"][0]);
+    assert_eq!(less["tag"], "SELECTin");
+    assert_eq!(less["name"]["signed"], json!({"utf8":"<"}));
+    assert_eq!(
+        less["name"]["parameters"],
+        json!([{"qualified":[{"utf8":"scala"},{"utf8":"Int"}]}])
+    );
+    assert_eq!(
+        less["name"]["result"],
+        json!({"qualified":[{"utf8":"scala"},{"utf8":"Boolean"}]})
+    );
+
+    let block = by_id(&loop_node["body"]);
+    assert_eq!(block["tag"], "BLOCK");
+    // TASTy stores the block's final expression before its preceding stats;
+    // evaluation order is stats first, then expression.
+    let final_assignment = by_id(&block["expression"]);
+    let preceding_assignment = by_id(&block["stats"][0]);
+    assert_eq!(final_assignment["tag"], "ASSIGN");
+    assert_eq!(preceding_assignment["tag"], "ASSIGN");
+    assert_eq!(
+        reference_target(&preceding_assignment["left"]),
+        named(&snapshot, "total")["id"]
+    );
+    assert_eq!(
+        reference_target(&final_assignment["left"]),
+        named(&snapshot, "i")["id"]
+    );
+    assert_eq!(
+        nodes
+            .iter()
+            .filter(|node| node["tag"] == "SELECTin"
+                && node["owner"] == sum_to["id"]
+                && node["name"]["signed"] == json!({"utf8":"+"}))
+            .count(),
+        2
+    );
+    for local_name in ["i", "total"] {
+        let local = named(&snapshot, local_name);
+        assert_eq!(local["tag"], "VALDEF");
+        assert_eq!(local["modifiers"], json!(["MUTABLE"]));
+        assert_eq!(local["owner"], sum_to["id"]);
+    }
+    assert!(nodes.iter().any(|node| node["tag"] == "VALDEF"
+        && node["name"] == json!({"utf8":"saved"})
+        && node["modifiers"] == json!([])));
 }
 
 #[test]

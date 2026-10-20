@@ -33,6 +33,8 @@ Fixtures are under [`tests/fixtures/tasty_pickler/`](../tests/fixtures/tasty_pic
 | `Operations.scala` / `example/Operations.tasty` | Multiple methods; `use = identity(42)` is `APPLY(SELECTin(QUALTHIS(...), signed identity), INTconst 42)`; `identity(x)` has an ordered `PARAM` and `TERMREFdirect` to that parameter; `first = second` is a named forward `SELECT` from `this`; `zero()` has `EMPTYCLAUSE` |
 | `Multi.scala` / `example/Multi.tasty` | `one` and `two` are parameterless `DEFDEF`s with Int literals 1 and 2; `zero()` alone carries `EMPTYCLAUSE` and literal 0; methods remain in source order under the same class owner |
 | `ParameterDecl.scala` / `example/ParameterDecl.tasty` | `constant(first: Int, second: Int): Int = 42` has two ordered `PARAM` declarations owned by `constant`, each with an Int type tree, and an independent literal RHS |
+| `Algorithms.scala` / `example/Algorithms.tasty` | Primitive Int and Boolean operator signatures and application shapes, short-circuit/eager Boolean runtime distinction, immutable/mutable local tails, direct local references, ordered assignments and `WHILE` condition/body topology; see [the focused audit](tasty-pickler-primitive-control-flow.md) |
+| `CustomOperators.scala` / `example/CustomOperators.tasty` | Same-spelled user `+` declaration and application with `THIS` receiver and direct argument; source typer confirms its `SymbolId` is owned by `CustomOperators` |
 
 Each source produces exactly one top-level `.tasty`. Adjacent `.class` files are
 generated in temporary compiler output but are not checked in or supplied to the
@@ -166,7 +168,7 @@ the Rust inspector with `cargo build --locked`; `CARGO_TARGET_DIR` is honored.
 already-built inspector. Temporary files use Python's standard TMPDIR setting.
 
 `check` checks fixture provenance, recompiles sources into a fresh temporary
-directory and compares all eight normalized snapshots; independently decompiles
+directory and compares all normalized snapshots; independently decompiles
 and compiles each checked-in standalone fixture and reduced Answer; and requires
 Rust/Scala rejection of invalid magic and Scala rejection of a deliberately
 misplaced package file. A JSON result records each successful reader/compiler
