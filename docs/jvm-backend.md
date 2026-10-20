@@ -201,17 +201,20 @@ parameter can also be read with `aload` from its descriptor-assigned slot, and
 unqualified `this` can be read with `aload_0` after its `ThisType` matches the
 current planned class. Exact planned references may be returned with `areturn`,
 passed to virtual calls, used as call results or receivers, and discarded with
-`pop`. The local's checked class identity must match the
-initializer's `Flow::Value`; read-before-store and mutable reference locals
-fail with typed errors. Reference values may be discarded as category-one
+`pop`. The local's checked class identity must match the initializer's
+`Flow::Value`, except for the verified direct `Derived` to `Base` assignment
+supported by the current emission unit; the local and descriptor keep the
+declared class identity. Read-before-store and mutable reference locals fail
+with typed errors. Reference values may be discarded as category-one
 block statements with `pop`. Planned reference parameters and results, plus
 reference virtual-call arguments and results, are supported. Primary
-constructor metadata accepts exact references to classes in the same
-compilation unit. Method-body constructor calls may pass a reference parameter,
-an initialized immutable local of an exact planned class, or the current
-unqualified `this` when its class matches the constructor parameter. These
-references may appear between primitive arguments; each is loaded once in
-source order as part of the `new`/`dup`/arguments/`invokespecial` sequence.
+constructor metadata retains exact parameter descriptors for classes in the
+same compilation unit. Method-body constructor calls may pass a reference
+parameter, an initialized immutable local of a planned class, or the current
+unqualified `this` when it is assignable to the constructor parameter by exact
+identity or the verified direct-parent edge. These references may appear
+between primitive arguments; each is loaded once in source order as part of
+the `new`/`dup`/arguments/`invokespecial` sequence.
 Mutable reference locals, fields, nested allocations, method-call results, and
 branching expressions remain unsupported as constructor arguments. The
 uninitialized object and argument evaluation must complete in one basic block.
@@ -233,10 +236,10 @@ unsupported states remain typed build errors.
 | Source shape | Planned JVM lowering | CFG/verifier rule |
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
-| Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and value descriptor; reference types must match at CFG joins |
-| Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver, argument, and result classes must exactly match planned descriptors |
+| Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and declared value descriptor; a field write may use the verified direct `Derived` to `Base` edge |
+| Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver owner is exact or the verified direct parent; arguments and results use exact types or the bounded `Derived` to `Base` assignment |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
-| Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must exactly match; full allocation sequence remains in one basic block |
+| Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified direct-parent relation; full allocation sequence remains in one basic block |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
 | Different reference classes at a stack join | No classfile emitted | Typed exact-class merge error; no inferred `Object`/common parent |
 
