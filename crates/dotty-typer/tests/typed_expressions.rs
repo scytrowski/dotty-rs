@@ -273,6 +273,344 @@ fn types_a_monomorphic_application_through_the_public_pipeline() {
 }
 
 #[test]
+fn types_explicit_super_calls_to_direct_parent_method_symbols() {
+    let text = "class Base { def value(): Int = 10; def plainValue: Int = 12; def add(x: Int): Int = x + 2 }; class Derived extends Base { override def value(): Int = super.value() + 1; def direct(): Int = super.add(4); def parameterless(): Int = super.plainValue; def virtualCall(): Int = this.add(4) }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "super-typing.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let base_class = class_definition(&parsed, &store, &index, source, "Base").0;
+    let derived_class = class_definition(&parsed, &store, &index, source, "Derived").0;
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let mut typed_methods = std::collections::HashMap::new();
+    let mut source_super_trees = Vec::new();
+    let mut method_symbols = std::collections::HashMap::new();
+    for (tree, node) in parsed.ast.iter() {
+        if let TreeKind::Super(_) = node.kind {
+            source_super_trees.push(tree);
+        }
+        let TreeKind::DefDef(definition) = &node.kind else {
+            continue;
+        };
+        let method_name = typer
+            .store()
+            .names
+            .resolve(definition.name.as_name().text())
+            .to_owned();
+        let method = index.symbol_at(source, tree).unwrap();
+        if method_name == "add" {
+            method_symbols.insert("base_add", method);
+        }
+        if method_name == "plainValue" {
+            method_symbols.insert("base_plain_value", method);
+        }
+        if method_name == "value" && typer.store().symbols.get(method).owner == Some(base_class) {
+            method_symbols.insert("base_value", method);
+        }
+        if let Some(rhs) = definition.rhs
+            && matches!(
+                method_name.as_str(),
+                "value" | "direct" | "parameterless" | "virtualCall"
+            )
+        {
+            let context = ExpressionContext {
+                lexical: index.declaration_context_of(method).unwrap(),
+                owner: method,
+                local_scopes: None,
+            };
+            let typed = typer.type_expression(rhs, context).unwrap_or_else(|error| {
+                panic!(
+                    "typing {method_name}: {error:?}; source={:?}",
+                    parsed.ast.get(rhs).kind
+                )
+            });
+            assert_eq!(typer.type_expression(rhs, context).unwrap(), typed);
+            typed_methods.insert(method_name, typed);
+        }
+    }
+
+    let base_value = method_symbols["base_value"];
+    let base_add = method_symbols["base_add"];
+    let base_plain_value = method_symbols["base_plain_value"];
+    let selected_symbols = typed_methods
+        .values()
+        .flat_map(|root| {
+            let mut pending = vec![*root];
+            let mut selected = Vec::new();
+            while let Some(tree) = pending.pop() {
+                let node = typer.typed_ast().get(tree);
+                if let TreeKind::Select(selection) = &node.kind
+                    && let Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } = typer.store().types.get(node.ty)
+                {
+                    selected.push((*symbol, selection.qualifier));
+                }
+                pending.extend(match &node.kind {
+                    TreeKind::Select(selection) => vec![selection.qualifier],
+                    TreeKind::Apply(application) => std::iter::once(application.function)
+                        .chain(application.args.iter().copied())
+                        .collect(),
+                    TreeKind::Super(super_tree) => vec![super_tree.qual],
+                    TreeKind::Block(block) => block
+                        .stats
+                        .iter()
+                        .copied()
+                        .chain(std::iter::once(block.expr))
+                        .collect(),
+                    _ => Vec::new(),
+                });
+            }
+            selected
+        })
+        .collect::<Vec<_>>();
+    assert!(selected_symbols.iter().any(|(symbol, qualifier)| {
+        *symbol == base_value
+            && matches!(typer.typed_ast().get(*qualifier).kind, TreeKind::Super(_))
+    }));
+    assert!(selected_symbols.iter().any(|(symbol, qualifier)| {
+        *symbol == base_add && matches!(typer.typed_ast().get(*qualifier).kind, TreeKind::Super(_))
+    }));
+    assert!(selected_symbols.iter().any(|(symbol, qualifier)| {
+        *symbol == base_add && matches!(typer.typed_ast().get(*qualifier).kind, TreeKind::This(_))
+    }));
+    assert!(selected_symbols.iter().any(|(symbol, qualifier)| {
+        *symbol == base_plain_value
+            && matches!(typer.typed_ast().get(*qualifier).kind, TreeKind::Super(_))
+    }));
+    let plain_value_selection = parsed
+        .ast
+        .iter()
+        .find_map(|(source_tree, node)| {
+            let TreeKind::Select(selection) = &node.kind else {
+                return None;
+            };
+            (typer.store().names.resolve(selection.name.text()) == "plainValue"
+                && matches!(parsed.ast.get(selection.qualifier).kind, TreeKind::Super(_)))
+            .then(|| typer.source_typed_index().get(source, source_tree).unwrap())
+        })
+        .unwrap();
+    let plain_value_type = typer.typed_ast().get(plain_value_selection).ty;
+    assert!(matches!(
+        typer.store().types.get(plain_value_type),
+        Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }
+            if *symbol == base_plain_value
+                && matches!(typer.store().types.get(*prefix), Type::SuperType { .. })
+    ));
+    assert_eq!(
+        typer.widen_expression_type(plain_value_type).unwrap(),
+        definitions.int
+    );
+    assert_eq!(source_super_trees.len(), 3);
+    for source_super in source_super_trees {
+        let typed_super = typer
+            .source_typed_index()
+            .get(source, source_super)
+            .unwrap();
+        assert!(matches!(
+            typer.typed_ast().get(typed_super).kind,
+            TreeKind::Super(_)
+        ));
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_super).ty),
+            Type::SuperType { this_type, super_type }
+                if matches!(typer.store().types.get(*this_type), Type::ThisType { class } if *class == derived_class)
+                    && matches!(typer.store().types.get(*super_type), Type::TypeRef { target: TypeRefTarget::Symbol(class), .. } if *class == base_class)
+        ));
+    }
+    for (source_tree, source_node) in parsed.ast.iter() {
+        let is_super_selection = matches!(
+            &source_node.kind,
+            TreeKind::Select(selection)
+                if matches!(parsed.ast.get(selection.qualifier).kind, TreeKind::Super(_))
+        );
+        let is_super_application = matches!(
+            &source_node.kind,
+            TreeKind::Apply(application)
+                if matches!(
+                    &parsed.ast.get(application.function).kind,
+                    TreeKind::Select(selection)
+                        if matches!(parsed.ast.get(selection.qualifier).kind, TreeKind::Super(_))
+                )
+        );
+        if is_super_selection || is_super_application {
+            assert!(
+                typer
+                    .source_typed_index()
+                    .get(source, source_tree)
+                    .is_some()
+            );
+        }
+    }
+}
+
+#[test]
+fn rejects_unsupported_super_owners_members_and_application_shapes() {
+    let text = "class Root { def bad(): Int = super.value() }; class Base { def add(x: Int): Int = x; def value(): Int = 1; def plainValue: Int = 2; def abstractValue(): Int; def bodyless(): Int; def staticTarget(): Int = 3; def extensionTarget(): Int = 4 }; class Derived extends Base { def missing(): Int = super.missing(); def arity(): Int = super.add(); def argument(): Int = super.add(true); def qualified(): Int = super[Base].value(); def parameterlessApply(): Int = super.plainValue(); def abstractTarget(): Int = super.abstractValue(); def bodylessTarget(): Int = super.bodyless(); def staticFlagTarget(): Int = super.staticTarget(); def extensionFlagTarget(): Int = super.extensionTarget() }";
+    let source = SourceId::from_index(1);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "unsupported-super-typing.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    for (tree, node) in parsed.ast.iter() {
+        let TreeKind::DefDef(definition) = &node.kind else {
+            continue;
+        };
+        let flag = match store.names.resolve(definition.name.as_name().text()) {
+            "staticTarget" => Some(dotty_core::SymbolFlags::STATIC),
+            "extensionTarget" => Some(dotty_core::SymbolFlags::EXTENSION),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            let symbol = index.symbol_at(source, tree).unwrap();
+            let flags = store.symbols.get(symbol).flags | flag;
+            store.symbols.get_mut(symbol).flags = flags;
+        }
+    }
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let mut outcomes = std::collections::HashMap::new();
+    for (tree, node) in parsed.ast.iter() {
+        let TreeKind::DefDef(definition) = &node.kind else {
+            continue;
+        };
+        let name = typer
+            .store()
+            .names
+            .resolve(definition.name.as_name().text())
+            .to_owned();
+        if !matches!(
+            name.as_str(),
+            "bad"
+                | "missing"
+                | "arity"
+                | "argument"
+                | "qualified"
+                | "parameterlessApply"
+                | "abstractTarget"
+                | "bodylessTarget"
+                | "staticFlagTarget"
+                | "extensionFlagTarget"
+        ) {
+            continue;
+        }
+        let Some(rhs) = definition.rhs else { continue };
+        let method = index.symbol_at(source, tree).unwrap();
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(method).unwrap(),
+            owner: method,
+            local_scopes: None,
+        };
+        outcomes.insert(name, typer.type_expression(rhs, context).unwrap_err());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+    }
+    assert!(matches!(
+        outcomes["bad"],
+        TyperError::UnsupportedSuper {
+            reason: "super requires exactly one direct non-Object class parent",
+            ..
+        }
+    ));
+    assert!(matches!(
+        outcomes["missing"],
+        TyperError::MemberNotFound { .. }
+    ));
+    assert!(matches!(
+        outcomes["arity"],
+        TyperError::ApplicationArityMismatch {
+            expected: 1,
+            actual: 0,
+            ..
+        }
+    ));
+    assert!(matches!(
+        outcomes["argument"],
+        TyperError::ApplicationArgumentTypeMismatch { .. }
+    ));
+    assert!(matches!(
+        outcomes["qualified"],
+        TyperError::UnsupportedSuper {
+            reason: "trait-qualified super is not supported",
+            ..
+        }
+    ));
+    assert!(
+        matches!(
+            outcomes["parameterlessApply"],
+            TyperError::ApplicationCalleeNotMethod { .. }
+        ),
+        "{:?}",
+        outcomes["parameterlessApply"]
+    );
+    for method in ["abstractTarget", "bodylessTarget"] {
+        assert!(matches!(
+            outcomes[method],
+            TyperError::UnsupportedSuper { .. }
+        ));
+    }
+    for method in ["staticFlagTarget", "extensionFlagTarget"] {
+        assert!(matches!(
+            outcomes[method],
+            TyperError::UnsupportedSuper {
+                reason: "selected parent member is not a public concrete instance method",
+                ..
+            }
+        ));
+    }
+}
+
+#[test]
 fn parent_constructor_arguments_keep_child_parameter_and_source_identities() {
     let text = "class Base(seed: Int, enabled: Boolean) {}\nclass ByParameter(start: Int, active: Boolean) extends Base(start, active) {}\nclass ByLiteral(start: Int) extends Base(42, true) {}\nclass Dep {}\nclass RefBase(dep: Dep) {}\nclass RefChild(dep: Dep) extends RefBase(dep) {}\n";
     let source = SourceId::from_index(1370);

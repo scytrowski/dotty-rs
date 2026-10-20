@@ -1354,6 +1354,13 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
     },
+    /// Explicit `super` is limited to an unqualified direct class parent and
+    /// one public, concrete, monomorphic method declared by that parent.
+    UnsupportedSuper {
+        source: SourceId,
+        tree_index: u32,
+        reason: &'static str,
+    },
     /// Member discovery failed with a typed lookup error.
     MemberLookup(Box<MemberLookupError>),
     /// The source expression form is outside this issue's supported subset.

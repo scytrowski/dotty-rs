@@ -5,7 +5,10 @@ bounded implementation steps. Source compatibility targets Scala 3.9.0
 revision `777528f19a58e794c9954a42f433373472ec57f8`; verifier rules refer to
 Java SE 21. Issues #1369 and #1370 establish source typing and verifier
 contracts for a narrow parent application. Issue #1371 adds bounded JVM
-constructor lowering. Explicit `super` method calls remain unimplemented.
+constructor lowering. Issue #1372 adds Typer support for an unqualified
+`super` selection targeting one public, concrete, monomorphic method declared
+directly by the current source class's sole non-Object class parent. JVM
+emission of that typed shape remains a separate follow-up.
 
 ## Reproduce the current behavior
 
@@ -15,8 +18,9 @@ pipeline:
 ```text
 cargo test -p dotty-typer --test typed_expressions parent_constructor --locked
 cargo test -p dotty-typer --test typed_expressions unsupported_parent_constructor --locked
+cargo test -p dotty-typer --test typed_expressions super_calls --locked
 cargo test -p dotty --test jvm_source_compilation parameterized_parent_constructor --locked
-cargo test -p dotty --test jvm_source_compilation super_method_source_is_rejected_by_typer_before_jvm_emission --locked
+cargo test -p dotty --test jvm_source_compilation typed_super_method_source_remains_rejected_before_jvm_emission --locked
 ```
 
 For `class Derived(start: Int) extends Base(start)`, the parser preserves the
@@ -64,27 +68,35 @@ argument forms and unplanned reference types return typed errors without
 publishing class files. The adapter must not retype expressions or infer
 constructor targets from names or `ClassInfo.parents`.
 
-For all characterized source forms below, parsing accepts a method selection,
-but source typing fails first with
-`TyperError::UnsupportedExpression { expression_kind: "expression or declaration tree", .. }`.
-No JVM output is published. Current cases include unqualified
-`super.value()` and `super.increment()`, qualified `super[Base].value()`,
-`Base.super.value()`, and `super.value()` in a class with no declared parent.
-The same generic Typer error is not yet a sufficiently precise long-term
-diagnostic for unsupported `super` forms.
+Unqualified `super.value()` and `super.add(4)` now type through the real
+source pipeline. The typed `Super` carries `Type::SuperType` with
+`ThisType(Derived)` and the direct parent's canonical `TypeRef`; its `Select`
+carries a `TermRefTarget::Symbol` for the declaration in that parent's own
+scope. The ordinary application path uses this selected method type directly,
+without passing the `Super` receiver through inherited virtual-member lookup.
+The source-to-typed index retains the `Super`, `Select`, and `Apply` roots.
+
+The typer rejects trait-qualified or outer-qualified super, use outside an
+ordinary source class instance method, no direct non-Object parent, multiple
+parents, generic/non-plain parent types, missing direct declarations, overload
+buckets, non-method terms, and private, abstract, static, or extension
+methods. Failures are typed (`UnsupportedSuper`, `MemberNotFound`, or
+`OverloadedSelectionDeferred`) and never rewrite the expression as a virtual
+call. JVM emission still has no lowering for the typed super call.
 
 The untyped AST for the supported spelling `super.value()` is a selection
 whose qualifier is `TreeKind::Super { qual: This(None), mix: None }` and whose
 name is `value`; an application adds an `Apply` with the argument list. The
 parser also retains the qualifier of `super[Base]` in `mix`, and the outer
-qualifier in `Base.super`. The current typer does not produce a typed
-`Type::SuperType` or selected member for these trees.
+qualifier in `Base.super`. The typer produces a `Type::SuperType` and canonical
+selected member for the supported unqualified direct-parent form; the other
+qualifiers remain rejected.
 
 ## Target semantic and bytecode contracts
 
-Future typing of an unqualified direct-parent call should retain canonical
-identity, not only a member name. For `Derived extends Base` with
-`super.value()`, the intended typed relation is:
+Typing of an unqualified direct-parent call retains canonical identity, not
+only a member name. For `Derived extends Base` with `super.value()`, the typed
+relation is:
 
 ```text
 Super(qual = This(None), mix = None)
@@ -215,11 +227,11 @@ baseline for all follow-up work.
 | Source shape | Current observed result | Required boundary / next owner |
 | --- | --- | --- |
 | `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then source-ordered arguments, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
-| `super.value()` targeting direct `Base.value` | Parser preserves `Super` selection; typer returns generic `UnsupportedExpression`; no class file is published | Resolve the canonical direct-parent method symbol — [#1372](https://github.com/scytrowski/dotty-rs/issues/1372); separately validate initialized-receiver `invokespecial` — [#1373](https://github.com/scytrowski/dotty-rs/issues/1373); lower only a checked target as special dispatch — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
+| `super.value()` targeting direct `Base.value` | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical Base symbol; JVM emission is not implemented | Separately validate initialized-receiver `invokespecial` — [#1373](https://github.com/scytrowski/dotty-rs/issues/1373); lower only a checked target as special dispatch — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
 | Parameterized parent plus explicit direct-super calls, run on the JVM | Not implemented; no output path exists for the required combination | Source-to-classfile-to-JDK integration and runtime behavior — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `extends Base` with accessible `Base.<init>()V` | Supported and verified by existing source-backed regression | Preserve direct-parent ownership and post-super analysis in `dotty-jvm` and `dotty-classfile` |
 | `base.value()` or inherited `derived.value()` | Supported virtual calls use the selected declaration's owner and `invokevirtual` | Preserve current dynamic-dispatch and `Methodref` behavior |
-| Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Currently rejected in typer with generic `UnsupportedExpression`; no output | Replace with explicit typed errors while keeping these shapes rejected in the initial slice — #1372 and #1374 |
+| Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Rejected in typer with focused `UnsupportedSuper` or member-resolution errors; no JVM lowering | Keep these shapes rejected in the initial slice — #1374 |
 
 Source typing proof, verifier support, and bounded lowering remain separate
 contracts at their owning boundaries. The integration fixture exercises the

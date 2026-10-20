@@ -571,6 +571,114 @@ impl SourceTyper<'_> {
         )
     }
 
+    pub(in crate::typer) fn type_super_expression(
+        &mut self,
+        tree: TreeId<Untyped>,
+        super_tree: dotty_core::ast::Super<Untyped>,
+        position: Option<SourceSpan>,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let source = self.source;
+        let tree_index = tree.index();
+        let unsupported = |reason| TyperError::UnsupportedSuper {
+            source,
+            tree_index,
+            reason,
+        };
+        if super_tree.mix.is_some() {
+            return Err(unsupported("trait-qualified super is not supported"));
+        }
+        if !matches!(
+            self.arena.try_get(super_tree.qual).map(|node| &node.kind),
+            Some(TreeKind::This(dotty_core::ast::This { qual: None }))
+        ) {
+            return Err(unsupported(
+                "only the current unqualified super is supported",
+            ));
+        }
+        if !self.store.symbols.contains(context.owner)
+            || self.store.symbols.get(context.owner).kind != SymbolKind::Method
+        {
+            return Err(unsupported("super is only supported in an instance method"));
+        }
+        if self
+            .store
+            .symbols
+            .get(context.owner)
+            .flags
+            .contains(SymbolFlags::STATIC)
+        {
+            return Err(unsupported("super is unavailable in a static method"));
+        }
+        let Some(current_class) = self.store.symbols.get(context.owner).owner else {
+            return Err(unsupported("the enclosing method has no class owner"));
+        };
+        if !self.store.symbols.contains(current_class)
+            || self.store.symbols.get(current_class).kind != SymbolKind::Class
+            || !self.is_current_source_symbol(current_class)
+        {
+            return Err(unsupported(
+                "super requires a source-defined ordinary class",
+            ));
+        }
+        let current_info = self
+            .class_info(current_class, info_journal)
+            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        let mut direct_parents = Vec::new();
+        for parent_type in current_info.parents {
+            let Some(Type::TypeRef {
+                target: TypeRefTarget::Symbol(parent),
+                ..
+            }) = self.store.types.try_get(parent_type)
+            else {
+                return Err(unsupported(
+                    "the direct parent type is not a plain class type",
+                ));
+            };
+            if *parent != self.definitions.object_class {
+                direct_parents.push((parent_type, *parent));
+            }
+        }
+        let [(parent_type, parent)] = direct_parents.as_slice() else {
+            return Err(unsupported(
+                "super requires exactly one direct non-Object class parent",
+            ));
+        };
+        if !self.store.symbols.contains(*parent)
+            || self.store.symbols.get(*parent).kind != SymbolKind::Class
+        {
+            return Err(unsupported("super parent must be an ordinary class"));
+        }
+        let this_type = self.store.types.alloc(Type::ThisType {
+            class: current_class,
+        });
+        let super_type = self.store.types.alloc(Type::SuperType {
+            this_type,
+            super_type: *parent_type,
+        });
+        let qualifier =
+            self.type_expression_inner(super_tree.qual, context, info_journal, new_mappings)?;
+        let qualifier_type = self.typed_arena.get(qualifier).ty;
+        if !matches!(
+            self.store.types.try_get(qualifier_type),
+            Some(Type::ThisType { class }) if *class == current_class
+        ) {
+            return Err(unsupported(
+                "super qualifier does not bind to the current class",
+            ));
+        }
+        Ok(self.typed_arena.alloc(Tree {
+            kind: TreeKind::Super(dotty_core::ast::Super {
+                qual: qualifier,
+                mix: None,
+            }),
+            position,
+            ty: super_type,
+        }))
+    }
+
     pub(in crate::typer) fn type_identifier_expression(
         &mut self,
         tree: TreeId<Untyped>,
@@ -653,6 +761,16 @@ impl SourceTyper<'_> {
             self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?
         };
         let receiver_type = self.typed_arena.get(qualifier).ty;
+        if matches!(self.typed_arena.get(qualifier).kind, TreeKind::Super(_)) {
+            return self.type_super_selected_member(
+                tree.index(),
+                qualifier,
+                selection.name,
+                selection.backquoted,
+                position,
+                info_journal,
+            );
+        }
         self.require_stable_application_selection_prefix(qualifier, receiver_type, tree.index())?;
         let package_receiver = matches!(
             self.store.types.try_get(receiver_type),
@@ -692,6 +810,135 @@ impl SourceTyper<'_> {
             selection.backquoted,
             position,
             info_journal,
+        )
+    }
+
+    fn type_super_selected_member(
+        &mut self,
+        tree_index: u32,
+        qualifier: TreeId<Typed>,
+        name: Name,
+        backquoted: bool,
+        position: Option<SourceSpan>,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TreeId<Typed>, TyperError> {
+        let receiver_type = self.typed_arena.get(qualifier).ty;
+        let parent_type = match self.store.types.try_get(receiver_type) {
+            Some(Type::SuperType { super_type, .. }) => *super_type,
+            _ => {
+                return Err(TyperError::UnsupportedSuper {
+                    source: self.source,
+                    tree_index,
+                    reason: "typed super expression has no SuperType",
+                });
+            }
+        };
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(parent),
+            ..
+        }) = self.store.types.try_get(parent_type)
+        else {
+            return Err(TyperError::UnsupportedSuper {
+                source: self.source,
+                tree_index,
+                reason: "direct superclass is not a plain class type",
+            });
+        };
+        let parent = *parent;
+        let info = self
+            .class_info(parent, info_journal)
+            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        let candidates = self.store.scopes.get(info.declarations).lookup_all(&name);
+        let [symbol] = candidates else {
+            if candidates.is_empty() {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver: parent_type,
+                    name,
+                });
+            }
+            return Err(TyperError::OverloadedSelectionDeferred {
+                source: self.source,
+                tree_index,
+                name,
+            });
+        };
+        let symbol = *symbol;
+        if !self.store.symbols.contains(symbol) {
+            return Err(TyperError::UnknownSymbol { symbol });
+        }
+        let declaration = self.store.symbols.get(symbol);
+        let forbidden_flags = [
+            SymbolFlags::ABSTRACT,
+            SymbolFlags::STATIC,
+            SymbolFlags::EXTENSION,
+        ];
+        if declaration.owner != Some(parent)
+            || declaration.kind != SymbolKind::Method
+            || forbidden_flags
+                .iter()
+                .any(|flag| declaration.flags.contains(*flag))
+            || declaration.visibility != Visibility::Public
+        {
+            return Err(TyperError::UnsupportedSuper {
+                source: self.source,
+                tree_index,
+                reason: "selected parent member is not a public concrete instance method",
+            });
+        }
+        if let Some(
+            SourceDefinition::Canonical { source, tree }
+            | SourceDefinition::Derived { source, tree },
+        ) = self.index.definition_of(symbol)
+            && source == self.source
+            && !matches!(
+                self.arena.try_get(tree).map(|node| &node.kind),
+                Some(TreeKind::DefDef(definition)) if definition.rhs.is_some()
+            )
+        {
+            return Err(TyperError::UnsupportedSuper {
+                source: self.source,
+                tree_index,
+                reason: "selected source method has no implementation body",
+            });
+        }
+        let method_type = self.completed_expression_symbol_info(symbol, info_journal)?;
+        let supported_signature = match self.store.types.try_get(method_type) {
+            Some(Type::Method(method)) => {
+                method.kind == MethodKind::Plain
+                    && method.params.iter().all(|parameter| {
+                        !parameter.erased
+                            && !parameter.varargs
+                            && !matches!(
+                                self.store.types.try_get(parameter.ty),
+                                Some(Type::ByName { .. })
+                            )
+                    })
+                    && !matches!(
+                        self.store.types.try_get(method.result),
+                        Some(Type::Method(_) | Type::Poly(_))
+                    )
+            }
+            // Parameterless `def m: T` is represented by its result type.
+            // Explicit `def m(): T` retains a zero-argument Method wrapper.
+            Some(ty) if !matches!(ty, Type::Poly(_) | Type::ByName { .. }) => true,
+            _ => false,
+        };
+        if !supported_signature {
+            return Err(TyperError::UnsupportedSuper {
+                source: self.source,
+                tree_index,
+                reason: "selected parent member does not have one plain monomorphic clause",
+            });
+        }
+        let ty = self.store.types.alloc(Type::TermRef {
+            prefix: receiver_type,
+            target: TermRefTarget::Symbol(symbol),
+        });
+        Ok(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                .select(qualifier, name, backquoted, ty, position),
         )
     }
 
