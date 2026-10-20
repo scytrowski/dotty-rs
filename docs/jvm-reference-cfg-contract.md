@@ -52,6 +52,14 @@ while branched constructors remain unsupported. The
 `StackMapFrameGenerator` maps every initialized class through a validated
 `CONSTANT_Class` index and emits `Object(index)` entries.
 
+For class-aware method analysis, ordinary `invokespecial` is separate from
+constructor invocation. It requires an explicit current-class to direct-parent
+edge, an exact `Methodref` owner for that parent, an `ACC_SUPER` emitting
+class in `ClassFileBuilder`, and an initialized receiver whose exact class is
+the emitting class. It consumes the descriptor arguments and pushes only the
+supported declared result. The direct-parent method call never rewrites
+uninitialized allocation aliases.
+
 The constructor path in `ClassFileBuilder` rejects branched `<init>` bodies
 because it does not track the transition from `uninitializedThis` to
 initialized `this`. Class-file analysis supports exact object parameters and
@@ -130,6 +138,7 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | `invokevirtual` | Validate methodref and descriptor. Pop supported arguments right-to-left; each object argument and receiver must be assignable to its declared class/owner using the explicit hierarchy. Push the exact object result or int-like result. Arrays and category-two types remain unsupported. |
 | `new` | Validate the `CONSTANT_Class`; push a fresh uninitialized allocation-site identity. |
 | `invokespecial <init>` | The constructor owner must equal the uninitialized allocation class; constructor arguments use explicit hierarchy assignability. On normal completion rewrite all aliases of that allocation to `Initialized(owner)`. |
+| `invokespecial DirectParent.method` | Require the `Methodref` owner to equal the validated direct parent and the receiver to be exactly the initialized emitting class. Validate the supported descriptor arguments, then push its exact reference or int-like result. The class-file builder requires `ACC_SUPER`; constructors keep their separate allocation transfer. |
 | Integer instructions and branches | Preserve the existing integer transfer rules. Branch operands are int-like only; reference equality branches are out of scope. |
 | Returns | Preserve primitive/void checks; `areturn` requires an initialized reference assignable to the planned result class using the explicit hierarchy. |
 

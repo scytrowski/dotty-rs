@@ -1216,6 +1216,127 @@ fn reference_fields_and_constructor_arguments_verify_with_jdk() {
 }
 
 #[test]
+fn direct_super_invokespecial_verifies_and_executes_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let package_dir = directory.path().join("example");
+    fs::create_dir_all(&package_dir).unwrap();
+
+    let mut base = ClassFileBuilder::new("example/Base", version).unwrap();
+    base.add_instance_method("<init>", "()V", |code| {
+        code.aload(0)?;
+        code.invokespecial("java/lang/Object", "<init>", "()V")?;
+        code.return_void()?;
+        Ok(())
+    })
+    .unwrap()
+    .add_instance_method("value", "()I", |code| {
+        code.iconst(41)?;
+        code.ireturn()?;
+        Ok(())
+    })
+    .unwrap();
+    fs::write(package_dir.join("Base.class"), base.encode().unwrap()).unwrap();
+
+    let mut derived = ClassFileBuilder::new("example/Derived", version).unwrap();
+    derived
+        .set_super_class(Some("example/Base"))
+        .unwrap()
+        .add_instance_method("<init>", "()V", |code| {
+            code.aload(0)?;
+            code.invokespecial("example/Base", "<init>", "()V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap()
+        .add_instance_method("superValue", "()I", |code| {
+            code.aload(0)?;
+            code.invokespecial("example/Base", "value", "()I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap()
+        .add_instance_method("superValueOnBranch", "(Z)I", |code| {
+            let otherwise = code.new_label()?;
+            code.iload(1)?;
+            code.ifeq(otherwise.clone())?;
+            code.aload(0)?;
+            code.invokespecial("example/Base", "value", "()I")?;
+            code.ireturn()?;
+            code.mark(otherwise)?;
+            code.iconst(0)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    let derived_bytes = derived.encode().unwrap();
+    let decoded_derived = decode_and_validate(&derived_bytes);
+    let branch_code = code(method_named(&decoded_derived, "superValueOnBranch"));
+    assert!(
+        branch_code
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, Attribute::Other(attribute)
+                if decoded_derived.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable")))
+    );
+    assert!(
+        !code(method_named(&decoded_derived, "superValue"))
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, Attribute::Other(attribute)
+                if decoded_derived.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable")))
+    );
+    fs::write(package_dir.join("Derived.class"), derived_bytes).unwrap();
+
+    let harness_path = package_dir.join("DirectSuperHarness.java");
+    fs::write(
+        &harness_path,
+        "package example; public class DirectSuperHarness { public static void main(String[] args) { Derived value = new Derived(); if (value.superValue() != 41 || value.superValueOnBranch(true) != 41 || value.superValueOnBranch(false) != 0) throw new AssertionError(); System.out.print(\"ok\"); } }",
+    )
+    .unwrap();
+    let directory_arg = directory.path().to_string_lossy().into_owned();
+    let harness_arg = harness_path.to_string_lossy().into_owned();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            &directory_arg,
+            "-d",
+            &directory_arg,
+            &harness_arg,
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for direct-super harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            &directory_arg,
+            "example.DirectSuperHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected direct-super invokespecial\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "ok");
+}
+
+#[test]
 fn parameterized_direct_super_constructor_prologue_verifies_with_jdk() {
     if !require_jdk_or_skip() {
         return;

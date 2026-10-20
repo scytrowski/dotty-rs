@@ -159,6 +159,10 @@ impl ClassHierarchy {
         false
     }
 
+    pub(crate) fn direct_superclass(&self, class: &ClassIdentity) -> Option<&ClassIdentity> {
+        self.superclasses.get(class)
+    }
+
     pub(crate) fn with_edge(
         &self,
         subclass: &str,
@@ -433,6 +437,41 @@ pub enum AnalysisError {
         expected: ClassIdentity,
         /// Exact receiver class on the operand stack.
         actual: ClassIdentity,
+    },
+    /// A direct-super invocation has no validated direct-superclass edge.
+    MissingDirectSuperclassProof {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Emitting class identity requiring a direct-parent proof.
+        current: ClassIdentity,
+    },
+    /// A direct-super method reference names something other than the exact direct parent.
+    DirectSuperMethodOwnerMismatch {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// The validated direct superclass.
+        expected: ClassIdentity,
+        /// Owner named by the method reference.
+        actual: ClassIdentity,
+    },
+    /// A direct-super call receiver must have the exact emitting-class identity.
+    DirectSuperMethodReceiverMismatch {
+        /// Zero-based instruction position.
+        instruction: usize,
+        /// Emitting class identity required for the receiver.
+        expected: ClassIdentity,
+        /// Exact receiver class on the operand stack.
+        actual: ClassIdentity,
+    },
+    /// A direct-super invocation requires an ordinary instance method context.
+    DirectSuperMethodRequiresInstanceContext {
+        /// Zero-based instruction position.
+        instruction: usize,
+    },
+    /// A direct-super invocation requires the emitting class to carry `ACC_SUPER`.
+    DirectSuperMethodRequiresAccSuper {
+        /// Zero-based instruction position.
+        instruction: usize,
     },
     /// An uninitialized allocation was used as an ordinary value.
     UninitializedReferenceUse {
@@ -873,6 +912,42 @@ impl fmt::Display for AnalysisError {
                 "instruction {instruction} method owner {} does not match receiver class {}",
                 expected.internal_name(),
                 actual.internal_name()
+            ),
+            Self::MissingDirectSuperclassProof {
+                instruction,
+                current,
+            } => write!(
+                formatter,
+                "instruction {instruction} has no validated direct superclass for {}",
+                current.internal_name()
+            ),
+            Self::DirectSuperMethodOwnerMismatch {
+                instruction,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} direct-super method owner {} is not the direct superclass {}",
+                actual.internal_name(),
+                expected.internal_name()
+            ),
+            Self::DirectSuperMethodReceiverMismatch {
+                instruction,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} direct-super receiver {} is not the current class {}",
+                actual.internal_name(),
+                expected.internal_name()
+            ),
+            Self::DirectSuperMethodRequiresInstanceContext { instruction } => write!(
+                formatter,
+                "instruction {instruction} direct-super invocation requires a non-static instance method"
+            ),
+            Self::DirectSuperMethodRequiresAccSuper { instruction } => write!(
+                formatter,
+                "instruction {instruction} direct-super invocation requires ACC_SUPER on the current class"
             ),
             Self::UninitializedReferenceUse {
                 instruction,
@@ -1498,6 +1573,7 @@ fn analyze_validated_with_current_class_inner(
             &descriptor,
             constant_pool,
             current_class.as_ref(),
+            is_static,
         )?;
         returned = is_return(instruction);
     }
@@ -1682,6 +1758,7 @@ impl Frame {
         method_descriptor: &MethodDescriptor,
         pool: &ConstantPool,
         flow_current_class: Option<&ClassIdentity>,
+        flow_is_static: bool,
     ) -> Result<(), AnalysisError> {
         match instruction {
             Instruction::AConstNull => self.push(instruction_index, ValueKind::Reference)?,
@@ -1873,16 +1950,25 @@ impl Frame {
                 }
             }
             Instruction::InvokeSpecial(reference) => {
-                if flow_current_class.is_some() {
+                if let Some(current_class) = flow_current_class {
                     let (owner, name, descriptor) =
                         self.special_method(instruction_index, reference, pool)?;
-                    self.invoke_constructor_flow(
-                        instruction_index,
-                        reference.index().get(),
-                        &owner,
-                        name,
-                        &descriptor,
-                    )?;
+                    if name == "<init>" {
+                        self.invoke_constructor_flow(
+                            instruction_index,
+                            reference.index().get(),
+                            &owner,
+                            name,
+                            &descriptor,
+                        )?;
+                    } else {
+                        self.invoke_direct_super_flow(
+                            instruction_index,
+                            current_class,
+                            flow_is_static,
+                            (reference.index().get(), &owner, name, &descriptor),
+                        )?;
+                    }
                 } else {
                     let descriptor = self.method_descriptor(instruction_index, reference, pool)?;
                     self.invoke(instruction_index, &descriptor, true)?;
@@ -2714,6 +2800,96 @@ impl Frame {
         Ok(())
     }
 
+    fn invoke_direct_super_flow(
+        &mut self,
+        instruction: usize,
+        current_class: &ClassIdentity,
+        is_static: bool,
+        method: (ConstantPoolIndex, &ClassIdentity, &str, &MethodDescriptor),
+    ) -> Result<(), AnalysisError> {
+        let (index, actual_owner, name, descriptor) = method;
+        if is_static {
+            return Err(AnalysisError::DirectSuperMethodRequiresInstanceContext { instruction });
+        }
+        validate_flow_virtual_signature(instruction, index, name, descriptor)?;
+        let expected_owner = self
+            .hierarchy
+            .direct_superclass(current_class)
+            .cloned()
+            .ok_or_else(|| AnalysisError::MissingDirectSuperclassProof {
+                instruction,
+                current: current_class.clone(),
+            })?;
+        if actual_owner != &expected_owner {
+            return Err(AnalysisError::DirectSuperMethodOwnerMismatch {
+                instruction,
+                expected: expected_owner,
+                actual: actual_owner.clone(),
+            });
+        }
+        self.ensure_no_pending_allocation(instruction)?;
+        check_parameter_slots(descriptor, true, Some(instruction))?;
+        for (parameter, ty) in descriptor.parameters.iter().enumerate().rev() {
+            match ty {
+                FieldType::Int | FieldType::Boolean => {
+                    self.pop_expected(instruction, ValueKind::Int)?;
+                }
+                FieldType::Object(name) => {
+                    let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+                    let expected = ClassIdentity(Arc::from(name.as_str()));
+                    let actual = actual.ok_or(AnalysisError::MissingExactMethodArgument {
+                        instruction,
+                        parameter,
+                    })?;
+                    if !self
+                        .hierarchy
+                        .is_assignable(actual.internal_name(), expected.internal_name())
+                    {
+                        return Err(AnalysisError::WrongExactMethodArgument {
+                            instruction,
+                            parameter,
+                            expected,
+                            actual,
+                        });
+                    }
+                }
+                _ => {
+                    return Err(AnalysisError::UnsupportedFlowMethodParameter {
+                        instruction,
+                        parameter,
+                        actual: ty.clone(),
+                    });
+                }
+            }
+        }
+        let (_, actual_receiver) = self.pop_typed(instruction, ValueKind::Reference)?;
+        let actual_receiver =
+            actual_receiver.ok_or(AnalysisError::MissingExactReference { instruction })?;
+        if actual_receiver != *current_class {
+            return Err(AnalysisError::DirectSuperMethodReceiverMismatch {
+                instruction,
+                expected: current_class.clone(),
+                actual: actual_receiver,
+            });
+        }
+        match descriptor.return_type.as_ref() {
+            None => {}
+            Some(FieldType::Int | FieldType::Boolean) => {
+                self.push(instruction, ValueKind::Int)?;
+            }
+            Some(FieldType::Object(name)) => {
+                self.push_object(instruction, ClassIdentity(Arc::from(name.as_str())))?;
+            }
+            Some(actual) => {
+                return Err(AnalysisError::UnsupportedFlowMethodReturn {
+                    instruction,
+                    actual: actual.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn pop_method_receiver(
         &mut self,
         instruction: usize,
@@ -3293,6 +3469,7 @@ impl CfgCodeAnalyzer {
                         &descriptor,
                         constant_pool,
                         current_class.as_ref(),
+                        is_static,
                     )?,
                     CodeElement::Branch(branch) => {
                         apply_branch(&mut frame, instruction_index, branch)?;
@@ -4124,6 +4301,236 @@ mod tests {
                 false,
                 &pool,
                 class_index,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn invokespecial_direct_parent_methods_preserve_cfg_value_types() {
+        let mut builder = ConstantPoolBuilder::new();
+        let derived = builder.class("example/Derived").unwrap();
+        let value = builder.method_ref("example/Base", "value", "()I").unwrap();
+        let add = builder.method_ref("example/Base", "add", "(I)I").unwrap();
+        let identity = builder
+            .method_ref(
+                "example/Base",
+                "identity",
+                "(Lexample/Arg;)Lexample/Result;",
+            )
+            .unwrap();
+        let pool = builder.finish().unwrap();
+        let hierarchy =
+            ClassHierarchy::from_edges([("example/Derived".to_owned(), "example/Base".to_owned())])
+                .unwrap();
+
+        let mut arithmetic = CodeSequence::new();
+        arithmetic
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(value),
+            )))
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .instruction(Instruction::IAdd)
+            .instruction(Instruction::IReturn);
+        let arithmetic_graph = ControlFlowGraph::build(&arithmetic).unwrap();
+        let arithmetic_flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &arithmetic_graph,
+            "valuePlusOne",
+            "()I",
+            false,
+            &pool,
+            derived,
+            &hierarchy,
+        )
+        .unwrap();
+        assert_eq!(arithmetic_flow.max_stack, 2);
+
+        let mut branched = CodeSequence::new();
+        let otherwise = branched.new_label().unwrap();
+        branched
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .branch(BranchInstruction::IfEq(otherwise.clone()))
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ILoad(LocalIndex::new(2)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(add),
+            )))
+            .instruction(Instruction::IReturn)
+            .bind(otherwise)
+            .unwrap()
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(add),
+            )))
+            .instruction(Instruction::IReturn);
+        let branched_graph = ControlFlowGraph::build(&branched).unwrap();
+        let branched_flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &branched_graph,
+            "branchingCall",
+            "(ZI)I",
+            false,
+            &pool,
+            derived,
+            &hierarchy,
+        )
+        .unwrap();
+        assert_eq!(branched_flow.max_stack, 2);
+
+        let mut object_result = CodeSequence::new();
+        object_result
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(identity),
+            )))
+            .instruction(Instruction::AReturn);
+        let object_result_graph = ControlFlowGraph::build(&object_result).unwrap();
+        let object_result_flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &object_result_graph,
+            "identity",
+            "(Lexample/Arg;)Lexample/Result;",
+            false,
+            &pool,
+            derived,
+            &hierarchy,
+        )
+        .unwrap();
+        assert_eq!(object_result_flow.max_stack, 2);
+    }
+
+    #[test]
+    fn rejects_invalid_direct_super_invokespecial_targets_and_receivers() {
+        let mut builder = ConstantPoolBuilder::new();
+        let derived = builder.class("example/Derived").unwrap();
+        let value = builder.method_ref("example/Base", "value", "()I").unwrap();
+        let sibling_value = builder
+            .method_ref("example/Sibling", "value", "()I")
+            .unwrap();
+        let init = builder
+            .method_ref("example/Derived", "<init>", "()V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+        let hierarchy =
+            ClassHierarchy::from_edges([("example/Derived".to_owned(), "example/Base".to_owned())])
+                .unwrap();
+
+        let mut wrong_owner = CodeSequence::new();
+        wrong_owner
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(sibling_value),
+            )))
+            .instruction(Instruction::IReturn);
+        let wrong_owner_graph = ControlFlowGraph::build(&wrong_owner).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_hierarchy(
+                &wrong_owner_graph,
+                "wrongParent",
+                "()I",
+                false,
+                &pool,
+                derived,
+                &hierarchy,
+            ),
+            Err(AnalysisError::DirectSuperMethodOwnerMismatch {
+                instruction: 1,
+                expected: class_identity("example/Base"),
+                actual: class_identity("example/Sibling"),
+            })
+        );
+
+        let mut wrong_receiver = CodeSequence::new();
+        wrong_receiver
+            .instruction(Instruction::ALoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(value),
+            )))
+            .instruction(Instruction::IReturn);
+        let wrong_receiver_graph = ControlFlowGraph::build(&wrong_receiver).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_hierarchy(
+                &wrong_receiver_graph,
+                "wrongReceiver",
+                "(Lexample/Other;)I",
+                false,
+                &pool,
+                derived,
+                &hierarchy,
+            ),
+            Err(AnalysisError::DirectSuperMethodReceiverMismatch {
+                instruction: 1,
+                expected: class_identity("example/Derived"),
+                actual: class_identity("example/Other"),
+            })
+        );
+
+        let mut no_hierarchy = CodeSequence::new();
+        no_hierarchy
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(value),
+            )))
+            .instruction(Instruction::IReturn);
+        let no_hierarchy_graph = ControlFlowGraph::build(&no_hierarchy).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &no_hierarchy_graph,
+                "noHierarchy",
+                "()I",
+                false,
+                &pool,
+                derived,
+            ),
+            Err(AnalysisError::MissingDirectSuperclassProof {
+                instruction: 1,
+                current: class_identity("example/Derived"),
+            })
+        );
+
+        let mut uninitialized_receiver = CodeSequence::new();
+        uninitialized_receiver
+            .instruction(Instruction::New(ClassReference::new(operand(derived))))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(value),
+            )))
+            .instruction(Instruction::IReturn);
+        let uninitialized_graph = ControlFlowGraph::build(&uninitialized_receiver).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_hierarchy(
+                &uninitialized_graph,
+                "uninitializedReceiver",
+                "()I",
+                false,
+                &pool,
+                derived,
+                &hierarchy,
+            ),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 1,
+                allocation_site: 0,
+            })
+        );
+
+        let mut constructor = CodeSequence::new();
+        constructor
+            .instruction(Instruction::New(ClassReference::new(operand(derived))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(init),
+            )))
+            .instruction(Instruction::AReturn);
+        let constructor_graph = ControlFlowGraph::build(&constructor).unwrap();
+        assert!(
+            CfgCodeAnalyzer::analyze_with_hierarchy(
+                &constructor_graph,
+                "construct",
+                "()Lexample/Derived;",
+                false,
+                &pool,
+                derived,
+                &hierarchy,
             )
             .is_ok()
         );
