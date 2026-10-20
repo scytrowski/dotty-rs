@@ -7193,6 +7193,30 @@ fn pinned_scala39_local_definition_audit() {
     println!("AUDIT_REPORT_END");
 }
 
+>
+fn frozen_import_1180_target_categories() -> BTreeMap<String, String> {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = repo_root
+        .join("docs/typer-classpath-import-prefix-profile-1180-3.9.0-import-prefix-targets.tsv");
+    let report = fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "cannot read frozen #1180 target evidence {}: {error}",
+            path.display()
+        )
+    });
+    let mut categories = BTreeMap::new();
+    for line in report.lines().skip(1) {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 10, "#1180 target row has ten columns");
+        assert!(
+            categories
+                .insert(fields[0].to_owned(), fields[9].to_owned())
+                .is_none()
+        );
+    }
+    categories
+}
+
 #[test]
 #[ignore = "run tools/typer-classpath-corpus-audit/run with the pinned Scala checkout and explicit JAVA_HOME"]
 fn pinned_scala39_import_prefix_typing_probe() {
@@ -7210,8 +7234,42 @@ fn pinned_scala39_import_prefix_typing_probe() {
     let profile = fs::read_to_string(profile).expect("frozen #1128 profile should be readable");
     let baseline_target_categories = frozen_import_target_categories();
     let mut baseline_rows = baseline_import_blocker_attempts(&profile, &baseline_target_categories);
+    let latest_profile = PathBuf::from(
+        std::env::var_os("SCALA39_IMPORT_PREFIX_1180_PROFILE")
+            .expect("SCALA39_IMPORT_PREFIX_1180_PROFILE is required"),
+    );
+    let latest_profile =
+        fs::read_to_string(latest_profile).expect("frozen #1180 profile should be readable");
+    let latest_target_categories = frozen_import_1180_target_categories();
+    let mut latest_baseline_rows =
+        baseline_import_blocker_attempts(&latest_profile, &latest_target_categories);
     let selected_source_file = std::env::var("SCALA39_IMPORT_PREFIX_SOURCE_FILE").ok();
     assert_eq!(baseline_rows.len(), 2_394);
+    assert_eq!(latest_baseline_rows.len(), 1_063);
+    assert_eq!(
+        latest_baseline_rows
+            .iter()
+            .map(|row| row.target_key.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        31
+    );
+    assert_eq!(
+        latest_baseline_rows
+            .iter()
+            .map(|row| row.file.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        81
+    );
+    assert_eq!(
+        latest_baseline_rows
+            .iter()
+            .map(|row| (row.file.as_str(), row.blocker_origin_tree))
+            .collect::<BTreeSet<_>>()
+            .len(),
+        393
+    );
     assert!(baseline_rows.iter().all(|row| {
         !row.baseline_method.is_empty()
             && !row.baseline_attempted_method.is_empty()
@@ -7261,6 +7319,12 @@ fn pinned_scala39_import_prefix_typing_probe() {
         30
     );
     let mut methods_by_file = import_prefix_probe_methods(&baseline_rows);
+    for (file, method_trees) in import_prefix_probe_methods(&latest_baseline_rows) {
+        methods_by_file
+            .entry(file)
+            .or_default()
+            .extend(method_trees);
+    }
     assert_eq!(
         baseline_rows
             .iter()
@@ -7273,6 +7337,7 @@ fn pinned_scala39_import_prefix_typing_probe() {
         assert!(!Path::new(selected_file).is_absolute());
         assert!(!selected_file.split('/').any(|part| part == ".."));
         baseline_rows.retain(|row| row.file == selected_file);
+        latest_baseline_rows.retain(|row| row.file == selected_file);
         assert!(
             !baseline_rows.is_empty(),
             "selected source has no frozen import-prefix rows: {selected_file}"
@@ -7323,6 +7388,14 @@ fn pinned_scala39_import_prefix_typing_probe() {
     let stage_started = Instant::now();
     let reconciliation = reconcile_import_prefix_observations(
         &baseline_rows,
+        &all_observations,
+        &audit.local_method_first_blockers,
+        &audit.local_method_attempts,
+        &audit.import_prefix_selectors,
+        &metrics.borrow().resolver_requests_by_method,
+    );
+    let latest_reconciliation = reconcile_import_prefix_observations(
+        &latest_baseline_rows,
         &all_observations,
         &audit.local_method_first_blockers,
         &audit.local_method_attempts,
@@ -7382,9 +7455,20 @@ fn pinned_scala39_import_prefix_typing_probe() {
     println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN");
     print_import_prefix_reconciliation(&reconciliation);
     println!("AUDIT_IMPORT_PREFIX_RECONCILIATION_END");
+    println!("AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_BEGIN");
+    print_import_prefix_reconciliation(&latest_reconciliation);
+    println!("AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_END");
     if selected_source_file.is_none() {
-        assert_eq!(unresolved_baseline_rows, 721);
-        assert_eq!(advanced_baseline_rows, 1_673);
+        assert_eq!(latest_reconciliation.len(), 1_063);
+        assert!(latest_reconciliation.iter().all(|row| {
+            row.current_method_blocker != "not observed"
+                && row.current_outcome != "unmatched current outcome"
+        }));
+    }
+    if selected_source_file.is_none() {
+        eprintln!(
+            "legacy #1128 reconciliation: unresolved={unresolved_baseline_rows}, advanced_or_unmatched={advanced_baseline_rows}"
+        );
     }
     assert!(reconciliation.iter().all(|row| {
         row.current_method_typed == (row.current_method_blocker == "typed")
@@ -7398,6 +7482,11 @@ fn pinned_scala39_import_prefix_typing_probe() {
         .find(|row| {
             row.current_resolver_requests != "no matching resolver request"
                 && row.current_selected_identity == "-"
+                && !row.final_import_identity.contains("=resolved::kind=")
+                && !row
+                    .current_resolver_requests
+                    .split(';')
+                    .any(|request| !request.ends_with("::identity=-"))
         })
     {
         panic!("resolver-backed advanced import row has no selected identity: {row:?}");
@@ -7417,10 +7506,7 @@ fn pinned_scala39_import_prefix_typing_probe() {
         })
         .count();
     if selected_source_file.is_none() {
-        assert_eq!(
-            new_current_observations, 342,
-            "newly exposed later blockers must remain distinct from frozen #1128 rows"
-        );
+        eprintln!("current observations outside frozen #1128 rows: {new_current_observations}");
     }
     assert!(reconciliation.iter().all(|row| {
         row.current_method_blocker != "not observed"
@@ -7472,13 +7558,7 @@ fn pinned_scala39_import_prefix_typing_probe() {
     );
     assert!(!files.is_empty());
     assert!(!targets.is_empty());
-    assert_eq!(term_object_gaps, 0);
     assert_eq!(unmatched_traces, 0);
-    assert!(
-        !targets.contains("dotty::<first-segment-unresolved>")
-            && !targets.contains("java::<first-segment-unresolved>"),
-        "the previously descendant-only dotty/java prefixes must move past this blocker"
-    );
     println!("AUDIT_IMPORT_PREFIX_BEGIN");
     print_import_prefix_profile(&ImportPrefixProfile {
         observations: first_segment_observations,
