@@ -3385,6 +3385,51 @@ fn mutable_int_locals_serialize_ordered_assignments_and_exact_local_targets() {
 }
 
 #[test]
+fn mutable_assignment_rhs_obeys_projection_expression_depth_after_validation() {
+    let limits = PickleLimits {
+        projection: ProjectionLimits {
+            max_expression_depth: 0,
+            ..ProjectionLimits::default()
+        },
+        ..PickleLimits::default()
+    };
+    let error = source_outputs_named_with_tree_edits_and_pickle_limits(
+        MUTABLE,
+        "Mutable.scala",
+        ValidationLimits::default(),
+        limits,
+        |_, _, _, _| {},
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+
+    let nested_block = "package example\\nclass NestedAssignment:\\n  def run: Int =\\n    var count: Int = 0\\n    count = { count = 1; count + 1 }\\n    count\\n";
+    let error = source_outputs_named_with_tree_edits_and_pickle_limits(
+        nested_block,
+        "NestedAssignment.scala",
+        ValidationLimits::default(),
+        limits,
+        |_, _, _, _| {},
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+}
+
+#[test]
 fn mutable_local_assignments_reject_forged_flags_swapped_children_and_non_unit_results() {
     let forged_source_modifier = source_outputs_named_with_tree_edits(
         MUTABLE,
