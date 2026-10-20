@@ -401,6 +401,11 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             | sed '1d;$d' >"$tmp_dir/$run.reconciliation"
         sed -n '/^AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_BEGIN$/,/^AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_END$/p' "$tmp_dir/$run.log" \
             | sed '1d;$d' >"$tmp_dir/$run.1180-reconciliation"
+        if [[ ! -s "$tmp_dir/$run.1180-reconciliation" ]]; then
+            cat "$tmp_dir/$run.log" >&2
+            printf '#1180 reconciliation markers were missing or empty\n' >&2
+            exit 1
+        fi
         if [[ ! -s "$tmp_dir/$run.profile" ]]; then
             cat "$tmp_dir/$run.log" >&2
             printf 'import-prefix audit markers were missing\n' >&2
