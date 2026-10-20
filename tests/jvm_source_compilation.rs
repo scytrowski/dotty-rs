@@ -386,6 +386,7 @@ fn compile_source_batch_observed(
                 arguments,
                 &parsed.ast,
                 &index,
+                typer.source_typed_index(),
                 typer.store(),
                 typer.typed_ast(),
             )
@@ -5148,7 +5149,7 @@ fn parameterized_direct_super_constructors_preserve_source_arguments_and_verify(
     );
     let javap = String::from_utf8_lossy(&javap.stdout);
     assert!(javap.contains("invokespecial #"));
-    assert!(javap.contains("ParameterizedBase.<init>:(IZ)V"));
+    assert!(javap.contains("ParameterizedBase.\"<init>\":(IZ)V"));
     assert!(javap.contains("descriptor: (IZ)V"));
 
     let harness = first_output.path().join("ParameterizedSuperHarness.java");
@@ -9336,7 +9337,7 @@ fn super_method_source_is_rejected_by_typer_before_jvm_emission() {
 
 #[test]
 fn parameterized_parent_constructor_arguments_keep_their_source_mappings() {
-    let source_text = "class Base(seed: Int):\n  def value(): Int = seed\n\nclass Derived(start: Int) extends Base(start):\n  def read(): Int = start\n";
+    let source_text = "class Base(seed: Int):\n  def value(): Int = seed\n\nclass Derived(start: Int) extends Base(start):\n  def read(): Int = start\n\nclass Other extends Base(2) {}\n";
     let source_id = SourceId::from_index(1368);
     let source = SourceText::new(source_text).unwrap();
     let scanner = ContextualScanner::new(source_text).unwrap();
@@ -9380,6 +9381,7 @@ fn parameterized_parent_constructor_arguments_keep_their_source_mappings() {
     };
     let base = class_named("Base");
     let derived = class_named("Derived");
+    let other = class_named("Other");
     let dotty_core::SourceDefinition::Canonical {
         source,
         tree: derived_tree,
@@ -9445,6 +9447,7 @@ fn parameterized_parent_constructor_arguments_keep_their_source_mappings() {
         &packages,
     );
     typer.complete_symbol(derived).unwrap();
+    typer.complete_symbol(other).unwrap();
     let class_info = match typer.store().symbols.info(derived) {
         dotty_core::SymbolInfo::Complete(info) => *info,
         other => panic!("Derived class info is complete: {other:?}"),
@@ -9472,6 +9475,61 @@ fn parameterized_parent_constructor_arguments_keep_their_source_mappings() {
             .get(source_id, application.args[0])
             .is_some()
     );
+
+    let dotty_core::SourceDefinition::Canonical {
+        tree: other_tree, ..
+    } = index.definition_of(other).unwrap()
+    else {
+        panic!("Other has canonical source provenance");
+    };
+    let TreeKind::TypeDef(other_definition) = &parsed.ast.get(other_tree).kind else {
+        panic!("Other source identity points to a TypeDef");
+    };
+    let TreeKind::Template(other_template) = &parsed.ast.get(other_definition.rhs).kind else {
+        panic!("Other has a template");
+    };
+    let [other_parent_application] = other_template.parents.as_slice() else {
+        panic!("Other has one parent application");
+    };
+    let other_typed_application = typer
+        .source_typed_index()
+        .get(source_id, *other_parent_application)
+        .unwrap();
+    let TreeKind::Apply(other_typed_apply) = &typer.typed_ast().get(other_typed_application).kind
+    else {
+        panic!("Other parent call has a typed Apply");
+    };
+    let other_typed_argument = other_typed_apply.args[0];
+    let constructor_plan = JvmPrimaryConstructorPlan::from_source(
+        derived,
+        constructor_symbol,
+        vec![start_symbol],
+        &parsed.ast,
+        &index,
+    )
+    .unwrap();
+    let error = constructor_plan
+        .with_direct_super_constructor(
+            *parent_application,
+            other_typed_application,
+            vec![dotty_jvm::JvmConstructorArgumentBinding {
+                source: application.args[0],
+                typed: other_typed_argument,
+            }],
+            &parsed.ast,
+            &index,
+            typer.source_typed_index(),
+            typer.store(),
+            typer.typed_ast(),
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        JvmCodegenError::InvalidPrimaryConstructor {
+            issue: dotty_jvm::JvmConstructorIssue::ParentConstructorArgumentIdentity,
+            ..
+        }
+    ));
 }
 
 #[test]

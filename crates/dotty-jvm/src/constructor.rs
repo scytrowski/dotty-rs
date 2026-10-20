@@ -3,8 +3,8 @@ use crate::{JvmCodegenError, JvmMethodDescriptor, JvmMethodPlan, JvmParameterLoc
 use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC, MethodAccessFlags};
 use dotty_core::ast::{AstArena, Modifier, TreeKind, Typed, TypedAst, Untyped, VisibilitySyntax};
 use dotty_core::{
-    Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolId,
-    SymbolInfo, SymbolKind, TreeId, Type, TypeRefTarget, Visibility,
+    Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SourceTypedIndex,
+    SymbolId, SymbolInfo, SymbolKind, TreeId, Type, TypeRefTarget, Visibility,
 };
 
 /// A source argument and the exact typed root mapped from it by the frontend.
@@ -187,6 +187,7 @@ impl JvmPrimaryConstructorPlan {
         arguments: Vec<JvmConstructorArgumentBinding>,
         ast: &AstArena<Untyped>,
         index: &SourceSemanticIndex,
+        source_typed_index: &SourceTypedIndex,
         store: &SemanticStore,
         typed_ast: &TypedAst,
     ) -> Result<Self, JvmCodegenError> {
@@ -228,6 +229,13 @@ impl JvmPrimaryConstructorPlan {
                 .iter()
                 .zip(&arguments)
                 .any(|(source, binding)| *source != binding.source)
+        {
+            return Err(fail(JvmConstructorIssue::ParentConstructorArgumentIdentity));
+        }
+        if source_typed_index.get(source, parent_application) != Some(typed_parent_application)
+            || arguments.iter().any(|binding| {
+                source_typed_index.get(source, binding.source) != Some(binding.typed)
+            })
         {
             return Err(fail(JvmConstructorIssue::ParentConstructorArgumentIdentity));
         }

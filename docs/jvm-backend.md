@@ -420,9 +420,11 @@ the field and constructor plans.
 
 The backend treats each field/RHS pair as frontend proof. A `TreeId<Typed>`
 does not carry a session tag, so the producer must obtain the ID from the same
-typed arena it passes in the compilation unit. The backend checks arena
-membership and type conformance, but it cannot independently reconstruct the
-source-to-typed mapping without violating the frontend dependency boundary.
+typed arena it passes in the compilation unit. For direct-super constructor
+plans, the backend also receives the shared `dotty-core::SourceTypedIndex` and
+checks that the source application and every source argument map to the exact
+typed roots supplied by the frontend. This shared contract preserves the
+frontend dependency boundary while rejecting mixed source/typed roots.
 
 Formal parameter identities stay in the plan's explicit order and are checked
 against the canonical method owner, completed parameter info, and descriptor
