@@ -214,6 +214,27 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
               "fresh_class": True, "adjacent_input_classfiles": False}
     if runtime:
         runtime_cases = {
+            "example/Logic.tasty": (
+                "example.Logic", r"public boolean safeAnd\(\)", "LogicRuntime.java",
+                """public final class LogicRuntime {
+  public static void main(String[] args) {
+    example.Logic logic = new example.Logic();
+    if (logic.negate(true) || !logic.negate(false) ||
+        !logic.both(true, true) || logic.both(true, false) ||
+        logic.both(false, true) || logic.both(false, false) ||
+        !logic.either(true, true) || !logic.either(true, false) ||
+        !logic.either(false, true) || logic.either(false, false) ||
+        logic.safeAnd() || !logic.safeOr())
+      throw new AssertionError("unexpected Boolean results or eager short-circuit RHS");
+    try { logic.evaluatedAnd(true); throw new AssertionError("&& RHS was not evaluated"); }
+    catch (ArithmeticException expected) { }
+    try { logic.evaluatedOr(false); throw new AssertionError("|| RHS was not evaluated"); }
+    catch (ArithmeticException expected) { }
+    System.out.println("Logic = Boolean truth tables and short-circuit");
+  }
+}
+""", "Logic = Boolean truth tables and short-circuit", 1,
+            ),
             "example/Arithmetic.tasty": (
                 "example.Arithmetic", r"public int add\(int, int\)", "ArithmeticRuntime.java",
                 """public final class ArithmeticRuntime {
@@ -540,6 +561,18 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Comparisons class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Logic.tasty":
+                signatures = (
+                    r"public boolean negate\(boolean\)",
+                    r"public boolean both\(boolean, boolean\)",
+                    r"public boolean either\(boolean, boolean\)",
+                    r"public boolean safeAnd\(\)",
+                    r"public boolean safeOr\(\)",
+                    r"public boolean evaluatedAnd\(boolean\)",
+                    r"public boolean evaluatedOr\(boolean\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Logic class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":
