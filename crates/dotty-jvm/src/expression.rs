@@ -1530,6 +1530,10 @@ fn emit_apply(
         return emit_object_creation(context, tree_id, &arguments, code, depth);
     }
 
+    if is_direct_super_selection(context, function)? {
+        return emit_direct_super_call(context, tree_id, function, &arguments, code, depth);
+    }
+
     let intrinsic = crate::resolve_boolean_intrinsic(
         context.store,
         context.typed_ast,
@@ -1654,7 +1658,117 @@ fn emit_apply(
                 tree: tree_id,
                 error,
             })?,
+        JvmInvocationKind::SpecialSuper => code
+            .invokespecial(
+                target.owner_internal_name(),
+                target.method_name(),
+                target.descriptor().as_str(),
+            )
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?,
     };
+    Ok(match target.result() {
+        JvmReturnType::Value(value) => Flow::Value(value),
+        JvmReturnType::Void => Flow::Unit,
+    })
+}
+
+fn is_direct_super_selection(
+    context: &JvmLoweringContext<'_>,
+    function: TreeId<Typed>,
+) -> Result<bool, JvmCodegenError> {
+    let function = context.tree(function)?;
+    let TreeKind::Select(select) = &function.kind else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        context.tree(select.qualifier)?.kind,
+        TreeKind::Super(_)
+    ))
+}
+
+fn emit_direct_super_call(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    function: TreeId<Typed>,
+    arguments: &[TreeId<Typed>],
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let Some((unit, class, _)) = context.call_context else {
+        return Err(JvmCodegenError::JvmCallContextUnavailable {
+            tree: tree_id,
+            method: context.method.symbol(),
+        });
+    };
+    let target = unit.resolve_direct_super_call(
+        class.identity().symbol(),
+        context.method.symbol(),
+        tree_id,
+        context.definitions,
+    )?;
+    let parameters = target.descriptor().parameters().to_vec();
+    if arguments.len() != parameters.len() {
+        return Err(JvmCodegenError::JvmCallArityMismatch {
+            tree: tree_id,
+            method: target.method_symbol(),
+            expected: parameters.len(),
+            found: arguments.len(),
+        });
+    }
+
+    context.visit(function, depth + 1)?;
+    let qualifier = match &context.tree(function)?.kind {
+        TreeKind::Select(select) => select.qualifier,
+        _ => {
+            return Err(JvmCodegenError::UnsupportedJvmCallShape {
+                tree: function,
+                kind: UnsupportedJvmCallShapeKind::UnsupportedFunctionTree,
+            });
+        }
+    };
+    context.visit(qualifier, depth + 2)?;
+    let super_qualifier = match &context.tree(qualifier)?.kind {
+        TreeKind::Super(super_node) => super_node.qual,
+        _ => {
+            return Err(JvmCodegenError::UnsupportedJvmCallShape {
+                tree: qualifier,
+                kind: UnsupportedJvmCallShapeKind::UnsupportedSuperQualifier,
+            });
+        }
+    };
+    context.visit(super_qualifier, depth + 3)?;
+
+    code.aload(0)
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    for (index, (argument, expected)) in arguments.iter().copied().zip(parameters).enumerate() {
+        let flow = emit_expression(context, argument, code, depth + 1)?;
+        if !call_argument_assignable(unit, flow, expected, context.definitions)? {
+            return Err(JvmCodegenError::JvmCallArgumentMismatch {
+                tree: tree_id,
+                argument,
+                method: target.method_symbol(),
+                index,
+                expected,
+                found: public_flow(flow),
+            });
+        }
+    }
+
+    code.invokespecial(
+        target.owner_internal_name(),
+        target.method_name(),
+        target.descriptor().as_str(),
+    )
+    .map_err(|error| JvmCodegenError::CodeBuilder {
+        tree: tree_id,
+        error,
+    })?;
     Ok(match target.result() {
         JvmReturnType::Value(value) => Flow::Value(value),
         JvmReturnType::Void => Flow::Unit,

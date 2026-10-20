@@ -144,11 +144,13 @@ pub struct JvmMethodDescriptor {
     result: JvmReturnType,
 }
 
-/// Invocation mode selected by the bounded planned-instance call resolver.
+/// Invocation mode selected by the bounded planned-call resolvers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmInvocationKind {
     /// Ordinary dynamically dispatched instance invocation.
     Virtual,
+    /// Statically selected direct-parent call from an unqualified `super`.
+    SpecialSuper,
 }
 
 /// JVM invocation mode for a validated object constructor call.
@@ -1376,7 +1378,7 @@ pub enum UnsupportedMethodShapeKind {
     NotMethodType,
 }
 
-/// Why a typed call is outside same-class virtual target resolution.
+/// Why a typed call is outside the supported planned-call subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnsupportedJvmCallShapeKind {
     /// The supplied call root is not a term application.
@@ -1403,6 +1405,10 @@ pub enum UnsupportedJvmCallShapeKind {
     RecursiveReceiver,
     /// The canonical term reference has a prefix outside this call subset.
     UnsupportedReceiverPrefix,
+    /// A super call is qualified or its qualifier is not the current `this`.
+    UnsupportedSuperQualifier,
+    /// The typed `SuperType` does not match the caller's proved direct parent.
+    SuperTypeDoesNotMatchHierarchy,
 }
 
 /// Unsupported semantic type form in this descriptor projection.
@@ -2138,6 +2144,24 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<JvmCallTarget, JvmCodegenError> {
         call_target::resolve_instance_call(self, caller_class, caller_method, call, definitions)
+    }
+
+    /// Resolves an explicitly typed `super.method(args)` call to the canonical
+    /// method declared by this class's direct parent.
+    ///
+    /// The complete `Apply` tree must select an unqualified `Super(This)`;
+    /// the `SuperType`, selected `TermRefTarget::Symbol`, hierarchy edge,
+    /// parent declaration, public instance method plan, descriptor, and result
+    /// type must agree. This is a read-only proof and never falls back to
+    /// ordinary virtual/name-based resolution.
+    pub fn resolve_direct_super_call(
+        &self,
+        caller_class: SymbolId,
+        caller_method: SymbolId,
+        call: TreeId<Typed>,
+        definitions: &Definitions,
+    ) -> Result<JvmCallTarget, JvmCodegenError> {
+        call_target::resolve_direct_super_call(self, caller_class, caller_method, call, definitions)
     }
 
     /// Resolves a typed `Apply(Select(New(...), <init>), args)` to the exact
