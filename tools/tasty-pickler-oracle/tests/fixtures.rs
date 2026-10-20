@@ -39,6 +39,7 @@ fn independent_fixtures_match_normalized_snapshots() {
         "example/Flags",
         "example/Conditionals",
         "example/Algorithms",
+        "example/AlgorithmsReference",
         "example/CustomOperators",
     ] {
         let expected: Value = serde_json::from_slice(
@@ -57,7 +58,7 @@ fn independent_fixtures_match_normalized_snapshots() {
 
 #[test]
 fn scala_39_primitive_control_flow_fixture_pins_mutable_while_and_assignment_wire_edges() {
-    let snapshot = inspect(&fixture("example/Algorithms"), false).unwrap();
+    let snapshot = inspect(&fixture("example/AlgorithmsReference"), false).unwrap();
     let sum_to = named(&snapshot, "sumTo");
     let nodes = nodes(&snapshot);
     let by_id = |id: &Value| {

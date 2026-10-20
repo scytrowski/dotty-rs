@@ -20,7 +20,8 @@
   "scala_version": "3.9.0",
   "schema": 1,
   "sources_sha256": {
-    "Algorithms.scala": "af22b6f3240a8227246fbf393219ba88996e3b04d44d50109d6b0967f81d8a01",
+    "Algorithms.scala": "87a3f0fbb9e73b64235fbfbf2a1adcdad2b3a729951320f8769a0d3f1bc6f503",
+    "AlgorithmsReference.scala": "67c803c36fe4019dc53460e6abab86644ac21173b9a882f0916451f7076a1855",
     "Answer.scala": "a6dc526f51dfce838872242246750e833ce10b77ffdb2620745503d66bfd7b22",
     "Blocks.scala": "1a2228e96197f35c62c9797d12796f59516bbe578e488dc25734ef8dc5bf62f7",
     "Conditionals.scala": "de39ce707f835e660a3a02a489a18356960cd59e31723e8ec65705bd86930f32",
@@ -37,7 +38,8 @@
   },
   "tasty_sha256": {
     "Empty.tasty": "bfacda2b842f4dcfbefe8d4dafe697847e505a2380df0a1eb0a2abdad3155eef",
-    "example/Algorithms.tasty": "9f031fa3f69f7ef2e92714ffc55c6add7f5edae2d6895558ee6a8de8c88749c7",
+    "example/Algorithms.tasty": "fe229bb080f10566ff583b5a842d1272fa75f974df56df37d2c88f90952b05c6",
+    "example/AlgorithmsReference.tasty": "d6742e34141531b7ddd21c7c9d515f60683932e3b1ace416836b48a4973863e2",
     "example/Answer.tasty": "1cf021c302e2bf64fabed58cf7ea1c80689726ad3b198d01d9facb6b2776a4c4",
     "example/Blocks.tasty": "fe750d12d6d9e0e4054392c04c4204d910f00d9e3f709c7890a96318cd91ad87",
     "example/Conditionals.tasty": "25d716b62702fb0c80291e1b95368ca55e4864391fe9df4430c880521cfaffd7",

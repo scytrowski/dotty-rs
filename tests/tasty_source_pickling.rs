@@ -17,6 +17,7 @@ const ANSWER: &str = include_str!("fixtures/tasty_pickler/Answer.scala");
 const PARAMETERS: &str = include_str!("fixtures/tasty_pickler/Parameters.scala");
 const OPERATIONS: &str = include_str!("fixtures/tasty_pickler/Operations.scala");
 const DECISIONS: &str = include_str!("fixtures/tasty_pickler/Decisions.scala");
+const ALGORITHMS: &str = include_str!("fixtures/tasty_pickler/Algorithms.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct CanonicalIntResolver {
@@ -597,6 +598,267 @@ fn compile_decisions() -> DecisionsProduct {
     }
 }
 
+struct AlgorithmsProduct {
+    bytes: Vec<u8>,
+    output: PickledTasty,
+    methods: Vec<(String, SymbolId)>,
+    mutable_locals: Vec<(String, SymbolId)>,
+    operators: Vec<(String, SymbolId)>,
+}
+
+fn compile_algorithms() -> AlgorithmsProduct {
+    let source = SourceId::from_index(17);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(ALGORITHMS).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let parsed = parse_compilation_unit(
+        SourceText::new(ALGORITHMS).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Algorithms.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("namer rejected Algorithms fixture: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("expected package root")
+    };
+    let [class_tree] = package.stats.as_slice() else {
+        panic!("expected one Algorithms class")
+    };
+    let class = index.symbol_at(source, *class_tree).unwrap();
+    let TreeKind::TypeDef(class_def) = &parsed.ast.get(*class_tree).kind else {
+        panic!("expected class definition")
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+        panic!("expected class template")
+    };
+    let constructor_tree = template.constructor;
+    let constructor = index.symbol_at(source, constructor_tree).unwrap();
+    let TreeKind::DefDef(constructor_def) = &parsed.ast.get(constructor_tree).kind else {
+        panic!("expected primary constructor")
+    };
+    let clauses = |definition: &DefDef<Untyped>| {
+        definition
+            .value_param_clauses
+            .iter()
+            .map(|clause| {
+                clause
+                    .iter()
+                    .map(|tree| index.symbol_at(source, *tree).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let source_methods = template
+        .body
+        .iter()
+        .filter_map(|tree| match &parsed.ast.get(*tree).kind {
+            TreeKind::DefDef(definition) => Some((*tree, definition)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!source_methods.is_empty());
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(class).unwrap();
+    typer.complete_symbol(constructor).unwrap();
+    let mut methods = Vec::with_capacity(source_methods.len());
+    let mut method_names = Vec::with_capacity(source_methods.len());
+    let mut local_values = Vec::new();
+    for (tree, definition) in &source_methods {
+        let method = index.symbol_at(source, *tree).unwrap();
+        let name = typer
+            .store()
+            .names
+            .resolve(definition.name.as_name().text())
+            .to_owned();
+        let result_type = match name.as_str() {
+            "add" | "subtract" | "multiply" | "divide" | "remainder" | "immutableLocal"
+            | "sumTo" => definitions.int,
+            "less" | "lessOrEqual" | "greater" | "greaterOrEqual" | "negate" | "both"
+            | "either" | "eagerAnd" | "eagerOr" | "exclusiveOr" | "shortCircuitAnd"
+            | "shortCircuitOr" | "eagerAndEffect" | "eagerOrEffect" | "positive" | "safeAnd"
+            | "safeOr" | "divisionByZero" => definitions.boolean,
+            other => panic!("unexpected Algorithms method {other}"),
+        };
+        let signature = typer.complete_symbol(method).unwrap();
+        assert_eq!(typer.store().symbols.get(method).owner, Some(class));
+        if clauses(definition).is_empty() {
+            assert_eq!(signature, result_type, "nullary method {name}");
+        } else {
+            let Type::Method(method_type) = typer.store().types.get(signature) else {
+                panic!("{name} must have a method signature")
+            };
+            assert_eq!(method_type.result, result_type, "result type for {name}");
+        }
+        let rhs = definition
+            .rhs
+            .expect("all Algorithms fixture methods have bodies");
+        let context = typer.expression_context_for(method).unwrap();
+        let body = typer
+            .type_expression_expected(rhs, context, result_type)
+            .unwrap_or_else(|error| panic!("SourceTyper rejected Algorithms.{name}: {error:?}"));
+        assert_eq!(typer.source_typed_index().get(source, rhs), Some(body));
+
+        if name == "sumTo" {
+            let TreeKind::Block(source_block) = &parsed.ast.get(rhs).kind else {
+                panic!("sumTo source must be a block")
+            };
+            assert_eq!(source_block.stats.len(), 3);
+            for &local_tree in &source_block.stats[..2] {
+                let binding = typer
+                    .typed_local_binding_at(source, local_tree)
+                    .expect("SourceTyper supplies canonical mutable-local bindings");
+                assert_eq!(
+                    typer.source_typed_index().get(source, local_tree),
+                    Some(binding.declaration())
+                );
+                let symbol = typer.store().symbols.get(binding.symbol());
+                assert_eq!(symbol.owner, Some(method));
+                assert_eq!(symbol.flags, SymbolFlags::MUTABLE);
+                local_values.push(LocalValueBinding {
+                    source_tree: local_tree,
+                    symbol: binding.symbol(),
+                    typed_declaration: binding.declaration(),
+                    scope: binding.scope(),
+                });
+            }
+        }
+        methods.push(MethodPicklePlan {
+            symbol: method,
+            source_tree: *tree,
+            parameter_clauses: clauses(definition),
+            body: Some(body),
+        });
+        method_names.push((name, method));
+    }
+    let int_symbol = typer
+        .store()
+        .types
+        .get(definitions.int)
+        .reference_symbol()
+        .expect("canonical Scala Int symbol");
+    let boolean_symbol = typer
+        .store()
+        .types
+        .get(definitions.boolean)
+        .reference_symbol()
+        .expect("canonical Scala Boolean symbol");
+    let mut operators = Vec::new();
+    for (_, tree) in typer.typed_ast().iter() {
+        if !matches!(tree.kind, TreeKind::Select(_)) {
+            continue;
+        }
+        let Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        } = typer.store().types.get(tree.ty)
+        else {
+            continue;
+        };
+        let selected_symbol = typer.store().symbols.get(*symbol);
+        let name = typer
+            .store()
+            .names
+            .resolve(selected_symbol.name.text())
+            .to_owned();
+        if matches!(name.as_str(), "+" | "<" | ">" | "&&" | "||") {
+            assert_eq!(
+                selected_symbol.origin,
+                SymbolOrigin::Builtin,
+                "operator {name}"
+            );
+            let expected_owner = if matches!(name.as_str(), "+" | "<" | ">") {
+                int_symbol
+            } else {
+                boolean_symbol
+            };
+            assert_eq!(
+                selected_symbol.owner,
+                Some(expected_owner),
+                "operator {name}"
+            );
+            operators.push((name, *symbol));
+        }
+    }
+    let operator_names = operators
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for name in ["+", "<", ">", "&&", "||"] {
+        assert!(
+            operator_names.contains(name),
+            "typed source lacks builtin {name}"
+        );
+    }
+    let bindings = |source, tree| typer.source_typed_index().get(source, tree);
+    let plan = PicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        typed_ast: typer.typed_ast(),
+        source_ast: &parsed.ast,
+        source_index: &index,
+        typed_bindings: &bindings,
+        source: SourceMetadata {
+            id: source,
+            name: "Algorithms.scala".into(),
+        },
+        source_root: parsed.root,
+        class,
+        class_tree: *class_tree,
+        constructor: DefaultConstructorPlan {
+            symbol: constructor,
+            source_tree: constructor_tree,
+            parameter_clauses: clauses(constructor_def),
+        },
+        methods: &methods,
+        local_values: &local_values,
+    };
+    let output = plan.validate().unwrap().pickle().unwrap();
+    for method in &methods {
+        assert_eq!(output.body(method.symbol), method.body);
+    }
+    AlgorithmsProduct {
+        bytes: output.bytes().to_vec(),
+        output,
+        methods: method_names,
+        mutable_locals: local_values
+            .iter()
+            .map(|binding| {
+                let name = typer
+                    .store()
+                    .names
+                    .resolve(typer.store().symbols.get(binding.symbol).name.text())
+                    .to_owned();
+                (name, binding.symbol)
+            })
+            .collect(),
+        operators,
+    }
+}
+
 fn semantic_and_wire_projection(product: &Product) {
     let file = TastyFile::parse_and_validate_scala_3_9(&product.bytes).unwrap();
     assert_eq!(
@@ -761,6 +1023,233 @@ fn real_scala_source_produces_deterministic_semantic_tasty_and_roundtrips() {
         assert!(
             result.success(),
             "requested Scala interop/runtime gate failed"
+        );
+    }
+}
+
+#[test]
+fn algorithms_combines_primitives_mutation_and_while_for_scala_390_runtime() {
+    let first = compile_algorithms();
+    let second = compile_algorithms();
+    assert_eq!(
+        first.bytes, second.bytes,
+        "fresh frontend sessions must match"
+    );
+    assert_eq!(
+        first
+            .methods
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "add",
+            "positive",
+            "both",
+            "safeAnd",
+            "safeOr",
+            "divisionByZero",
+            "sumTo"
+        ]
+    );
+    assert_eq!(
+        first
+            .mutable_locals
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["i", "total"]
+    );
+    assert_ne!(first.mutable_locals[0].1, first.mutable_locals[1].1);
+    let canonical_operators = first.operators.iter().fold(
+        std::collections::HashMap::<&str, SymbolId>::new(),
+        |mut selected, (name, symbol)| {
+            if let Some(previous) = selected.insert(name, *symbol) {
+                assert_eq!(
+                    previous, *symbol,
+                    "{name} has one canonical selected symbol"
+                );
+            }
+            selected
+        },
+    );
+    assert_eq!(canonical_operators.len(), 5);
+
+    let file = TastyFile::parse_and_validate_scala_3_9(&first.bytes).unwrap();
+    assert_eq!(
+        (
+            file.header().major_version,
+            file.header().minor_version,
+            file.header().experimental_version
+        ),
+        (28, 9, 0)
+    );
+    assert_eq!(file.source_file().unwrap(), Some("Algorithms.scala"));
+    assert_eq!(
+        first.output.intended_tasty_path(),
+        "example/Algorithms.tasty"
+    );
+    let addresses = file.ast_address_index().unwrap();
+    let class = first.output.declarations()[0].symbol;
+    let declarations = first
+        .output
+        .declarations()
+        .iter()
+        .filter(|declaration| declaration.owner == class)
+        .filter_map(|declaration| {
+            let body = addresses
+                .get(declaration.address)?
+                .decode_defdef_body()
+                .ok()?;
+            let name = file.render_name(body.name).ok()?;
+            (name != "<init>").then_some((name, *declaration, body))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        declarations
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        first
+            .methods
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+    );
+    let sum_to = declarations
+        .iter()
+        .find(|(name, _, _)| name == "sumTo")
+        .unwrap();
+    let RawTree::LengthNode(sum_body) = sum_to.2.rhs.as_ref().unwrap() else {
+        panic!("sumTo body must be a source-order block")
+    };
+    assert_eq!(sum_body.tag, BLOCK_TAG);
+    let StructuredNode::Block(sum_body) = sum_body.decode_structured().unwrap() else {
+        panic!("sumTo body must decode as BLOCK")
+    };
+    assert_eq!(sum_body.stats.len(), 3);
+    let RawTree::LengthNode(while_node) = &sum_body.stats[2] else {
+        panic!("sumTo third source stat must be WHILE")
+    };
+    assert_eq!(while_node.tag, WHILE_TAG);
+    let while_node = while_node.decode_while().unwrap();
+    let RawTree::LengthNode(condition) = while_node.condition else {
+        panic!("sumTo condition must retain its selected comparison")
+    };
+    assert_eq!(condition.tag, APPLY_TAG);
+    let RawTree::LengthNode(body) = while_node.body else {
+        panic!("sumTo body must remain a block")
+    };
+    let StructuredNode::Block(body) = body.decode_structured().unwrap() else {
+        panic!("while body must decode as BLOCK")
+    };
+    assert_eq!(body.stats.len(), 1);
+    let RawTree::LengthNode(first_assignment) = &body.stats[0] else {
+        panic!("first assignment must remain a block stat")
+    };
+    let RawTree::LengthNode(last_assignment) = &body.expression else {
+        panic!("final assignment must remain the block expression")
+    };
+    assert_eq!(first_assignment.tag, ASSIGN_TAG);
+    assert_eq!(last_assignment.tag, ASSIGN_TAG);
+    let assignment_targets = [first_assignment, last_assignment]
+        .into_iter()
+        .map(|assignment| {
+            let assignment = assignment.decode_assign().unwrap();
+            let RawTree::Leaf(target) = assignment.left else {
+                panic!("assignment target must be a local reference")
+            };
+            assert_eq!(target.tag, TERMREFDIRECT_TAG);
+            let definition = addresses.get(target.ast_ref().unwrap().address).unwrap();
+            let DefinitionBody::ValDef { name, .. } = definition.decode_definition_body().unwrap()
+            else {
+                panic!("assignment target must reference its VALDEF")
+            };
+            file.render_name(name).unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(assignment_targets, ["total", "i"]);
+    assert_eq!(file.encode_validated().unwrap(), first.bytes);
+
+    let mut semantic_store = SemanticStore::new();
+    let semantic_definitions = Definitions::bootstrap(&mut semantic_store);
+    let builtin_symbols = [semantic_definitions.int, semantic_definitions.boolean]
+        .into_iter()
+        .map(|ty| semantic_store.types.get(ty).reference_symbol().unwrap())
+        .collect();
+    let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
+        .with_resolver(Box::new(CanonicalScalaResolver {
+            symbols: builtin_symbols,
+        }));
+    let semantic_index = unpickler.enter_symbols().unwrap().clone();
+    let semantic_class = semantic_index
+        .symbol_at(first.output.declarations()[0].address)
+        .unwrap();
+    let mut semantic_methods = Vec::new();
+    for (name, declaration, _) in &declarations {
+        let semantic_method = semantic_index.symbol_at(declaration.address).unwrap();
+        assert_eq!(
+            unpickler.symbol_state_at(declaration.address).unwrap().0,
+            SymbolKind::Method
+        );
+        unpickler.complete_symbol(declaration.address).unwrap();
+        semantic_methods.push((name.as_str(), semantic_method));
+    }
+    let _ = unpickler.into_parts();
+    for (name, semantic_method) in semantic_methods {
+        assert_eq!(
+            semantic_store.symbols.get(semantic_method).owner,
+            Some(semantic_class)
+        );
+        let SymbolInfo::Complete(signature) = semantic_store.symbols.info(semantic_method) else {
+            panic!("unpickled Algorithms.{name} signature must be complete")
+        };
+        let (expected_parameters, expected_result) = match name {
+            "add" => (vec![semantic_definitions.int; 2], semantic_definitions.int),
+            "positive" => (vec![semantic_definitions.int], semantic_definitions.boolean),
+            "both" => (
+                vec![semantic_definitions.boolean; 2],
+                semantic_definitions.boolean,
+            ),
+            "sumTo" => (vec![semantic_definitions.int], semantic_definitions.int),
+            "safeAnd" | "safeOr" | "divisionByZero" => (Vec::new(), semantic_definitions.boolean),
+            other => panic!("unexpected unpickled Algorithms method {other}"),
+        };
+        if expected_parameters.is_empty() {
+            assert_builtin_type(&semantic_store, *signature, expected_result);
+        } else {
+            let Type::Method(method_type) = semantic_store.types.get(*signature) else {
+                panic!("unpickled Algorithms.{name} must retain its method type")
+            };
+            assert_eq!(method_type.params.len(), expected_parameters.len());
+            for (parameter, expected) in method_type.params.iter().zip(expected_parameters) {
+                assert_builtin_type(&semantic_store, parameter.ty, expected);
+            }
+            assert_builtin_type(&semantic_store, method_type.result, expected_result);
+        }
+    }
+    assert_eq!(file.encode_validated().unwrap(), first.bytes);
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("target"));
+        let candidate = target.join("issue-1361/generated/example/Algorithms.tasty");
+        fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        fs::write(&candidate, &first.bytes).unwrap();
+        let temporary = target.join("issue-1361/tmp");
+        fs::create_dir_all(&temporary).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg("--runtime")
+            .arg(&candidate)
+            .env("TMPDIR", temporary)
+            .status()
+            .expect("start pinned Scala 3.9 Algorithms interop/runtime gate");
+        assert!(
+            result.success(),
+            "Algorithms Scala interoperability gate failed"
         );
     }
 }

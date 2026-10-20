@@ -10,7 +10,8 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
 use dotty_typer::{SourceTyper, TyperError};
 
-const ALGORITHMS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Algorithms.scala");
+const ALGORITHMS: &str =
+    include_str!("../../../tests/fixtures/tasty_pickler/AlgorithmsReference.scala");
 const CUSTOM_OPERATORS: &str =
     include_str!("../../../tests/fixtures/tasty_pickler/CustomOperators.scala");
 const ALGORITHMS_SOURCE: SourceId = SourceId::from_index(40);
@@ -136,7 +137,7 @@ fn selected_application(typer: &SourceTyper<'_>, root: TreeId<Typed>) -> (Symbol
 
 #[test]
 fn pinned_int_and_boolean_operators_keep_exact_source_symbols_and_shapes() {
-    let mut fixture = Fixture::new(ALGORITHMS_SOURCE, ALGORITHMS, "Algorithms.scala");
+    let mut fixture = Fixture::new(ALGORITHMS_SOURCE, ALGORITHMS, "AlgorithmsReference.scala");
     let int = fixture.definitions.int;
     let boolean = fixture.definitions.boolean;
     let int_class = class_symbol(&fixture.store, int);
@@ -310,7 +311,7 @@ fn pinned_int_and_boolean_operators_keep_exact_source_symbols_and_shapes() {
 
 #[test]
 fn mutable_loop_bindings_assignments_and_while_keep_canonical_typed_edges() {
-    let mut fixture = Fixture::new(ALGORITHMS_SOURCE, ALGORITHMS, "Algorithms.scala");
+    let mut fixture = Fixture::new(ALGORITHMS_SOURCE, ALGORITHMS, "AlgorithmsReference.scala");
     let (method, _, rhs) = fixture.method("sumTo");
     let TreeKind::Block(source_block) = &fixture.ast.get(rhs).kind else {
         panic!("sumTo source RHS should be a block")
@@ -468,7 +469,7 @@ fn mutable_loop_bindings_assignments_and_while_keep_canonical_typed_edges() {
 
 #[test]
 fn immutable_val_and_mutable_var_have_distinct_source_flags() {
-    let mut fixture = Fixture::new(ALGORITHMS_SOURCE, ALGORITHMS, "Algorithms.scala");
+    let mut fixture = Fixture::new(ALGORITHMS_SOURCE, ALGORITHMS, "AlgorithmsReference.scala");
     let (_, _, immutable_rhs) = fixture.method("immutableLocal");
     let (mutable_method, _, mutable_rhs) = fixture.method("sumTo");
     let immutable_local = match &fixture.ast.get(immutable_rhs).kind {
@@ -548,7 +549,7 @@ fn same_spelled_user_operator_is_not_a_canonical_int_operator() {
 
 #[test]
 fn typed_short_circuit_rhs_and_eager_rhs_remain_distinguishable_applications() {
-    let mut fixture = Fixture::new(ALGORITHMS_SOURCE, ALGORITHMS, "Algorithms.scala");
+    let mut fixture = Fixture::new(ALGORITHMS_SOURCE, ALGORITHMS, "AlgorithmsReference.scala");
     let operators = fixture
         .definitions
         .boolean_primitive_operator_symbols(&fixture.store)

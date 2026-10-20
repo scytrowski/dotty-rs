@@ -462,24 +462,19 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 """public final class AlgorithmsRuntime {
   public static void main(String[] args) {
     example.Algorithms a = new example.Algorithms();
-    if (a.add(7, 3) != 10 || a.subtract(7, 3) != 4 || a.multiply(7, 3) != 21 ||
-        a.divide(7, 3) != 2 || a.remainder(7, 3) != 1 || a.less(2, 3) != true ||
-        a.lessOrEqual(3, 3) != true || a.greater(4, 3) != true ||
-        a.greaterOrEqual(3, 3) != true || a.negate(true) != false ||
-        !a.both(true, true) || a.both(true, false) || !a.either(false, true) ||
-        a.either(false, false) || !a.eagerAnd(true, true) ||
-        !a.eagerOr(false, true) || !a.exclusiveOr(true, false) ||
-        a.shortCircuitAnd() || !a.shortCircuitOr() || a.sumTo(0) != 0 ||
+    if (a.add(2, 3) != 5 || a.add(-2, 3) != 1 ||
+        a.add(Integer.MAX_VALUE, 1) != Integer.MIN_VALUE ||
+        !a.positive(1) || a.positive(0) || a.positive(-1) ||
+        !a.both(true, true) || a.both(true, false) ||
+        a.safeAnd() || !a.safeOr() || a.sumTo(0) != 0 ||
         a.sumTo(1) != 0 || a.sumTo(5) != 10 || a.sumTo(-1) != 0)
       throw new AssertionError("unexpected Algorithms results");
-    try { a.eagerAndEffect(); throw new AssertionError("& skipped its RHS"); }
+    try { a.divisionByZero(); throw new AssertionError("division did not throw"); }
     catch (ArithmeticException expected) { }
-    try { a.eagerOrEffect(); throw new AssertionError("| skipped its RHS"); }
-    catch (ArithmeticException expected) { }
-    System.out.println("Algorithms = arithmetic, booleans, short-circuit, eager, sumTo(5)=10");
+    System.out.println("Algorithms = arithmetic, booleans, short-circuit, sumTo(5)=10");
   }
 }
-""", "Algorithms = arithmetic, booleans, short-circuit, eager, sumTo(5)=10", 10,
+""", "Algorithms = arithmetic, booleans, short-circuit, sumTo(5)=10", 10,
             ),
             "example/Loop.tasty": (
                 "example.Loop", r"public int sumTo\(int\)", "LoopRuntime.java",
@@ -576,13 +571,12 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                     raise RuntimeError(f"fresh Decisions class has unexpected signatures: {javap}")
             if relative.as_posix() == "example/Algorithms.tasty":
                 signatures = (
-                    r"public int add\(int, int\)", r"public int divide\(int, int\)",
+                    r"public int add\(int, int\)", r"public boolean positive\(int\)",
                     r"public boolean both\(boolean, boolean\)",
-                    r"public boolean shortCircuitAnd\(\)",
-                    r"public boolean shortCircuitOr\(\)",
-                    r"public boolean eagerAndEffect\(\)",
-                    r"public boolean eagerOrEffect\(\)",
-                    r"public int immutableLocal\(int\)", r"public int sumTo\(int\)",
+                    r"public boolean safeAnd\(\)",
+                    r"public boolean safeOr\(\)",
+                    r"public boolean divisionByZero\(\)",
+                    r"public int sumTo\(int\)",
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Algorithms class has unexpected signatures: {javap}")
@@ -685,18 +679,18 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
     results = []
     algorithm_classes = directory / "algorithm-source-reference"
     algorithm_classes.mkdir()
-    toolchain.compiler(["-d", algorithm_classes, FIXTURES / "Algorithms.scala"])
+    toolchain.compiler(["-d", algorithm_classes, FIXTURES / "AlgorithmsReference.scala"])
     algorithm_harness = directory / "AlgorithmsSourceRuntime.java"
     algorithm_harness.write_text("""public final class AlgorithmsSourceRuntime {
   public static void main(String[] args) {
-    example.Algorithms a = new example.Algorithms();
+    example.AlgorithmsReference a = new example.AlgorithmsReference();
     if (a.shortCircuitAnd() || !a.shortCircuitOr() || a.sumTo(5) != 10)
       throw new AssertionError("Scala source reference failed");
     try { a.eagerAndEffect(); throw new AssertionError("& skipped its RHS"); }
     catch (ArithmeticException expected) { }
     try { a.eagerOrEffect(); throw new AssertionError("| skipped its RHS"); }
     catch (ArithmeticException expected) { }
-    System.out.println("Algorithms source = short-circuit, eager, sumTo(5)=10");
+    System.out.println("Algorithms reference = short-circuit, eager, sumTo(5)=10");
   }
 }
 """)
@@ -704,10 +698,10 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
              algorithm_harness])
     algorithm_source_run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath",
                                     algorithm_classes, "AlgorithmsSourceRuntime"])
-    expected_algorithm_source = "Algorithms source = short-circuit, eager, sumTo(5)=10"
+    expected_algorithm_source = "Algorithms reference = short-circuit, eager, sumTo(5)=10"
     if expected_algorithm_source not in algorithm_source_run:
         raise RuntimeError(f"pinned Scala Algorithms source returned unexpected values: {algorithm_source_run}")
-    results.append({"source_reference": "example.Algorithms", "scala_source_compile": True,
+    results.append({"source_reference": "example.AlgorithmsReference", "scala_source_compile": True,
                     "source_runtime_output": expected_algorithm_source})
     # Independently compile and execute the original Scala source. This is a
     # source-level reference: it does not consume the checked-in TASTy fixture.
