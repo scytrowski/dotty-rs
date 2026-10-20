@@ -11,6 +11,34 @@ from reconcile_import_prefix_1180 import (
 
 
 class ImportPrefix1180ReconciliationTests(unittest.TestCase):
+    def test_rust_probe_and_runner_share_a_nonempty_1180_section(self):
+        root = Path(__file__).resolve().parents[2]
+        rust = (root / "crates/dotty-typer/tests/local_definition_audit.rs").read_text()
+        probe = rust.split("fn pinned_scala39_import_prefix_typing_probe()", 1)[1].split(
+            "fn print_singleton_reference_profile", 1
+        )[0]
+        begin = 'println!("AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_BEGIN");'
+        end = 'println!("AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_END");'
+        self.assertIn("reconcile_import_prefix_observations(\n        &latest_baseline_rows", probe)
+        self.assertIn("assert_eq!(latest_reconciliation.len(), 1_063)", probe)
+        self.assertIn(begin, probe)
+        self.assertIn("print_import_prefix_reconciliation(&latest_reconciliation)", probe)
+        self.assertIn(end, probe)
+
+        runner = (root / "tools/typer-classpath-corpus-audit/run").read_text()
+        extraction = (
+            "sed -n '/^AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_BEGIN$/,"
+            "/^AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_END$/p'"
+        )
+        self.assertIn(extraction, runner)
+        self.assertIn(
+            'if [[ ! -s "$tmp_dir/$run.1180-reconciliation" ]]; then', runner
+        )
+        self.assertLess(
+            runner.index('if [[ ! -s "$tmp_dir/$run.1180-reconciliation" ]]; then'),
+            runner.index('python3 "$script_dir/reconcile_import_prefix_1180.py"'),
+        )
+
     def test_joins_all_frozen_rows_and_preserves_original_evidence(self):
         root = Path(__file__).resolve().parents[2]
         profile = (root / "docs/typer-classpath-import-prefix-profile-1180-3.9.0.md").read_text()
