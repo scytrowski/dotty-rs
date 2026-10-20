@@ -40,7 +40,8 @@ class ImportPrefix1180ReconciliationTests(unittest.TestCase):
         self.assertEqual(len({row["stable_key"] for row in refreshed}), 1063)
         self.assertEqual({row["current_method_blocker"] for row in refreshed}, {"current-value"})
         self.assertTrue(all(row["source_package_registry_lookup"] for row in refreshed))
-        self.assertTrue(all(row["pinned_classpath_evidence"] for row in refreshed))
+        self.assertTrue(all(int(row["target_unique_blocker_origins"]) > 0 for row in refreshed))
+        self.assertTrue(all(int(row["classpath_evidence_rows"]) > 0 for row in refreshed))
 
         current[0]["final_import_identity"] = (
             "outcomes::qualifier=resolved::kind=Object::origin=tasty::"
