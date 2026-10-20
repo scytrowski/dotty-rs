@@ -9068,7 +9068,7 @@ fn super_method_source_is_rejected_by_typer_before_jvm_emission() {
 }
 
 #[test]
-fn parameterized_parent_constructor_is_preserved_in_source_but_not_typed() {
+fn parameterized_parent_constructor_arguments_are_typed_before_codegen_rejects_them() {
     let source_text = "class Base(seed: Int):\n  def value(): Int = seed\n\nclass Derived(start: Int) extends Base(start):\n  def read(): Int = start\n";
     let source_id = SourceId::from_index(1368);
     let source = SourceText::new(source_text).unwrap();
@@ -9197,13 +9197,13 @@ fn parameterized_parent_constructor_is_preserved_in_source_but_not_typed() {
         typer
             .source_typed_index()
             .get(source_id, *parent_application)
-            .is_none()
+            .is_some()
     );
     assert!(
         typer
             .source_typed_index()
             .get(source_id, application.args[0])
-            .is_none()
+            .is_some()
     );
 }
 

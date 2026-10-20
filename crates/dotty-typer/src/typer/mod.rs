@@ -15,7 +15,7 @@ use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, Name, NoResolver, Packages,
     ResolutionError, ScopeId, SemanticStore, SourceContextId, SourceDefinition, SourceId,
     SourceSemanticIndex, SourceSpan, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin,
-    SymbolResolver, TreeId, TypeId, Typed, Untyped,
+    SymbolResolver, TreeId, TypeId, Typed, Untyped, Visibility,
 };
 
 use crate::{SourceTypeIndex, SourceTypedIndex};
@@ -122,6 +122,7 @@ pub struct SourceTyper<'a> {
     initializing_local_symbols: HashSet<SymbolId>,
     inferred_field_types_in_progress: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
+    uninitialized_parent_receiver: Option<SymbolId>,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     function_literals: expression::FunctionLiteralIndex,
@@ -213,6 +214,7 @@ impl<'a> SourceTyper<'a> {
             initializing_local_symbols: HashSet::new(),
             inferred_field_types_in_progress: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
+            uninitialized_parent_receiver: None,
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
             function_literals: expression::FunctionLiteralIndex::default(),
@@ -242,6 +244,7 @@ impl<'a> SourceTyper<'a> {
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
             self.validate_value_expression(tree, typed)?;
+            self.validate_cached_parent_argument_receiver_access(tree, typed)?;
             return Ok(typed);
         }
         self.run_expression_transaction(|typer, info_journal, new_mappings| {
@@ -307,6 +310,7 @@ impl<'a> SourceTyper<'a> {
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
             self.validate_value_expression(tree, typed)?;
+            self.validate_cached_parent_argument_receiver_access(tree, typed)?;
             return Ok(typed);
         }
         let Some(source_tree) = self.arena.try_get(tree).cloned() else {

@@ -7,6 +7,60 @@ use dotty_core::types::*;
 use dotty_core::*;
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn validate_cached_parent_argument_receiver_access(
+        &self,
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+    ) -> Result<(), TyperError> {
+        let Some(receiver) = self.uninitialized_parent_receiver else {
+            return Ok(());
+        };
+        let mut pending = vec![typed_tree];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(tree) = pending.pop() {
+            if !seen.insert(tree) {
+                continue;
+            }
+            let Some(node) = self.typed_arena.try_get(tree) else {
+                continue;
+            };
+            let accesses_receiver = match &node.kind {
+                TreeKind::This(_) => matches!(
+                    self.store.types.try_get(node.ty),
+                    Some(Type::ThisType { class }) if *class == receiver
+                ),
+                TreeKind::Ident(_) => match self.store.types.try_get(node.ty) {
+                    Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    }) => self.is_instance_class_member(*symbol),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if accesses_receiver {
+                return Err(TyperError::UninitializedParentArgumentReceiver {
+                    source: self.source,
+                    tree_index: source_tree.index(),
+                    receiver,
+                });
+            }
+            pending.extend(typed_tree_children(&node.kind));
+        }
+        Ok(())
+    }
+
+    fn is_instance_class_member(&self, symbol: SymbolId) -> bool {
+        self.store.symbols.contains(symbol)
+            && self.store.symbols.get(symbol).owner.is_some_and(|owner| {
+                self.store.symbols.contains(owner)
+                    && matches!(
+                        self.store.symbols.get(owner).kind,
+                        SymbolKind::Class | SymbolKind::Trait
+                    )
+            })
+    }
+
     pub(in crate::typer) fn non_value_term_mapping_symbol(
         &self,
         source_tree: TreeId<Untyped>,
@@ -503,6 +557,13 @@ impl SourceTyper<'_> {
             });
         }
         let class = self.enclosing_this_owner(this.qual, context.owner, tree.index())?;
+        if self.uninitialized_parent_receiver == Some(class) {
+            return Err(TyperError::UninitializedParentArgumentReceiver {
+                source: self.source,
+                tree_index: tree.index(),
+                receiver: class,
+            });
+        }
         let ty = self.store.types.alloc(Type::ThisType { class });
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
@@ -520,6 +581,15 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let symbol = self.resolve_expression_term(ident.name, context, tree.index(), position)?;
         let declaration = self.store.symbols.get(symbol);
+        if let Some(receiver) = self.uninitialized_parent_receiver
+            && self.is_instance_class_member(symbol)
+        {
+            return Err(TyperError::UninitializedParentArgumentReceiver {
+                source: self.source,
+                tree_index: tree.index(),
+                receiver,
+            });
+        }
         let shared_owner = declaration
             .owner
             .filter(|owner| self.store.symbols.contains(*owner))
@@ -681,6 +751,7 @@ impl SourceTyper<'_> {
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<Option<TreeId<Typed>>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
+            self.validate_cached_parent_argument_receiver_access(tree, typed)?;
             return Ok(self
                 .non_value_term_mapping_symbol(tree, typed)
                 .is_some()
@@ -735,5 +806,149 @@ impl SourceTyper<'_> {
             })?;
         new_mappings.push((self.source, tree));
         Ok(Some(typed))
+    }
+}
+
+fn typed_tree_children(kind: &TreeKind<Typed>) -> Vec<TreeId<Typed>> {
+    match kind {
+        TreeKind::Select(selection) => vec![selection.qualifier],
+        TreeKind::Super(super_tree) => vec![super_tree.qual],
+        TreeKind::Apply(application) => std::iter::once(application.function)
+            .chain(application.args.iter().copied())
+            .collect(),
+        TreeKind::TypeApply(application) => std::iter::once(application.function)
+            .chain(application.args.iter().copied())
+            .collect(),
+        TreeKind::New(new) => vec![new.tpt],
+        TreeKind::Typed(ascription) => vec![ascription.expr, ascription.tpt],
+        TreeKind::NamedArg(argument) => vec![argument.arg],
+        TreeKind::Assign(assignment) => vec![assignment.lhs, assignment.rhs],
+        TreeKind::Block(block) => block
+            .stats
+            .iter()
+            .copied()
+            .chain(std::iter::once(block.expr))
+            .collect(),
+        TreeKind::If(if_expr) => vec![if_expr.cond, if_expr.then_branch, if_expr.else_branch],
+        TreeKind::Match(matched) => std::iter::once(matched.selector)
+            .chain(matched.cases.iter().copied())
+            .collect(),
+        TreeKind::CaseDef(case) => std::iter::once(case.pattern)
+            .chain(case.guard)
+            .chain(std::iter::once(case.body))
+            .collect(),
+        TreeKind::Return(return_tree) => return_tree
+            .expr
+            .into_iter()
+            .chain(return_tree.from)
+            .collect(),
+        TreeKind::While(while_tree) => vec![while_tree.cond, while_tree.body],
+        TreeKind::Try(try_tree) => std::iter::once(try_tree.expr)
+            .chain(try_tree.cases.iter().copied())
+            .chain(try_tree.finalizer)
+            .collect(),
+        TreeKind::Closure(closure) => closure
+            .env
+            .iter()
+            .copied()
+            .chain(std::iter::once(closure.method))
+            .chain(closure.tpt)
+            .collect(),
+        TreeKind::ValDef(definition) => std::iter::once(definition.tpt)
+            .chain(definition.rhs)
+            .collect(),
+        TreeKind::DefDef(definition) => definition
+            .type_params
+            .iter()
+            .copied()
+            .chain(definition.value_param_clauses.iter().flatten().copied())
+            .chain(std::iter::once(definition.tpt))
+            .chain(definition.rhs)
+            .collect(),
+        TreeKind::TypeDef(definition) => vec![definition.rhs],
+        TreeKind::Template(template) => std::iter::once(template.constructor)
+            .chain(template.parents.iter().copied())
+            .chain(template.self_val)
+            .chain(template.body.iter().copied())
+            .collect(),
+        TreeKind::PackageDef(package) => std::iter::once(package.name)
+            .chain(package.stats.iter().copied())
+            .collect(),
+        TreeKind::Import(import) => std::iter::once(import.expr)
+            .chain(
+                import
+                    .selectors
+                    .iter()
+                    .flat_map(|selector| selector.renamed),
+            )
+            .chain(import.selectors.iter().flat_map(|selector| selector.bound))
+            .collect(),
+        TreeKind::Export(export) => std::iter::once(export.expr)
+            .chain(
+                export
+                    .selectors
+                    .iter()
+                    .flat_map(|selector| selector.renamed),
+            )
+            .chain(export.selectors.iter().flat_map(|selector| selector.bound))
+            .collect(),
+        TreeKind::SingletonTypeTree(singleton) => vec![singleton.reference],
+        TreeKind::AppliedTypeTree(applied) => std::iter::once(applied.tpt)
+            .chain(applied.args.iter().copied())
+            .collect(),
+        TreeKind::RefinedTypeTree(refined) => std::iter::once(refined.tpt)
+            .chain(refined.refinements.iter().copied())
+            .collect(),
+        TreeKind::LambdaTypeTree(lambda) => lambda
+            .type_params
+            .iter()
+            .copied()
+            .chain(std::iter::once(lambda.body))
+            .collect(),
+        TreeKind::MatchTypeTree(matched) => matched
+            .bound
+            .into_iter()
+            .chain(std::iter::once(matched.selector))
+            .chain(matched.cases.iter().copied())
+            .collect(),
+        TreeKind::ByNameTypeTree(by_name) => vec![by_name.result],
+        TreeKind::TypeBoundsTree(bounds) => bounds
+            .low
+            .into_iter()
+            .chain(bounds.high)
+            .chain(bounds.alias)
+            .collect(),
+        TreeKind::Bind(bind) => vec![bind.body],
+        TreeKind::Alternative(alternative) => alternative.alternatives.clone(),
+        TreeKind::UnApply(unapply) => std::iter::once(unapply.function)
+            .chain(unapply.implicits.iter().copied())
+            .chain(unapply.patterns.iter().copied())
+            .collect(),
+        TreeKind::Annotated(annotated) => vec![annotated.expr, annotated.annotation],
+        TreeKind::Quote(quote) => std::iter::once(quote.body)
+            .chain(quote.tags.iter().copied())
+            .collect(),
+        TreeKind::Splice(splice) => vec![splice.expr],
+        TreeKind::QuotePattern(pattern) => pattern
+            .bindings
+            .iter()
+            .copied()
+            .chain(std::iter::once(pattern.body))
+            .chain(std::iter::once(pattern.quotes))
+            .collect(),
+        TreeKind::SplicePattern(pattern) => std::iter::once(pattern.body)
+            .chain(pattern.type_args.iter().copied())
+            .chain(pattern.args.iter().copied())
+            .collect(),
+        TreeKind::Inlined(inlined) => inlined
+            .bindings
+            .iter()
+            .copied()
+            .chain(std::iter::once(inlined.expansion))
+            .collect(),
+        TreeKind::Ident(_) | TreeKind::This(_) | TreeKind::Literal(_) | TreeKind::TypeTree(_) => {
+            Vec::new()
+        }
+        TreeKind::PhaseSpecific(never) => match *never {},
     }
 }
