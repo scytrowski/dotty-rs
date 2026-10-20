@@ -64,7 +64,7 @@ pub struct MethodPicklePlan {
     pub body: Option<TreeId<Typed>>,
 }
 
-/// Exact source/typed/symbol/scope evidence for one method-local immutable value.
+/// Exact source/typed/symbol/scope evidence for one method-local Int `val` or `var`.
 ///
 /// The source integration obtains this tuple from its `SourceTyper` session;
 /// the pickler never reconstructs local identity from names or allocation order.
@@ -91,7 +91,7 @@ pub struct PicklePlan<'a> {
     pub class_tree: TreeId<Untyped>,
     pub constructor: DefaultConstructorPlan,
     pub methods: &'a [MethodPicklePlan],
-    /// Canonical bindings for supported local `val` declarations across methods.
+    /// Canonical bindings for supported local Int `val` and `var` declarations across methods.
     pub local_values: &'a [LocalValueBinding],
 }
 
