@@ -461,6 +461,62 @@ fn class_builder_accepts_prebuilt_symbolic_branch_code() {
 }
 
 #[test]
+fn class_builder_verifies_parameterized_direct_super_constructor_prologue() {
+    let mut builder = ClassFileBuilder::new(
+        "example/Derived",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder.set_super_class(Some("example/Base")).unwrap();
+    builder.set_verification_hierarchy(
+        ClassHierarchy::from_edges([("example/Derived".to_owned(), "example/Base".to_owned())])
+            .unwrap(),
+    );
+    builder
+        .add_instance_method("<init>", "(I)V", |code| {
+            code.aload(0)?;
+            code.iload(1)?;
+            code.invokespecial("example/Base", "<init>", "(I)V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let constructor = code_attribute(method_named(&class_file, "<init>"));
+    assert_eq!((constructor.max_stack, constructor.max_locals), (2, 2));
+    assert_eq!(constructor.code[0], 0x2a);
+    assert_eq!(constructor.code[1], 0x1b);
+    assert_eq!(constructor.code[2], 0xb7);
+    let method_index = u16::from_be_bytes([constructor.code[3], constructor.code[4]]);
+    let dotty_classfile::classfile::ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    } = class_file
+        .constant_pool
+        .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+            method_index,
+        ))
+        .unwrap()
+    else {
+        panic!("super constructor invocation uses a Methodref");
+    };
+    assert_eq!(
+        class_file.constant_pool.class_name(*class_index),
+        Ok("example/Base")
+    );
+    assert_eq!(
+        class_file.constant_pool.name_and_type(*name_and_type_index),
+        Ok(("<init>", "(I)V"))
+    );
+    assert_eq!(constructor.code[5], 0xb1);
+}
+
+#[test]
 fn stack_map_frames_preserve_exact_objects_in_locals_and_operand_stack() {
     let mut builder = ClassFileBuilder::new(
         "example/ReferenceFrames",

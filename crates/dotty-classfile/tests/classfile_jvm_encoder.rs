@@ -1,3 +1,4 @@
+use dotty_classfile::bytecode::ClassHierarchy;
 use dotty_classfile::classfile::{
     ACC_PRIVATE, ACC_PUBLIC, ACC_SUPER, Attribute, ClassAccessFlags, ClassFile, ClassFileBuilder,
     ClassFileVersion, CodeAttribute, ConstantPoolEntry, FieldAccessFlags, MethodAccessFlags,
@@ -1211,6 +1212,159 @@ fn reference_fields_and_constructor_arguments_verify_with_jdk() {
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
         "reference-field=ok"
+    );
+}
+
+#[test]
+fn parameterized_direct_super_constructor_prologue_verifies_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let hierarchy =
+        ClassHierarchy::from_edges([("example/Derived".to_owned(), "example/Base".to_owned())])
+            .unwrap();
+
+    let mut dep = ClassFileBuilder::new("example/Dep", version).unwrap();
+    dep.set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    dep.add_instance_method("<init>", "()V", |code| {
+        code.aload(0)?;
+        code.invokespecial("java/lang/Object", "<init>", "()V")?;
+        code.return_void()?;
+        Ok(())
+    })
+    .unwrap();
+    dep.add_instance_method("value", "()I", |code| {
+        code.iconst(7)?;
+        code.ireturn()?;
+        Ok(())
+    })
+    .unwrap();
+
+    let mut base = ClassFileBuilder::new("example/Base", version).unwrap();
+    base.set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    base.add_field("seed", "I", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    base.add_field("enabled", "Z", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    base.add_field("dep", "Lexample/Dep;", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    base.add_instance_method("<init>", "(IZLexample/Dep;)V", |code| {
+        code.aload(0)?;
+        code.invokespecial("java/lang/Object", "<init>", "()V")?;
+        code.aload(0)?;
+        code.iload(1)?;
+        code.putfield("example/Base", "seed", "I")?;
+        code.aload(0)?;
+        code.iload(2)?;
+        code.putfield("example/Base", "enabled", "Z")?;
+        code.aload(0)?;
+        code.aload(3)?;
+        code.putfield("example/Base", "dep", "Lexample/Dep;")?;
+        code.return_void()?;
+        Ok(())
+    })
+    .unwrap();
+    base.add_instance_method("seed", "()I", |code| {
+        code.aload(0)?;
+        code.getfield("example/Base", "seed", "I")?;
+        code.ireturn()?;
+        Ok(())
+    })
+    .unwrap();
+    base.add_instance_method("enabled", "()Z", |code| {
+        code.aload(0)?;
+        code.getfield("example/Base", "enabled", "Z")?;
+        code.ireturn()?;
+        Ok(())
+    })
+    .unwrap();
+    base.add_instance_method("dep", "()Lexample/Dep;", |code| {
+        code.aload(0)?;
+        code.getfield("example/Base", "dep", "Lexample/Dep;")?;
+        code.areturn()?;
+        Ok(())
+    })
+    .unwrap();
+
+    let mut derived = ClassFileBuilder::new("example/Derived", version).unwrap();
+    derived
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    derived.set_super_class(Some("example/Base")).unwrap();
+    derived.set_verification_hierarchy(hierarchy);
+    derived
+        .add_instance_method("<init>", "(IZLexample/Dep;)V", |code| {
+            code.aload(0)?;
+            code.iload(1)?;
+            code.iload(2)?;
+            code.aload(3)?;
+            code.invokespecial("example/Base", "<init>", "(IZLexample/Dep;)V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    fs::create_dir_all(directory.path().join("example")).unwrap();
+    for (name, bytes) in [
+        ("Dep", dep.encode().unwrap()),
+        ("Base", base.encode().unwrap()),
+        ("Derived", derived.encode().unwrap()),
+    ] {
+        fs::write(
+            directory.path().join(format!("example/{name}.class")),
+            bytes,
+        )
+        .unwrap();
+    }
+
+    let harness = directory.path().join("ParameterizedSuperHarness.java");
+    fs::write(
+        &harness,
+        "public class ParameterizedSuperHarness { public static void main(String[] args) { example.Dep dep = new example.Dep(); example.Derived value = new example.Derived(42, true, dep); if (value.seed() != 42 || !value.enabled() || value.dep() != dep) throw new AssertionError(); System.out.println(\"parameterized-super=ok\"); } }\n",
+    )
+    .unwrap();
+    let directory_arg = directory.path().to_str().unwrap();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            directory_arg,
+            "-d",
+            directory_arg,
+            harness.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for parameterized-super harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            directory_arg,
+            "ParameterizedSuperHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected parameterized direct-super initialization\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "parameterized-super=ok"
     );
 }
 
