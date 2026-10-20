@@ -135,13 +135,17 @@ the peak argument stack. The parent constructor descriptor includes only
 formal arguments (for example `(I)V`); `this` is implicit and is not written
 into the descriptor.
 
-The current `dotty-classfile` validated-constructor path requires the first
-two instructions to be exactly `aload_0; invokespecial DirectParent.<init>()V`.
-It checks direct ownership, `<init>`, no arguments, and void return, then
-analyzes the remainder as post-super code. The general `InvokeSpecial` flow
-currently routes to allocation-constructor handling, which expects a pending
-`new` object and `<init>`. It does not model the distinct
-`UninitializedThis` transition for a parameterized parent call.
+The current `dotty-classfile` validated-constructor path requires `aload_0`,
+then allows only a bounded sequence of integer constants and `iload`/`aload`
+from initialized constructor parameters, followed by exactly one direct-parent
+`invokespecial <init>`. It checks owner, void return, descriptor arity and
+categories, local initialization, and exact reference assignability before
+analyzing the remaining body as post-super code. `aload_0` cannot be loaded as
+an argument, and field access, calls, allocation, stores, arithmetic, and
+branches are rejected before initialization. The ordinary `InvokeSpecial`
+flow after the prologue still handles constructor calls on pending `new`
+allocations; this separate prologue performs the `UninitializedThis`
+transition after the direct-parent call succeeds normally.
 
 Under JVMS 21 §4.10.1, local 0 begins as `UninitializedThis` with the
 `flagThisUninit` flag. Arguments must be evaluated without exposing that value

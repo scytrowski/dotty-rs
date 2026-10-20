@@ -84,8 +84,12 @@ For an ordinary non-static, non-constructor method, the initial local 0 is
 `Initialized(emitting_class)`. Static methods start with descriptor-derived
 parameters, including exact object identities. The Scala source backend still
 restricts emitted public method signatures to its existing subset. A constructor starts with
-`UninitializedThis`; do not treat it as an ordinary receiver. Its branch path
-and superclass-initialization flow remain unsupported.
+`UninitializedThis`; do not treat it as an ordinary receiver. The validated
+branchless constructor path accepts only a bounded sequence of integer
+constants and loads from initialized constructor parameter locals before one
+direct-super `<init>` call. It checks the call's owner, descriptor, argument
+categories, and exact reference identities before analyzing the remainder as
+initialized `this`. Branched constructor flow remains unsupported.
 
 ## Join and termination policy
 
@@ -154,10 +158,10 @@ constructor owner must equal the allocation class. `dup` aliases must all be
 rewritten to initialized `C` after the matching call. No uninitialized value
 may appear in a merge state or emitted branch-target frame.
 
-Branched `<init>` methods remain unsupported: tracking
-`UninitializedThis`, the first legal `this`/direct-super constructor call, and
-the allowed pre-super current-class `putfield` exception is a separate
-constructor-flow problem. No branch target may assume initialized `this`
+Branched `<init>` methods remain unsupported: the current linear class-file
+builder validates the `UninitializedThis` to initialized-`this` transition
+only in a single bounded prologue. It does not model exception edges or merge
+states across the call, and no branch target may assume initialized `this`
 before that transition.
 
 ## Constant-pool and frame construction
