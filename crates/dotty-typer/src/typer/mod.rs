@@ -9660,6 +9660,224 @@ mod tests {
     }
 
     #[test]
+    fn local_compiler_object_import_forms_type_a_real_module_member() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+        use dotty_core::types::{TermRefTarget, Type};
+
+        let cases = [
+            (
+                "import Contexts.*; withFreshTyperState",
+                "withFreshTyperState",
+            ),
+            (
+                "import Contexts.withFreshTyperState as state; state",
+                "withFreshTyperState",
+            ),
+            (
+                "import Contexts.withFreshTyperState; withFreshTyperState",
+                "withFreshTyperState",
+            ),
+        ];
+
+        for (body, member_name) in cases {
+            let source_text = format!(
+                "package dotty.tools\npackage dotc\npackage core\nclass Use {{ def run = {{ {body} }} }}"
+            );
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(&source_text);
+            let contexts_name = Name::new(store.names.intern("Contexts"), Namespace::Term);
+            let (run_method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "run");
+            let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+            let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let resolver = ClasspathSymbolResolver::new(
+                CompositeClassPath::new(vec![
+                    Box::new(DirectoryClassPath::new(compiler_root)),
+                    Box::new(DirectoryClassPath::new(library_root)),
+                    Box::new(JavaObjectStubPath),
+                ]),
+                definitions,
+                LoadingSession::with_packages(packages.snapshot()),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let context = typer.expression_context_for(run_method).unwrap();
+            let typed = typer
+                .type_expression(rhs, context)
+                .unwrap_or_else(|error| panic!("{body}: {error:?}"));
+            let member = match typer.store().types.get(typer.typed_ast().get(typed).ty) {
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } => *symbol,
+                other => panic!("{body}: expected a stable module-member reference, got {other:?}"),
+            };
+            let member_entry = typer.store().symbols.get(member);
+            assert_eq!(
+                typer.store().names.resolve(member_entry.name.text()),
+                member_name
+            );
+            assert_eq!(member_entry.kind, SymbolKind::Method);
+            let module_class = member_entry
+                .owner
+                .expect("method is owned by a ModuleClass");
+            assert_eq!(
+                typer.store().symbols.get(module_class).kind,
+                SymbolKind::ModuleClass
+            );
+            let package = typer.store().symbols.get(module_class).owner.unwrap();
+            let package_scope = packages.scope_of(package).unwrap();
+            let object = typer
+                .store()
+                .scopes
+                .get(package_scope)
+                .lookup(&contexts_name)
+                .expect("the package retains the canonical Contexts object");
+            assert_eq!(typer.store().symbols.get(object).kind, SymbolKind::Object);
+            assert_eq!(
+                typer
+                    .resolver
+                    .module_class_of_object(typer.store(), object)
+                    .unwrap(),
+                Some(module_class)
+            );
+            assert!(matches!(
+                typer.store().symbols.get(object).origin,
+                SymbolOrigin::Tasty(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn compiler_object_member_import_rolls_back_after_later_expression_failure_and_retries() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+            ModuleResolutionProfile,
+        };
+        use dotty_core::types::{TermRefTarget, Type};
+
+        let source_text = "package dotty.tools\npackage dotc\npackage core\nclass Use { def broken = { import Contexts.withFreshTyperState as state; state; missing }; def valid = { import Contexts.withFreshTyperState as state; state } }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let contexts_name = Name::new(store.names.intern("Contexts"), Namespace::Term);
+        let (broken_method, broken_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "broken");
+        let (valid_method, valid_rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "valid");
+        let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let resolver = ClasspathSymbolResolver::new(
+            CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(compiler_root)),
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+            ]),
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        )
+        .with_module_resolution_profile_collection();
+        let profile = Rc::new(RefCell::new(ModuleResolutionProfile::default()));
+        let resolver = ProfiledCompilerResolver {
+            inner: resolver,
+            profile: Rc::clone(&profile),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+        let broken_context = typer.expression_context_for(broken_method).unwrap();
+        let store_checkpoint = typer.store().checkpoint();
+        let typed_checkpoint = typer.typed_ast().checkpoint();
+        let resolver_checkpoint = typer.resolver.checkpoint();
+        let core_package = packages
+            .symbol(&["dotty", "tools", "dotc", "core"])
+            .unwrap();
+        let core_scope = packages.scope_of(core_package).unwrap();
+
+        let error = typer
+            .type_expression(broken_rhs, broken_context)
+            .expect_err("the later missing name should fail after the import is used");
+        assert!(
+            matches!(error, TyperError::TermNameNotFound { .. }),
+            "{error:?}"
+        );
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
+        assert_eq!(typer.resolver.checkpoint(), resolver_checkpoint);
+        assert_eq!(typer.source_typed_index().get(source, broken_rhs), None);
+        assert!(
+            typer
+                .store()
+                .scopes
+                .get(core_scope)
+                .lookup_all(&contexts_name)
+                .is_empty()
+        );
+        assert!(
+            profile.borrow().module_member_successes > 0,
+            "the failing attempt must have resolved a real ModuleClass member before rollback"
+        );
+        assert!(profile.borrow().new_object_identities > 0);
+
+        let valid_context = typer.expression_context_for(valid_method).unwrap();
+        let typed = typer
+            .type_expression(valid_rhs, valid_context)
+            .expect("a positive retry in the same typer and resolver session should succeed");
+        let member = match typer.store().types.get(typer.typed_ast().get(typed).ty) {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected a module member reference after retry, got {other:?}"),
+        };
+        let module_class = typer.store().symbols.get(member).owner.unwrap();
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        let package = typer.store().symbols.get(module_class).owner.unwrap();
+        let package_scope = packages.scope_of(package).unwrap();
+        let objects = typer
+            .store()
+            .scopes
+            .get(package_scope)
+            .lookup_all(&contexts_name);
+        assert_eq!(
+            objects.len(),
+            1,
+            "retry must leave one canonical package Object"
+        );
+        assert_eq!(
+            typer.store().symbols.get(objects[0]).kind,
+            SymbolKind::Object
+        );
+        assert_eq!(
+            typer
+                .resolver
+                .module_class_of_object(typer.store(), objects[0])
+                .unwrap(),
+            Some(module_class)
+        );
+    }
+
+    #[test]
     fn wildcard_package_import_resolves_a_type_name() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package lib { class Imported }\npackage app { import lib.*; val x: Imported = 1 }",

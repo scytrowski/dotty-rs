@@ -1588,6 +1588,16 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         self.resolver_mut()
             .enter_synthetic_package_member(store, package, name, member)
     }
+
+    fn package_object_collision(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: dotty_core::Name,
+    ) -> Result<bool, ResolutionError> {
+        self.resolver_mut()
+            .package_object_collision(store, package, name)
+    }
 }
 
 fn audit_symbol_path(store: &SemanticStore, symbol: SymbolId) -> String {
@@ -2051,6 +2061,78 @@ fn direct_module_resolver(
             LoadingSession::new(),
         ),
     )
+}
+
+#[test]
+fn audit_resolver_forwards_compiler_object_package_collision_probe() {
+    let source = "package dotty.tools\npackage dotc\npackage core\npackage Contexts";
+    let source_id = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let scanner = ContextualScanner::new(source).expect("test source should scan");
+    let parsed = parse_compilation_unit(
+        SourceText::new(source).expect("test source should be valid UTF-8"),
+        source_id,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "Contexts.scala",
+        &mut store,
+        &mut packages,
+    )
+    .expect("test package should be entered");
+    let core_package = packages
+        .symbol(&["dotty", "tools", "dotc", "core"])
+        .expect("source should establish the package prefix");
+    let definitions = Definitions::bootstrap(&mut store);
+    assert!(
+        packages
+            .symbol(&["dotty", "tools", "dotc", "core", "Contexts"])
+            .is_some()
+    );
+    let name = dotty_core::Name::new(store.names.intern("Contexts"), Namespace::Term);
+    let fixture_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+    let class_path = || {
+        CompositeClassPath::new(vec![Box::new(DirectoryClassPath::new(
+            fixture_root.clone(),
+        ))])
+    };
+    let make_resolver = || {
+        ClasspathSymbolResolver::new(
+            class_path(),
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        )
+    };
+
+    // Use the same semantic state for both trait-object calls. The first probe
+    // fails transactionally, so the wrapper sees precisely the same evidence.
+    let direct_result = {
+        let mut resolver = make_resolver();
+        let direct: &mut dyn SymbolResolver = &mut resolver;
+        direct.package_object_collision(&mut store, core_package, name)
+    };
+    let metrics = Rc::new(RefCell::new(ResolverMetrics::default()));
+    let mut audit = AuditResolver {
+        inner: Some(make_resolver()),
+        metrics,
+        class_path_probe: None,
+        session_out: None,
+    };
+    let audit_port: &mut dyn SymbolResolver = &mut audit;
+    let audit_result = audit_port.package_object_collision(&mut store, core_package, name);
+
+    assert_eq!(
+        direct_result,
+        Err(ResolutionError::Ambiguous { candidates: 2 })
+    );
+    assert_eq!(audit_result, direct_result);
 }
 
 fn source_audit_resolver(
