@@ -9,7 +9,6 @@ use crate::{TypeRole, UnsupportedFeature};
 struct OperatorContract {
     owner: Builtin,
     source_name: &'static str,
-    wire_name: &'static str,
     parameters: Vec<TypeId>,
     result: TypeId,
     argument_count: Option<usize>,
@@ -118,8 +117,8 @@ impl<'a> EncodingContext<'a> {
                 });
             }
 
-            // TASTy stores Scala's encoded operator spelling in names such as
-            // `$div`; the source spelling `/` is not a valid ordinary name.
+            // TASTy stores semantic operator spellings verbatim, including
+            // names such as `/` that are not ordinary identifiers.
             let source_spelling = context.store.names.try_resolve(record.name.text()).ok_or(
                 PickleError::InvalidName {
                     name: record.name.text(),
@@ -137,7 +136,7 @@ impl<'a> EncodingContext<'a> {
             if source_spelling != contract.source_name {
                 return Err(reference(target, ReferenceError::Metadata));
             }
-            let method_name = context.utf8(contract.wire_name)?;
+            let method_name = context.intern_wire_text(contract.source_name)?;
             if contract.argument_count.is_none() {
                 return context
                     .wire
@@ -204,17 +203,7 @@ impl<'a> EncodingContext<'a> {
             .iter()
             .position(|&symbol| symbol == target)
         {
-            let (source_name, wire_name) = [
-                ("+", "$plus"),
-                ("-", "$minus"),
-                ("*", "$times"),
-                ("/", "$div"),
-                ("%", "$percent"),
-                ("<", "$less"),
-                ("<=", "$less$eq"),
-                (">", "$greater"),
-                (">=", "$greater$eq"),
-            ][index];
+            let source_name = ["+", "-", "*", "/", "%", "<", "<=", ">", ">="][index];
             let result = if index < 5 {
                 self.definitions.int
             } else {
@@ -223,7 +212,6 @@ impl<'a> EncodingContext<'a> {
             return Ok(OperatorContract {
                 owner: Builtin::Int,
                 source_name,
-                wire_name,
                 parameters: vec![self.definitions.int],
                 result,
                 argument_count: Some(1),
@@ -240,7 +228,6 @@ impl<'a> EncodingContext<'a> {
             return Ok(OperatorContract {
                 owner: Builtin::Boolean,
                 source_name: "unary_!",
-                wire_name: "unary_$bang",
                 parameters: Vec::new(),
                 result: self.definitions.boolean,
                 argument_count: None,
@@ -253,11 +240,6 @@ impl<'a> EncodingContext<'a> {
                     "&&"
                 } else {
                     "||"
-                },
-                wire_name: if target == boolean_symbols.and_then {
-                    "$amp$amp"
-                } else {
-                    "$bar$bar"
                 },
                 parameters: vec![self.definitions.boolean],
                 result: self.definitions.boolean,
@@ -412,17 +394,16 @@ mod tests {
         let definitions = Definitions::bootstrap(&mut store);
         let index = SourceSemanticIndex::new();
         let int_symbols = definitions.int_primitive_operator_symbols(&store).unwrap();
+        // These are the semantic names in the pinned Scala-generated
+        // tests/fixtures/tasty_pickler/tasty/example/Algorithms.tasty file.
+        let scala_int_operators = ["+", "-", "*", "/", "%", "<", "<=", ">", ">="];
         for (position, symbol) in int_symbols.all().into_iter().enumerate() {
+            let expected_operator = scala_int_operators[position];
             let result = if position < 5 {
                 definitions.int
             } else {
                 definitions.boolean
             };
-            let operator = store
-                .names
-                .resolve(store.symbols.get(symbol).name.text())
-                .to_owned();
-            let encoded_operator = crate::artifact_name::encode_component(&operator);
             let before = store.checkpoint();
             let mut context = make_context(&store, &definitions, &index, source);
             let receiver = make_receiver(&mut context, true);
@@ -435,7 +416,7 @@ mod tests {
                     result,
                     Some(1),
                 )
-                .unwrap_or_else(|error| panic!("operator {operator:?}: {error:?}"));
+                .unwrap_or_else(|error| panic!("operator {expected_operator:?}: {error:?}"));
             let fragment = context.finish(&[select]).unwrap();
             let RawTree::LengthNode(raw) = root(&fragment, select) else {
                 panic!("binary primitive selection should be length-delimited")
@@ -454,7 +435,7 @@ mod tests {
             assert_eq!(
                 rendered,
                 RenderedSignedName::Signed {
-                    original: encoded_operator,
+                    original: expected_operator.to_owned(),
                     signature: RenderedNameSignature {
                         result: expected_result.to_owned(),
                         parameters: vec![RenderedParamSig::TermParameter("scala.Int".into())],
@@ -476,16 +457,11 @@ mod tests {
         }
 
         let boolean_symbols = definitions.boolean_primitive_operator_ids().unwrap();
-        for symbol in [
-            boolean_symbols.unary_not,
-            boolean_symbols.and_then,
-            boolean_symbols.or_else,
+        for (symbol, expected_operator) in [
+            (boolean_symbols.unary_not, "unary_!"),
+            (boolean_symbols.and_then, "&&"),
+            (boolean_symbols.or_else, "||"),
         ] {
-            let operator = store
-                .names
-                .resolve(store.symbols.get(symbol).name.text())
-                .to_owned();
-            let encoded_operator = crate::artifact_name::encode_component(&operator);
             let unary = symbol == boolean_symbols.unary_not;
             let before = store.checkpoint();
             let mut context = make_context(&store, &definitions, &index, source);
@@ -505,7 +481,7 @@ mod tests {
             if unary {
                 let raw = root(&fragment, select).decode_select().unwrap();
                 assert_eq!(raw.tag, SELECT_TAG);
-                assert_eq!(fragment.names.get_utf8(raw.name), Some("unary_$bang"));
+                assert_eq!(fragment.names.get_utf8(raw.name), Some(expected_operator));
                 assert!(matches!(
                     raw.qualifier,
                     RawTree::Leaf(SimpleTerm {
@@ -525,7 +501,7 @@ mod tests {
                         .unwrap()
                         .unwrap(),
                     RenderedSignedName::Signed {
-                        original: encoded_operator,
+                        original: expected_operator.to_owned(),
                         signature: RenderedNameSignature {
                             result: "scala.Boolean".into(),
                             parameters: vec![RenderedParamSig::TermParameter(
