@@ -1495,7 +1495,7 @@ impl JvmClassPlan {
         store: &SemanticStore,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, None, definitions, None, None)
+        identity::class_metadata(self, store, None, definitions, None, None, None)
     }
 
     /// Derives class, primitive-field, constructor, and selected method
@@ -1509,7 +1509,7 @@ impl JvmClassPlan {
         typed_ast: &TypedAst,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, Some(typed_ast), definitions, None, None)
+        identity::class_metadata(self, store, Some(typed_ast), definitions, None, None, None)
     }
 }
 

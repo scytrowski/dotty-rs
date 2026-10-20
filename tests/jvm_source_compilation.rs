@@ -6060,7 +6060,7 @@ fn derived_values_flow_to_base_parameters_and_returns() {
 #[test]
 fn derived_values_flow_to_supported_constructor_arguments_and_reference_fields() {
     let output = TestOutputDirectory::new("derived-to-base-constructor-and-field");
-    let source = "class Base { def value(): Int = 10 }\nclass Derived extends Base { override def value(): Int = 42 }\nclass Holder(initial: Base) { private var current: Base = initial; def replace(next: Derived): Unit = { current = next }; def get(): Base = current }\nclass Runner { def fromParameter(next: Derived): Holder = new Holder(next); def fromLocal(): Holder = { val next = new Derived(); new Holder(next) } }\n";
+    let source = "class Base { def value(): Int = 10 }\nclass Derived extends Base { override def value(): Int = 42 }\nclass Holder(initial: Base) { private var current: Base = initial; def replace(next: Derived): Unit = { current = next }; def get(): Base = current }\nclass InitializedHolder(initial: Derived) { private val current: Base = initial; def get(): Base = current }\nclass Runner { def fromParameter(next: Derived): Holder = new Holder(next); def fromLocal(): Holder = { val next = new Derived(); new Holder(next) }; def initialized(next: Derived): InitializedHolder = new InitializedHolder(next) }\n";
     let artifacts = compile_source_classes(
         source,
         "DerivedToBaseConstructorAndField.scala",
@@ -6086,6 +6086,33 @@ fn derived_values_flow_to_supported_constructor_arguments_and_reference_fields()
     let replace = emitted_method_code(&holder, "replace");
     assert_field_reference(&holder, replace, 0xb5, "Holder", "current", "LBase;");
 
+    let initialized_holder = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "InitializedHolder")
+        .expect("InitializedHolder class is emitted");
+    let mut reader = Reader::new(initialized_holder.class.bytes());
+    let initialized_holder =
+        ClassFile::decode(&mut reader).expect("decode emitted InitializedHolder class");
+    assert_eq!(
+        initialized_holder
+            .fields
+            .iter()
+            .find(|field| initialized_holder.constant_pool.utf8(field.name_index) == Ok("current"))
+            .map(|field| initialized_holder
+                .constant_pool
+                .utf8(field.descriptor_index)),
+        Some(Ok("LBase;"))
+    );
+    let constructor = emitted_method_code(&initialized_holder, "<init>");
+    assert_field_reference(
+        &initialized_holder,
+        constructor,
+        0xb5,
+        "InitializedHolder",
+        "current",
+        "LBase;",
+    );
+
     if require_jdk_or_skip() {
         let classpath = output.path().to_str().expect("UTF-8 output path");
         let harness = output
@@ -6093,7 +6120,7 @@ fn derived_values_flow_to_supported_constructor_arguments_and_reference_fields()
             .join("DerivedToBaseConstructorAndFieldHarness.java");
         fs::write(
             &harness,
-            "public final class DerivedToBaseConstructorAndFieldHarness { public static void main(String[] args) { Runner runner = new Runner(); Holder fromParameter = runner.fromParameter(new Derived()); if (fromParameter.get().value() != 42) throw new AssertionError(\"constructor parameter\"); fromParameter.replace(new Derived()); if (fromParameter.get().value() != 42) throw new AssertionError(\"reference field assignment\"); if (runner.fromLocal().get().value() != 42) throw new AssertionError(\"constructor local\"); System.out.println(\"Derived-to-Base constructor and field verified\"); } }\n",
+            "public final class DerivedToBaseConstructorAndFieldHarness { public static void main(String[] args) { Runner runner = new Runner(); Holder fromParameter = runner.fromParameter(new Derived()); if (fromParameter.get().value() != 42) throw new AssertionError(\"constructor parameter\"); fromParameter.replace(new Derived()); if (fromParameter.get().value() != 42) throw new AssertionError(\"reference field assignment\"); if (runner.fromLocal().get().value() != 42) throw new AssertionError(\"constructor local\"); if (runner.initialized(new Derived()).get().value() != 42) throw new AssertionError(\"reference field initializer\"); System.out.println(\"Derived-to-Base constructor and field verified\"); } }\n",
         )
         .expect("write constructor and field harness");
         let javac = Command::new("javac")
