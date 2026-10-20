@@ -28,7 +28,7 @@ jobs:
       CARGO_BUILD_JOBS: 1
       RUST_TEST_THREADS: 1
       SCALA39_JDK_RELEASE: 21
-      SCALA39_ROOT: ${{ runner.temp }}/scala39-source
+      SCALA39_ROOT: ${{ github.workspace }}/scala39-source
       COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
       DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}/typer-audit-intermediates
 
@@ -41,7 +41,7 @@ jobs:
         with:
           repository: scala/scala3
           ref: 777528f19a58e794c9954a42f433373472ec57f8
-          path: ${{ runner.temp }}/scala39-source
+          path: scala39-source
           persist-credentials: false
 
       - name: Install pinned JDK
