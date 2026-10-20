@@ -565,12 +565,27 @@ fn unsupported_parent_constructor_shapes_fail_at_the_typer_boundary() {
         (
             "this-is-not-an-int-parent-argument",
             "class Base(seed: Int) {}\nclass Derived extends Base(this) {}\n",
-            "type",
+            "receiver",
         ),
         (
             "field-prefix-is-not-an-int-parent-argument",
             "class Base(seed: Int) {}\nclass Derived(val flag: Boolean) extends Base(this.flag) {}\n",
-            "type",
+            "receiver",
+        ),
+        (
+            "same-type-this-field-is-uninitialized",
+            "class Base(seed: Int) {}\nclass Derived(val seed: Int) extends Base(this.seed) {}\n",
+            "receiver",
+        ),
+        (
+            "nested-this-field-is-uninitialized",
+            "class Base(seed: Int) {}\nclass Derived(seed: Int) extends Base(if true then this.seed else seed) {}\n",
+            "receiver",
+        ),
+        (
+            "unqualified-child-field-is-uninitialized",
+            "class Base(seed: Int) {}\nclass Derived extends Base(childSeed) { val childSeed: Int = 1 }\n",
+            "receiver",
         ),
     ] {
         let source = SourceId::from_index(1400 + label.len() as u32);
@@ -624,6 +639,10 @@ fn unsupported_parent_constructor_shapes_fail_at_the_typer_boundary() {
             "no-constructor" => {
                 matches!(error, TyperError::ConstructorApplicationUnavailable { .. })
             }
+            "receiver" => matches!(
+                error,
+                TyperError::UninitializedParentArgumentReceiver { .. }
+            ),
             _ => unreachable!(),
         };
         assert!(accepted, "{label}: unexpected Typer error: {error:?}");

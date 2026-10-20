@@ -290,12 +290,11 @@ impl SourceTyper<'_> {
         self.complete_symbol_inner(child_constructor, info_journal)?;
         let context = self.expression_context_for(child_constructor)?;
         let mut new_mappings = Vec::new();
-        let typed_parent = self.type_value_expression_inner(
-            parent_tree,
-            context,
-            info_journal,
-            &mut new_mappings,
-        )?;
+        let previous_uninitialized_receiver = self.uninitialized_parent_receiver.replace(class);
+        let typed_parent_result =
+            self.type_value_expression_inner(parent_tree, context, info_journal, &mut new_mappings);
+        self.uninitialized_parent_receiver = previous_uninitialized_receiver;
+        let typed_parent = typed_parent_result?;
 
         let parent_class = self.instantiable_class_of_type(parent_type, info_journal)?;
         let Some(TreeKind::Apply(typed_application)) = self

@@ -17528,6 +17528,9 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         }
         TyperError::MalformedClassParent { .. } => "MalformedClassParent",
         TyperError::ParentConstructorInaccessible { .. } => "ParentConstructorInaccessible",
+        TyperError::UninitializedParentArgumentReceiver { .. } => {
+            "UninitializedParentArgumentReceiver"
+        }
         TyperError::UnresolvedParentClassKind { .. } => "UnresolvedParentClassKind",
         TyperError::HigherKindedTypeParameterDeferred { .. } => "HigherKindedTypeParameterDeferred",
         TyperError::HigherKindedTypeAliasDeferred { .. } => "HigherKindedTypeAliasDeferred",

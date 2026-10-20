@@ -7,6 +7,52 @@ use dotty_core::types::*;
 use dotty_core::*;
 
 impl SourceTyper<'_> {
+    pub(in crate::typer) fn validate_cached_parent_argument_receiver_access(
+        &self,
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+    ) -> Result<(), TyperError> {
+        let Some(receiver) = self.uninitialized_parent_receiver else {
+            return Ok(());
+        };
+        let Some(node) = self.typed_arena.try_get(typed_tree) else {
+            return Ok(());
+        };
+        let accesses_receiver = match &node.kind {
+            TreeKind::This(_) => matches!(
+                self.store.types.try_get(node.ty),
+                Some(Type::ThisType { class }) if *class == receiver
+            ),
+            TreeKind::Ident(_) => match self.store.types.try_get(node.ty) {
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }) => self.is_instance_class_member(*symbol),
+                _ => false,
+            },
+            _ => false,
+        };
+        if accesses_receiver {
+            return Err(TyperError::UninitializedParentArgumentReceiver {
+                source: self.source,
+                tree_index: source_tree.index(),
+                receiver,
+            });
+        }
+        Ok(())
+    }
+
+    fn is_instance_class_member(&self, symbol: SymbolId) -> bool {
+        self.store.symbols.contains(symbol)
+            && self.store.symbols.get(symbol).owner.is_some_and(|owner| {
+                self.store.symbols.contains(owner)
+                    && matches!(
+                        self.store.symbols.get(owner).kind,
+                        SymbolKind::Class | SymbolKind::Trait
+                    )
+            })
+    }
+
     pub(in crate::typer) fn non_value_term_mapping_symbol(
         &self,
         source_tree: TreeId<Untyped>,
@@ -503,6 +549,13 @@ impl SourceTyper<'_> {
             });
         }
         let class = self.enclosing_this_owner(this.qual, context.owner, tree.index())?;
+        if self.uninitialized_parent_receiver == Some(class) {
+            return Err(TyperError::UninitializedParentArgumentReceiver {
+                source: self.source,
+                tree_index: tree.index(),
+                receiver: class,
+            });
+        }
         let ty = self.store.types.alloc(Type::ThisType { class });
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
@@ -520,6 +573,15 @@ impl SourceTyper<'_> {
     ) -> Result<TreeId<Typed>, TyperError> {
         let symbol = self.resolve_expression_term(ident.name, context, tree.index(), position)?;
         let declaration = self.store.symbols.get(symbol);
+        if let Some(receiver) = self.uninitialized_parent_receiver
+            && self.is_instance_class_member(symbol)
+        {
+            return Err(TyperError::UninitializedParentArgumentReceiver {
+                source: self.source,
+                tree_index: tree.index(),
+                receiver,
+            });
+        }
         let shared_owner = declaration
             .owner
             .filter(|owner| self.store.symbols.contains(*owner))

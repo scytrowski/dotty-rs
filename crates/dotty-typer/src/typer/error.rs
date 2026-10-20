@@ -464,6 +464,12 @@ pub enum TyperError {
         tree_index: u32,
         constructor: SymbolId,
     },
+    /// A parent constructor argument reads the child receiver before `super` initializes it.
+    UninitializedParentArgumentReceiver {
+        source: SourceId,
+        tree_index: u32,
+        receiver: SymbolId,
+    },
     /// A projected parent does not resolve to a class or trait declaration.
     UnresolvedParentClassKind {
         source: SourceId,

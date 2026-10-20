@@ -468,7 +468,9 @@ For the tested subset, source Typer completion currently supports:
   constructor's expression context, checks ordinary arity and argument
   conformance, and records the original application and argument trees in
   `SourceTypedIndex`. `ClassInfo.parents` remains a list of parent types; it
-  does not carry constructor expressions. Curried, contextual, erased,
+  does not carry constructor expressions. Parent arguments cannot read the
+  uninitialized child receiver through `this` or unqualified instance members;
+  constructor parameters remain directly available. Curried, contextual, erased,
   by-name, repeated, defaulted, generic, secondary, and private parent
   constructors are rejected.
 
