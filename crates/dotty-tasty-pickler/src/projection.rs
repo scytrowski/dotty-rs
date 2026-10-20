@@ -72,6 +72,7 @@ pub struct EncodingContext<'a> {
     wire: AstBuilder,
     declarations: HashMap<SymbolId, AstLabel>,
     local_values_by_typed_declaration: HashMap<TreeId<Typed>, SymbolId>,
+    local_value_symbols: HashSet<SymbolId>,
     external: HashMap<SymbolId, (NameRef, NameRef)>,
     types: HashMap<TypeId, AstLabel>,
     active: HashSet<TypeId>,
@@ -92,6 +93,10 @@ fn reference(symbol: SymbolId, reason: ReferenceError) -> PickleError {
 }
 
 impl<'a> EncodingContext<'a> {
+    pub(crate) fn definitions(&self) -> &'a Definitions {
+        self.definitions
+    }
+
     /// Standalone entry point. IDs, index and Definitions must come from these
     /// borrowed arenas in one session. Each supplied symbol/type is checked.
     pub fn new(
@@ -114,6 +119,7 @@ impl<'a> EncodingContext<'a> {
             wire: AstBuilder::new(limits.wire),
             declarations: HashMap::new(),
             local_values_by_typed_declaration: HashMap::new(),
+            local_value_symbols: HashSet::new(),
             external: HashMap::new(),
             types: HashMap::new(),
             active: HashSet::new(),
@@ -164,6 +170,7 @@ impl<'a> EncodingContext<'a> {
                     .owner
                     .ok_or(reference(local.symbol, ReferenceError::Owner))?;
                 context.reserve_local_value(local.symbol, owner, local.scope)?;
+                context.local_value_symbols.insert(local.symbol);
                 if context
                     .local_values_by_typed_declaration
                     .insert(local.typed_declaration, local.symbol)
@@ -191,7 +198,7 @@ impl<'a> EncodingContext<'a> {
                 || record.origin != SymbolOrigin::Source(context.source)
                 || record.owner != Some(method)
                 || record.visibility != Visibility::Public
-                || !record.flags.is_empty()
+                || !(record.flags.is_empty() || record.flags == SymbolFlags::MUTABLE)
                 || !record.annotations.is_empty()
             {
                 return Err(reference(symbol, ReferenceError::Metadata));
@@ -506,7 +513,9 @@ impl<'a> EncodingContext<'a> {
         }
         self.namespace(symbol, s.name.is_type())?;
         self.text(s.name.text())?;
-        if s.visibility != Visibility::Public || !s.flags.is_empty() || !s.annotations.is_empty() {
+        let flags_are_supported = s.flags.is_empty()
+            || (s.flags == SymbolFlags::MUTABLE && self.local_value_symbols.contains(&symbol));
+        if s.visibility != Visibility::Public || !flags_are_supported || !s.annotations.is_empty() {
             return Err(reference(symbol, ReferenceError::Metadata));
         }
         self.complete(symbol)?;
