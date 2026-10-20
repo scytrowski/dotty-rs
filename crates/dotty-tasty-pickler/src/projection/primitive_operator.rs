@@ -29,6 +29,20 @@ impl<'a> EncodingContext<'a> {
         Ok(symbols.all()[..5].contains(&target))
     }
 
+    pub(crate) fn is_registered_int_comparison_target(
+        &self,
+        target: SymbolId,
+    ) -> Result<bool, PickleError> {
+        let symbols = self
+            .definitions
+            .int_primitive_operator_symbols(self.store)
+            .ok_or(PickleError::BuiltinIdentity {
+                builtin: Builtin::Int,
+                ty: self.definitions.int,
+            })?;
+        Ok(symbols.all()[5..].contains(&target))
+    }
+
     /// Projects one registered primitive operator selection.
     ///
     /// `receiver` is the already projected source receiver, and
@@ -399,6 +413,27 @@ mod tests {
                 },
             }))
             .unwrap()
+    }
+
+    #[test]
+    fn int_arithmetic_and_comparison_targets_use_disjoint_canonical_symbol_sets() {
+        let source = SourceId::from_index(10);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let index = SourceSemanticIndex::new();
+        let symbols = definitions.int_primitive_operator_symbols(&store).unwrap();
+        let context = make_context(&store, &definitions, &index, source);
+
+        for (position, target) in symbols.all().into_iter().enumerate() {
+            assert_eq!(
+                context.is_registered_int_arithmetic_target(target).unwrap(),
+                position < 5
+            );
+            assert_eq!(
+                context.is_registered_int_comparison_target(target).unwrap(),
+                position >= 5
+            );
+        }
     }
 
     #[test]
