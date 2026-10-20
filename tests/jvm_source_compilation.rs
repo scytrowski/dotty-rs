@@ -5937,6 +5937,255 @@ fn inherited_virtual_call_rejects_an_unplanned_declaring_method() {
 }
 
 #[test]
+fn derived_values_flow_to_base_parameters_and_returns() {
+    let output = TestOutputDirectory::new("derived-to-base-values");
+    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2 }\nclass Derived extends Base { override def value(): Int = 21 }\nclass Runner { def evaluate(base: Base): Int = base.doubled(); def viaBase(): Int = evaluate(new Base()); def viaDerived(): Int = evaluate(new Derived()); def viaLocal(): Int = { val derived = new Derived(); evaluate(derived) }; def viaWidenedLocal(): Int = { val base: Base = new Derived(); evaluate(base) }; def produced(): Base = new Derived() }\n";
+    let artifacts = compile_source_classes(source, "DerivedToBase.scala", output.path())
+        .expect("verified Derived values flow to Base method and return positions");
+
+    let runner = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner class is emitted");
+    let mut reader = Reader::new(runner.class.bytes());
+    let runner = ClassFile::decode(&mut reader).expect("decode emitted Runner class");
+    runner
+        .validate_references()
+        .expect("Runner references remain valid");
+    let evaluate = runner
+        .methods
+        .iter()
+        .find(|method| runner.constant_pool.utf8(method.name_index) == Ok("evaluate"))
+        .expect("evaluate method is emitted");
+    assert_eq!(
+        runner.constant_pool.utf8(evaluate.descriptor_index),
+        Ok("(LBase;)I")
+    );
+    let produced = runner
+        .methods
+        .iter()
+        .find(|method| runner.constant_pool.utf8(method.name_index) == Ok("produced"))
+        .expect("produced method is emitted");
+    assert_eq!(
+        runner.constant_pool.utf8(produced.descriptor_index),
+        Ok("()LBase;")
+    );
+    for method in ["viaDerived", "viaLocal", "viaWidenedLocal"] {
+        let code = emitted_method_code(&runner, method);
+        let instructions = decode_subset_instructions(code);
+        let opcodes = instructions
+            .into_iter()
+            .map(|(_, opcode)| opcode)
+            .collect::<Vec<_>>();
+        assert!(opcodes.contains(&0xb6), "{method} invokes evaluate");
+        assert!(!opcodes.contains(&0xc0), "{method} uses no checkcast");
+        let offset = decode_subset_instructions(code)
+            .into_iter()
+            .find_map(|(offset, opcode)| (opcode == 0xb6).then_some(offset))
+            .expect("method contains invokevirtual");
+        let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+        let ConstantPoolEntry::Methodref {
+            class_index,
+            name_and_type_index,
+        } = runner
+            .constant_pool
+            .get(ConstantPoolIndex(index))
+            .expect("invokevirtual Methodref")
+        else {
+            panic!("invokevirtual references a Methodref")
+        };
+        assert_eq!(runner.constant_pool.class_name(*class_index), Ok("Runner"));
+        assert_eq!(
+            runner
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .unwrap(),
+            ("evaluate", "(LBase;)I")
+        );
+    }
+    let produced_opcodes = decode_subset_instructions(emitted_method_code(&runner, "produced"))
+        .into_iter()
+        .map(|(_, opcode)| opcode)
+        .collect::<Vec<_>>();
+    assert!(
+        produced_opcodes.contains(&0xb0),
+        "produced returns a reference"
+    );
+    assert!(
+        !produced_opcodes.contains(&0xc0),
+        "produced uses no checkcast"
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("DerivedToBaseHarness.java");
+        fs::write(
+            &harness,
+            "public final class DerivedToBaseHarness { public static void main(String[] args) { Runner runner = new Runner(); if (runner.viaBase() != 20 || runner.viaDerived() != 42 || runner.viaLocal() != 42 || runner.viaWidenedLocal() != 42 || runner.produced().value() != 21) throw new AssertionError(); System.out.println(\"Derived-to-Base verified\"); } }\n",
+        )
+        .expect("write Derived-to-Base harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected Derived-to-Base harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "DerivedToBaseHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected Derived-to-Base classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "Derived-to-Base verified"
+        );
+    }
+}
+
+#[test]
+fn derived_values_flow_to_supported_constructor_arguments_and_reference_fields() {
+    let output = TestOutputDirectory::new("derived-to-base-constructor-and-field");
+    let source = "class Base { def value(): Int = 10 }\nclass Derived extends Base { override def value(): Int = 42 }\nclass Holder(initial: Base) { private var current: Base = initial; def replace(next: Derived): Unit = { current = next }; def get(): Base = current }\nclass InitializedHolder(initial: Derived) { private val current: Base = initial; def get(): Base = current }\nclass Runner { def fromParameter(next: Derived): Holder = new Holder(next); def fromLocal(): Holder = { val next = new Derived(); new Holder(next) }; def initialized(next: Derived): InitializedHolder = new InitializedHolder(next) }\n";
+    let artifacts = compile_source_classes(
+        source,
+        "DerivedToBaseConstructorAndField.scala",
+        output.path(),
+    )
+    .expect("verified Derived values flow to supported constructor and field positions");
+
+    let holder = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Holder")
+        .expect("Holder class is emitted");
+    let mut reader = Reader::new(holder.class.bytes());
+    let holder = ClassFile::decode(&mut reader).expect("decode emitted Holder class");
+    let constructor = holder
+        .methods
+        .iter()
+        .find(|method| holder.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .expect("Holder constructor is emitted");
+    assert_eq!(
+        holder.constant_pool.utf8(constructor.descriptor_index),
+        Ok("(LBase;)V")
+    );
+    let replace = emitted_method_code(&holder, "replace");
+    assert_field_reference(&holder, replace, 0xb5, "Holder", "current", "LBase;");
+
+    let initialized_holder = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "InitializedHolder")
+        .expect("InitializedHolder class is emitted");
+    let mut reader = Reader::new(initialized_holder.class.bytes());
+    let initialized_holder =
+        ClassFile::decode(&mut reader).expect("decode emitted InitializedHolder class");
+    assert_eq!(
+        initialized_holder
+            .fields
+            .iter()
+            .find(|field| initialized_holder.constant_pool.utf8(field.name_index) == Ok("current"))
+            .map(|field| initialized_holder
+                .constant_pool
+                .utf8(field.descriptor_index)),
+        Some(Ok("LBase;"))
+    );
+    let constructor = emitted_method_code(&initialized_holder, "<init>");
+    assert_field_reference(
+        &initialized_holder,
+        constructor,
+        0xb5,
+        "InitializedHolder",
+        "current",
+        "LBase;",
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output
+            .path()
+            .join("DerivedToBaseConstructorAndFieldHarness.java");
+        fs::write(
+            &harness,
+            "public final class DerivedToBaseConstructorAndFieldHarness { public static void main(String[] args) { Runner runner = new Runner(); Holder fromParameter = runner.fromParameter(new Derived()); if (fromParameter.get().value() != 42) throw new AssertionError(\"constructor parameter\"); fromParameter.replace(new Derived()); if (fromParameter.get().value() != 42) throw new AssertionError(\"reference field assignment\"); if (runner.fromLocal().get().value() != 42) throw new AssertionError(\"constructor local\"); if (runner.initialized(new Derived()).get().value() != 42) throw new AssertionError(\"reference field initializer\"); System.out.println(\"Derived-to-Base constructor and field verified\"); } }\n",
+        )
+        .expect("write constructor and field harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected constructor and field harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "DerivedToBaseConstructorAndFieldHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected constructor and field classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "Derived-to-Base constructor and field verified"
+        );
+    }
+}
+
+#[test]
+fn source_typing_rejects_reverse_and_unrelated_reference_arguments() {
+    for (label, source) in [
+        (
+            "base-to-derived-argument",
+            "class Base { def value(): Int = 1 }\nclass Derived extends Base {}\nclass Runner { def use(value: Derived): Int = value.value(); def invalid(base: Base): Int = use(base) }\n",
+        ),
+        (
+            "unrelated-to-base-argument",
+            "class Base { def value(): Int = 1 }\nclass Other {}\nclass Runner { def use(value: Base): Int = value.value(); def invalid(other: Other): Int = use(other) }\n",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("the source Typer must reject unproved reference conversions");
+        assert!(
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch { .. })
+            ),
+            "{label} should fail in the Typer, got {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} emits no class files"
+        );
+    }
+}
+
+#[test]
 fn reference_parameters_and_call_results_flow_through_virtual_calls() {
     let output = TestOutputDirectory::new("reference-method-values");
     let source = "class Counter(start: Int):\n  def create(value: Int): Counter = new Counter(value)\n  def passthrough(counter: Counter): Counter = counter\n  def self(): Counter = this\n  def read(counter: Counter): Int = counter.get()\n  def forward(counter: Counter): Counter = passthrough(counter)\n  def readCreated(value: Int): Int = read(create(value))\n  def get(): Int = 42\nclass Client:\n  def accept(counter: Counter): Counter = counter\n  def read(counter: Counter): Int = counter.get()\n";

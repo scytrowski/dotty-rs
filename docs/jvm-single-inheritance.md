@@ -54,10 +54,14 @@ parent's canonical symbol and checked internal name. Instance-call resolution
 accepts the receiver's exact planned class or its validated direct parent as
 the selected method owner. For inherited calls, the resolver confirms the
 canonical method symbol is declared and planned by that parent and appears
-unchanged in the receiver's effective dispatch metadata. Reference arguments
-accept a `Derived` value at a `Base` parameter only when the same validated
-direct-parent proof establishes that assignment. These checks do not use
-method-name lookup, name-based class identity, or an Object fallback.
+unchanged in the receiver's effective dispatch metadata. Reference
+assignability accepts a `Derived` value where `Base` is required only when the
+same validated direct-parent proof establishes that assignment. The bounded
+conversion applies to method arguments, immutable local initializers, and
+returns; it retains each value's exact source/JVM class identity and emits no
+cast. It does not enable mutable reference locals, arbitrary `Object` upcasts,
+or implicit reference conversions without the unit proof. These checks do not
+use method-name lookup or name-based class identity.
 
 Keep the source and class-file identities distinct:
 
@@ -95,11 +99,14 @@ the selected declaration, not from the static receiver type. Thus
 `Base.doubled` calling `Base.value` must reference owner `Base` with the exact
 method name and descriptor and use `invokevirtual`. At runtime the JVM resolves
 that virtual call against the receiver class, so `new Derived()` dispatches to
-`Derived.value`. `Runner.evaluate(base: Base)` should carry a `Base` formal
-descriptor; passing a typed `Derived` value is a source assignment-compatibility
-check. It must not be confused with merging two possible values at a control
-flow join. A hierarchy-aware merge requires a separately defined least upper
-bound operation; do not reuse the one-directional argument subtype check.
+`Derived.value`. `Runner.evaluate(base: Base)` must carry a `Base` formal
+descriptor; passing a typed `Derived` value, initializing an immutable `Base`
+local, or returning a `Derived` value from a method declared `Base` is accepted
+only through the validated direct-parent edge. The JVM verifier receives that
+same hierarchy proof, so no `checkcast` is needed. This must not be confused
+with merging two possible values at a control-flow join. A hierarchy-aware
+merge requires a separately defined least upper-bound operation; do not reuse
+the one-directional assignability check.
 
 This initial slice does not emit bridge methods. A covariant result or any
 override whose JVM name/descriptor does not match the inherited entry point

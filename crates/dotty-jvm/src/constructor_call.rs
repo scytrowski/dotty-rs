@@ -219,7 +219,13 @@ pub(super) fn resolve(
             definitions,
             &class_identities,
         );
-        if found != Some(*expected) {
+        let assignable = match found {
+            Some(found) => {
+                crate::reference::is_assignable(Some(unit), found, *expected, definitions)?
+            }
+            None => false,
+        };
+        if !assignable {
             return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
                 tree: apply_tree,
                 argument,

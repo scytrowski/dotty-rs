@@ -1,7 +1,7 @@
 //! Checked projection of semantic class references within one emission unit.
 
 use dotty_core::definitions::Definitions;
-use dotty_core::ids::TypeId;
+use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolKind, SymbolOrigin};
 use dotty_core::types::{Type, TypeRefTarget};
@@ -10,6 +10,44 @@ use crate::{
     InvalidTypeReason, JvmClassIdentity, JvmCodegenError, JvmCompilationUnit, JvmType,
     UnsupportedJvmReferenceTypeKind,
 };
+
+/// Returns whether `found` is assignable to `expected` through the exact
+/// direct-parent edge validated for this emission unit.
+pub(super) fn is_direct_subtype(
+    unit: &JvmCompilationUnit<'_>,
+    found: SymbolId,
+    expected: SymbolId,
+    definitions: &Definitions,
+) -> Result<bool, JvmCodegenError> {
+    if found == expected {
+        return Ok(true);
+    }
+    Ok(unit
+        .class_hierarchy(definitions)?
+        .superclasses()
+        .iter()
+        .any(|superclass| superclass.class() == found && superclass.parent() == expected))
+}
+
+/// Returns whether a JVM value can flow to `expected` within one validated
+/// compilation unit. References may use only exact identity or the verified
+/// direct-parent edge; primitive values remain invariant.
+pub(super) fn is_assignable(
+    unit: Option<&JvmCompilationUnit<'_>>,
+    found: JvmType,
+    expected: JvmType,
+    definitions: &Definitions,
+) -> Result<bool, JvmCodegenError> {
+    if found == expected {
+        return Ok(true);
+    }
+    let (JvmType::Reference(found), JvmType::Reference(expected), Some(unit)) =
+        (found, expected, unit)
+    else {
+        return Ok(false);
+    };
+    is_direct_subtype(unit, found, expected, definitions)
+}
 
 pub(super) fn project_type(
     unit: &JvmCompilationUnit<'_>,
