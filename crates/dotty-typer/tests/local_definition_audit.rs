@@ -7260,16 +7260,7 @@ fn pinned_scala39_import_prefix_typing_probe() {
             .len(),
         30
     );
-    let mut methods_by_file = BTreeMap::<String, BTreeSet<u32>>::new();
-    for attempt in &baseline_rows {
-        let methods = methods_by_file.entry(attempt.file.clone()).or_default();
-        // Import observations are keyed by the method that owns the import,
-        // while resolver requests are attributed to the enclosing failed
-        // attempt. Reprofile both trees: collecting only blocker origins
-        // leaves inherited source-method observations unmatched.
-        methods.insert(attempt.method_tree);
-        methods.insert(attempt.blocker_origin_tree);
-    }
+    let mut methods_by_file = import_prefix_probe_methods(&baseline_rows);
     assert_eq!(
         baseline_rows
             .iter()
@@ -13316,6 +13307,22 @@ fn baseline_import_blocker_attempts(
     rows
 }
 
+fn import_prefix_probe_methods(
+    baseline_rows: &[BaselineImportAttempt],
+) -> BTreeMap<String, BTreeSet<u32>> {
+    let mut methods_by_file = BTreeMap::<String, BTreeSet<u32>>::new();
+    for attempt in baseline_rows {
+        let methods = methods_by_file.entry(attempt.file.clone()).or_default();
+        // Import observations are keyed by the method that owns the import,
+        // while resolver requests are attributed to the enclosing failed
+        // attempt. Reprofile both trees: collecting only blocker origins
+        // leaves inherited source-method observations unmatched.
+        methods.insert(attempt.method_tree);
+        methods.insert(attempt.blocker_origin_tree);
+    }
+    methods_by_file
+}
+
 fn lexical_package_chain_from_evidence(context_package: &str, evidence: &str) -> Vec<String> {
     let mut packages = Vec::new();
     if !context_package.is_empty() && !context_package.starts_with('<') {
@@ -13820,6 +13827,31 @@ fn final_import_identity_requires_an_exact_resolver_target() {
     assert_eq!(
         class.selected_identity.as_deref(),
         Some("kind=Class::origin=classfile::path=scala.collection.List")
+    );
+}
+
+#[test]
+fn import_prefix_probe_includes_source_methods_and_enclosing_attempts() {
+    let baseline = [BaselineImportAttempt {
+        file: "src/Use.scala".to_owned(),
+        method_tree: 10,
+        blocker_origin_tree: 20,
+        import_tree: 30,
+        baseline_method: "src/Use.scala#tree=10".to_owned(),
+        baseline_attempted_method: "src/Use.scala#tree=20".to_owned(),
+        baseline_attribution: "inherited".to_owned(),
+        baseline_import_tree: "src/Use.scala#tree=30".to_owned(),
+        qualifier_segments: "example.pkg".to_owned(),
+        context_package: "example".to_owned(),
+        lexical_package_chain: vec!["example".to_owned()],
+        first_failing_segment: "pkg".to_owned(),
+        evidence_category: "source_relative_candidate".to_owned(),
+        target_key: "pkg::<first-segment-unresolved>".to_owned(),
+    }];
+
+    assert_eq!(
+        import_prefix_probe_methods(&baseline),
+        BTreeMap::from([("src/Use.scala".to_owned(), BTreeSet::from([10, 20]))])
     );
 }
 
