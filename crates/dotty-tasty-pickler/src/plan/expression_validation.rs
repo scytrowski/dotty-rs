@@ -1,5 +1,6 @@
 use super::*;
 
+mod assignment;
 mod block;
 mod local;
 
