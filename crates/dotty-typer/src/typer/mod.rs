@@ -310,6 +310,7 @@ impl<'a> SourceTyper<'a> {
     ) -> Result<TreeId<Typed>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
             self.validate_value_expression(tree, typed)?;
+            self.validate_cached_parent_argument_receiver_access(tree, typed)?;
             return Ok(typed);
         }
         let Some(source_tree) = self.arena.try_get(tree).cloned() else {

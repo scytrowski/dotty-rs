@@ -530,6 +530,170 @@ fn invalid_parent_constructor_arguments_roll_back_typer_state() {
 }
 
 #[test]
+fn cached_parent_receiver_qualifier_is_rejected_without_rolling_back_prior_typing() {
+    let text =
+        "class Base(seed: Int) {}\nclass Derived(val seed: Int) extends Base(this.seed) {}\n";
+    let source = SourceId::from_index(1378);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "cached-parent-receiver.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (base, _) = class_definition(&parsed, &store, &index, source, "Base");
+    let (derived, derived_tree) = class_definition(&parsed, &store, &index, source, "Derived");
+    let template = class_template(&parsed, derived_tree);
+    let parent_application = template.parents[0];
+    let TreeKind::Apply(application) = &parsed.ast.get(parent_application).kind else {
+        panic!("parent remains an application")
+    };
+    let TreeKind::Select(selection) = &parsed.ast.get(application.args[0]).kind else {
+        panic!("parent argument selects the child field")
+    };
+    let receiver_tree = selection.qualifier;
+    let child_constructor = index.symbol_at(source, template.constructor).unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let context = typer.expression_context_for(child_constructor).unwrap();
+
+    let cached_receiver = typer.type_expression(receiver_tree, context).unwrap();
+    let typed_count_before_completion = typer.typed_ast().iter().count();
+    assert_eq!(
+        typer.source_typed_index().get(source, receiver_tree),
+        Some(cached_receiver)
+    );
+    assert!(matches!(
+        typer.complete_symbol(derived),
+        Err(TyperError::UninitializedParentArgumentReceiver {
+            source: error_source,
+            tree_index,
+            receiver,
+        }) if error_source == source
+            && tree_index == receiver_tree.index()
+            && receiver == derived
+    ));
+
+    assert_eq!(*typer.store().symbols.info(derived), SymbolInfo::Missing);
+    assert_eq!(*typer.store().symbols.info(base), SymbolInfo::Missing);
+    assert_eq!(
+        typer.typed_ast().iter().count(),
+        typed_count_before_completion
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, receiver_tree),
+        Some(cached_receiver),
+        "completion rollback keeps the earlier successful receiver mapping"
+    );
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, application.args[0])
+            .is_none()
+    );
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, parent_application)
+            .is_none()
+    );
+}
+
+#[test]
+fn cached_parent_composite_is_rejected_when_it_contains_the_uninitialized_receiver() {
+    let text = "class Base(seed: Derived) {}\nclass Derived extends Base(if true then this else this) {}\n";
+    let source = SourceId::from_index(1379);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "cached-parent-composite.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (base, _) = class_definition(&parsed, &store, &index, source, "Base");
+    let (derived, derived_tree) = class_definition(&parsed, &store, &index, source, "Derived");
+    let template = class_template(&parsed, derived_tree);
+    let parent_application = template.parents[0];
+    let TreeKind::Apply(application) = &parsed.ast.get(parent_application).kind else {
+        panic!("parent remains an application")
+    };
+    let argument_tree = application.args[0];
+    let TreeKind::If(_) = &parsed.ast.get(argument_tree).kind else {
+        panic!("parent argument is a composite conditional")
+    };
+    let child_constructor = index.symbol_at(source, template.constructor).unwrap();
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let context = typer.expression_context_for(child_constructor).unwrap();
+
+    let cached_argument = typer.type_expression(argument_tree, context).unwrap();
+    let typed_count_before_completion = typer.typed_ast().iter().count();
+    assert!(matches!(
+        typer.complete_symbol(derived),
+        Err(TyperError::UninitializedParentArgumentReceiver {
+            source: error_source,
+            receiver,
+            ..
+        }) if error_source == source && receiver == derived
+    ));
+
+    assert_eq!(*typer.store().symbols.info(derived), SymbolInfo::Missing);
+    assert_eq!(*typer.store().symbols.info(base), SymbolInfo::Missing);
+    assert_eq!(
+        typer.typed_ast().iter().count(),
+        typed_count_before_completion
+    );
+    assert_eq!(
+        typer.source_typed_index().get(source, argument_tree),
+        Some(cached_argument)
+    );
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, parent_application)
+            .is_none()
+    );
+}
+
+#[test]
 fn unsupported_parent_constructor_shapes_fail_at_the_typer_boundary() {
     for (label, text, expected) in [
         (
