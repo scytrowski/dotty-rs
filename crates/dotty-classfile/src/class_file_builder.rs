@@ -853,9 +853,9 @@ impl ClassFileBuilder {
                         || constructor_body.iter().copied().any(|instruction| {
                             instruction_requires_exact_references(instruction, &constant_pool)
                         });
-                    let analysis = if method.name == "<init>" && requires_exact_references {
+                    let analysis = if method.name == "<init>" {
                         let super_class = super_class
-                            .ok_or(AnalysisError::InvalidConstructorSuperCall { instruction: 1 })
+                            .ok_or(AnalysisError::InvalidConstructorSuperCall { instruction: 0 })
                             .map_err(ClassFileBuildError::Analysis)?;
                         crate::bytecode::analyze_validated_constructor_body_with_hierarchy(
                             &method.descriptor,

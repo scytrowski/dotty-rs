@@ -460,6 +460,51 @@ pub enum AnalysisError {
         /// Zero-based instruction position of the invalid prologue instruction.
         instruction: usize,
     },
+    /// The direct-super constructor call receives a different number of arguments.
+    ConstructorSuperArgumentCountMismatch {
+        /// Zero-based instruction position of the `invokespecial` instruction.
+        instruction: usize,
+        /// Number of arguments required by the direct-super constructor.
+        expected: usize,
+        /// Number of values supplied before the receiver.
+        actual: usize,
+    },
+    /// A direct-super constructor argument has the wrong JVM value category.
+    ConstructorSuperArgumentTypeMismatch {
+        /// Zero-based instruction position of the `invokespecial` instruction.
+        instruction: usize,
+        /// Zero-based parameter position in the constructor descriptor.
+        parameter: usize,
+        /// Required value category.
+        expected: ValueKind,
+        /// Actual value category.
+        actual: ValueKind,
+    },
+    /// A direct-super reference argument is not assignable to the exact descriptor class.
+    WrongExactConstructorSuperArgument {
+        /// Zero-based instruction position of the `invokespecial` instruction.
+        instruction: usize,
+        /// Zero-based parameter position in the constructor descriptor.
+        parameter: usize,
+        /// Required class from the constructor descriptor.
+        expected: ClassIdentity,
+        /// Exact class loaded from the child constructor parameter.
+        actual: ClassIdentity,
+    },
+    /// A constructor argument uses a type outside the supported pre-super subset.
+    UnsupportedConstructorSuperArgumentType {
+        /// Zero-based instruction position of the `invokespecial` instruction.
+        instruction: usize,
+        /// Zero-based parameter position in the constructor descriptor.
+        parameter: usize,
+    },
+    /// The bounded direct-super argument sequence is longer than the verifier permits.
+    ConstructorSuperPrologueTooLong {
+        /// Zero-based instruction position where the bound was exceeded.
+        instruction: usize,
+        /// Maximum allowed instructions before the `invokespecial` instruction.
+        maximum: usize,
+    },
     /// A local access extends past the maximum representable `max_locals`.
     LocalLimitExceeded {
         /// Zero-based instruction position.
@@ -854,6 +899,48 @@ impl fmt::Display for AnalysisError {
                 formatter,
                 "instruction {instruction} is not the required direct-super constructor call"
             ),
+            Self::ConstructorSuperArgumentCountMismatch {
+                instruction,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} supplies {actual} direct-super constructor arguments, expected {expected}"
+            ),
+            Self::ConstructorSuperArgumentTypeMismatch {
+                instruction,
+                parameter,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} supplies {actual} for direct-super constructor parameter {parameter}, expected {expected}"
+            ),
+            Self::WrongExactConstructorSuperArgument {
+                instruction,
+                parameter,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "instruction {instruction} supplies reference {} for direct-super constructor parameter {parameter}, expected {}",
+                actual.internal_name(),
+                expected.internal_name()
+            ),
+            Self::UnsupportedConstructorSuperArgumentType {
+                instruction,
+                parameter,
+            } => write!(
+                formatter,
+                "instruction {instruction} uses unsupported type for direct-super constructor parameter {parameter}"
+            ),
+            Self::ConstructorSuperPrologueTooLong {
+                instruction,
+                maximum,
+            } => write!(
+                formatter,
+                "instruction {instruction} exceeds the direct-super constructor prologue limit of {maximum} instructions"
+            ),
             Self::LocalLimitExceeded {
                 instruction,
                 index,
@@ -1127,8 +1214,9 @@ pub(crate) fn analyze_validated_with_current_class_and_hierarchy(
     )
 }
 
-/// Analyzes the body of a branchless constructor after validating its first
-/// `aload_0; invokespecial DirectSuper.<init>()V` initialization sequence.
+/// Analyzes a branchless constructor after validating its bounded direct-super
+/// prologue. Before the call, only integer constants and loads from initialized
+/// constructor parameter locals are accepted.
 pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
     method_descriptor: &str,
     instructions: &[Instruction],
@@ -1140,38 +1228,204 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
     if !matches!(instructions.first(), Some(Instruction::ALoad(index)) if index.get() == 0) {
         return Err(AnalysisError::InvalidConstructorSuperCall { instruction: 0 });
     }
-    let Some(Instruction::InvokeSpecial(reference)) = instructions.get(1).copied() else {
-        return Err(AnalysisError::InvalidConstructorSuperCall { instruction: 1 });
-    };
+    const MAX_CONSTRUCTOR_PROLOGUE_INSTRUCTIONS: usize = 255;
+
+    let child_descriptor = MethodDescriptor::parse(method_descriptor)
+        .map_err(AnalysisError::InvalidMethodDescriptor)?;
+    check_parameter_slots(&child_descriptor, true, None)?;
+    if child_descriptor.return_type.is_some() {
+        return Err(AnalysisError::InvalidConstructorSuperCall { instruction: 0 });
+    }
+    validate_descriptor_class_names(&child_descriptor)?;
+    validate_bounded_reference_descriptor(&child_descriptor)?;
+
+    let mut parameter_locals = vec![ConstructorParameterLocal::UninitializedThis];
+    for parameter in &child_descriptor.parameters {
+        let local = match parameter {
+            FieldType::Boolean
+            | FieldType::Byte
+            | FieldType::Char
+            | FieldType::Short
+            | FieldType::Int => ConstructorParameterLocal::Int,
+            FieldType::Object(name) => {
+                ConstructorParameterLocal::Reference(ClassIdentity(Arc::from(name.as_str())))
+            }
+            FieldType::Array(_) => ConstructorParameterLocal::Unsupported,
+            FieldType::Float | FieldType::Long | FieldType::Double => {
+                ConstructorParameterLocal::Unsupported
+            }
+        };
+        parameter_locals.push(local);
+        if value_kind(parameter).slots() == 2 {
+            parameter_locals.push(ConstructorParameterLocal::Unsupported);
+        }
+    }
+
     let empty_descriptor =
         MethodDescriptor::parse("()V").map_err(AnalysisError::InvalidMethodDescriptor)?;
-    let resolver = Frame::new(&empty_descriptor, true, None, ClassHierarchy::default())?;
-    let (actual_owner, name, descriptor) = resolver.special_method(1, reference, constant_pool)?;
-    let expected_owner = class_identity_from_pool(constant_pool, super_class_index, 1)?;
-    if name != "<init>"
-        || !descriptor.parameters.is_empty()
-        || descriptor.return_type.is_some()
-        || actual_owner != expected_owner
-    {
-        return Err(AnalysisError::InvalidConstructorSuperCall { instruction: 1 });
+    let resolver = Frame::new(&empty_descriptor, true, None, hierarchy.clone())?;
+    let mut prologue_stack = vec![ConstructorPrologueValue::UninitializedThis];
+    let mut prologue_max_stack = 1usize;
+    let mut super_call = None;
+    for (instruction_index, instruction) in instructions.iter().copied().enumerate().skip(1) {
+        if let Instruction::InvokeSpecial(reference) = instruction {
+            super_call = Some((instruction_index, reference));
+            break;
+        }
+        if instruction_index > MAX_CONSTRUCTOR_PROLOGUE_INSTRUCTIONS {
+            return Err(AnalysisError::ConstructorSuperPrologueTooLong {
+                instruction: instruction_index,
+                maximum: MAX_CONSTRUCTOR_PROLOGUE_INSTRUCTIONS,
+            });
+        }
+        let value = match instruction {
+            Instruction::IConst(_) | Instruction::Bipush(_) | Instruction::Sipush(_) => {
+                ConstructorPrologueValue::Int
+            }
+            Instruction::ILoad(index) => match parameter_locals.get(usize::from(index.get())) {
+                Some(ConstructorParameterLocal::Int) => ConstructorPrologueValue::Int,
+                _ => {
+                    return Err(AnalysisError::InvalidConstructorSuperCall {
+                        instruction: instruction_index,
+                    });
+                }
+            },
+            Instruction::ALoad(index) => match parameter_locals.get(usize::from(index.get())) {
+                Some(ConstructorParameterLocal::Reference(class)) => {
+                    ConstructorPrologueValue::Reference(class.clone())
+                }
+                _ => {
+                    return Err(AnalysisError::InvalidConstructorSuperCall {
+                        instruction: instruction_index,
+                    });
+                }
+            },
+            _ => {
+                return Err(AnalysisError::InvalidConstructorSuperCall {
+                    instruction: instruction_index,
+                });
+            }
+        };
+        prologue_stack.push(value);
+        prologue_max_stack = prologue_max_stack.max(prologue_stack.len());
     }
+
+    let Some((instruction_index, reference)) = super_call else {
+        return Err(AnalysisError::InvalidConstructorSuperCall {
+            instruction: instructions.len(),
+        });
+    };
+    let (actual_owner, name, descriptor) =
+        resolver.special_method(instruction_index, reference, constant_pool)?;
+    let expected_owner =
+        class_identity_from_pool(constant_pool, super_class_index, instruction_index)?;
+    check_parameter_slots(&descriptor, true, Some(instruction_index))?;
+    validate_descriptor_class_names(&descriptor)?;
+    validate_bounded_reference_descriptor(&descriptor)?;
+    if name != "<init>" || descriptor.return_type.is_some() || actual_owner != expected_owner {
+        return Err(AnalysisError::InvalidConstructorSuperCall {
+            instruction: instruction_index,
+        });
+    }
+
+    let supplied_arguments = prologue_stack.len().saturating_sub(1);
+    if supplied_arguments != descriptor.parameters.len() {
+        return Err(AnalysisError::ConstructorSuperArgumentCountMismatch {
+            instruction: instruction_index,
+            expected: descriptor.parameters.len(),
+            actual: supplied_arguments,
+        });
+    }
+    for (parameter_index, (expected, actual)) in descriptor
+        .parameters
+        .iter()
+        .zip(prologue_stack.iter().skip(1))
+        .enumerate()
+    {
+        match (expected, actual) {
+            (
+                FieldType::Boolean
+                | FieldType::Byte
+                | FieldType::Char
+                | FieldType::Short
+                | FieldType::Int,
+                ConstructorPrologueValue::Int,
+            ) => {}
+            (
+                FieldType::Object(expected_name),
+                ConstructorPrologueValue::Reference(actual_class),
+            ) => {
+                let expected_class = ClassIdentity(Arc::from(expected_name.as_str()));
+                if !hierarchy.is_assignable(actual_class.internal_name(), expected_name) {
+                    return Err(AnalysisError::WrongExactConstructorSuperArgument {
+                        instruction: instruction_index,
+                        parameter: parameter_index,
+                        expected: expected_class,
+                        actual: actual_class.clone(),
+                    });
+                }
+            }
+            (FieldType::Array(_) | FieldType::Float | FieldType::Long | FieldType::Double, _) => {
+                return Err(AnalysisError::UnsupportedConstructorSuperArgumentType {
+                    instruction: instruction_index,
+                    parameter: parameter_index,
+                });
+            }
+            (expected, actual) => {
+                return Err(AnalysisError::ConstructorSuperArgumentTypeMismatch {
+                    instruction: instruction_index,
+                    parameter: parameter_index,
+                    expected: match expected {
+                        FieldType::Object(_) | FieldType::Array(_) => ValueKind::Reference,
+                        _ => ValueKind::Int,
+                    },
+                    actual: match actual {
+                        ConstructorPrologueValue::Int => ValueKind::Int,
+                        ConstructorPrologueValue::Reference(_)
+                        | ConstructorPrologueValue::UninitializedThis => ValueKind::Reference,
+                    },
+                });
+            }
+        }
+    }
+
     let mut analysis = analyze_validated_with_current_class_inner(
         "<init>",
         method_descriptor,
         false,
-        &instructions[2..],
+        &instructions[instruction_index + 1..],
         constant_pool,
         Some(current_class_index),
         AnalysisContext {
             after_constructor_super_call: true,
-            instruction_offset: 2,
+            instruction_offset: instruction_index + 1,
             hierarchy,
         },
     )?;
-    // The validated `aload_0` prologue reaches one stack slot before the
-    // direct-super invocation; account for it in the full method maximum.
-    analysis.max_stack = analysis.max_stack.max(1);
+    // The initialized receiver and ordered arguments are all on the stack at
+    // the invokespecial site. Account for this full prologue in the method max.
+    let prologue_max_stack =
+        u16::try_from(prologue_max_stack).map_err(|_| AnalysisError::StackLimitExceeded {
+            instruction: instruction_index,
+            slots: prologue_max_stack,
+        })?;
+    analysis.max_stack = analysis.max_stack.max(prologue_max_stack);
     Ok(analysis)
+}
+
+#[derive(Clone)]
+enum ConstructorParameterLocal {
+    UninitializedThis,
+    Int,
+    Reference(ClassIdentity),
+    Unsupported,
+}
+
+#[derive(Clone)]
+enum ConstructorPrologueValue {
+    UninitializedThis,
+    Int,
+    Reference(ClassIdentity),
 }
 
 #[derive(Clone, Copy)]
@@ -5805,6 +6059,183 @@ mod tests {
                 instruction: 2,
                 allocation_site: 0,
             })
+        );
+    }
+
+    #[test]
+    fn validates_bounded_parameterized_direct_super_constructor_prologues() {
+        let mut builder = ConstantPoolBuilder::new();
+        let child = builder.class("example/Derived").unwrap();
+        let base = builder.class("example/Base").unwrap();
+        let no_arg = builder.method_ref("example/Base", "<init>", "()V").unwrap();
+        let int_arg = builder
+            .method_ref("example/Base", "<init>", "(I)V")
+            .unwrap();
+        let mixed_args = builder
+            .method_ref("example/Base", "<init>", "(IZ)V")
+            .unwrap();
+        let reference_arg = builder
+            .method_ref("example/Base", "<init>", "(Lexample/Dep;)V")
+            .unwrap();
+        let object_arg = builder
+            .method_ref("example/Base", "<init>", "(Ljava/lang/Object;)V")
+            .unwrap();
+        let wrong_owner = builder.method_ref("example/Dep", "<init>", "(I)V").unwrap();
+        let returning_constructor = builder
+            .method_ref("example/Base", "<init>", "(I)I")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+        let hierarchy = ClassHierarchy::from_edges([
+            ("example/Derived".to_owned(), "example/Base".to_owned()),
+            ("example/Dep".to_owned(), "java/lang/Object".to_owned()),
+        ])
+        .unwrap();
+        let analyze_constructor = |descriptor: &str, instructions: &[Instruction]| {
+            analyze_validated_constructor_body_with_hierarchy(
+                descriptor,
+                instructions,
+                &pool,
+                child,
+                base,
+                &hierarchy,
+            )
+        };
+        let invoke =
+            |index| Instruction::InvokeSpecial(SpecialMethodReference::new(operand(index)));
+
+        let int_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::ILoad(LocalIndex::new(1)),
+            invoke(int_arg),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("(I)V", &int_prologue),
+            Ok(CodeAnalysis {
+                max_stack: 2,
+                max_locals: 2,
+            })
+        );
+
+        let mixed_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::ILoad(LocalIndex::new(1)),
+            Instruction::ILoad(LocalIndex::new(2)),
+            invoke(mixed_args),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("(IZ)V", &mixed_prologue),
+            Ok(CodeAnalysis {
+                max_stack: 3,
+                max_locals: 3,
+            })
+        );
+
+        let reference_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::ALoad(LocalIndex::new(1)),
+            invoke(reference_arg),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("(Lexample/Dep;)V", &reference_prologue),
+            Ok(CodeAnalysis {
+                max_stack: 2,
+                max_locals: 2,
+            })
+        );
+
+        let constant_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::IConst(SmallIntConstant::One),
+            invoke(int_arg),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("()V", &constant_prologue),
+            Ok(CodeAnalysis {
+                max_stack: 2,
+                max_locals: 1,
+            })
+        );
+
+        let no_arguments = [Instruction::ALoad(LocalIndex::new(0)), invoke(int_arg)];
+        assert_eq!(
+            analyze_constructor("()V", &no_arguments),
+            Err(AnalysisError::ConstructorSuperArgumentCountMismatch {
+                instruction: 1,
+                expected: 1,
+                actual: 0,
+            })
+        );
+
+        let wrong_reference_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::ALoad(LocalIndex::new(1)),
+            invoke(reference_arg),
+            Instruction::Return,
+        ];
+        assert!(matches!(
+            analyze_constructor("(Ljava/lang/String;)V", &wrong_reference_prologue),
+            Err(AnalysisError::WrongExactConstructorSuperArgument {
+                instruction: 2,
+                parameter: 0,
+                ref expected,
+                ref actual,
+            }) if expected == &class_identity("example/Dep")
+                && actual == &class_identity("java/lang/String")
+        ));
+
+        let uninitialized_this_argument = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::ALoad(LocalIndex::new(0)),
+            invoke(object_arg),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("()V", &uninitialized_this_argument),
+            Err(AnalysisError::InvalidConstructorSuperCall { instruction: 1 })
+        );
+
+        let wrong_owner_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::IConst(SmallIntConstant::One),
+            invoke(wrong_owner),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("()V", &wrong_owner_prologue),
+            Err(AnalysisError::InvalidConstructorSuperCall { instruction: 2 })
+        );
+
+        let wrong_return_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::IConst(SmallIntConstant::One),
+            invoke(returning_constructor),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("()V", &wrong_return_prologue),
+            Err(AnalysisError::InvalidConstructorSuperCall { instruction: 2 })
+        );
+
+        let missing_call = [Instruction::ALoad(LocalIndex::new(0)), Instruction::Return];
+        assert_eq!(
+            analyze_constructor("()V", &missing_call),
+            Err(AnalysisError::InvalidConstructorSuperCall { instruction: 1 })
+        );
+
+        let duplicate_call = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            invoke(no_arg),
+            Instruction::ALoad(LocalIndex::new(0)),
+            invoke(no_arg),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("()V", &duplicate_call),
+            Err(AnalysisError::ConstructorReceiverNotUninitialized { instruction: 3 })
         );
     }
 
