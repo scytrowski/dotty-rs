@@ -284,6 +284,27 @@ fn class_builder_verifies_direct_super_invokespecial_and_requires_acc_super() {
             }
         ))
     ));
+
+    let mut initialized_this_constructor_call =
+        ClassFileBuilder::new("example/BadConstructorCall", version).unwrap();
+    initialized_this_constructor_call
+        .set_super_class(Some("example/Base"))
+        .unwrap()
+        .add_instance_method("bad", "()V", |code| {
+            code.aload(0)?;
+            code.invokespecial("example/Base", "<init>", "()V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        initialized_this_constructor_call.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::ConstructorReceiverNotUninitialized {
+                instruction: 1
+            }
+        ))
+    ));
 }
 
 #[test]

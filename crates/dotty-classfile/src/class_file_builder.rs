@@ -1137,7 +1137,8 @@ fn instruction_requires_exact_references(instruction: Instruction, pool: &Consta
         | Instruction::New(_)
         | Instruction::Ldc(LdcConstant::Reference(_)) => true,
         Instruction::InvokeSpecial(reference) => {
-            special_reference_is_ordinary_method(reference.index().get(), pool)
+            special_reference_is_constructor(reference.index().get(), pool)
+                || special_reference_is_ordinary_method(reference.index().get(), pool)
         }
         Instruction::GetStatic(reference) | Instruction::PutStatic(reference) => {
             field_reference_has_reference_type(reference.index().get(), pool)
@@ -1189,6 +1190,25 @@ fn special_reference_is_ordinary_method(index: ConstantPoolIndex, pool: &Constan
     };
     pool.name_and_type(*name_and_type_index)
         .is_ok_and(|(name, _)| name != "<init>")
+}
+
+fn special_reference_is_constructor(index: ConstantPoolIndex, pool: &ConstantPool) -> bool {
+    match pool.get(index) {
+        Some(
+            ConstantPoolEntry::Methodref {
+                name_and_type_index,
+                ..
+            }
+            | ConstantPoolEntry::InterfaceMethodref {
+                name_and_type_index,
+                ..
+            },
+        ) => pool
+            .name_and_type(*name_and_type_index)
+            .map(|(name, _)| name == "<init>")
+            .unwrap_or(true),
+        _ => true,
+    }
 }
 
 fn field_reference_has_reference_type(index: ConstantPoolIndex, pool: &ConstantPool) -> bool {
