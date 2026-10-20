@@ -6456,10 +6456,10 @@ fn pinned_scala39_local_definition_audit() {
     assert_eq!(
         audit
             .source_function_outcomes
-            .get("expression::Function::ImportQualifierNotFound")
+            .get("expression::Function::SymbolResolution")
             .map(|bucket| bucket.count),
         Some(4),
-        "the four Scala2Unpickler lambda methods should expose their classpath blocker"
+        "#1180 advances the four Scala2Unpickler lambda methods past import lookup"
     );
     assert_eq!(
         audit
