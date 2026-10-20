@@ -367,6 +367,25 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Blocks = 42, 42, 7, 3", 3,
             ),
+            "example/Mutable.tasty": (
+                "example.Mutable", r"public int overwrite\(\)", "MutableRuntime.java",
+                """public final class MutableRuntime {
+  public static void main(String[] args) {
+    example.Mutable values = new example.Mutable();
+    int overwrite = values.overwrite();
+    int increment = values.increment(41);
+    int sequential = values.sequential();
+    int overflow = values.signed(Integer.MAX_VALUE);
+    int negative = values.signed(-1);
+    if (overwrite != 7 || increment != 42 || sequential != 8 ||
+        overflow != Integer.MIN_VALUE || negative != 0)
+      throw new AssertionError("mutable local assignment results were not preserved");
+    System.out.println("Mutable = " + overwrite + ", " + increment + ", " +
+        sequential + ", " + overflow + ", " + negative);
+  }
+}
+""", "Mutable = 7, 42, 8, -2147483648, 0", 42,
+            ),
             "example/Locals.tasty": (
                 "example.Locals", r"public int copy\(int\)", "LocalsRuntime.java",
                 """public final class LocalsRuntime {
@@ -513,6 +532,14 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Blocks class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Mutable.tasty":
+                signatures = (
+                    r"public int overwrite\(\)", r"public int increment\(int\)",
+                    r"public int sequential\(\)", r"public int signed\(int\)",
+                    r"public int immutableTarget\(\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Mutable class has unexpected signatures: {javap}")
             if relative.as_posix() == "example/Locals.tasty":
                 signatures = (
                     r"public int copy\(int\)", r"public int literal\(\)",
