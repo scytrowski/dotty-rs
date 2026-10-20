@@ -352,6 +352,35 @@ impl SourceTyper<'_> {
                     }
                     Ok(info)
                 } else {
+                    if let Some(Type::SuperType { super_type, .. }) =
+                        self.store.types.try_get(prefix)
+                    {
+                        let Some(Type::TypeRef {
+                            target: TypeRefTarget::Symbol(parent),
+                            ..
+                        }) = self.store.types.try_get(*super_type)
+                        else {
+                            return Err(TyperError::TermReferencePrefixMismatch {
+                                symbol,
+                                prefix: *super_type,
+                            });
+                        };
+                        if self.store.symbols.get(symbol).owner != Some(*parent) {
+                            return Err(TyperError::TermReferencePrefixMismatch {
+                                symbol,
+                                prefix: *super_type,
+                            });
+                        }
+                        return self.member_type_on_journaled(
+                            &crate::typer::lookup::MemberCandidate {
+                                symbol,
+                                declaring_class: *parent,
+                                receiver_view: *super_type,
+                                inheritance_depth: 1,
+                            },
+                            info_journal,
+                        );
+                    }
                     let receiver =
                         self.widen_expression_type_journaled(prefix, info_journal, depth + 1)?;
                     let receiver = self.this_type_receiver_view(receiver)?;

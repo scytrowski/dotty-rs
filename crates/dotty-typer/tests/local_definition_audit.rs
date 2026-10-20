@@ -17740,6 +17740,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::MalformedOverloadCandidate { .. } => "MalformedOverloadCandidate",
         TyperError::MixedApplicationCandidateKinds { .. } => "MixedApplicationCandidateKinds",
         TyperError::TypeSelectionInExpression { .. } => "TypeSelectionInExpression",
+        TyperError::UnsupportedSuper { .. } => "UnsupportedSuper",
         TyperError::MemberLookup(..) => "MemberLookup",
         TyperError::UnsupportedExpression { .. } => "UnsupportedExpression",
         TyperError::UnsupportedFunctionLiteralParameter { .. } => {

@@ -110,6 +110,18 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
+        let explicit_super_selection = matches!(
+            self.arena
+                .try_get(application.function)
+                .map(|tree| &tree.kind),
+            Some(TreeKind::Select(selection))
+                if matches!(
+                    self.arena
+                        .try_get(selection.qualifier)
+                        .map(|tree| &tree.kind),
+                    Some(TreeKind::Super(_))
+                )
+        );
         let request = ApplicationRequest {
             function_tree: application.function,
             argument_trees: &application.args,
@@ -117,10 +129,13 @@ impl SourceTyper<'_> {
             context,
             tree_index: tree.index(),
         };
-        let constructor_function =
-            self.resolve_constructor_application_function(request, info_journal, new_mappings)?;
+        let constructor_function = if explicit_super_selection {
+            None
+        } else {
+            self.resolve_constructor_application_function(request, info_journal, new_mappings)?
+        };
         let is_constructor_application = constructor_function.is_some();
-        let resolved_function = if constructor_function.is_some() {
+        let resolved_function = if explicit_super_selection || constructor_function.is_some() {
             None
         } else {
             self.resolve_overloaded_application_function(request, info_journal, new_mappings)?

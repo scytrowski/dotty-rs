@@ -9283,20 +9283,17 @@ fn final_parent_method_name_collision_fails_closed_when_parent_method_is_unplann
 }
 
 #[test]
-fn super_method_source_is_rejected_by_typer_before_jvm_emission() {
+fn typed_super_method_source_remains_rejected_before_jvm_emission() {
     let output = TestOutputDirectory::new("super-method-unsupported");
     let source = "class Base { def value(): Int = 10 }; class Derived extends Base { def read(): Int = super.value() }";
     let error = compile_source_classes(source, "SuperMethod.scala", output.path())
-        .expect_err("super.method() must fail in the current frontend");
+        .expect_err("super.method() must remain unsupported by JVM emission");
     assert!(
         matches!(
             error,
-            PipelineFailure::Typer(TyperError::UnsupportedExpression {
-                expression_kind: "expression or declaration tree",
-                ..
-            })
+            PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmCallShape { .. })
         ),
-        "super.method() failed at an unexpected pipeline stage: {error:?}"
+        "typed super.method() failed at an unexpected pipeline stage: {error:?}"
     );
     assert!(output.class_files().is_empty());
 
@@ -9320,17 +9317,24 @@ fn super_method_source_is_rejected_by_typer_before_jvm_emission() {
     ] {
         let output = TestOutputDirectory::new(label);
         let error = compile_source_classes(source, "SuperAudit.scala", output.path())
-            .expect_err("super calls remain unsupported in the source Typer");
-        assert!(
-            matches!(
-                error,
-                PipelineFailure::Typer(TyperError::UnsupportedExpression {
-                    expression_kind: "expression or declaration tree",
-                    ..
-                })
-            ),
-            "{label} failed at an unexpected pipeline stage: {error:?}"
-        );
+            .expect_err("super calls must remain unsupported in this backend increment");
+        if label == "super-increment" {
+            assert!(
+                matches!(
+                    error,
+                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmCallShape { .. })
+                ),
+                "{label} failed at an unexpected pipeline stage: {error:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    error,
+                    PipelineFailure::Typer(TyperError::UnsupportedSuper { .. })
+                ),
+                "{label} failed at an unexpected pipeline stage: {error:?}"
+            );
+        }
         assert!(output.class_files().is_empty());
     }
 }

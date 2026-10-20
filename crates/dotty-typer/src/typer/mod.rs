@@ -366,6 +366,14 @@ impl<'a> SourceTyper<'a> {
             TreeKind::This(this) => {
                 self.type_this_expression(tree, this, source_tree.position, context)
             }
+            TreeKind::Super(super_tree) => self.type_super_expression(
+                tree,
+                super_tree,
+                source_tree.position,
+                context,
+                info_journal,
+                new_mappings,
+            ),
             TreeKind::Typed(ascription) => self.type_ascription_expression(
                 tree,
                 ascription,
