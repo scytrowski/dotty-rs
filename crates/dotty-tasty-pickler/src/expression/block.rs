@@ -40,14 +40,7 @@ fn lower_local_value_inner(
         });
     }
     let rhs = value.rhs.ok_or(PickleError::MissingBody { method })?;
-    let rhs_depth = if matches!(
-        ast.try_get(rhs).map(|rhs| &rhs.kind),
-        Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_))
-    ) {
-        depth + 1
-    } else {
-        depth
-    };
+    let rhs_depth = child_expression_depth(ast, rhs, depth);
     let rhs = lower_expression_inner(
         store,
         ast,
