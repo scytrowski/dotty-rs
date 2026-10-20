@@ -17,6 +17,7 @@ const REFERENCES: &str = include_str!("../../../tests/fixtures/tasty_pickler/Ref
 const EXPLICIT_THIS_REFERENCES: &str =
     "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
+const MUTABLE: &str = include_str!("fixtures/Mutable.scala");
 const ARITHMETIC: &str = "package example\nclass Arithmetic:\n  def add(x: Int, y: Int): Int = x + y\n  def subtract(x: Int, y: Int): Int = x - y\n  def multiply(x: Int, y: Int): Int = x * y\n  def divide(x: Int, y: Int): Int = x / y\n  def remainder(x: Int, y: Int): Int = x % y\n  def nested(x: Int, y: Int, z: Int): Int = x + y * z\n  def throughCall(x: Int, y: Int): Int = identity(x + y)\n  def local(x: Int, y: Int): Int =\n    val result: Int = x + y\n    result\n  def identity(value: Int): Int = value\n  def compute(a: Int, b: Int): Int = (a + b) * 2 - 1\n";
 const PARENTHESIZED_CALL_ARGUMENTS: &str = "package example\nclass ParenthesizedCallArguments:\n  def run(a: Int, b: Int): Int = identity((a + b))\n  def nested(a: Int, b: Int): Int = identity(identity((a + b)))\n  def identity(value: Int): Int = value\n";
 const COMPARISONS: &str = "package example\nclass Comparisons:\n  def positive(x: Int): Boolean = x > 0\n  def before(a: Int, b: Int): Boolean = a < b\n  def atMost(a: Int, b: Int): Boolean = a <= b\n  def atLeast(a: Int, b: Int): Boolean = a >= b\n  def nested(a: Int, b: Int): Boolean = (a + 1) >= b\n  def choose(x: Int): Int = if x > 0 then 1 else 0\n";
@@ -753,15 +754,9 @@ fn block_validation_rejects_unmapped_reordered_repeated_and_unsupported_statemen
     var saved: Int = 1
     saved
 ";
-    let forbidden_local =
-        source_outputs_named(mutable_local, "LocalBlock.scala", |_| {}).unwrap_err();
-    assert!(matches!(
-        forbidden_local,
-        PickleError::Unsupported {
-            feature: UnsupportedFeature::SourceMetadata,
-            ..
-        }
-    ));
+    let (_, mutable_output) =
+        source_outputs_named(mutable_local, "LocalBlock.scala", |_| {}).unwrap();
+    dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(mutable_output.bytes()).unwrap();
 }
 
 #[test]
@@ -3298,4 +3293,342 @@ fn complete_source_output_is_deterministic_across_actual_frontend_sessions() {
     let (_, first) = source_outputs(ANSWER, |_| {}).unwrap();
     let (_, second) = source_outputs(ANSWER, |_| {}).unwrap();
     assert_eq!(first.bytes(), second.bytes());
+}
+
+#[test]
+fn mutable_int_locals_serialize_ordered_assignments_and_exact_local_targets() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(MUTABLE, "Mutable.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    for (method_index, expected_assignments) in [(2, 1), (3, 1), (4, 2), (5, 1)] {
+        let method = addresses
+            .get(output.declarations()[method_index].address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap();
+        let RawTree::LengthNode(block_node) = method.rhs.unwrap() else {
+            panic!("mutable method body must retain its source block")
+        };
+        let StructuredNode::Block(block) = block_node.decode_structured().unwrap() else {
+            panic!("mutable method body must be a BLOCK")
+        };
+        assert_eq!(block.stats.len(), expected_assignments + 1);
+        let RawTree::LengthNode(value_node) = &block.stats[0] else {
+            panic!("first source statement must be the local VALDEF")
+        };
+        assert_eq!(value_node.tag, VALDEF_TAG);
+        let DefinitionBody::ValDef { name, tail, .. } =
+            value_node.decode_definition_body().unwrap()
+        else {
+            panic!("local declaration did not decode as VALDEF")
+        };
+        assert_eq!(tail, [DefinitionTail::Modifier(MUTABLE_TAG)]);
+        assert_eq!(file.render_name(name).unwrap(), "count");
+
+        for statement in &block.stats[1..] {
+            let RawTree::LengthNode(assign_node) = statement else {
+                panic!("assignment statement was dropped or reordered")
+            };
+            assert_eq!(assign_node.tag, ASSIGN_TAG);
+            let assign = assign_node.decode_assign().unwrap();
+            let RawTree::Leaf(lhs) = assign.left else {
+                panic!("assignment LHS must be a direct local reference")
+            };
+            assert_eq!(lhs.tag, TERMREFDIRECT_TAG);
+            let target = addresses.get(lhs.ast_ref().unwrap().address).unwrap();
+            let DefinitionBody::ValDef {
+                name: target_name, ..
+            } = target.decode_definition_body().unwrap()
+            else {
+                panic!("assignment target must point to its local VALDEF")
+            };
+            assert_eq!(target_name, name);
+        }
+        let RawTree::Leaf(result) = block.expression else {
+            panic!("block result must read the mutated local")
+        };
+        assert_eq!(result.tag, TERMREFDIRECT_TAG);
+        let target = addresses.get(result.ast_ref().unwrap().address).unwrap();
+        let DefinitionBody::ValDef {
+            name: result_name, ..
+        } = target.decode_definition_body().unwrap()
+        else {
+            panic!("block result target must be its local VALDEF")
+        };
+        assert_eq!(result_name, name);
+    }
+
+    let (_, repeated) = source_outputs_named(MUTABLE, "Mutable.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeated.bytes());
+    assert_eq!(file.encode_validated().unwrap(), output.bytes());
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1359/generated/example/Mutable.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1359/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 mutable-local interoperability gate");
+        assert!(
+            result.success(),
+            "Mutable Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
+fn mutable_assignment_rhs_obeys_projection_expression_depth_after_validation() {
+    let limits = PickleLimits {
+        projection: ProjectionLimits {
+            max_expression_depth: 0,
+            ..ProjectionLimits::default()
+        },
+        ..PickleLimits::default()
+    };
+    let error = source_outputs_named_with_tree_edits_and_pickle_limits(
+        MUTABLE,
+        "Mutable.scala",
+        ValidationLimits::default(),
+        limits,
+        |_, _, _, _| {},
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+
+    let nested_block = "package example\nclass NestedAssignment:\n  def run: Int =\n    var count: Int = 0\n    count = { count = 1; count + 1 }\n    count\n";
+    let error = source_outputs_named_with_tree_edits_and_pickle_limits(
+        nested_block,
+        "NestedAssignment.scala",
+        ValidationLimits::default(),
+        limits,
+        |_, _, _, _| {},
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+}
+
+#[test]
+fn mutable_local_assignments_reject_forged_flags_swapped_children_and_non_unit_results() {
+    let forged_source_modifier = source_outputs_named_with_tree_edits(
+        MUTABLE,
+        "Mutable.scala",
+        ValidationLimits::default(),
+        |source_ast, _, _, _| {
+            let (tree, mut value) = source_ast
+                .iter()
+                .find_map(|(id, tree)| match &tree.kind {
+                    TreeKind::ValDef(value)
+                        if value.metadata.modifiers == [dotty_core::ast::Modifier::Var] =>
+                    {
+                        Some((id, value.clone()))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            value.metadata.modifiers.clear();
+            source_ast.get_mut(tree).kind = TreeKind::ValDef(value);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        forged_source_modifier,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::SymbolMetadata,
+            ..
+        }
+    ));
+
+    let swapped_children = source_outputs_named_with_tree_edits(
+        MUTABLE,
+        "Mutable.scala",
+        ValidationLimits::default(),
+        |_, typed_ast, _, _| {
+            let typed_assign = typed_ast
+                .iter()
+                .find_map(|(id, tree)| matches!(tree.kind, TreeKind::Assign(_)).then_some(id))
+                .unwrap();
+            let TreeKind::Assign(assign) = &mut typed_ast.get_mut(typed_assign).kind else {
+                unreachable!()
+            };
+            std::mem::swap(&mut assign.lhs, &mut assign.rhs);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(swapped_children, PickleError::BodyBinding { .. }));
+
+    let non_unit_assignment = source_outputs_named_with_tree_edits(
+        MUTABLE,
+        "Mutable.scala",
+        ValidationLimits::default(),
+        |_, typed_ast, _, _| {
+            let assign = typed_ast
+                .iter()
+                .find_map(|(id, tree)| matches!(tree.kind, TreeKind::Assign(_)).then_some(id))
+                .unwrap();
+            let TreeKind::Assign(value) = &typed_ast.get(assign).kind else {
+                unreachable!()
+            };
+            let rhs_type = typed_ast.get(value.rhs).ty;
+            typed_ast.get_mut(assign).ty = rhs_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(non_unit_assignment, PickleError::BodyType { .. }));
+
+    let assignment_to_parameter = source_outputs_named_with_tree_edits(
+        MUTABLE,
+        "Mutable.scala",
+        ValidationLimits::default(),
+        |_, typed_ast, _, store| {
+            let parameter_ty = typed_ast
+                .iter()
+                .find_map(|(_, tree)| match store.types.try_get(tree.ty) {
+                    Some(Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    }) if store.symbols.get(*symbol).kind == SymbolKind::Parameter => Some(tree.ty),
+                    _ => None,
+                })
+                .unwrap();
+            let assign = typed_ast
+                .iter()
+                .find_map(|(id, tree)| matches!(tree.kind, TreeKind::Assign(_)).then_some(id))
+                .unwrap();
+            let TreeKind::Assign(value) = &typed_ast.get(assign).kind else {
+                unreachable!()
+            };
+            typed_ast.get_mut(value.lhs).ty = parameter_ty;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        assignment_to_parameter,
+        PickleError::Reference { .. }
+    ));
+
+    let assignment_to_immutable_local = source_outputs_named_with_tree_edits(
+        MUTABLE,
+        "Mutable.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, store| {
+            let source_method = source_ast
+                .iter()
+                .find_map(|(_, tree)| match &tree.kind {
+                    TreeKind::DefDef(definition)
+                        if store.names.try_resolve(definition.name.as_name().text())
+                            == Some("immutableTarget") =>
+                    {
+                        Some(definition.rhs.unwrap())
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let TreeKind::Block(block) = &source_ast.get(source_method).kind else {
+                unreachable!()
+            };
+            let source_assignment = block
+                .stats
+                .iter()
+                .copied()
+                .find(|stat| matches!(source_ast.get(*stat).kind, TreeKind::Assign(_)))
+                .unwrap();
+            let typed_assignment = bindings
+                .get(SourceId::from_index(7), source_assignment)
+                .unwrap();
+            let TreeKind::Assign(assignment) = &typed_ast.get(typed_assignment).kind else {
+                unreachable!()
+            };
+            let immutable_type = typed_ast
+                .iter()
+                .find_map(
+                    |(_, tree)| match (&tree.kind, store.types.try_get(tree.ty)) {
+                        (
+                            TreeKind::Ident(_),
+                            Some(Type::TermRef {
+                                target: TermRefTarget::Symbol(symbol),
+                                ..
+                            }),
+                        ) if store.symbols.get(*symbol).kind == SymbolKind::Local
+                            && store.symbols.get(*symbol).flags.is_empty() =>
+                        {
+                            Some(tree.ty)
+                        }
+                        _ => None,
+                    },
+                )
+                .unwrap();
+            typed_ast.get_mut(assignment.lhs).ty = immutable_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        assignment_to_immutable_local,
+        PickleError::Reference { .. }
+    ));
+
+    let assignment_before_declaration = source_outputs_named_with_tree_edits(
+        MUTABLE,
+        "Mutable.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let source_block_id = source_ast
+                .iter()
+                .find_map(|(id, tree)| {
+                    let TreeKind::Block(block) = &tree.kind else {
+                        return None;
+                    };
+                    (block.stats.len() >= 2
+                        && block
+                            .stats
+                            .iter()
+                            .any(|stat| matches!(source_ast.get(*stat).kind, TreeKind::Assign(_))))
+                    .then_some(id)
+                })
+                .unwrap();
+            let typed_block_id = bindings
+                .get(SourceId::from_index(7), source_block_id)
+                .unwrap();
+            let TreeKind::Block(block) = &mut source_ast.get_mut(source_block_id).kind else {
+                unreachable!()
+            };
+            block.stats.swap(0, 1);
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(typed_block_id).kind else {
+                unreachable!()
+            };
+            block.stats.swap(0, 1);
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        assignment_before_declaration,
+        PickleError::Reference { .. }
+    ));
 }

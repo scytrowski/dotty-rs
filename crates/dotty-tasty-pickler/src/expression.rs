@@ -7,8 +7,8 @@ use dotty_core::{
     Constant, SemanticStore, SymbolId, SymbolInfo, TermRefTarget, TreeId, TreeKind, Type, Typed,
 };
 use dotty_tasty::tasty::{
-    APPLY_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, IF_TAG, INTCONST_TAG, SimpleTerm,
-    TRUECONST_TAG, TermValue, UNITCONST_TAG,
+    APPLY_TAG, ASSIGN_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, IF_TAG, INTCONST_TAG,
+    SimpleTerm, TRUECONST_TAG, TermValue, UNITCONST_TAG,
 };
 
 use crate::{
@@ -28,6 +28,17 @@ struct ExpressionBudget {
 struct ExpressionState<'a> {
     depth: usize,
     budget: &'a mut ExpressionBudget,
+}
+
+fn child_expression_depth(ast: &TypedAst, tree: TreeId<Typed>, depth: usize) -> usize {
+    if matches!(
+        ast.try_get(tree).map(|tree| &tree.kind),
+        Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_))
+    ) {
+        depth + 1
+    } else {
+        depth
+    }
 }
 
 impl ExpressionBudget {
@@ -100,6 +111,71 @@ fn lower_expression_inner(
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::Assign(assignment) = &tree.kind {
+        if tree.ty != context.definitions().unit {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: tree.ty,
+            });
+        }
+        budget.visit(assignment.lhs, depth)?;
+        let lhs = ast
+            .try_get(assignment.lhs)
+            .ok_or(PickleError::InvalidTypedTree {
+                tree: assignment.lhs,
+            })?;
+        let TreeKind::Ident(ident) = &lhs.kind else {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::BodyExpression,
+                symbol: Some(method),
+            });
+        };
+        let Some(Type::TermRef {
+            prefix,
+            target: TermRefTarget::Symbol(target),
+        }) = store.types.try_get(lhs.ty)
+        else {
+            return Err(PickleError::BodyType {
+                tree: assignment.lhs,
+                ty: lhs.ty,
+            });
+        };
+        let target = *target;
+        if !store.symbols.contains(target) {
+            return Err(PickleError::InvalidSymbol { symbol: target });
+        }
+        let symbol = store.symbols.get(target);
+        if symbol.kind != dotty_core::SymbolKind::Local
+            || symbol.owner != Some(method)
+            || symbol.flags != dotty_core::SymbolFlags::MUTABLE
+            || symbol.name != ident.name
+            || *prefix != context.definitions().no_prefix
+            || symbol.info != SymbolInfo::Complete(context.definitions().int)
+        {
+            return Err(PickleError::Reference {
+                symbol: target,
+                reason: crate::ReferenceError::NotRegistered,
+            });
+        }
+        let lhs = context.local_reference(target, None)?;
+        let rhs_depth = child_expression_depth(ast, assignment.rhs, depth);
+        let rhs = lower_expression_inner(
+            store,
+            ast,
+            assignment.rhs,
+            method,
+            parameters,
+            ExpressionState {
+                depth: rhs_depth,
+                budget,
+            },
+            context,
+        )?;
+        return context.wire_node(AstNode::Length {
+            tag: ASSIGN_TAG,
+            fields: vec![AstField::Tree(lhs), AstField::Tree(rhs)],
+        });
+    }
     if let TreeKind::If(if_expr) = tree.kind {
         let condition = lower_expression_inner(
             store,

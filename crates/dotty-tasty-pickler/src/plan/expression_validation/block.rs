@@ -107,6 +107,18 @@ impl Validator<'_, '_> {
                 )?;
                 continue;
             }
+            if matches!(source_stat_node.kind, TreeKind::Assign(_))
+                || matches!(stat.kind, TreeKind::Assign(_))
+            {
+                self.validate_assignment_statement(
+                    source_stat,
+                    typed_stat,
+                    method,
+                    depth,
+                    visited,
+                )?;
+                continue;
+            }
             if matches!(source_stat_node.kind, TreeKind::Block(_))
                 || matches!(stat.kind, TreeKind::Block(_))
             {

@@ -65,9 +65,26 @@ impl Validator<'_, '_> {
             });
         }
         self.span(symbol.position)?;
-        self.metadata(&source_val.metadata, binding.symbol)?;
+        self.charge(source_val.metadata.modifiers.len())?;
+        let mutable = match source_val.metadata.modifiers.as_slice() {
+            [] => false,
+            [dotty_core::ast::Modifier::Var] => true,
+            _ => {
+                return Err(
+                    self.unsupported(UnsupportedFeature::SourceMetadata, Some(binding.symbol))
+                );
+            }
+        };
+        if source_val.metadata.visibility.is_some() || !source_val.metadata.annotations.is_empty() {
+            return Err(self.unsupported(UnsupportedFeature::SourceMetadata, Some(binding.symbol)));
+        }
+        let expected_flags = if mutable {
+            SymbolFlags::MUTABLE
+        } else {
+            SymbolFlags::EMPTY
+        };
         if symbol.visibility != Visibility::Public
-            || !symbol.flags.is_empty()
+            || symbol.flags != expected_flags
             || !symbol.annotations.is_empty()
         {
             return Err(self.unsupported(UnsupportedFeature::SymbolMetadata, Some(binding.symbol)));
