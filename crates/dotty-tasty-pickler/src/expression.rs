@@ -189,7 +189,8 @@ fn lower_expression_inner(
                 ..
             }) = store.types.try_get(function.ty)
             && (context.is_registered_int_arithmetic_target(*target)?
-                || context.is_registered_int_comparison_target(*target)?)
+                || context.is_registered_int_comparison_target(*target)?
+                || context.is_registered_boolean_short_circuit_target(*target)?)
         {
             if application.args.len() != 1 || application.kind != ApplyKind::Regular {
                 return Err(PickleError::PrimitiveOperatorArity {
@@ -403,6 +404,52 @@ fn lower_expression_inner(
         return context.local_reference(*target, None);
     }
     if let TreeKind::Select(selection) = &tree.kind {
+        if let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(target),
+            ..
+        }) = store.types.try_get(tree.ty)
+            && context.is_registered_boolean_unary_not_target(*target)?
+        {
+            let receiver =
+                ast.try_get(selection.qualifier)
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: selection.qualifier,
+                    })?;
+            let receiver_depth = if matches!(
+                receiver.kind,
+                TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_)
+            ) {
+                depth + 1
+            } else {
+                depth
+            };
+            let receiver_label = lower_expression_inner(
+                store,
+                ast,
+                selection.qualifier,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: receiver_depth,
+                    budget,
+                },
+                context,
+            )?;
+            let SymbolInfo::Complete(result_type) = store.symbols.get(*target).info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: *target,
+                    info: store.symbols.get(*target).info,
+                });
+            };
+            return context.primitive_operator_select(
+                *target,
+                receiver_label,
+                receiver.ty,
+                &[],
+                result_type,
+                None,
+            );
+        }
         let qualifier = ast
             .try_get(selection.qualifier)
             .ok_or(PickleError::InvalidTypedTree {
