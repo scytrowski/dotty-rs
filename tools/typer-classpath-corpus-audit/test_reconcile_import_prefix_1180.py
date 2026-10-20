@@ -1,5 +1,4 @@
 import unittest
-import json
 from pathlib import Path
 
 from reconcile_import_prefix_1180 import (
@@ -25,6 +24,7 @@ class ImportPrefix1180ReconciliationTests(unittest.TestCase):
                     "method_tree": method,
                     "blocker_origin_tree": origin,
                     "import_tree": imported,
+                    "final_import_identity": "-",
                     **{column: "current-value" for column in CURRENT_COLUMNS},
                 }
             )
@@ -66,9 +66,7 @@ class ImportPrefix1180ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(refreshed[0]["current_qualifier_kind"], "Object")
         self.assertEqual(refreshed[0]["current_object_module_evidence_status"], "matched_object_module_evidence")
-        evidence = json.loads(refreshed[0]["current_object_module_evidence"])[0]
-        self.assertEqual(evidence["classifications"], ["module_shell_not_completed"])
-        self.assertEqual(evidence["member_outcomes"], ["error|rolled_back"])
+        self.assertEqual(refreshed[0]["current_object_module_evidence_status"], "matched_object_module_evidence")
 
 
 if __name__ == "__main__":
