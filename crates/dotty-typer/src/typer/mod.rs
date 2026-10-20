@@ -726,6 +726,9 @@ pub(in crate::typer) fn source_method_flags(modifiers: &[Modifier]) -> SymbolFla
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_classloader::classloader::{
+        ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource,
+    };
     use dotty_core::{
         Name, Namespace, SourceText, SymbolFlags, SymbolLinks, SymbolOrigin, TermName, Visibility,
         ast::VisibilitySyntax,
@@ -733,6 +736,165 @@ mod tests {
     use dotty_lexer::ContextualScanner;
     use dotty_namer::name_compilation_unit;
     use std::{cell::RefCell, rc::Rc};
+
+    #[derive(Clone, Copy)]
+    struct JavaObjectStubPath;
+
+    #[derive(Clone, Copy)]
+    struct ContextsPackagePath;
+
+    #[derive(Clone, Copy)]
+    struct TypesPackagePath;
+
+    struct ProfiledCompilerResolver {
+        inner: dotty_classloader::classloader::ClasspathSymbolResolver<
+            dotty_classloader::classloader::CompositeClassPath,
+        >,
+        profile: Rc<RefCell<dotty_classloader::classloader::ModuleResolutionProfile>>,
+    }
+
+    impl SymbolResolver for ProfiledCompilerResolver {
+        fn checkpoint(&self) -> dotty_core::ResolverCheckpoint {
+            self.inner.checkpoint()
+        }
+
+        fn rollback_to(
+            &mut self,
+            store: &mut SemanticStore,
+            checkpoint: dotty_core::ResolverCheckpoint,
+        ) {
+            self.inner.rollback_to(store, checkpoint);
+        }
+
+        fn module_class_of_object(
+            &self,
+            store: &SemanticStore,
+            object: SymbolId,
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            self.inner.module_class_of_object(store, object)
+        }
+
+        fn complete_module_class(
+            &mut self,
+            store: &mut SemanticStore,
+            module_class: SymbolId,
+        ) -> Result<bool, ResolutionError> {
+            self.inner.complete_module_class(store, module_class)
+        }
+
+        fn complete_class(
+            &mut self,
+            store: &mut SemanticStore,
+            symbol: SymbolId,
+        ) -> Result<bool, ResolutionError> {
+            self.inner.complete_class(store, symbol)
+        }
+
+        fn resolve_member(
+            &mut self,
+            store: &mut SemanticStore,
+            request: &MemberRequest,
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            let result = self.inner.resolve_member(store, request);
+            let observed = self.inner.take_module_resolution_profile();
+            let mut profile = self.profile.borrow_mut();
+            profile.package_term_requests += observed.package_term_requests;
+            profile.package_term_successes += observed.package_term_successes;
+            profile.package_term_unresolved += observed.package_term_unresolved;
+            profile.package_term_non_object_results += observed.package_term_non_object_results;
+            profile.package_term_errors += observed.package_term_errors;
+            profile.new_object_identities += observed.new_object_identities;
+            profile.reused_object_identities += observed.reused_object_identities;
+            profile.module_member_successes += observed.module_member_successes;
+            profile
+                .resolved_object_targets
+                .extend(observed.resolved_object_targets);
+            profile
+                .resolved_member_targets
+                .extend(observed.resolved_member_targets);
+            profile
+                .package_term_targets
+                .extend(observed.package_term_targets);
+            profile.module_targets.extend(observed.module_targets);
+            profile.member_targets.extend(observed.member_targets);
+            profile
+                .completed_module_classes
+                .extend(observed.completed_module_classes);
+            result
+        }
+
+        fn resolve_package(
+            &mut self,
+            store: &mut SemanticStore,
+            path: &[&str],
+        ) -> Result<Option<SymbolId>, ResolutionError> {
+            self.inner.resolve_package(store, path)
+        }
+    }
+
+    impl ClassPathEntry for JavaObjectStubPath {
+        fn find_class(
+            &self,
+            name: &dotty_classloader::classloader::BinaryName,
+        ) -> Result<Option<ClassResource>, ClassPathError> {
+            if name.as_internal() != "java/lang/Object" {
+                return Ok(None);
+            }
+            let name = b"java/lang/Object";
+            let mut bytes = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 61, 0, 3, 1];
+            bytes.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            bytes.extend_from_slice(name);
+            bytes.extend_from_slice(&[7, 0, 1, 0, 0x21, 0, 2, 0, 0]);
+            bytes.extend_from_slice(&[0; 8]);
+            Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Class,
+                ClassOrigin::Directory(std::path::PathBuf::from("<java.lang.Object stub>")),
+            )))
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["java", "lang"])
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(["java", "lang"].starts_with(package))
+        }
+    }
+
+    impl ClassPathEntry for ContextsPackagePath {
+        fn find_class(
+            &self,
+            _name: &dotty_classloader::classloader::BinaryName,
+        ) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["dotty", "tools", "dotc", "core", "Contexts"])
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(["dotty", "tools", "dotc", "core", "Contexts"].starts_with(package))
+        }
+    }
+
+    impl ClassPathEntry for TypesPackagePath {
+        fn find_class(
+            &self,
+            _name: &dotty_classloader::classloader::BinaryName,
+        ) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["dotty", "tools", "dotc", "core", "Types"])
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(["dotty", "tools", "dotc", "core", "Types"].starts_with(package))
+        }
+    }
 
     const LOCAL_EXTENSION_CALL_SOURCE: &str =
         include_str!("../../tests/fixtures/local-extension-calls/LocalExtensionCalls.scala");
@@ -8574,7 +8736,14 @@ mod tests {
 
         assert_eq!(type_symbol(typer.store(), projected), external_type);
         assert_eq!(*package_requests.borrow(), vec![vec!["p".to_owned()]]);
-        assert_eq!(member_requests.borrow().len(), 1);
+        assert_eq!(
+            member_requests
+                .borrow()
+                .iter()
+                .map(|name| typer.store().names.resolve(name.text()).to_owned())
+                .collect::<Vec<_>>(),
+            ["C"]
+        );
         let Type::TypeRef {
             target: TypeRefTarget::Symbol(found_package),
             ..
@@ -8855,10 +9024,11 @@ mod tests {
             .parent
             .expect("the import has a preceding package context");
         let package_requests = Rc::new(RefCell::new(Vec::new()));
+        let member_requests = Rc::new(RefCell::new(Vec::new()));
         let resolver = ScriptedResolver {
             member: None,
             package: None,
-            member_requests: Rc::new(RefCell::new(Vec::new())),
+            member_requests: Rc::clone(&member_requests),
             package_requests: Rc::clone(&package_requests),
         };
         let mut typer = SourceTyper::new(
@@ -8870,6 +9040,7 @@ mod tests {
             &packages,
         )
         .with_resolver(Box::new(resolver));
+        let store_checkpoint = typer.store().checkpoint();
 
         let resolved = typer
             .import_qualifier_symbol(
@@ -8881,6 +9052,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(resolved, None);
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
         assert_eq!(
             *package_requests.borrow(),
             vec![
@@ -8888,6 +9060,603 @@ mod tests {
                 vec!["b".to_owned()],
             ]
         );
+        assert_eq!(
+            member_requests
+                .borrow()
+                .iter()
+                .map(|name| typer.store().names.resolve(name.text()).to_owned())
+                .collect::<Vec<_>>(),
+            ["b", "b"]
+        );
+    }
+
+    #[test]
+    fn scala39_compiler_object_is_a_relative_import_qualifier_and_selects_real_members() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+            ModuleResolutionProfile,
+        };
+
+        let source_text = "package dotty.tools\npackage dotc\npackage core\nimport Contexts.*\nimport Contexts.withFreshTyperState\nclass Use";
+        let (mut parsed, mut store, packages, definitions, index, source) =
+            parse_and_name(source_text);
+        let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let imports = parsed
+            .ast
+            .iter()
+            .filter_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import.expr)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(imports.len(), 2);
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .expect("the fixture source declares Use");
+        let declaration_context = index.declaration_context_of(use_symbol).unwrap();
+        let context = index
+            .source_context(declaration_context)
+            .parent
+            .expect("Use is declared inside the stacked core package");
+        let member_name = Name::new(store.names.intern("withFreshTyperState"), Namespace::Term);
+        let selected_member = parsed.ast.alloc(dotty_core::ast::Tree {
+            kind: TreeKind::Select(dotty_core::ast::Select {
+                qualifier: imports[0].1,
+                name: member_name,
+                backquoted: false,
+            }),
+            position: None,
+            ty: (),
+        });
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(compiler_root)),
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JavaObjectStubPath),
+        ]);
+        let resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        )
+        .with_module_resolution_profile_collection();
+        let profile = Rc::new(RefCell::new(ModuleResolutionProfile::default()));
+        let resolver = ProfiledCompilerResolver {
+            inner: resolver,
+            profile: Rc::clone(&profile),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let object = typer
+            .import_qualifier_symbol(imports[0].1, context, imports[0].0.index(), None)
+            .expect("the real package Object should resolve")
+            .expect("Contexts is a package-owned compiler Object");
+        assert_eq!(typer.store().symbols.get(object).kind, SymbolKind::Object);
+        assert!(matches!(
+            typer.store().symbols.get(object).origin,
+            SymbolOrigin::Tasty(_)
+        ));
+        let module_class = typer
+            .resolver
+            .module_class_of_object(typer.store(), object)
+            .expect("the resolver should retain the canonical module pair")
+            .expect("Contexts has a validated ModuleClass");
+        assert_eq!(
+            typer.store().symbols.get(module_class).kind,
+            SymbolKind::ModuleClass
+        );
+        assert_eq!(
+            typer.store().symbols.get(module_class).owner,
+            typer.store().symbols.get(object).owner
+        );
+
+        assert_eq!(
+            typer
+                .import_qualifier_symbol(imports[0].1, context, imports[0].0.index(), None)
+                .expect("repeated lookup should reuse the validated module pair"),
+            Some(object)
+        );
+
+        let import_contexts = typer
+            .source_context_chain(declaration_context, imports[1].0.index())
+            .expect("the declaration should retain its preceding imports");
+        let imported_members = typer
+            .lookup_import_candidates(
+                &import_contexts,
+                member_name,
+                false,
+                ImportSelection::Explicit,
+                SourceTreeLocation {
+                    tree_index: imports[1].0.index(),
+                    position: parsed.ast.get(imports[1].0).position,
+                },
+            )
+            .expect("the qualified import selector should resolve on Contexts");
+        assert_eq!(imported_members.len(), 1);
+        let imported_member = imported_members[0];
+        assert_eq!(
+            typer.store().symbols.get(imported_member).kind,
+            SymbolKind::Method
+        );
+        assert_eq!(
+            typer.store().symbols.get(imported_member).owner,
+            Some(module_class)
+        );
+
+        let member = typer
+            .resolve_qualifier_symbol(selected_member, context, selected_member.index(), None)
+            .expect("a Select from the real module should resolve through the ModuleClass")
+            .expect("Contexts declares withFreshTyperState");
+        assert_eq!(typer.store().symbols.get(member).kind, SymbolKind::Method);
+        assert_eq!(typer.store().symbols.get(member).owner, Some(module_class));
+        assert_eq!(member, imported_member);
+        let profile = profile.borrow();
+        assert_eq!(profile.package_term_requests, 1);
+        assert_eq!(profile.package_term_successes, 1);
+        assert_eq!(profile.new_object_identities, 1);
+        assert_eq!(profile.reused_object_identities, 0);
+        assert_eq!(profile.module_member_successes, 1);
+        assert_eq!(
+            profile.resolved_object_targets,
+            ["dotty.tools.dotc.core::Contexts".to_owned()]
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            profile.resolved_member_targets.len(),
+            1,
+            "the later selected member is counted separately from qualifier successes"
+        );
+    }
+
+    #[test]
+    fn failed_external_object_qualifier_lookup_rolls_back_store_and_resolver() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package app { import Missing.*; class Use }");
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .unwrap();
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let declaration_context = index.declaration_context_of(use_symbol).unwrap();
+        let context = index
+            .source_context(declaration_context)
+            .parent
+            .expect("Use is declared in the package context");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(JournalingResolver::default()));
+        let store_checkpoint = typer.store().checkpoint();
+        let resolver_checkpoint = typer.resolver.checkpoint();
+
+        let error = typer
+            .import_qualifier_symbol(import.1.expr, context, import.0.index(), None)
+            .expect_err("a non-Object package term is invalid evidence");
+
+        assert!(matches!(error, TyperError::SymbolResolution { .. }));
+        assert_eq!(typer.store().checkpoint(), store_checkpoint);
+        assert_eq!(typer.resolver.checkpoint(), resolver_checkpoint);
+    }
+
+    #[test]
+    fn source_owned_object_keeps_priority_over_same_named_compiler_tasty_object() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        let source_text = "package dotty.tools\npackage dotc\npackage core\nobject Contexts { val local: Int = 1 }\nimport Contexts.*\nclass Use";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .unwrap();
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let context = index
+            .source_context(index.declaration_context_of(use_symbol).unwrap())
+            .parent
+            .expect("Use is declared in the source core package");
+        let package = packages
+            .symbol(&["dotty", "tools", "dotc", "core"])
+            .unwrap();
+        let package_scope = packages.scope_of(package).unwrap();
+        let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+        let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../dotty-tasty/tests/fixtures/scala3-library");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(DirectoryClassPath::new(compiler_root)),
+            Box::new(DirectoryClassPath::new(library_root)),
+            Box::new(JavaObjectStubPath),
+        ]);
+        let resolver = ClasspathSymbolResolver::new(
+            class_path,
+            definitions,
+            LoadingSession::with_packages(packages.snapshot()),
+        );
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let object = typer
+            .import_qualifier_symbol(import.1.expr, context, import.0.index(), None)
+            .expect("the source Object should resolve without consulting its TASTy twin")
+            .expect("the source package declares Contexts");
+
+        assert_eq!(typer.store().symbols.get(object).kind, SymbolKind::Object);
+        assert_eq!(typer.store().symbols.get(object).owner, Some(package));
+        assert_eq!(
+            typer.store().symbols.get(object).origin,
+            SymbolOrigin::Source(source)
+        );
+        assert_eq!(
+            typer
+                .store()
+                .scopes
+                .get(package_scope)
+                .lookup_all(&Name::new(
+                    typer.store().symbols.get(object).name.text(),
+                    Namespace::Term,
+                )),
+            [object]
+        );
+    }
+
+    #[test]
+    fn package_and_object_candidates_with_the_same_term_name_are_explicitly_ambiguous() {
+        let (parsed, mut store, mut packages, definitions, index, source) =
+            parse_and_name("package app { import Choice.*; class Use }");
+        let package = packages
+            .symbol(&["app"])
+            .expect("the source app package should be registered");
+        let package_scope = packages.scope_of(package).unwrap();
+        let child_package = packages
+            .enter(&mut store, SymbolOrigin::Source(source), &["app", "Choice"])
+            .pop()
+            .expect("Choice package should be entered")
+            .symbol;
+        let name = Name::new(store.names.intern("Choice"), Namespace::Term);
+        let object = store.symbols.alloc(dotty_core::Symbol {
+            name,
+            owner: Some(package),
+            kind: SymbolKind::Object,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Source(source),
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        });
+        store.scopes.get_mut(package_scope).enter(name, object);
+        let import = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::Import(import) => Some((tree, import)),
+                _ => None,
+            })
+            .unwrap();
+        let use_symbol = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::TypeDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                {
+                    index.symbol_at(source, tree)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let context = index
+            .source_context(index.declaration_context_of(use_symbol).unwrap())
+            .parent
+            .expect("Use is declared in the source app package");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let checkpoint = typer.store().checkpoint();
+
+        assert!(matches!(
+            typer.import_qualifier_symbol(import.1.expr, context, import.0.index(), None),
+            Err(TyperError::AmbiguousTermReference { name: found, .. })
+                | Err(TyperError::AmbiguousTypeName { name: found, .. })
+                if typer.store().names.resolve(found.text()) == "Choice"
+        ));
+        assert_eq!(typer.store().checkpoint(), checkpoint);
+        assert_eq!(
+            typer.store().scopes.get(package_scope).lookup_all(&name),
+            [child_package, object]
+        );
+    }
+
+    #[test]
+    fn classpath_package_object_collision_is_ambiguous_before_and_after_object_warmup() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        for warm_object in [false, true] {
+            let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+                "package dotty.tools\npackage dotc\npackage core\nimport Contexts.*\nclass Use",
+            );
+            let import = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::Import(import) => Some((tree, import.expr)),
+                    _ => None,
+                })
+                .unwrap();
+            let use_symbol = parsed
+                .ast
+                .iter()
+                .find_map(|(tree, node)| match &node.kind {
+                    TreeKind::TypeDef(definition)
+                        if store.names.resolve(definition.name.as_name().text()) == "Use" =>
+                    {
+                        index.symbol_at(source, tree)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let context = index
+                .source_context(index.declaration_context_of(use_symbol).unwrap())
+                .parent
+                .expect("Use is declared in the stacked core package");
+            let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+            let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let class_path = CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(compiler_root)),
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+                Box::new(ContextsPackagePath),
+            ]);
+            let resolver = ClasspathSymbolResolver::new(
+                class_path,
+                definitions,
+                LoadingSession::with_packages(packages.snapshot()),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let package = packages
+                .symbol(&["dotty", "tools", "dotc", "core"])
+                .unwrap();
+
+            if warm_object {
+                let prefix = typer.package_type_prefix(package);
+                let name = Name::new(typer.store.names.intern("Contexts"), Namespace::Term);
+                let request = MemberRequest {
+                    prefix,
+                    name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                };
+                let object = typer
+                    .resolver
+                    .resolve_member(typer.store, &request)
+                    .unwrap()
+                    .expect("the TASTy classpath exposes Contexts as an Object");
+                assert_eq!(typer.store.symbols.get(object).kind, SymbolKind::Object);
+            }
+
+            let checkpoint = typer.store().checkpoint();
+            let error = typer
+                .import_qualifier_symbol(import.1, context, import.0.index(), None)
+                .expect_err("mixed classpath Package and Object evidence is ambiguous");
+            assert!(
+                matches!(error, TyperError::AmbiguousTypeName { name, .. }
+                if typer.store().names.resolve(name.text()) == "Contexts"),
+                "{error:?}"
+            );
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+
+            let retry = typer
+                .import_qualifier_symbol(import.1, context, import.0.index(), None)
+                .expect_err("retry must make the same choice without cache-history effects");
+            assert!(matches!(retry, TyperError::AmbiguousTypeName { name, .. }
+                if typer.store().names.resolve(name.text()) == "Contexts"));
+            assert_eq!(typer.store().checkpoint(), checkpoint);
+        }
+    }
+
+    #[test]
+    fn local_import_expression_arbitrates_package_object_collision_before_and_after_warmup() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        for warm_state in ["cold", "object", "package"] {
+            let source_text = "package dotty.tools\npackage dotc\npackage core\nclass Use { def run(): Int = { import Contexts.*; 1 } }";
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (run_method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "run");
+            let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+            let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let class_path = CompositeClassPath::new(vec![
+                Box::new(DirectoryClassPath::new(compiler_root)),
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+                Box::new(ContextsPackagePath),
+            ]);
+            let resolver = ClasspathSymbolResolver::new(
+                class_path,
+                definitions,
+                LoadingSession::with_packages(packages.snapshot()),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let expression_context = typer.expression_context_for(run_method).unwrap();
+
+            if warm_state == "object" {
+                let package = packages
+                    .symbol(&["dotty", "tools", "dotc", "core"])
+                    .unwrap();
+                let prefix = typer.package_type_prefix(package);
+                let name = Name::new(typer.store.names.intern("Contexts"), Namespace::Term);
+                let request = MemberRequest {
+                    prefix,
+                    name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                };
+                let object = typer
+                    .resolver
+                    .resolve_member(typer.store, &request)
+                    .unwrap()
+                    .expect("the TASTy classpath exposes Contexts as an Object");
+                assert_eq!(typer.store.symbols.get(object).kind, SymbolKind::Object);
+            } else if warm_state == "package" {
+                let package = typer
+                    .resolver
+                    .resolve_package(typer.store, &["dotty", "tools", "dotc", "core", "Contexts"])
+                    .unwrap()
+                    .expect("the package prefix exposes Contexts as a Package");
+                assert_eq!(typer.store.symbols.get(package).kind, SymbolKind::Package);
+            }
+
+            let result = typer.type_expression(rhs, expression_context);
+            assert!(
+                matches!(
+                    result,
+                    Err(TyperError::AmbiguousTypeName { name, .. })
+                        if typer.store().names.resolve(name.text()) == "Contexts"
+                ),
+                "warm state {warm_state}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_import_alias_keeps_selected_object_with_unrelated_package_evidence() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        for add_types_package in [false, true] {
+            let source_text = "package dotty.tools\npackage dotc\npackage core\nclass Use { def run(): Int = { import _root_.dotty.tools.dotc.core.Contexts as Types; import Types.*; 1 } }";
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (run_method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "run");
+            let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+            let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![
+                Box::new(DirectoryClassPath::new(compiler_root)),
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+            ];
+            if add_types_package {
+                entries.push(Box::new(TypesPackagePath));
+            }
+            let resolver = ClasspathSymbolResolver::new(
+                CompositeClassPath::new(entries),
+                definitions,
+                LoadingSession::with_packages(packages.snapshot()),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let expression_context = typer.expression_context_for(run_method).unwrap();
+            let result = typer.type_expression(rhs, expression_context);
+            assert!(
+                result.is_ok(),
+                "unrelated Types package evidence={add_types_package}: {result:?}"
+            );
+        }
     }
 
     #[test]

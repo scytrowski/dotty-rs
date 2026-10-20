@@ -1080,6 +1080,73 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
 }
 
 impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
+    fn package_object_collision(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: Name,
+    ) -> Result<bool, ResolutionError> {
+        self.transact(store, |resolver, store| {
+            if !store.symbols.contains(package)
+                || store.symbols.get(package).kind != SymbolKind::Package
+            {
+                return Err(ResolutionError::Malformed {
+                    reason: "package/Object collision probe requires a Package owner".to_owned(),
+                });
+            }
+            let package_path = package_path_of_symbol(store, package).ok_or_else(|| {
+                ResolutionError::Malformed {
+                    reason: "package prefix has an invalid owner chain".to_owned(),
+                }
+            })?;
+            let simple_name = store.names.resolve(name.text());
+            let internal = if package_path.is_empty() {
+                simple_name.to_owned()
+            } else {
+                format!("{}/{simple_name}", package_path.join("/"))
+            };
+            let binary_name = BinaryName::from_internal(internal);
+            if !binary_name.is_path_safe() {
+                return Ok(None);
+            }
+            let resource = resolver
+                .class_path
+                .as_ref()
+                .expect("resolver operation is exclusive")
+                .find_class(&binary_name)
+                .map_err(|error| ResolutionError::Malformed {
+                    reason: format!("cannot inspect external module {binary_name}: {error}"),
+                })?;
+            if !resource
+                .is_some_and(|resource| resource.format() == crate::class_path::ClassFormat::Tasty)
+            {
+                return Ok(None);
+            }
+            match resolver.ensure_module_identity(store, &binary_name) {
+                Ok(identity) => {
+                    resolver.validate_module_object(store, package, identity.object)?;
+                    Ok(Some(true))
+                }
+                Err(ClassLoadError::IdentityConflict { reason, .. })
+                    if reason
+                        == "the canonical package name is occupied by an incompatible symbol" =>
+                {
+                    Err(ResolutionError::Ambiguous { candidates: 2 })
+                }
+                Err(ClassLoadError::IdentityConflict { reason, .. })
+                    if reason
+                        == "the TASTy file does not prove a top-level object and module class" =>
+                {
+                    Ok(None)
+                }
+                Err(error) => Err(ResolutionError::Malformed {
+                    reason: format!("external module identity failed for {binary_name}: {error}"),
+                }),
+            }
+        })
+        .map(|collision| collision.unwrap_or(false))
+    }
+
     fn module_class_of_object(
         &self,
         store: &SemanticStore,

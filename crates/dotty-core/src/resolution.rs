@@ -126,6 +126,17 @@ impl std::error::Error for ResolutionError {}
 /// Supplies symbols an adapter did not enter itself. See the module docs for
 /// the contract.
 pub trait SymbolResolver {
+    /// Reports whether a package child and a classpath Object provide
+    /// competing evidence for the same package-qualified name.
+    fn package_object_collision(
+        &mut self,
+        _store: &mut SemanticStore,
+        _package: SymbolId,
+        _name: Name,
+    ) -> Result<bool, ResolutionError> {
+        Ok(false)
+    }
+
     /// Returns the canonical ModuleClass for an externally validated Object.
     ///
     /// Resolvers must return `Some` only when their authoritative identity
