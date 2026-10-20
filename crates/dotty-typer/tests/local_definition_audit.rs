@@ -7193,7 +7193,6 @@ fn pinned_scala39_local_definition_audit() {
     println!("AUDIT_REPORT_END");
 }
 
->
 fn frozen_import_1180_target_categories() -> BTreeMap<String, String> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let path = repo_root
