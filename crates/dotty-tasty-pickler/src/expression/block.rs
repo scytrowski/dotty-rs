@@ -1,6 +1,8 @@
 use super::*;
 use dotty_core::ast::Block;
-use dotty_tasty::tasty::{AstField, AstNode, BLOCK_TAG, VALDEF_TAG};
+use dotty_tasty::tasty::{
+    AstField, AstNode, BLOCK_TAG, MUTABLE_TAG, SimpleTerm, TermValue, VALDEF_TAG,
+};
 
 fn lower_local_value_inner(
     store: &SemanticStore,
@@ -60,15 +62,24 @@ fn lower_local_value_inner(
     )?;
     let name = context.intern_name(*value.name.as_name())?;
     let type_syntax = context.primitive_type_syntax(tree.ty)?;
+    let mut fields = vec![
+        AstField::Nat(name),
+        AstField::Tree(type_syntax),
+        AstField::Tree(rhs),
+    ];
+    if store.symbols.get(symbol).flags == dotty_core::SymbolFlags::MUTABLE {
+        let mutable = SimpleTerm::new(MUTABLE_TAG, TermValue::Tag).map_err(|cause| {
+            PickleError::Encoding {
+                cause: Box::new(cause.into()),
+            }
+        })?;
+        fields.push(AstField::Tree(context.wire_node(AstNode::Leaf(mutable))?));
+    }
     context.bind_declaration(
         symbol,
         AstNode::Length {
             tag: VALDEF_TAG,
-            fields: vec![
-                AstField::Nat(name),
-                AstField::Tree(type_syntax),
-                AstField::Tree(rhs),
-            ],
+            fields,
         },
     )?;
     context
