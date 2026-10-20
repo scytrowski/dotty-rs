@@ -7262,13 +7262,20 @@ fn pinned_scala39_import_prefix_typing_probe() {
     );
     let mut methods_by_file = BTreeMap::<String, BTreeSet<u32>>::new();
     for attempt in &baseline_rows {
-        methods_by_file
-            .entry(attempt.file.clone())
-            .or_default()
-            .insert(attempt.blocker_origin_tree);
+        let methods = methods_by_file.entry(attempt.file.clone()).or_default();
+        // Import observations are keyed by the method that owns the import,
+        // while resolver requests are attributed to the enclosing failed
+        // attempt. Reprofile both trees: collecting only blocker origins
+        // leaves inherited source-method observations unmatched.
+        methods.insert(attempt.method_tree);
+        methods.insert(attempt.blocker_origin_tree);
     }
     assert_eq!(
-        methods_by_file.values().map(BTreeSet::len).sum::<usize>(),
+        baseline_rows
+            .iter()
+            .map(|row| (row.file.as_str(), row.blocker_origin_tree))
+            .collect::<BTreeSet<_>>()
+            .len(),
         904
     );
     if let Some(selected_file) = selected_source_file.as_deref() {
