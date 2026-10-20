@@ -20,7 +20,7 @@ CURRENT_COLUMNS = [
     "current_import_selectors", "current_outcome", "current_method_blocker",
     "current_enclosing_attempt_blocker",
     "current_method_typed", "current_blocker_origin", "current_selected_identity",
-    "final_import_identity", "current_resolver_requests",
+    "final_import_identity",
 ]
 
 
@@ -195,12 +195,11 @@ def reconcile(profile, targets, classpath_evidence, current_rows, object_module_
             **baseline,
             "target_classification": target["classification"],
             "target_weighted_observations": target["weighted_observations"],
-            "target_unique_blocker_origins": target["unique_blocker_origins"],
-            "pinned_classpath_evidence": json.dumps(
-                evidence_by_key.get(baseline["target_key"], []),
-                sort_keys=True,
-                separators=(",", ":"),
+            "target_unique_blocker_origins": str(
+                len([origin for origin in target["unique_blocker_origins"].split(";") if origin])
             ),
+            "classpath_evidence_target_key": baseline["target_key"],
+            "classpath_evidence_rows": str(len(evidence_by_key.get(baseline["target_key"], []))),
             "current_qualifier_identity": qualifier_identity,
             "current_qualifier_kind": qualifier_type,
             "current_object_module_evidence_status": (
