@@ -94,13 +94,15 @@ planned class in plan order. Each parent must be one canonical, unqualified
 `TypeRef` to a class symbol. `java/lang/Object` is the required root; a
 planned subclass may have one planned parent whose own parent is Object. The
 bounded graph rejects cycles, self or multiple parents, missing plans,
-unsupported/final/non-public parents, parent self types, and parents without
-an accessible no-argument constructor. The proof retains child and parent
-`SymbolId`s alongside their checked JVM internal names, and can also be
-projected to internal-name-only edges for downstream class-file checks.
-Unit-aware class metadata carries the matching direct-parent proof. Whole-class
-emission uses that proof for both the class-file `super_class` and the
-constructor's single direct-parent `<init>()V` call. The supported graph is
+unsupported/final/non-public parents, and parent self types. It requires an
+accessible no-argument constructor unless a primary-constructor plan carries
+a validated same-session direct-super proof for the selected public parent
+primary constructor. The proof retains child and parent `SymbolId`s alongside
+their checked JVM internal names, and can also be projected to
+internal-name-only edges for downstream class-file checks. Unit-aware class
+metadata carries the matching direct-parent proof. Whole-class emission uses it for the class-file
+`super_class` and emits either `<init>()V` or the proved parameterized
+`<init>` descriptor. The supported graph is
 limited to the canonical Object root and one same-unit edge from a public
 ordinary class to a public, non-final ordinary parent whose own parent is
 Object. Deeper or external chains, unavailable constructors, and other
@@ -550,11 +552,22 @@ is represented by the supplied plan. A missing plan, a plan marked
 subset returns a typed error; the backend does not infer initialization
 safety from an empty method list.
 
+A parameterized direct-super call is supported only when the source frontend
+provides the exact original parent `Apply`, its same-session typed roots, the
+canonical parent class and primary-constructor symbols, and source-ordered
+argument bindings. The backend accepts one plain argument clause containing
+only Int/Boolean literals or exact primary-constructor parameter identifiers
+whose types map to planned JVM classes or primitives. It emits `aload_0`, the
+arguments in source order, and `invokespecial Parent.<init>(descriptor)V`
+before child field initializers. Other expressions, side effects, extra clauses,
+additional constructors, and unplanned reference classes fail before bytes
+are returned.
+
 The emitted class has no interfaces, class initializer, Scala/TASTy metadata,
-or unplanned methods. Parent constructor arguments, `super.method`, deeper or
-external parent chains, additional constructors, nested types, and other class
-initialization semantics remain unsupported. The API returns only after
-encoding succeeds, so a failure does not expose a partial artifact.
+or unplanned methods. `super.method`, deeper or external parent chains, nested
+types, and other class initialization semantics remain unsupported. The API
+returns only after encoding succeeds, so a failure does not expose a partial
+artifact.
 
 The lower-level `dotty-classfile::CodeBuilder::pop` operation discards one
 category-one JVM stack value. Linear analysis accepts represented

@@ -3,9 +3,9 @@
 This is an audit of the source-to-JVM pipeline and a contract for the next
 bounded implementation steps. Source compatibility targets Scala 3.9.0
 revision `777528f19a58e794c9954a42f433373472ec57f8`; verifier rules refer to
-Java SE 21. Issue #1369 adds source typing for a narrow parent application;
-JVM constructor lowering and all explicit `super` method calls remain
-unimplemented.
+Java SE 21. Issues #1369 and #1370 establish source typing and verifier
+contracts for a narrow parent application. Issue #1371 adds bounded JVM
+constructor lowering. Explicit `super` method calls remain unimplemented.
 
 ## Reproduce the current behavior
 
@@ -51,13 +51,18 @@ uncurried, non-generic clause; a private or unsupported signature fails during
 typing. A parent type edge and a constructor invocation are different facts;
 do not put argument trees into `ClassInfo.parents`.
 
-The current codegen accepts only the accessible public no-argument direct
-parent constructor. The parameterized source above reaches codegen but fails
-with `JvmCodegenError::InvalidJvmSuperclass` and
-`JvmSuperclassIssue::ParentConstructorUnavailable`; no class files are
-published. Source argument typing now succeeds before this backend failure.
-The typed mapping is a frontend-owned proof source; `dotty-jvm` must consume
-the exact same-session source and typed IDs rather than retyping expressions.
+For the supported source subset, the frontend adapter builds an explicit
+`JvmDirectSuperConstructorPlan` from the original `Template.parents`
+application and exact same-session `SourceTypedIndex` roots. The plan preserves
+the canonical parent class and primary-constructor symbols and argument order.
+`dotty-jvm` validates that proof against the child template, typed application,
+class hierarchy, and constructor metadata. It lowers only Int/Boolean literals
+and exact child primary-constructor parameter identifiers of primitive or
+planned reference types. Emission places `aload_0`, source-ordered arguments,
+and the parent `<init>` call before child field initializers. Unsupported
+argument forms and unplanned reference types return typed errors without
+publishing class files. The adapter must not retype expressions or infer
+constructor targets from names or `ClassInfo.parents`.
 
 For all characterized source forms below, parsing accepts a method selection,
 but source typing fails first with
@@ -209,15 +214,14 @@ baseline for all follow-up work.
 
 | Source shape | Current observed result | Required boundary / next owner |
 | --- | --- | --- |
-| `class Derived(start: Int) extends Base(start)` | Typer retains the parent `Apply` and argument mappings, selects canonical `Base.<init>`, and binds `start` to the child constructor's derived parameter symbol; `ClassInfo.parents` remains `TypeRef(Base)`. Codegen still rejects unavailable `()V` and publishes no classes | Frontend proof/type mapping is implemented in [#1369](https://github.com/scytrowski/dotty-rs/issues/1369); validate pre-super initialization state and descriptor in class files — [#1370](https://github.com/scytrowski/dotty-rs/issues/1370); lower the proven bounded source forms — [#1371](https://github.com/scytrowski/dotty-rs/issues/1371) |
+| `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then source-ordered arguments, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
 | `super.value()` targeting direct `Base.value` | Parser preserves `Super` selection; typer returns generic `UnsupportedExpression`; no class file is published | Resolve the canonical direct-parent method symbol — [#1372](https://github.com/scytrowski/dotty-rs/issues/1372); separately validate initialized-receiver `invokespecial` — [#1373](https://github.com/scytrowski/dotty-rs/issues/1373); lower only a checked target as special dispatch — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
 | Parameterized parent plus explicit direct-super calls, run on the JVM | Not implemented; no output path exists for the required combination | Source-to-classfile-to-JDK integration and runtime behavior — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `extends Base` with accessible `Base.<init>()V` | Supported and verified by existing source-backed regression | Preserve direct-parent ownership and post-super analysis in `dotty-jvm` and `dotty-classfile` |
 | `base.value()` or inherited `derived.value()` | Supported virtual calls use the selected declaration's owner and `invokevirtual` | Preserve current dynamic-dispatch and `Methodref` behavior |
 | Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Currently rejected in typer with generic `UnsupportedExpression`; no output | Replace with explicit typed errors while keeping these shapes rejected in the initial slice — #1372 and #1374 |
 
-The seven follow-up issues are deliberately separate: source typing proof,
-verifier support, and lowering can be reviewed and tested at their owning
-boundaries. End-to-end coverage belongs after those contracts exist. Do not
-add permanent ignored or expected-failure feature tests as a substitute for
-implemented behavior.
+Source typing proof, verifier support, and bounded lowering remain separate
+contracts at their owning boundaries. The integration fixture exercises the
+implemented parameterized-constructor slice end to end; unsupported forms stay
+explicitly rejected until a scoped follow-up adds them.
