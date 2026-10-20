@@ -720,11 +720,22 @@ impl SourceTyper<'_> {
             let Some(package) = entry.owner else {
                 continue;
             };
-            if entry.kind != SymbolKind::Object
-                || !matches!(
+            let external_candidate = match entry.kind {
+                SymbolKind::Object => matches!(
                     entry.origin,
                     dotty_core::SymbolOrigin::Classfile(_) | dotty_core::SymbolOrigin::Tasty(_)
-                )
+                ),
+                // Classpath packages are entered by the resolver's synthetic
+                // package registry; source packages retain Source origin.
+                SymbolKind::Package => matches!(
+                    entry.origin,
+                    dotty_core::SymbolOrigin::Synthetic
+                        | dotty_core::SymbolOrigin::Classfile(_)
+                        | dotty_core::SymbolOrigin::Tasty(_)
+                ),
+                _ => false,
+            };
+            if !external_candidate
                 || !self.store.symbols.contains(package)
                 || self.store.symbols.get(package).kind != SymbolKind::Package
             {
@@ -1782,3 +1793,20 @@ impl SourceTyper<'_> {
                 && self.store.scopes.get(info.declarations).owner == Some(module_class)
             {
                 insert_scope(&mut scopes, info.declarations);
+            }
+            return scopes;
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = self.index.definition_of(symbol)
+        else {
+            return scopes;
+        };
+        if source == self.source
+            && let Some(module_class) = self.index.derived_symbol_at(owner, source, tree)
+            && self.store.symbols.get(module_class).kind == SymbolKind::ModuleClass
+            && let Some(scope) = self.index.scope_of(module_class)
+        {
+            insert_scope(&mut scopes, scope);
+        }
+        scopes
+    }
+}

@@ -9521,7 +9521,7 @@ mod tests {
             ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
         };
 
-        for warm_object in [false, true] {
+        for warm_state in ["cold", "object", "package"] {
             let source_text = "package dotty.tools\npackage dotc\npackage core\nclass Use { def run(): Int = { import Contexts.*; 1 } }";
             let (parsed, mut store, packages, definitions, index, source) =
                 parse_and_name(source_text);
@@ -9553,7 +9553,7 @@ mod tests {
             .with_resolver(Box::new(resolver));
             let expression_context = typer.expression_context_for(run_method).unwrap();
 
-            if warm_object {
+            if warm_state == "object" {
                 let package = packages
                     .symbol(&["dotty", "tools", "dotc", "core"])
                     .unwrap();
@@ -9571,18 +9571,23 @@ mod tests {
                     .unwrap()
                     .expect("the TASTy classpath exposes Contexts as an Object");
                 assert_eq!(typer.store.symbols.get(object).kind, SymbolKind::Object);
+            } else if warm_state == "package" {
+                let package = typer
+                    .resolver
+                    .resolve_package(typer.store, &["dotty", "tools", "dotc", "core", "Contexts"])
+                    .unwrap()
+                    .expect("the package prefix exposes Contexts as a Package");
+                assert_eq!(typer.store.symbols.get(package).kind, SymbolKind::Package);
             }
 
-            let error = typer
-                .type_expression(rhs, expression_context)
-                .expect_err("the local import qualifier is ambiguous");
+            let result = typer.type_expression(rhs, expression_context);
             assert!(
                 matches!(
-                    error,
-                    TyperError::AmbiguousTypeName { name, .. }
+                    result,
+                    Err(TyperError::AmbiguousTypeName { name, .. })
                         if typer.store().names.resolve(name.text()) == "Contexts"
                 ),
-                "{error:?}"
+                "warm state {warm_state}: {result:?}"
             );
         }
     }
