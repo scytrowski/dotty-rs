@@ -188,7 +188,8 @@ fn lower_expression_inner(
                 target: TermRefTarget::Symbol(target),
                 ..
             }) = store.types.try_get(function.ty)
-            && context.is_registered_int_arithmetic_target(*target)?
+            && (context.is_registered_int_arithmetic_target(*target)?
+                || context.is_registered_int_comparison_target(*target)?)
         {
             if application.args.len() != 1 || application.kind != ApplyKind::Regular {
                 return Err(PickleError::PrimitiveOperatorArity {
