@@ -437,7 +437,7 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             --targets "$repo_root/docs/typer-classpath-import-prefix-profile-1180-3.9.0-import-prefix-targets.tsv" \
             --classpath-evidence "$repo_root/docs/typer-classpath-import-prefix-profile-1180-3.9.0-import-prefix-classpath-evidence.tsv" \
             --current "$tmp_dir/$run.1180-reconciliation" \
-            --object-modules "$repo_root/docs/typer-classpath-corpus-audit-3.9.0-object-module-reprofile.tsv" \
+            --object-modules "$repo_root/docs/typer-classpath-corpus-audit-post-compiler-modules-3.9.0-object-module-reprofile.tsv" \
             --rows "$tmp_dir/$run.1180-current-reconciliation.tsv" \
             --summary "$tmp_dir/$run.1180-current-summary.txt"
         printf '%s ' "$run"
