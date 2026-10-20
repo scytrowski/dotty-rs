@@ -7,7 +7,7 @@ use dotty_core::ast::{TreeKind, Typed, TypedAst};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::SymbolKind;
+use dotty_core::symbols::{SymbolInfo, SymbolKind};
 use dotty_core::types::{Constant, TermRefTarget, Type};
 
 use crate::{
@@ -156,6 +156,154 @@ impl JvmConstructorFieldInitializer {
     pub fn instructions(&self) -> &[JvmConstructorInitializerInstruction] {
         &self.instructions
     }
+}
+
+pub(crate) fn append_direct_super_constructor_call(
+    unit: &JvmCompilationUnit<'_>,
+    class: SymbolId,
+    definitions: &Definitions,
+    code: &mut CodeBuilder,
+) -> Result<bool, JvmCodegenError> {
+    unit.validate()?;
+    let class_plan = unit
+        .classes
+        .iter()
+        .find(|plan| plan.class == class)
+        .ok_or(JvmCodegenError::MissingClassPlan { class })?;
+    let proof = match &class_plan.initialization {
+        JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
+            constructor.direct_super_constructor()
+        }
+        JvmClassInitializationPlan::ImplicitNoArg | JvmClassInitializationPlan::Unsupported => None,
+    };
+    let Some(proof) = proof else {
+        return Ok(false);
+    };
+    let all_metadata = unit.metadata(definitions)?;
+    let child_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == class)
+        .ok_or(JvmCodegenError::MissingClassPlan { class })?;
+    let child_constructor = child_metadata
+        .constructor()
+        .ok_or(JvmCodegenError::ConstructorInitializerContextUnavailable { class })?;
+    let parent_metadata = all_metadata
+        .iter()
+        .find(|metadata| metadata.identity().symbol() == proof.parent_class())
+        .ok_or(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(proof.parent_class()),
+            issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
+        })?;
+    let parent_constructor = parent_metadata
+        .constructor()
+        .filter(|constructor| constructor.symbol() == proof.parent_constructor())
+        .ok_or(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(proof.parent_class()),
+            issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
+        })?;
+    if !parent_constructor.access_flags().is_public()
+        || parent_constructor.parameters().len() != proof.arguments().len()
+    {
+        return Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(proof.parent_class()),
+            issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
+        });
+    }
+    let class_identities = all_metadata
+        .iter()
+        .map(|metadata| metadata.identity().clone())
+        .collect::<Vec<_>>();
+    let mut context = ConstructorInitializerContext {
+        store: unit.store,
+        typed_ast: unit.typed_ast,
+        definitions,
+        class_identities: &class_identities,
+        class,
+        constructor: child_constructor,
+        fields: child_metadata.fields(),
+        initialized_fields: HashSet::new(),
+        current_field: class,
+        node_visits: 0,
+    };
+    let mut encoded_arguments = Vec::with_capacity(proof.arguments().len());
+    for (binding, formal) in proof
+        .arguments()
+        .iter()
+        .zip(parent_constructor.parameters())
+    {
+        let argument = unit.typed_ast.try_get(binding.typed).ok_or(
+            JvmCodegenError::UnsupportedJvmConstructorArgument {
+                tree: proof.typed_application(),
+                argument: binding.typed,
+            },
+        )?;
+        if !matches!(argument.kind, TreeKind::Literal(_) | TreeKind::Ident(_)) {
+            return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
+                tree: proof.typed_application(),
+                argument: binding.typed,
+            });
+        }
+        context.node_visits = 0;
+        let mut instructions = Vec::new();
+        let found = context.lower_expression(binding.typed, &mut instructions, 0)?;
+        if found != formal.ty() {
+            return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                tree: proof.typed_application(),
+                argument: binding.typed,
+                expected: formal.ty(),
+                found: Some(found),
+            });
+        }
+        match instructions.as_slice() {
+            [JvmConstructorInitializerInstruction::Constant(value)] => {
+                encoded_arguments.push((*value, None, found));
+            }
+            [
+                JvmConstructorInitializerInstruction::LoadParameter {
+                    slot, value_type, ..
+                },
+            ] => {
+                if *value_type != found {
+                    return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                        tree: proof.typed_application(),
+                        argument: binding.typed,
+                        expected: formal.ty(),
+                        found: Some(*value_type),
+                    });
+                }
+                encoded_arguments.push((0, Some(*slot), found));
+            }
+            _ => {
+                return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
+                    tree: proof.typed_application(),
+                    argument: binding.typed,
+                });
+            }
+        }
+    }
+
+    code.aload(0)
+        .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
+    for (value, slot, value_type) in encoded_arguments {
+        let result = match slot {
+            Some(slot) => match value_type {
+                JvmType::Int | JvmType::Boolean => code.iload(usize::from(slot)),
+                JvmType::Reference(_) => code.aload(usize::from(slot)),
+            },
+            None => code.iconst(value),
+        };
+        result.map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
+    }
+    code.invokespecial(
+        parent_constructor.owner_internal_name().to_owned(),
+        "<init>".to_owned(),
+        parent_constructor.descriptor().as_str().to_owned(),
+    )
+    .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
+    Ok(true)
 }
 
 struct ConstructorInitializerContext<'a> {
@@ -554,6 +702,42 @@ impl ConstructorInitializerContext<'_> {
         tree: TreeId<Typed>,
         ty: dotty_core::TypeId,
     ) -> Result<JvmType, JvmCodegenError> {
+        if let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(ty)
+            && self.store.symbols.contains(*symbol)
+        {
+            let parameter = self.store.symbols.get(*symbol);
+            let parameter_owner = parameter.owner.and_then(|owner| {
+                self.store
+                    .symbols
+                    .contains(owner)
+                    .then(|| self.store.symbols.get(owner))
+            });
+            if parameter.kind == SymbolKind::Parameter
+                && matches!(parameter_owner, Some(owner)
+                    if owner.kind == SymbolKind::Constructor
+                        && parameter.owner == Some(self.constructor.symbol()))
+            {
+                let parameter_type = match self.store.symbols.info(*symbol) {
+                    SymbolInfo::Complete(ty) => *ty,
+                    SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+                        return Err(JvmCodegenError::MissingSemanticInfo { symbol: *symbol });
+                    }
+                    SymbolInfo::Error => {
+                        return Err(JvmCodegenError::ErrorSemanticInfo { symbol: *symbol });
+                    }
+                };
+                return crate::identity::project_field_value_type(
+                    self.store,
+                    self.definitions,
+                    self.current_field,
+                    parameter_type,
+                    Some(self.class_identities),
+                );
+            }
+        }
         match crate::identity::typed_expression_primitive_type(
             self.store,
             self.definitions,

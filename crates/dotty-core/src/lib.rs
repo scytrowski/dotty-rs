@@ -20,6 +20,7 @@ pub mod packages;
 pub mod resolution;
 pub mod source;
 pub mod source_semantics;
+pub mod source_typed_index;
 pub mod store;
 pub mod symbols;
 pub mod token;
@@ -46,6 +47,7 @@ pub mod core {
     pub use super::source;
     pub use super::source::*;
     pub use super::source_semantics::*;
+    pub use super::source_typed_index::*;
     pub use super::store;
     pub use super::store::*;
     pub use super::symbols;
@@ -81,6 +83,7 @@ pub use source_semantics::{
     SourceContext, SourceContextId, SourceDefinition, SourceExportSite, SourceSemanticIndex,
     SourceSemanticIndexError,
 };
+pub use source_typed_index::{ConflictingTypedTree, SourceTypedIndex};
 pub use store::{SemanticStore, StoreCheckpoint};
 pub use symbols::{
     OriginTable, Scope, ScopeArena, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks,
