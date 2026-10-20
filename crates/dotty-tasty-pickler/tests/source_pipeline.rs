@@ -3525,6 +3525,82 @@ fn typed_while_loops_serialize_condition_and_unit_body_in_oracle_order() {
 }
 
 #[test]
+fn typed_while_accepts_boolean_formals_and_constant_unit_bodies() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(LOOP, "Loop.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+
+    let run = addresses
+        .get(output.declarations()[3].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(run_block) = run.rhs.unwrap() else {
+        panic!("run body must retain its local block")
+    };
+    let StructuredNode::Block(run_block) = run_block.decode_structured().unwrap() else {
+        panic!("run body must decode as BLOCK")
+    };
+    let RawTree::LengthNode(run_while) = &run_block.stats[1] else {
+        panic!("run block must retain its while statement")
+    };
+    let run_while = run_while.decode_while().unwrap();
+    let RawTree::Leaf(flag) = run_while.condition else {
+        panic!("Boolean formal condition must be a direct parameter reference")
+    };
+    assert_eq!(flag.tag, TERMREFDIRECT_TAG);
+
+    let empty = addresses
+        .get(output.declarations()[4].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(empty_block) = empty.rhs.unwrap() else {
+        panic!("empty Unit loop method must retain its result block")
+    };
+    let StructuredNode::Block(empty_block) = empty_block.decode_structured().unwrap() else {
+        panic!("empty Unit loop method must decode as BLOCK")
+    };
+    let RawTree::LengthNode(empty_while) = &empty_block.stats[0] else {
+        panic!("empty Unit loop body must remain a WHILE node")
+    };
+    let empty_while = empty_while.decode_while().unwrap();
+    let RawTree::Leaf(unit) = empty_while.body else {
+        panic!("empty Unit loop body must retain its Unit literal")
+    };
+    assert_eq!(unit.tag, UNITCONST_TAG);
+
+    let assigned = addresses
+        .get(output.declarations()[5].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(assigned_block) = assigned.rhs.unwrap() else {
+        panic!("assignment loop method must retain its result block")
+    };
+    let StructuredNode::Block(assigned_block) = assigned_block.decode_structured().unwrap() else {
+        panic!("assignment loop method must decode as BLOCK")
+    };
+    let RawTree::LengthNode(assigned_while) = &assigned_block.stats[1] else {
+        panic!("assignment loop body must remain a WHILE node")
+    };
+    let assigned_while = assigned_while.decode_while().unwrap();
+    let RawTree::LengthNode(body) = assigned_while.body else {
+        panic!("assignment followed by Unit must retain its body BLOCK")
+    };
+    let StructuredNode::Block(body) = body.decode_structured().unwrap() else {
+        panic!("assignment followed by Unit must decode as BLOCK")
+    };
+    assert_eq!(body.stats.len(), 1);
+    let RawTree::Leaf(unit) = body.expression else {
+        panic!("Unit block result must remain a Unit literal")
+    };
+    assert_eq!(unit.tag, UNITCONST_TAG);
+}
+
+#[test]
 fn while_validation_rejects_forged_types_swapped_body_bindings_and_depth_exhaustion() {
     let non_boolean = source_outputs_named_with_tree_edits(
         LOOP,

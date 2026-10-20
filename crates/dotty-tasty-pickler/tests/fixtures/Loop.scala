@@ -7,3 +7,16 @@ class Loop:
       total = total + i
       i = i + 1
     total
+  def run(flag: Boolean): Int =
+    var count: Int = 0
+    while flag do count = count + 1
+    count
+  def emptyBody(): Int =
+    while false do ()
+    0
+  def assignmentThenUnit(): Int =
+    var count: Int = 0
+    while false do
+      count = count + 1
+      ()
+    count

@@ -123,11 +123,27 @@ fn lower_expression_inner(
             .ok_or(PickleError::InvalidTypedTree {
                 tree: while_expr.cond,
             })?;
+        let boolean_parameter = matches!(
+            store.types.try_get(condition.ty),
+            Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(symbol),
+            }) if *prefix == context.definitions().no_prefix
+                && parameters.contains(symbol)
+                && store.symbols.contains(*symbol)
+                && {
+                    let parameter = store.symbols.get(*symbol);
+                    parameter.kind == dotty_core::SymbolKind::Parameter
+                        && parameter.owner == Some(method)
+                        && parameter.info == SymbolInfo::Complete(context.definitions().boolean)
+                }
+        );
         if condition.ty != context.definitions().boolean
             && !matches!(
                 store.types.try_get(condition.ty),
                 Some(Type::Constant(Constant::Boolean(_)))
             )
+            && !boolean_parameter
         {
             return Err(PickleError::BodyType {
                 tree: while_expr.cond,
@@ -139,7 +155,12 @@ fn lower_expression_inner(
             .ok_or(PickleError::InvalidTypedTree {
                 tree: while_expr.body,
             })?;
-        if body.ty != context.definitions().unit {
+        if body.ty != context.definitions().unit
+            && !matches!(
+                store.types.try_get(body.ty),
+                Some(Type::Constant(Constant::Unit))
+            )
+        {
             return Err(PickleError::BodyType {
                 tree: while_expr.body,
                 ty: body.ty,

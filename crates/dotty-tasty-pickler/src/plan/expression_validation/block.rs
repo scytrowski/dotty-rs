@@ -175,7 +175,9 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
-        if typed.ty != self.plan.definitions.unit {
+        if typed.ty != self.plan.definitions.unit
+            && !matches!(self.ty(typed.ty)?, Type::Constant(Constant::Unit))
+        {
             return Err(PickleError::BodyType {
                 tree: typed_id,
                 ty: typed.ty,
@@ -237,7 +239,8 @@ impl Validator<'_, '_> {
         };
         let source_block = source_block.clone();
         let typed_block = typed_block.clone();
-        if typed.ty != self.plan.definitions.unit
+        if (typed.ty != self.plan.definitions.unit
+            && !matches!(self.ty(typed.ty)?, Type::Constant(Constant::Unit)))
             || source_block.stats.len() != typed_block.stats.len()
         {
             return Err(PickleError::BodyType {
