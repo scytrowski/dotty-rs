@@ -356,6 +356,7 @@ impl SourceTyper<'_> {
                         Ok(candidates) => {
                             self.arbitrate_expression_package_objects(
                                 &candidates,
+                                expression_context.lexical,
                                 ident.name,
                                 tree_index,
                                 position,
@@ -708,10 +709,13 @@ impl SourceTyper<'_> {
     fn arbitrate_expression_package_objects(
         &mut self,
         candidates: &[SymbolId],
+        lexical: SourceContextId,
         name: dotty_core::Name,
         tree_index: u32,
         position: Option<SourceSpan>,
     ) -> Result<(), TyperError> {
+        let lexical_packages =
+            self.lexical_package_candidates(lexical, LexicalPackageSearch::Relative, tree_index)?;
         for &object in candidates {
             if !self.store.symbols.contains(object) {
                 continue;
@@ -720,6 +724,18 @@ impl SourceTyper<'_> {
             let Some(package) = entry.owner else {
                 continue;
             };
+            // Only arbitrate a candidate discovered under its own spelling
+            // in the corresponding lexical package scope. Expression lookup
+            // can also return explicit import aliases; combining their target
+            // owner with the alias spelling would inspect an unrelated path.
+            if self.store.names.resolve(entry.name.text()) != self.store.names.resolve(name.text())
+                || !lexical_packages.iter().any(|candidate| {
+                    candidate.package == package
+                        && self.scoped_symbols(candidate.scope, name).contains(&object)
+                })
+            {
+                continue;
+            }
             let external_candidate = match entry.kind {
                 SymbolKind::Object => matches!(
                     entry.origin,

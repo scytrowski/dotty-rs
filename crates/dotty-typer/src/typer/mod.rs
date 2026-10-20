@@ -743,6 +743,9 @@ mod tests {
     #[derive(Clone, Copy)]
     struct ContextsPackagePath;
 
+    #[derive(Clone, Copy)]
+    struct TypesPackagePath;
+
     struct ProfiledCompilerResolver {
         inner: dotty_classloader::classloader::ClasspathSymbolResolver<
             dotty_classloader::classloader::CompositeClassPath,
@@ -873,6 +876,23 @@ mod tests {
 
         fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
             Ok(["dotty", "tools", "dotc", "core", "Contexts"].starts_with(package))
+        }
+    }
+
+    impl ClassPathEntry for TypesPackagePath {
+        fn find_class(
+            &self,
+            _name: &dotty_classloader::classloader::BinaryName,
+        ) -> Result<Option<ClassResource>, ClassPathError> {
+            Ok(None)
+        }
+
+        fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(package == ["dotty", "tools", "dotc", "core", "Types"])
+        }
+
+        fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+            Ok(["dotty", "tools", "dotc", "core", "Types"].starts_with(package))
         }
     }
 
@@ -9588,6 +9608,53 @@ mod tests {
                         if typer.store().names.resolve(name.text()) == "Contexts"
                 ),
                 "warm state {warm_state}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_import_alias_keeps_selected_object_with_unrelated_package_evidence() {
+        use dotty_classloader::classloader::{
+            ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath, LoadingSession,
+        };
+
+        for add_types_package in [false, true] {
+            let source_text = "package dotty.tools\npackage dotc\npackage core\nclass Use { def run(): Int = { import _root_.dotty.tools.dotc.core.Contexts as Types; import Types.*; 1 } }";
+            let (parsed, mut store, packages, definitions, index, source) =
+                parse_and_name(source_text);
+            let (run_method, rhs) =
+                method_definition_and_rhs(&parsed, &store, &index, source, "run");
+            let compiler_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-compiler");
+            let library_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../dotty-tasty/tests/fixtures/scala3-library");
+            let mut entries: Vec<Box<dyn ClassPathEntry>> = vec![
+                Box::new(DirectoryClassPath::new(compiler_root)),
+                Box::new(DirectoryClassPath::new(library_root)),
+                Box::new(JavaObjectStubPath),
+            ];
+            if add_types_package {
+                entries.push(Box::new(TypesPackagePath));
+            }
+            let resolver = ClasspathSymbolResolver::new(
+                CompositeClassPath::new(entries),
+                definitions,
+                LoadingSession::with_packages(packages.snapshot()),
+            );
+            let mut typer = SourceTyper::new(
+                &parsed.ast,
+                source,
+                &index,
+                &mut store,
+                definitions,
+                &packages,
+            )
+            .with_resolver(Box::new(resolver));
+            let expression_context = typer.expression_context_for(run_method).unwrap();
+            let result = typer.type_expression(rhs, expression_context);
+            assert!(
+                result.is_ok(),
+                "unrelated Types package evidence={add_types_package}: {result:?}"
             );
         }
     }
