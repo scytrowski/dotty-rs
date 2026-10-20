@@ -6466,8 +6466,8 @@ fn pinned_scala39_local_definition_audit() {
             .source_function_outcomes
             .get("type::Function::SymbolResolution")
             .map(|bucket| bucket.count),
-        Some(6),
-        "#1180 moves ProtoTypes.isPoly from ImportQualifierNotFound to SymbolResolution"
+        Some(8),
+        "the frozen function-type cohort should account for all eight SymbolResolution blockers"
     );
     assert_eq!(audit.source_function_method_outcomes.len(), 25);
     assert_eq!(IMPURE_FUNCTION_BASELINE.len(), 13);
