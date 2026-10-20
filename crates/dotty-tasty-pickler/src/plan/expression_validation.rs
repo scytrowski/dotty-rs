@@ -191,7 +191,10 @@ impl Validator<'_, '_> {
         let source_operator = self.name_text(infix.op.text())?;
         let selected_name = self.symbol(*target)?.name;
         let selected_operator = self.name_text(selected_name.text())?;
-        if source_operator != operator_name || selected_operator != operator_name {
+        if source_operator != operator_name
+            || selected_operator != operator_name
+            || selection.name != selected_name
+        {
             return Err(PickleError::SourceShape {
                 tree: source_id,
                 expected: SourceRole::Body,
