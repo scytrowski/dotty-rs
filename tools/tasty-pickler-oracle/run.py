@@ -246,6 +246,23 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Arithmetic = -2147483648, 2147483647, -2147483648, -2, -2147483648, -1, 0, 14, 13, 13, 9", 14,
             ),
+            "example/Comparisons.tasty": (
+                "example.Comparisons", r"public boolean positive\(int\)", "ComparisonsRuntime.java",
+                """public final class ComparisonsRuntime {
+  public static void main(String[] args) {
+    example.Comparisons c = new example.Comparisons();
+    if (c.positive(Integer.MIN_VALUE) || c.positive(-1) || c.positive(0) ||
+        !c.positive(1) || !c.positive(Integer.MAX_VALUE) ||
+        !c.before(Integer.MIN_VALUE, -1) || c.before(-1, Integer.MIN_VALUE) ||
+        !c.atMost(-1, -1) || c.atMost(0, -1) ||
+        !c.atLeast(Integer.MAX_VALUE, Integer.MAX_VALUE) || c.atLeast(0, 1) ||
+        !c.nested(1, 2) || !c.nested(0, 0) || c.choose(-1) != 0 || c.choose(1) != 1)
+      throw new AssertionError("unexpected Comparisons results");
+    System.out.println("Comparisons = signed Int boundaries and Boolean conditions");
+  }
+}
+""", "Comparisons = signed Int boundaries and Boolean conditions", 1,
+            ),
             "example/Answer.tasty": (
                 "example.Answer", r"public int value\(\)", "AnswerRuntime.java",
                 """public final class AnswerRuntime {
@@ -515,6 +532,14 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Arithmetic class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Comparisons.tasty":
+                signatures = (
+                    r"public boolean positive\(int\)", r"public boolean before\(int, int\)",
+                    r"public boolean atMost\(int, int\)", r"public boolean atLeast\(int, int\)",
+                    r"public boolean nested\(int, int\)", r"public int choose\(int\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Comparisons class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":
