@@ -331,7 +331,7 @@ pub(super) fn unit_hierarchy(
             });
         }
         let parent_plan = plans[&parent];
-        validate_accessible_no_arg_constructor(unit, plan.class, parent_plan, parent_info)?;
+        validate_accessible_parent_constructor(unit, plan.class, plan, parent_plan, parent_info)?;
         if class_identity(unit.store, parent).is_err() {
             return Err(JvmCodegenError::InvalidJvmSuperclass {
                 class: plan.class,
@@ -383,18 +383,19 @@ pub(super) fn canonical_class_parent_prefix(
         && store.symbols.get(*package).kind == SymbolKind::Package
 }
 
-fn validate_accessible_no_arg_constructor(
+fn validate_accessible_parent_constructor(
     unit: &crate::JvmCompilationUnit<'_>,
     child: dotty_core::SymbolId,
-    plan: &crate::JvmClassPlan,
+    child_plan: &crate::JvmClassPlan,
+    parent_plan: &crate::JvmClassPlan,
     info: &dotty_core::types::ClassInfo,
 ) -> Result<(), JvmCodegenError> {
-    let valid_primary = match &plan.initialization {
-        crate::JvmClassInitializationPlan::ImplicitNoArg => true,
+    let direct_super = match &child_plan.initialization {
         crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
-            constructor.parameters().is_empty() && constructor.visibility() == Visibility::Public
+            constructor.direct_super_constructor()
         }
-        crate::JvmClassInitializationPlan::Unsupported => false,
+        crate::JvmClassInitializationPlan::ImplicitNoArg
+        | crate::JvmClassInitializationPlan::Unsupported => None,
     };
     let constructors = unit
         .store
@@ -406,9 +407,9 @@ fn validate_accessible_no_arg_constructor(
                 && unit.store.symbols.get(*symbol).kind == SymbolKind::Constructor
         })
         .collect::<Vec<_>>();
-    let valid_declared_constructor = |constructor: dotty_core::SymbolId| {
+    let valid_declared_no_arg_constructor = |constructor: dotty_core::SymbolId| {
         let symbol = unit.store.symbols.get(constructor);
-        if symbol.owner != Some(plan.class)
+        if symbol.owner != Some(parent_plan.class)
             || symbol.name.namespace() != dotty_core::Namespace::Term
             || unit.store.names.try_resolve(symbol.name.text()) != Some("<init>")
             || symbol.visibility != Visibility::Public
@@ -416,28 +417,53 @@ fn validate_accessible_no_arg_constructor(
         {
             false
         } else {
-            crate::emission::validate_primary_constructor(unit.store, plan.class, constructor)
-                .is_ok()
+            crate::emission::validate_primary_constructor(
+                unit.store,
+                parent_plan.class,
+                constructor,
+            )
+            .is_ok()
         }
     };
-    let declarations_valid = match (&plan.initialization, constructors.as_slice()) {
-        (crate::JvmClassInitializationPlan::ImplicitNoArg, []) => true,
-        (crate::JvmClassInitializationPlan::ImplicitNoArg, [constructor]) => {
-            valid_declared_constructor(*constructor)
-        }
-        (crate::JvmClassInitializationPlan::PrimaryConstructor(primary), [constructor])
-            if *constructor == primary.symbol() =>
+    let declarations_valid = match (
+        direct_super,
+        &parent_plan.initialization,
+        constructors.as_slice(),
+    ) {
+        (
+            Some(proof),
+            crate::JvmClassInitializationPlan::PrimaryConstructor(parent_primary),
+            [constructor],
+        ) if proof.parent_class() == parent_plan.class
+            && proof.parent_constructor() == parent_primary.symbol()
+            && *constructor == parent_primary.symbol()
+            && parent_primary.visibility() == Visibility::Public =>
         {
-            valid_declared_constructor(*constructor)
+            let symbol = unit.store.symbols.get(*constructor);
+            symbol.owner == Some(parent_plan.class)
+                && symbol.kind == SymbolKind::Constructor
+                && symbol.name.namespace() == dotty_core::Namespace::Term
+                && unit.store.names.try_resolve(symbol.name.text()) == Some("<init>")
+                && symbol.visibility == Visibility::Public
+                && symbol.flags.is_empty()
+        }
+        (None, crate::JvmClassInitializationPlan::ImplicitNoArg, []) => true,
+        (None, crate::JvmClassInitializationPlan::ImplicitNoArg, [constructor]) => {
+            valid_declared_no_arg_constructor(*constructor)
+        }
+        (None, crate::JvmClassInitializationPlan::PrimaryConstructor(primary), [constructor])
+            if *constructor == primary.symbol() && primary.parameters().is_empty() =>
+        {
+            valid_declared_no_arg_constructor(*constructor)
         }
         _ => false,
     };
-    if valid_primary && declarations_valid {
+    if declarations_valid {
         Ok(())
     } else {
         Err(JvmCodegenError::InvalidJvmSuperclass {
             class: child,
-            parent: Some(plan.class),
+            parent: Some(parent_plan.class),
             issue: crate::JvmSuperclassIssue::ParentConstructorUnavailable,
         })
     }
@@ -739,7 +765,7 @@ fn field_metadata(
     })
 }
 
-fn project_field_value_type(
+pub(super) fn project_field_value_type(
     store: &SemanticStore,
     definitions: &Definitions,
     symbol: dotty_core::SymbolId,

@@ -332,6 +332,66 @@ fn compile_source_batch_observed(
                 .map_err(PipelineFailure::Typer)?;
         }
     }
+    for class in &mut classes {
+        let JvmClassInitializationPlan::PrimaryConstructor(constructor_plan) =
+            &class.initialization
+        else {
+            continue;
+        };
+        let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
+            return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+        };
+        let [parent_application] = template.parents.as_slice() else {
+            continue;
+        };
+        let TreeKind::Apply(source_apply) = &parsed.ast.get(*parent_application).kind else {
+            continue;
+        };
+        if source_apply.args.is_empty() {
+            continue;
+        }
+        let typed_parent_application = typer
+            .source_typed_index()
+            .get(source_id, *parent_application)
+            .ok_or(PipelineFailure::UnexpectedSourceShape(
+                "typed direct-super constructor application",
+            ))?;
+        let TreeKind::Apply(typed_apply) = &typer.typed_ast().get(typed_parent_application).kind
+        else {
+            return Err(PipelineFailure::UnexpectedSourceShape(
+                "typed direct-super constructor application",
+            ));
+        };
+        let arguments = source_apply
+            .args
+            .iter()
+            .zip(&typed_apply.args)
+            .map(|(source, typed)| {
+                if typer.source_typed_index().get(source_id, *source) != Some(*typed) {
+                    return Err(PipelineFailure::UnexpectedSourceShape(
+                        "parent argument typed mapping",
+                    ));
+                }
+                Ok(dotty_jvm::JvmConstructorArgumentBinding {
+                    source: *source,
+                    typed: *typed,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let constructor_plan = constructor_plan
+            .clone()
+            .with_direct_super_constructor(
+                *parent_application,
+                typed_parent_application,
+                arguments,
+                &parsed.ast,
+                &index,
+                typer.store(),
+                typer.typed_ast(),
+            )
+            .map_err(PipelineFailure::Codegen)?;
+        class.initialization = JvmClassInitializationPlan::PrimaryConstructor(constructor_plan);
+    }
     for class in &classes {
         if !matches!(
             class.initialization,
@@ -1653,6 +1713,9 @@ fn source_initialization_plan(
         .value_param_clauses
         .iter()
         .any(|clause| !clause.is_empty());
+    let has_parent_arguments = template.parents.iter().any(|parent| {
+        matches!(ast.get(*parent).kind, TreeKind::Apply(ref application) if !application.args.is_empty())
+    });
     let no_template_initializers = template.body.iter().all(|tree| match &ast.get(*tree).kind {
         TreeKind::DefDef(_) => true,
         TreeKind::ValDef(_) => index
@@ -1660,12 +1723,12 @@ fn source_initialization_plan(
             .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field),
         _ => false,
     });
-    if !has_fields && !has_parameters {
+    if !has_fields && !has_parameters && !has_parent_arguments {
         return Ok(prove_implicit_noarg_constructor(
             ast, template, source, index, store,
         ));
     }
-    if !has_supported_noarg_parent(ast, template)
+    if !has_supported_parent_shape(ast, template)
         || template.self_val.is_some()
         || !no_template_initializers
     {
@@ -1745,6 +1808,31 @@ fn has_supported_noarg_parent(
                 matches!(
                     ast.get(application.function).kind,
                     TreeKind::Ident(_) | TreeKind::Select(_)
+                )
+            }
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn has_supported_parent_shape(
+    ast: &dotty_core::AstArena<Untyped>,
+    template: &Template<Untyped>,
+) -> bool {
+    if has_supported_noarg_parent(ast, template) {
+        return true;
+    }
+    match template.parents.as_slice() {
+        [parent] => match &ast.get(*parent).kind {
+            TreeKind::Apply(application)
+                if application.kind == dotty_core::ast::ApplyKind::Regular =>
+            {
+                matches!(
+                    ast.get(application.function).kind,
+                    TreeKind::Select(select)
+                        if !select.backquoted
+                            && matches!(ast.get(select.qualifier).kind, TreeKind::New(_))
                 )
             }
             _ => false,
@@ -3100,8 +3188,8 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0xac
             | 0xb0
             | 0xb1 => 1,
-            0x10 | 0x15 | 0x19 | 0x36 | 0x3a => 2,
-            0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
+            0x10 | 0x12 | 0x15 | 0x19 | 0x36 | 0x3a => 2,
+            0x13 | 0x14 | 0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };
         assert!(
@@ -4920,6 +5008,185 @@ fn real_reference_object_apis_compile_and_verify_end_to_end() {
     if require_jdk_or_skip() {
         verify_reference_object_apis_with_jdk(first_output.path());
     }
+}
+
+#[test]
+fn parameterized_direct_super_constructors_preserve_source_arguments_and_verify() {
+    let first_output = TestOutputDirectory::new("parameterized-super-first");
+    let second_output = TestOutputDirectory::new("parameterized-super-second");
+    let source = fs::read_to_string(fixture_path("ParameterizedSuper.scala"))
+        .expect("read parameterized-super source fixture");
+    let first = compile_source_classes(&source, "ParameterizedSuper.scala", first_output.path())
+        .expect("parameterized direct-super constructor fixture compiles");
+    let second = compile_source_classes(&source, "ParameterizedSuper.scala", second_output.path())
+        .expect("fresh frontend session emits the same parameterized constructors");
+
+    let identities = |artifacts: &[EmittedArtifact]| {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(identities(&first), identities(&second));
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        [
+            "ParameterizedBase",
+            "ParameterizedDerived",
+            "LiteralBase",
+            "LiteralDerived",
+            "Dep",
+            "ReferenceBase",
+            "ReferenceDerived",
+        ]
+    );
+    let classes = first
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.class.internal_name(),
+                decode_emitted_class(artifact),
+            )
+        })
+        .collect::<Vec<_>>();
+    let class = |name: &str| {
+        &classes
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .expect("expected emitted class")
+            .1
+    };
+    assert_eq!(
+        methods_with_descriptors(class("ParameterizedDerived"))
+            .iter()
+            .find(|(name, _)| name == "<init>")
+            .map(|(_, descriptor)| descriptor.as_str()),
+        Some("(IZ)V")
+    );
+    let derived_constructor = emitted_method_code(class("ParameterizedDerived"), "<init>");
+    assert_eq!(
+        decode_subset_instructions(derived_constructor)
+            .iter()
+            .take(4)
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        [0x2a, 0x1b, 0x1c, 0xb7]
+    );
+    let decoded_derived = decode_subset_instructions(derived_constructor);
+    let super_call = decoded_derived
+        .iter()
+        .position(|(_, opcode)| *opcode == 0xb7)
+        .expect("derived constructor calls its parent");
+    let field_initializer = decoded_derived
+        .iter()
+        .position(|(_, opcode)| *opcode == 0xb5)
+        .expect("derived constructor initializes its source field");
+    assert!(super_call < field_initializer);
+    assert_method_reference(
+        class("ParameterizedDerived"),
+        derived_constructor,
+        0xb7,
+        "ParameterizedBase",
+        "<init>",
+        "(IZ)V",
+    );
+    let literal_constructor = emitted_method_code(class("LiteralDerived"), "<init>");
+    assert_eq!(
+        decode_subset_instructions(literal_constructor)
+            .iter()
+            .take(4)
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        [0x2a, 0x12, 0x04, 0xb7]
+    );
+    assert_method_reference(
+        class("LiteralDerived"),
+        literal_constructor,
+        0xb7,
+        "LiteralBase",
+        "<init>",
+        "(IZ)V",
+    );
+    let reference_constructor = emitted_method_code(class("ReferenceDerived"), "<init>");
+    assert_eq!(
+        decode_subset_instructions(reference_constructor)
+            .iter()
+            .take(3)
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        [0x2a, 0x2b, 0xb7]
+    );
+    assert_method_reference(
+        class("ReferenceDerived"),
+        reference_constructor,
+        0xb7,
+        "ReferenceBase",
+        "<init>",
+        "(LDep;)V",
+    );
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = first_output.path().to_str().expect("UTF-8 test path");
+    let javap = Command::new("javap")
+        .args(["-c", "-v", "-classpath", classpath, "ParameterizedDerived"])
+        .output()
+        .expect("start javap for parameterized direct-super class");
+    assert!(
+        javap.status.success(),
+        "javap rejected ParameterizedDerived.class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap.contains("invokespecial #"));
+    assert!(javap.contains("ParameterizedBase.<init>:(IZ)V"));
+    assert!(javap.contains("descriptor: (IZ)V"));
+
+    let harness = first_output.path().join("ParameterizedSuperHarness.java");
+    fs::write(
+        &harness,
+        "public final class ParameterizedSuperHarness { public static void main(String[] args) { ParameterizedDerived value = new ParameterizedDerived(42, true); if (value.value() != 42 || !value.isActive() || value.originalValue() != 42) throw new AssertionError(\"primitive parameters\"); LiteralDerived literal = new LiteralDerived(); if (literal.value() != 123456 || !literal.isActive()) throw new AssertionError(\"literal arguments\"); new ReferenceDerived(new Dep()); System.out.println(\"parameterized-super=ok\"); } }\n",
+    )
+    .expect("write parameterized-super JVM harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for parameterized-super harness");
+    assert!(
+        javac.status.success(),
+        "javac failed for parameterized-super harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "ParameterizedSuperHarness",
+        ])
+        .output()
+        .expect("start java with full verifier for parameterized-super harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected parameterized-super classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "parameterized-super=ok"
+    );
 }
 
 #[test]
@@ -9068,7 +9335,7 @@ fn super_method_source_is_rejected_by_typer_before_jvm_emission() {
 }
 
 #[test]
-fn parameterized_parent_constructor_arguments_are_typed_before_codegen_rejects_them() {
+fn parameterized_parent_constructor_arguments_keep_their_source_mappings() {
     let source_text = "class Base(seed: Int):\n  def value(): Int = seed\n\nclass Derived(start: Int) extends Base(start):\n  def read(): Int = start\n";
     let source_id = SourceId::from_index(1368);
     let source = SourceText::new(source_text).unwrap();
@@ -9208,22 +9475,18 @@ fn parameterized_parent_constructor_arguments_are_typed_before_codegen_rejects_t
 }
 
 #[test]
-fn parameterized_parent_constructor_is_rejected_without_publishing_classes() {
-    let output = TestOutputDirectory::new("parameterized-parent-constructor-unsupported");
+fn parameterized_parent_constructor_is_emitted_from_the_source_proof() {
+    let output = TestOutputDirectory::new("parameterized-parent-constructor-supported");
     let source = "class Base(seed: Int) {}\nclass Derived(start: Int) extends Base(start) {}\n";
-    let error = compile_source_classes(source, "ParameterizedParent.scala", output.path())
-        .expect_err("the current backend only proves a no-argument direct parent constructor");
-    assert!(
-        matches!(
-            error,
-            PipelineFailure::Codegen(JvmCodegenError::InvalidJvmSuperclass {
-                issue: dotty_jvm::JvmSuperclassIssue::ParentConstructorUnavailable,
-                ..
-            })
-        ),
-        "parameterized parent constructor failed at an unexpected stage: {error:?}"
-    );
-    assert!(output.class_files().is_empty());
+    let artifacts = compile_source_classes(source, "ParameterizedParent.scala", output.path())
+        .expect("the source proof selects the canonical parameterized parent constructor");
+    let derived = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Derived")
+        .expect("Derived class was emitted");
+    let class = decode_emitted_class(derived);
+    let constructor = emitted_method_code(&class, "<init>");
+    assert_method_reference(&class, constructor, 0xb7, "Base", "<init>", "(I)V");
 }
 
 #[test]

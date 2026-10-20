@@ -1,11 +1,121 @@
 //! Source identity proof and bounded primary-constructor metadata.
 use crate::{JvmCodegenError, JvmMethodDescriptor, JvmMethodPlan, JvmParameterLocal};
 use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC, MethodAccessFlags};
-use dotty_core::ast::{AstArena, Modifier, TreeKind, Untyped, VisibilitySyntax};
+use dotty_core::ast::{AstArena, Modifier, TreeKind, Typed, TypedAst, Untyped, VisibilitySyntax};
 use dotty_core::{
-    Definitions, SemanticStore, SourceDefinition, SourceSemanticIndex, SymbolId, SymbolInfo,
-    SymbolKind, Visibility,
+    Definitions, SemanticStore, SourceDefinition, SourceId, SourceSemanticIndex, SymbolId,
+    SymbolInfo, SymbolKind, TreeId, Type, TypeRefTarget, Visibility,
 };
+
+/// A source argument and the exact typed root mapped from it by the frontend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmConstructorArgumentBinding {
+    /// Original constructor argument in the untyped source arena.
+    pub source: TreeId<Untyped>,
+    /// Typed replacement for `source` from the same frontend session.
+    pub typed: TreeId<Typed>,
+}
+
+/// Source- and symbol-checked direct-super constructor invocation evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JvmDirectSuperConstructorPlan {
+    child_class: SymbolId,
+    child_constructor: SymbolId,
+    parent_class: SymbolId,
+    parent_constructor: SymbolId,
+    source_application: TreeId<Untyped>,
+    typed_application: TreeId<Typed>,
+    arguments: Vec<JvmConstructorArgumentBinding>,
+    source: SourceId,
+}
+
+impl JvmDirectSuperConstructorPlan {
+    /// Canonical constructor selected by the typed parent application.
+    pub const fn parent_constructor(&self) -> SymbolId {
+        self.parent_constructor
+    }
+
+    /// Canonical direct parent that owns `parent_constructor`.
+    pub const fn parent_class(&self) -> SymbolId {
+        self.parent_class
+    }
+
+    /// Typed parent application retained from the same source session.
+    pub const fn typed_application(&self) -> TreeId<Typed> {
+        self.typed_application
+    }
+
+    /// Original parent application in the source arena.
+    pub const fn source_application(&self) -> TreeId<Untyped> {
+        self.source_application
+    }
+
+    /// Source unit that owns both parent-application roots.
+    pub const fn source_id(&self) -> SourceId {
+        self.source
+    }
+
+    /// Source argument identities and corresponding typed roots in order.
+    pub fn arguments(&self) -> &[JvmConstructorArgumentBinding] {
+        &self.arguments
+    }
+
+    pub(crate) fn validate_typed_binding(
+        &self,
+        store: &SemanticStore,
+        typed_ast: &TypedAst,
+        child_class: SymbolId,
+        child_constructor: SymbolId,
+    ) -> Result<(), JvmCodegenError> {
+        let fail = || JvmCodegenError::InvalidPrimaryConstructor {
+            constructor: child_constructor,
+            issue: JvmConstructorIssue::ParentConstructorTypedShape,
+        };
+        if self.child_class != child_class || self.child_constructor != child_constructor {
+            return Err(fail());
+        }
+        let symbol = store
+            .symbols
+            .contains(self.parent_constructor)
+            .then(|| store.symbols.get(self.parent_constructor))
+            .ok_or_else(fail)?;
+        if symbol.kind != SymbolKind::Constructor || symbol.owner != Some(self.parent_class) {
+            return Err(fail());
+        }
+        if symbol.origin != dotty_core::SymbolOrigin::Source(self.source)
+            || !store.symbols.contains(self.child_class)
+            || store.symbols.get(self.child_class).origin
+                != dotty_core::SymbolOrigin::Source(self.source)
+        {
+            return Err(fail());
+        }
+        let application = typed_ast.try_get(self.typed_application).ok_or_else(fail)?;
+        let TreeKind::Apply(application) = &application.kind else {
+            return Err(fail());
+        };
+        if application.kind != dotty_core::ast::ApplyKind::Regular
+            || application.args.len() != self.arguments.len()
+            || application
+                .args
+                .iter()
+                .zip(&self.arguments)
+                .any(|(typed, binding)| *typed != binding.typed)
+        {
+            return Err(fail());
+        }
+        for binding in &self.arguments {
+            let Some(argument) = typed_ast.try_get(binding.typed) else {
+                return Err(fail());
+            };
+            if !matches!(argument.kind, TreeKind::Literal(_) | TreeKind::Ident(_))
+                || store.types.try_get(argument.ty).is_none()
+            {
+                return Err(fail());
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Why an explicit primary constructor cannot be projected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +129,10 @@ pub enum JvmConstructorIssue {
     ResultType,
     Visibility,
     Flags,
+    ParentConstructorSourceShape,
+    ParentConstructorTypedShape,
+    ParentConstructorIdentity,
+    ParentConstructorArgumentIdentity,
 }
 
 /// Source-checked primary constructor binding. Its private fields retain the
@@ -31,6 +145,7 @@ pub struct JvmPrimaryConstructorPlan {
     parameters: Vec<SymbolId>,
     visibility: Visibility,
     source: dotty_core::SourceId,
+    direct_super_constructor: Option<JvmDirectSuperConstructorPlan>,
 }
 
 /// Read-only JVM constructor signature and instance-parameter slot metadata.
@@ -52,6 +167,161 @@ impl JvmPrimaryConstructorPlan {
     /// Constructor-owned parameter identities in authoritative source order.
     pub fn parameters(&self) -> &[SymbolId] {
         &self.parameters
+    }
+
+    /// Canonical source-proven direct-parent constructor call, if the source
+    /// template supplies supported parent arguments.
+    pub fn direct_super_constructor(&self) -> Option<&JvmDirectSuperConstructorPlan> {
+        self.direct_super_constructor.as_ref()
+    }
+
+    /// Attaches the exact mapped parent application and its typed arguments.
+    /// `arguments` must be copied in order from this session's
+    /// `SourceTypedIndex`; this adapter checks both arenas and the canonical
+    /// selected constructor but never retypes source expressions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_direct_super_constructor(
+        mut self,
+        parent_application: TreeId<Untyped>,
+        typed_parent_application: TreeId<Typed>,
+        arguments: Vec<JvmConstructorArgumentBinding>,
+        ast: &AstArena<Untyped>,
+        index: &SourceSemanticIndex,
+        store: &SemanticStore,
+        typed_ast: &TypedAst,
+    ) -> Result<Self, JvmCodegenError> {
+        let fail = |issue| JvmCodegenError::InvalidPrimaryConstructor {
+            constructor: self.constructor,
+            issue,
+        };
+        if self.direct_super_constructor.is_some() {
+            return Err(fail(JvmConstructorIssue::ParentConstructorSourceShape));
+        }
+        let Some(SourceDefinition::Canonical { source, tree }) = index.definition_of(self.class)
+        else {
+            return Err(fail(JvmConstructorIssue::SourceIdentity));
+        };
+        if source != self.source || index.symbol_at(source, tree) != Some(self.class) {
+            return Err(fail(JvmConstructorIssue::SourceIdentity));
+        }
+        let Some(TreeKind::TypeDef(definition)) = ast.try_get(tree).map(|node| &node.kind) else {
+            return Err(fail(JvmConstructorIssue::ParentConstructorSourceShape));
+        };
+        let Some(TreeKind::Template(template)) = ast.try_get(definition.rhs).map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::ParentConstructorSourceShape));
+        };
+        if index.symbol_at(source, template.constructor) != Some(self.constructor)
+            || template.parents.as_slice() != [parent_application]
+        {
+            return Err(fail(JvmConstructorIssue::ParentConstructorSourceShape));
+        }
+        let Some(TreeKind::Apply(source_apply)) =
+            ast.try_get(parent_application).map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::ParentConstructorSourceShape));
+        };
+        if source_apply.kind != dotty_core::ast::ApplyKind::Regular
+            || source_apply.args.len() != arguments.len()
+            || source_apply
+                .args
+                .iter()
+                .zip(&arguments)
+                .any(|(source, binding)| *source != binding.source)
+        {
+            return Err(fail(JvmConstructorIssue::ParentConstructorArgumentIdentity));
+        }
+        let Some(TreeKind::Select(source_select)) =
+            ast.try_get(source_apply.function).map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::ParentConstructorSourceShape));
+        };
+        if source_select.backquoted
+            || store.names.try_resolve(source_select.name.text()) != Some("<init>")
+            || !matches!(
+                ast.try_get(source_select.qualifier).map(|node| &node.kind),
+                Some(TreeKind::New(_))
+            )
+        {
+            return Err(fail(JvmConstructorIssue::ParentConstructorSourceShape));
+        }
+
+        let Some(TreeKind::Apply(typed_apply)) = typed_ast
+            .try_get(typed_parent_application)
+            .map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::ParentConstructorTypedShape));
+        };
+        let Some(TreeKind::Select(typed_select)) = typed_ast
+            .try_get(typed_apply.function)
+            .map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::ParentConstructorTypedShape));
+        };
+        if typed_select.backquoted
+            || store.names.try_resolve(typed_select.name.text()) != Some("<init>")
+        {
+            return Err(fail(JvmConstructorIssue::ParentConstructorTypedShape));
+        }
+        let Some(TreeKind::New(typed_new)) = typed_ast
+            .try_get(typed_select.qualifier)
+            .map(|node| &node.kind)
+        else {
+            return Err(fail(JvmConstructorIssue::ParentConstructorTypedShape));
+        };
+        let function_type = typed_ast
+            .try_get(typed_apply.function)
+            .and_then(|tree| store.types.try_get(tree.ty));
+        let parent_constructor = match function_type {
+            Some(Type::TermRef {
+                target: dotty_core::TermRefTarget::Symbol(symbol),
+                ..
+            }) => *symbol,
+            _ => return Err(fail(JvmConstructorIssue::ParentConstructorIdentity)),
+        };
+        let parent = store
+            .symbols
+            .contains(parent_constructor)
+            .then(|| store.symbols.get(parent_constructor))
+            .ok_or_else(|| fail(JvmConstructorIssue::ParentConstructorIdentity))?;
+        if parent.kind != SymbolKind::Constructor
+            || parent.owner.is_none()
+            || !matches!(
+                typed_ast
+                    .try_get(typed_new.tpt)
+                    .and_then(|tree| store.types.try_get(tree.ty)),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) if Some(*class) == parent.owner
+            )
+        {
+            return Err(fail(JvmConstructorIssue::ParentConstructorIdentity));
+        }
+        let parent_class = parent.owner.expect("checked above");
+        if typed_apply.kind != dotty_core::ast::ApplyKind::Regular
+            || typed_apply.args.len() != arguments.len()
+            || typed_apply
+                .args
+                .iter()
+                .zip(&arguments)
+                .any(|(typed, binding)| *typed != binding.typed)
+        {
+            return Err(fail(JvmConstructorIssue::ParentConstructorArgumentIdentity));
+        }
+        let proof = JvmDirectSuperConstructorPlan {
+            child_class: self.class,
+            child_constructor: self.constructor,
+            parent_class,
+            parent_constructor,
+            source_application: parent_application,
+            typed_application: typed_parent_application,
+            arguments,
+            source,
+        };
+        proof.validate_typed_binding(store, typed_ast, self.class, self.constructor)?;
+        self.direct_super_constructor = Some(proof);
+        Ok(self)
     }
 
     pub(crate) const fn visibility(&self) -> Visibility {
@@ -143,6 +413,7 @@ impl JvmPrimaryConstructorPlan {
             parameters,
             visibility,
             source,
+            direct_super_constructor: None,
         })
     }
 
@@ -504,6 +775,7 @@ mod tests {
                 parameters: Vec::new(),
                 visibility: Visibility::Public,
                 source,
+                direct_super_constructor: None,
             },
         )
     }

@@ -132,8 +132,15 @@ pub(super) fn emit_class(
         }
         Some(initializers) => {
             let constructor_metadata = initializers.constructor();
-            let mut constructor =
-                constructor_prefix(class_symbol, superclass.parent_internal_name())?;
+            let mut constructor = CodeBuilder::new();
+            if !crate::constructor_initializers::append_direct_super_constructor_call(
+                unit,
+                class_symbol,
+                definitions,
+                &mut constructor,
+            )? {
+                constructor = constructor_prefix(class_symbol, superclass.parent_internal_name())?;
+            }
             initializers.append_to(&mut constructor)?;
             constructor
                 .return_void()

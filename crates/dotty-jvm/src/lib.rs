@@ -25,7 +25,10 @@ mod constructor;
 mod constructor_call;
 mod constructor_initializers;
 mod descriptor;
-pub use constructor::{JvmConstructorIssue, JvmConstructorMetadata, JvmPrimaryConstructorPlan};
+pub use constructor::{
+    JvmConstructorArgumentBinding, JvmConstructorIssue, JvmConstructorMetadata,
+    JvmDirectSuperConstructorPlan, JvmPrimaryConstructorPlan,
+};
 pub use constructor_initializers::{
     JvmConstructorFieldInitializer, JvmConstructorFieldInitializerPlan,
     JvmConstructorInitializerInstruction,
@@ -2237,6 +2240,16 @@ impl JvmCompilationUnit<'_> {
             {
                 constructor.validate_binding(self.store, class_plan.class)?;
                 self.validate_symbol_type(constructor.symbol())?;
+                if let Some(super_constructor) = constructor.direct_super_constructor() {
+                    super_constructor.validate_typed_binding(
+                        self.store,
+                        self.typed_ast,
+                        class_plan.class,
+                        constructor.symbol(),
+                    )?;
+                    self.validate_symbol_type(super_constructor.parent_class())?;
+                    self.validate_symbol_type(super_constructor.parent_constructor())?;
+                }
                 for parameter in constructor.parameters() {
                     self.validate_symbol_type(*parameter)?;
                 }
