@@ -470,6 +470,23 @@ return structured errors, and a failed method does not produce a class
 artifact. Standalone expression/body lowering has no emission plan, so it
 cannot resolve ordinary `Apply` targets.
 
+An explicit unqualified `super.method(args)` follows a separate checked path.
+`resolve_direct_super_call` requires the typed receiver to be
+`Super(This)` with no mixin qualifier, verifies its `SuperType` against the
+current class and planned direct parent, and retains the selected canonical
+method symbol. The selected method must be public, concrete, planned, and
+declared by that direct parent. Lowering pushes `aload(0)`, evaluates each
+argument once in source order against the exact descriptor, and emits one
+`invokespecial` using the parent's JVM owner and the selected method name and
+descriptor. The result uses the selected method's validated return type.
+Qualified/mixin super, mismatched semantic types or owners, unplanned methods,
+and unsupported method signatures fail with typed errors before a class is
+published. Ordinary calls continue through the virtual resolver and emit
+`invokevirtual`; an explicit super call cannot fall back to virtual dispatch.
+The source integration test checks primitive and reference results, Boolean
+arguments/results, a branched body with stack-map frames, deterministic class
+bytes, and JDK 21 `-Xverify:all` execution in CI.
+
 Planned method-body lowering allows initialized primitive local references in
 the final expression or other value positions, and immutable planned-class
 reference locals in supported straight-line blocks. Standalone expression APIs have
@@ -566,8 +583,8 @@ additional constructors, and unplanned reference classes fail before bytes
 are returned.
 
 The emitted class has no interfaces, class initializer, Scala/TASTy metadata,
-or unplanned methods. `super.method`, deeper or external parent chains, nested
-types, and other class initialization semantics remain unsupported. The API
+or unplanned methods. Deeper or external parent chains, nested types, qualified
+or trait super, and other class initialization semantics remain unsupported. The API
 returns only after encoding succeeds, so a failure does not expose a partial
 artifact.
 
@@ -664,6 +681,17 @@ JDK harness checks reference identity and loop edge cases with
 `java -Xverify:all`. See
 [`jvm-reference-signatures.md`](jvm-reference-signatures.md) for the fixture's
 precise coverage and remaining limits.
+
+`typed_super_method_calls_lower_to_checked_invokespecial` uses actual Scala
+source for `Base`, `Derived`, and `Runner` in two independent frontend
+sessions. It checks exact `Methodref` owners/descriptors for direct `super`
+calls with Int and Boolean arguments, Unit and reference results, and both
+branches of an `if`; the branch has a `StackMapTable`. It separately confirms
+that `Base.doubled` and `Runner.evaluate` retain `invokevirtual`, rejects
+qualified/root/grandparent-only super shapes before publishing classes, and
+requires byte-identical ordered class output. The JDK gate inspects these
+instructions with `javap` and executes the methods using JDK 21
+`java -Xverify:all`.
 
 Multi-class compilation encodes every planned class in memory before staging or
 publishing output files, so semantic, codegen, and encoding failures publish no

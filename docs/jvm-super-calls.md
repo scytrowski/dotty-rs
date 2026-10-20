@@ -82,7 +82,11 @@ parents, generic/non-plain parent types, missing direct declarations, overload
 buckets, non-method terms, and private, abstract, static, or extension
 methods. Failures are typed (`UnsupportedSuper`, `MemberNotFound`, or
 `OverloadedSelectionDeferred`) and never rewrite the expression as a virtual
-call. JVM emission still has no lowering for the typed super call.
+call. For the accepted unqualified shape, `dotty-jvm` now checks the exact
+`SuperType`, direct-parent hierarchy edge, canonical selected method symbol,
+parent declaration, and method plan before emitting `aload_0`, ordered
+arguments, and `invokespecial`. Ordinary selected calls still emit
+`invokevirtual`.
 
 The untyped AST for the supported spelling `super.value()` is a selection
 whose qualifier is `TreeKind::Super { qual: This(None), mix: None }` and whose
@@ -228,11 +232,12 @@ baseline for all follow-up work.
 | Source shape | Current observed result | Required boundary / next owner |
 | --- | --- | --- |
 | `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then source-ordered arguments, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
-| `super.value()` targeting direct `Base.value` | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical Base symbol; `dotty-classfile` validates initialized-receiver `invokespecial` with the exact direct-parent proof | Lower only a checked typed target as special dispatch in `dotty-jvm` — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
-| Parameterized parent plus explicit direct-super calls, run on the JVM | Not implemented; no output path exists for the required combination | Source-to-classfile-to-JDK integration and runtime behavior — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
+| `super.value()` targeting direct `Base.value` | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical Base symbol; `dotty-jvm` verifies the exact direct-parent proof and emits `invokespecial`; JDK21 CI verifies execution | Preserve canonical symbol and verifier proofs while extending the bounded source-to-JVM integration in [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
+| `super.add(n)`, Boolean/reference results, or a branched super call | The planned direct-parent method, exact descriptor, argument order, and result are checked; branches receive classfile stack-map frames and the mandatory JDK gate verifies execution | Preserve the approved direct-parent public instance-method subset; broader signatures and call shapes need a scoped issue |
+| Parameterized parent plus explicit direct-super calls in one source-to-JVM run | Constructor argument lowering and the direct-super method path are implemented separately; combined end-to-end runtime coverage remains open | Combine canonical constructor and special-call proofs through the full pipeline — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `extends Base` with accessible `Base.<init>()V` | Supported and verified by existing source-backed regression | Preserve direct-parent ownership and post-super analysis in `dotty-jvm` and `dotty-classfile` |
 | `base.value()` or inherited `derived.value()` | Supported virtual calls use the selected declaration's owner and `invokevirtual` | Preserve current dynamic-dispatch and `Methodref` behavior |
-| Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Rejected in typer with focused `UnsupportedSuper` or member-resolution errors; no JVM lowering | Keep these shapes rejected in the initial slice — #1374 |
+| Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Rejected in typer or the JVM adapter with typed shape, owner, or metadata errors; no class artifact is published | Keep these shapes rejected in the initial slice — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
 
 Source typing proof, verifier support, and bounded lowering remain separate
 contracts at their owning boundaries. The integration fixture exercises the
