@@ -9031,6 +9031,199 @@ fn super_method_source_is_rejected_by_typer_before_jvm_emission() {
         "super.method() failed at an unexpected pipeline stage: {error:?}"
     );
     assert!(output.class_files().is_empty());
+
+    for (label, source) in [
+        (
+            "super-increment",
+            "class Base { def value(): Int = 10; def increment(): Int = 11 }\nclass Derived extends Base { def read(): Int = super.increment() }\n",
+        ),
+        (
+            "mixin-qualified-super",
+            "class Base { def value(): Int = 10 }\nclass Derived extends Base { def read(): Int = super[Base].value() }\n",
+        ),
+        (
+            "owner-qualified-super",
+            "class Base { def value(): Int = 10 }\nclass Derived extends Base { def read(): Int = Base.super.value() }\n",
+        ),
+        (
+            "root-class-super",
+            "class Base { def read(): Int = super.value() }\n",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, "SuperAudit.scala", output.path())
+            .expect_err("super calls remain unsupported in the source Typer");
+        assert!(
+            matches!(
+                error,
+                PipelineFailure::Typer(TyperError::UnsupportedExpression {
+                    expression_kind: "expression or declaration tree",
+                    ..
+                })
+            ),
+            "{label} failed at an unexpected pipeline stage: {error:?}"
+        );
+        assert!(output.class_files().is_empty());
+    }
+}
+
+#[test]
+fn parameterized_parent_constructor_is_preserved_in_source_but_not_typed() {
+    let source_text = "class Base(seed: Int):\n  def value(): Int = seed\n\nclass Derived(start: Int) extends Base(start):\n  def read(): Int = start\n";
+    let source_id = SourceId::from_index(1368);
+    let source = SourceText::new(source_text).unwrap();
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("expected package root");
+    };
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source_id,
+        "ParameterizedParent.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } => {
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            index
+        }
+        NamingOutcome::Rejected { diagnostics } => panic!("naming failed: {diagnostics:?}"),
+    };
+    let class_named = |wanted: &str| {
+        package
+            .stats
+            .iter()
+            .find_map(|tree| {
+                let TreeKind::TypeDef(definition) = &parsed.ast.get(*tree).kind else {
+                    return None;
+                };
+                let symbol = index.symbol_at(source_id, *tree)?;
+                (store.names.resolve(definition.name.as_name().text()) == wanted).then_some(symbol)
+            })
+            .unwrap_or_else(|| panic!("source declares {wanted}"))
+    };
+    let base = class_named("Base");
+    let derived = class_named("Derived");
+    let dotty_core::SourceDefinition::Canonical {
+        source,
+        tree: derived_tree,
+    } = index.definition_of(derived).unwrap()
+    else {
+        panic!("Derived has canonical source provenance");
+    };
+    assert_eq!(source, source_id);
+    let TreeKind::TypeDef(derived_definition) = &parsed.ast.get(derived_tree).kind else {
+        panic!("Derived source identity points to a TypeDef");
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(derived_definition.rhs).kind else {
+        panic!("Derived has a template");
+    };
+    let [parent_application] = template.parents.as_slice() else {
+        panic!("expected one source parent application");
+    };
+    let TreeKind::Apply(application) = &parsed.ast.get(*parent_application).kind else {
+        panic!("Base(start) remains a parent constructor application");
+    };
+    assert_eq!(application.args.len(), 1);
+    let TreeKind::Select(constructor_select) = &parsed.ast.get(application.function).kind else {
+        panic!("parent application selects <init>");
+    };
+    assert_eq!(
+        store.names.resolve(constructor_select.name.text()),
+        "<init>"
+    );
+    let TreeKind::New(parent_new) = &parsed.ast.get(constructor_select.qualifier).kind else {
+        panic!("constructor selection is qualified by New");
+    };
+    let TreeKind::Ident(parent_type) = &parsed.ast.get(parent_new.tpt).kind else {
+        panic!("Base is represented by its source type identifier");
+    };
+    assert_eq!(store.names.resolve(parent_type.name.text()), "Base");
+    let TreeKind::Ident(parent_argument) = &parsed.ast.get(application.args[0]).kind else {
+        panic!("start remains the parent argument expression");
+    };
+    assert_eq!(store.names.resolve(parent_argument.name.text()), "start");
+
+    let TreeKind::DefDef(constructor) = &parsed.ast.get(template.constructor).kind else {
+        panic!("template owns its primary constructor");
+    };
+    let [start_parameter] = constructor.value_param_clauses[0].as_slice() else {
+        panic!("Derived primary constructor has one formal parameter");
+    };
+    let constructor_symbol = index.symbol_at(source_id, template.constructor).unwrap();
+    let start_symbol = index
+        .derived_symbol_at(constructor_symbol, source_id, *start_parameter)
+        .expect("constructor formal has an owner-scoped derived identity");
+    assert_eq!(
+        store.symbols.get(start_symbol).owner,
+        Some(constructor_symbol)
+    );
+    assert_eq!(store.symbols.get(start_symbol).kind, SymbolKind::Parameter);
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source_id,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(derived).unwrap();
+    let class_info = match typer.store().symbols.info(derived) {
+        dotty_core::SymbolInfo::Complete(info) => *info,
+        other => panic!("Derived class info is complete: {other:?}"),
+    };
+    let Type::ClassInfo(class_info) = typer.store().types.get(class_info) else {
+        panic!("Derived has ClassInfo");
+    };
+    assert_eq!(class_info.parents.len(), 1);
+    assert!(matches!(
+        typer.store().types.get(class_info.parents[0]),
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(parent),
+            ..
+        } if *parent == base
+    ));
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source_id, *parent_application)
+            .is_none()
+    );
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source_id, application.args[0])
+            .is_none()
+    );
+}
+
+#[test]
+fn parameterized_parent_constructor_is_rejected_without_publishing_classes() {
+    let output = TestOutputDirectory::new("parameterized-parent-constructor-unsupported");
+    let source = "class Base(seed: Int) {}\nclass Derived(start: Int) extends Base(start) {}\n";
+    let error = compile_source_classes(source, "ParameterizedParent.scala", output.path())
+        .expect_err("the current backend only proves a no-argument direct parent constructor");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(JvmCodegenError::InvalidJvmSuperclass {
+                issue: dotty_jvm::JvmSuperclassIssue::ParentConstructorUnavailable,
+                ..
+            })
+        ),
+        "parameterized parent constructor failed at an unexpected stage: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
 }
 
 #[test]
