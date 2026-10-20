@@ -206,7 +206,7 @@ fn lower_expression_inner(
                     })?;
             let receiver_depth = if matches!(
                 receiver.kind,
-                TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_)
+                TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_)
             ) {
                 depth + 1
             } else {
@@ -227,7 +227,9 @@ fn lower_expression_inner(
             let argument = application.args[0];
             let argument_depth = if matches!(
                 ast.try_get(argument).map(|argument| &argument.kind),
-                Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_))
+                Some(
+                    TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_)
+                )
             ) {
                 depth + 1
             } else {
@@ -323,7 +325,7 @@ fn lower_expression_inner(
         for &argument in &application.args {
             let argument_depth = if matches!(
                 ast.try_get(argument).map(|argument| &argument.kind),
-                Some(TreeKind::Apply(_) | TreeKind::Block(_))
+                Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::Select(_))
             ) {
                 depth + 1
             } else {
@@ -417,7 +419,7 @@ fn lower_expression_inner(
                     })?;
             let receiver_depth = if matches!(
                 receiver.kind,
-                TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_)
+                TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_)
             ) {
                 depth + 1
             } else {
