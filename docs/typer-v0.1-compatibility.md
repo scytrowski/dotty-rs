@@ -1741,13 +1741,17 @@ See the completion report in
 
 ### #1339 package-owned Object import qualifiers
 
-After existing lexical bindings and package-scope declarations miss, an
-unrooted import qualifier checks the corresponding child package first, then
-requests a unique Term member from the candidate package. A classpath result
+After existing lexical bindings and source package-scope declarations miss,
+an unrooted import qualifier checks for both a corresponding child package
+and a unique Term member from the candidate package. A classpath result
 is accepted only when it is a canonical Object owned by that package and the
 resolver confirms its ModuleClass identity. Missing evidence remains a miss;
 malformed or ambiguous evidence is reported and does not continue at a lower
-package candidate. Explicit `_root_` continues to start at the canonical root.
+package candidate. If the same classpath candidate has both Package and Object
+evidence, the qualifier reports explicit ambiguity. Both providers are probed
+before choosing so the result is stable whether or not a prior lookup warmed
+the Object in the shared package scope. Explicit `_root_` continues to start
+at the canonical root.
 
 The real Scala 3.9.0 compiler `Contexts.tasty` regression resolves
 `import Contexts.*` to its package-owned Object, then resolves
@@ -1760,4 +1764,15 @@ in the same package keeps its identity when the classpath also contains the
 compiler TASTy Object. Missing lookup and malformed non-Object resolver
 results leave store and resolver checkpoints unchanged. A package and Object
 both entered under the same term name in one source package scope produce an
-explicit ambiguity rather than an allocation-order choice.
+explicit ambiguity rather than an allocation-order choice. A separate
+classpath fixture reports both a real compiler Object and the matching
+package-prefix evidence; fresh lookup, Object-warmed lookup, and retry all
+report the same ambiguity with no semantic-store mutation.
+
+## Post-compiler-module audit checkpoint (#1342)
+
+The latest pinned full-corpus audit and stable #1180 import reconciliation are
+summarized in the [post-compiler-module audit checkpoint](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md).
+These measurements preserve the 3,297-method denominator and distinguish
+Object qualification, ModuleClass attempts, selector outcomes, and fully typed
+methods.
