@@ -21,6 +21,7 @@ const ARITHMETIC: &str = "package example\nclass Arithmetic:\n  def add(x: Int, 
 const PARENTHESIZED_CALL_ARGUMENTS: &str = "package example\nclass ParenthesizedCallArguments:\n  def run(a: Int, b: Int): Int = identity((a + b))\n  def nested(a: Int, b: Int): Int = identity(identity((a + b)))\n  def identity(value: Int): Int = value\n";
 const COMPARISONS: &str = "package example\nclass Comparisons:\n  def positive(x: Int): Boolean = x > 0\n  def before(a: Int, b: Int): Boolean = a < b\n  def atMost(a: Int, b: Int): Boolean = a <= b\n  def atLeast(a: Int, b: Int): Boolean = a >= b\n  def nested(a: Int, b: Int): Boolean = (a + 1) >= b\n  def choose(x: Int): Int = if x > 0 then 1 else 0\n";
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
+const LOGIC: &str = "package example\nclass Logic:\n  def negate(a: Boolean): Boolean = !a\n  def both(a: Boolean, b: Boolean): Boolean = a && b\n  def either(a: Boolean, b: Boolean): Boolean = a || b\n  def safeAnd: Boolean = false && (1 / 0 > 0)\n  def safeOr: Boolean = true || (1 / 0 > 0)\n  def evaluatedAnd(a: Boolean): Boolean = a && (1 / 0 > 0)\n  def evaluatedOr(a: Boolean): Boolean = a || (1 / 0 > 0)\n";
 const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
 const BLOCKS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Blocks.scala");
 const LOCALS: &str = include_str!("fixtures/Locals.scala");
@@ -1791,6 +1792,113 @@ fn synthetic_int_operator_select_spans_are_validated() {
             assert_eq!(result, PickleError::BodySpan { tree: select });
         }
     }
+}
+
+#[test]
+fn canonical_boolean_operators_preserve_short_circuit_semantics() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(LOGIC, "Logic.scala", |_| {}).unwrap();
+    let (_, repeat) = source_outputs_named(LOGIC, "Logic.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeat.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    for (declaration, expected_name) in [(3, "&&"), (4, "||")] {
+        let body = addresses
+            .get(output.declarations()[declaration].address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap();
+        let RawTree::LengthNode(application) = body.rhs.unwrap() else {
+            panic!("expected Boolean operator APPLY for {expected_name}")
+        };
+        let application = application.decode_apply().unwrap();
+        let RawTree::LengthNode(selection) = application.function else {
+            panic!("expected signed Boolean SELECTin for {expected_name}")
+        };
+        let selection = selection.decode_select_in().unwrap();
+        assert!(matches!(
+            file.render_signed_name(selection.name).unwrap(),
+            Some(RenderedSignedName::Signed { original, signature })
+                if original == expected_name
+                    && signature.result == "scala.Boolean"
+                    && signature.parameters == [RenderedParamSig::TermParameter("scala.Boolean".into())]
+        ));
+    }
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1358/generated/example/Logic.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1358/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 Boolean short-circuit gate");
+        assert!(
+            result.success(),
+            "Boolean Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
+fn boolean_short_circuit_selection_must_be_registered() {
+    let result = source_outputs_named_with_tree_edits(
+        LOGIC,
+        "Logic.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, store| {
+            let source_id = source_ast
+                .iter()
+                .find_map(|(source_id, tree)| {
+                    let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = tree.kind else {
+                        return None;
+                    };
+                    (store.names.resolve(infix.op.text()) == "&&").then_some(source_id)
+                })
+                .unwrap();
+            let typed_id = bindings.get(SourceId::from_index(7), source_id).unwrap();
+            let TreeKind::Apply(application) = &typed_ast.get(typed_id).kind else {
+                panic!("expected typed Boolean application")
+            };
+            let parameter_type = typed_ast
+                .iter()
+                .find_map(|(_, tree)| {
+                    if !matches!(tree.kind, TreeKind::Ident(_)) {
+                        return None;
+                    }
+                    matches!(
+                        store.types.get(tree.ty),
+                        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                            if store.symbols.get(*symbol).kind == SymbolKind::Parameter
+                    )
+                    .then_some(tree.ty)
+                })
+                .unwrap();
+            typed_ast.get_mut(application.function).ty = parameter_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        result,
+        PickleError::Reference {
+            reason: ReferenceError::NotRegistered,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn same_spelled_class_operator_does_not_replace_boolean_intrinsic() {
+    let source = "package example\nclass CustomLogic:\n  def &&(other: Boolean): Boolean = other\n  def both(a: Boolean, b: Boolean): Boolean = a && b\n";
+    let (_, output) = source_outputs_named(source, "CustomLogic.scala", |_| {}).unwrap();
+    dotty_tasty::tasty::TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
 }
 
 #[test]
