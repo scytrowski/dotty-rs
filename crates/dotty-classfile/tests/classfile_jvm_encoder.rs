@@ -1271,6 +1271,16 @@ fn parameterized_direct_super_constructor_prologue_verifies_with_jdk() {
         Ok(())
     })
     .unwrap();
+    base.add_instance_method("<init>", "(I)V", |code| {
+        code.aload(0)?;
+        code.invokespecial("java/lang/Object", "<init>", "()V")?;
+        code.aload(0)?;
+        code.iload(1)?;
+        code.putfield("example/Base", "seed", "I")?;
+        code.return_void()?;
+        Ok(())
+    })
+    .unwrap();
     base.add_instance_method("seed", "()I", |code| {
         code.aload(0)?;
         code.getfield("example/Base", "seed", "I")?;
@@ -1310,6 +1320,15 @@ fn parameterized_direct_super_constructor_prologue_verifies_with_jdk() {
             Ok(())
         })
         .unwrap();
+    derived
+        .add_instance_method("<init>", "()V", |code| {
+            code.aload(0)?;
+            code.iconst(123_456)?;
+            code.invokespecial("example/Base", "<init>", "(I)V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
 
     fs::create_dir_all(directory.path().join("example")).unwrap();
     for (name, bytes) in [
@@ -1327,7 +1346,7 @@ fn parameterized_direct_super_constructor_prologue_verifies_with_jdk() {
     let harness = directory.path().join("ParameterizedSuperHarness.java");
     fs::write(
         &harness,
-        "public class ParameterizedSuperHarness { public static void main(String[] args) { example.Dep dep = new example.Dep(); example.Derived value = new example.Derived(42, true, dep); if (value.seed() != 42 || !value.enabled() || value.dep() != dep) throw new AssertionError(); System.out.println(\"parameterized-super=ok\"); } }\n",
+        "public class ParameterizedSuperHarness { public static void main(String[] args) { example.Dep dep = new example.Dep(); example.Derived value = new example.Derived(42, true, dep); if (value.seed() != 42 || !value.enabled() || value.dep() != dep) throw new AssertionError(); if (new example.Derived().seed() != 123456) throw new AssertionError(); System.out.println(\"parameterized-super=ok\"); } }\n",
     )
     .unwrap();
     let directory_arg = directory.path().to_str().unwrap();

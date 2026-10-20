@@ -1282,6 +1282,10 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
             Instruction::IConst(_) | Instruction::Bipush(_) | Instruction::Sipush(_) => {
                 ConstructorPrologueValue::Int
             }
+            Instruction::Ldc(constant @ LdcConstant::Integer(_)) => {
+                resolver.ldc_kind(instruction_index, constant, constant_pool)?;
+                ConstructorPrologueValue::Int
+            }
             Instruction::ILoad(index) => match parameter_locals.get(usize::from(index.get())) {
                 Some(ConstructorParameterLocal::Int) => ConstructorPrologueValue::Int,
                 _ => {
@@ -6080,6 +6084,8 @@ mod tests {
         let object_arg = builder
             .method_ref("example/Base", "<init>", "(Ljava/lang/Object;)V")
             .unwrap();
+        let integer_constants = [32_767, 32_768, -32_768, -32_769, i32::MIN, i32::MAX]
+            .map(|value| (value, builder.integer(value).unwrap()));
         let wrong_owner = builder.method_ref("example/Dep", "<init>", "(I)V").unwrap();
         let returning_constructor = builder
             .method_ref("example/Base", "<init>", "(I)I")
@@ -6159,6 +6165,37 @@ mod tests {
                 max_locals: 1,
             })
         );
+
+        for (_, integer_constant) in integer_constants {
+            let ldc_prologue = [
+                Instruction::ALoad(LocalIndex::new(0)),
+                Instruction::Ldc(LdcConstant::Integer(operand(integer_constant))),
+                invoke(int_arg),
+                Instruction::Return,
+            ];
+            assert_eq!(
+                analyze_constructor("()V", &ldc_prologue),
+                Ok(CodeAnalysis {
+                    max_stack: 2,
+                    max_locals: 1,
+                })
+            );
+        }
+
+        let wrong_ldc_operand = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::Ldc(LdcConstant::Integer(operand(child))),
+            invoke(int_arg),
+            Instruction::Return,
+        ];
+        assert!(matches!(
+            analyze_constructor("()V", &wrong_ldc_operand),
+            Err(AnalysisError::InvalidConstantPoolOperand {
+                instruction: 1,
+                expected: ConstantPoolOperandKind::IntegerConstant,
+                ..
+            })
+        ));
 
         let no_arguments = [Instruction::ALoad(LocalIndex::new(0)), invoke(int_arg)];
         assert_eq!(
