@@ -982,6 +982,29 @@ fn source_outputs_named_with_tree_edits(
     ),
     edit: impl FnOnce(&mut PicklePlan<'_>),
 ) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
+    source_outputs_named_with_tree_edits_and_pickle_limits(
+        text,
+        source_name,
+        validation_limits,
+        PickleLimits::default(),
+        edit_trees,
+        edit,
+    )
+}
+
+fn source_outputs_named_with_tree_edits_and_pickle_limits(
+    text: &str,
+    source_name: &str,
+    validation_limits: ValidationLimits,
+    pickle_limits: PickleLimits,
+    edit_trees: impl FnOnce(
+        &mut AstArena<Untyped>,
+        &mut AstArena<Typed>,
+        &mut dotty_typer::SourceTypedIndex,
+        &SemanticStore,
+    ),
+    edit: impl FnOnce(&mut PicklePlan<'_>),
+) -> Result<(DeclarationSkeleton, PickledTasty), PickleError> {
     let source = SourceId::from_index(7);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -1205,7 +1228,7 @@ fn source_outputs_named_with_tree_edits(
         | TreeKind::Block(_) => None,
         other => panic!("unexpected typed method body: {other:?}"),
     };
-    let output = checked.pickle()?;
+    let output = checked.pickle_with_limits(pickle_limits)?;
     for method in &methods {
         assert_eq!(output.body(method.symbol), method.body);
     }
@@ -1892,6 +1915,76 @@ fn boolean_short_circuit_selection_must_be_registered() {
             ..
         }
     ));
+}
+
+#[test]
+fn boolean_selection_name_must_match_its_canonical_target() {
+    let result = source_outputs_named_with_tree_edits(
+        LOGIC,
+        "Logic.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, store| {
+            let source_operator = |expected: &str| {
+                source_ast
+                    .iter()
+                    .find_map(|(source_id, tree)| {
+                        let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = tree.kind else {
+                            return None;
+                        };
+                        (store.names.resolve(infix.op.text()) == expected).then_some(source_id)
+                    })
+                    .unwrap()
+            };
+            let selected_function = |operator: &str| {
+                let source_id = source_operator(operator);
+                let typed_id = bindings.get(SourceId::from_index(7), source_id).unwrap();
+                let TreeKind::Apply(application) = &typed_ast.get(typed_id).kind else {
+                    panic!("expected typed Boolean operator application")
+                };
+                application.function
+            };
+            let and_function = selected_function("&&");
+            let or_function = selected_function("||");
+            let or_name = match &typed_ast.get(or_function).kind {
+                TreeKind::Select(selection) => selection.name,
+                _ => panic!("expected typed || selection"),
+            };
+            let TreeKind::Select(and_selection) = &mut typed_ast.get_mut(and_function).kind else {
+                panic!("expected typed && selection")
+            };
+            and_selection.name = or_name;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(result, PickleError::SourceShape { .. }));
+}
+
+#[test]
+fn nested_boolean_negations_obey_projection_depth_limit() {
+    let source = "package example\nclass NestedNegation:\n  def run(a: Boolean): Boolean = !(!a)\n";
+    let error = source_outputs_named_with_tree_edits_and_pickle_limits(
+        source,
+        "NestedNegation.scala",
+        ValidationLimits::default(),
+        PickleLimits {
+            projection: ProjectionLimits {
+                max_expression_depth: 0,
+                ..ProjectionLimits::default()
+            },
+            ..PickleLimits::default()
+        },
+        |_, _, _, _| {},
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
 }
 
 #[test]
