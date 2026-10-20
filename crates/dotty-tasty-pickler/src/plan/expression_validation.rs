@@ -140,24 +140,43 @@ impl Validator<'_, '_> {
                 ty: typed_function.ty,
             });
         };
-        let symbols = p
+        let int_symbols = p
             .definitions
             .int_primitive_operator_symbols(p.store)
             .ok_or(PickleError::BuiltinIdentity {
                 builtin: Builtin::Int,
                 ty: p.definitions.int,
             })?;
-        let index = symbols.all().iter().position(|&symbol| symbol == *target);
-        let Some(index) = index else {
+        let int_index = int_symbols
+            .all()
+            .iter()
+            .position(|&symbol| symbol == *target);
+        let boolean_symbols =
+            p.definitions
+                .boolean_primitive_operator_ids()
+                .ok_or(PickleError::BuiltinIdentity {
+                    builtin: Builtin::Boolean,
+                    ty: p.definitions.boolean,
+                })?;
+        let (operator_name, operand_type, operator_result) = if let Some(index) = int_index {
+            (
+                ["+", "-", "*", "/", "%", "<", "<=", ">", ">="][index],
+                p.definitions.int,
+                if index < 5 {
+                    p.definitions.int
+                } else {
+                    p.definitions.boolean
+                },
+            )
+        } else if *target == boolean_symbols.and_then {
+            ("&&", p.definitions.boolean, p.definitions.boolean)
+        } else if *target == boolean_symbols.or_else {
+            ("||", p.definitions.boolean, p.definitions.boolean)
+        } else {
             return Err(PickleError::Reference {
                 symbol: *target,
                 reason: crate::ReferenceError::NotRegistered,
             });
-        };
-        let operator_result = if index < 5 {
-            p.definitions.int
-        } else {
-            p.definitions.boolean
         };
         let typed_result = self.ty(typed_tree.ty)?;
         let result_matches = typed_tree.ty == operator_result
@@ -169,8 +188,10 @@ impl Validator<'_, '_> {
                 ty: typed_tree.ty,
             });
         }
-        let operator_name = self.symbol(*target)?.name;
-        if infix.op != operator_name || selection.name != operator_name {
+        let source_operator = self.name_text(infix.op.text())?;
+        let selected_name = self.symbol(*target)?.name;
+        let selected_operator = self.name_text(selected_name.text())?;
+        if source_operator != operator_name || selected_operator != operator_name {
             return Err(PickleError::SourceShape {
                 tree: source_id,
                 expected: SourceRole::Body,
@@ -188,9 +209,128 @@ impl Validator<'_, '_> {
                 reason: crate::ReferenceError::Owner,
             });
         }
-        self.validate_int_expression(infix.left, selection.qualifier, method, depth + 1, visited)?;
-        self.validate_int_expression(infix.right, application.args[0], method, depth + 1, visited)?;
+        if operand_type == p.definitions.int {
+            self.validate_int_expression(
+                infix.left,
+                selection.qualifier,
+                method,
+                depth + 1,
+                visited,
+            )?;
+            self.validate_int_expression(
+                infix.right,
+                application.args[0],
+                method,
+                depth + 1,
+                visited,
+            )?;
+        } else {
+            self.validate_if_condition(
+                infix.left,
+                selection.qualifier,
+                method,
+                depth + 1,
+                visited,
+            )?;
+            self.validate_if_condition(
+                infix.right,
+                application.args[0],
+                method,
+                depth + 1,
+                visited,
+            )?;
+        }
         Ok(operator_result)
+    }
+
+    fn validate_boolean_prefix(
+        &mut self,
+        source_id: TreeId<Untyped>,
+        typed_id: TreeId<Typed>,
+        method: &MethodPicklePlan,
+        depth: usize,
+        visited: &mut HashSet<TreeId<Typed>>,
+    ) -> Result<(), PickleError> {
+        let depth_limit = self.limits.expression_depth_limit();
+        if depth > depth_limit {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: depth_limit,
+            });
+        }
+        self.charge(1)?;
+        if !visited.insert(typed_id) {
+            return Err(PickleError::RepeatedExpression { tree: typed_id });
+        }
+        let source = self.source_tree(source_id)?;
+        let typed = self
+            .plan
+            .typed_ast
+            .try_get(typed_id)
+            .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        self.source_typed_binding(source_id, typed_id)?;
+        self.paired_source_typed_span(source.position, typed.position, typed_id)?;
+        let (TreeKind::PhaseSpecific(UntypedNode::PrefixOp(prefix)), TreeKind::Select(selection)) =
+            (&source.kind, &typed.kind)
+        else {
+            return Err(PickleError::SourceShape {
+                tree: source_id,
+                expected: SourceRole::Body,
+            });
+        };
+        if self.name_text(prefix.op.text())? != "!" {
+            return Err(PickleError::SourceShape {
+                tree: source_id,
+                expected: SourceRole::Body,
+            });
+        }
+        let Type::TermRef {
+            prefix: selected_prefix,
+            target: TermRefTarget::Symbol(target),
+        } = self.ty(typed.ty)?
+        else {
+            return Err(PickleError::BodyType {
+                tree: typed_id,
+                ty: typed.ty,
+            });
+        };
+        let symbols = self
+            .plan
+            .definitions
+            .boolean_primitive_operator_ids()
+            .ok_or(PickleError::BuiltinIdentity {
+                builtin: Builtin::Boolean,
+                ty: self.plan.definitions.boolean,
+            })?;
+        let function_name = self.symbol(*target)?.name;
+        if *target != symbols.unary_not
+            || self.name_text(function_name.text())? != "unary_!"
+            || selection.name != function_name
+            || self.complete(*target)? != self.plan.definitions.boolean
+        {
+            return Err(PickleError::Reference {
+                symbol: *target,
+                reason: crate::ReferenceError::NotRegistered,
+            });
+        }
+        let receiver = self.plan.typed_ast.try_get(selection.qualifier).ok_or(
+            PickleError::InvalidTypedTree {
+                tree: selection.qualifier,
+            },
+        )?;
+        if *selected_prefix != receiver.ty {
+            return Err(PickleError::Reference {
+                symbol: *target,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        self.validate_if_condition(
+            prefix.operand,
+            selection.qualifier,
+            method,
+            depth + 1,
+            visited,
+        )
     }
 
     fn same_class_method_target(
@@ -667,6 +807,13 @@ impl Validator<'_, '_> {
             }
             return Ok(());
         }
+        if matches!(
+            source.kind,
+            TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_))
+        ) && matches!(typed.kind, TreeKind::Select(_))
+        {
+            return self.validate_boolean_prefix(source_id, typed_id, method, depth, visited);
+        }
         self.charge(1)?;
         if !visited.insert(typed_id) {
             return Err(PickleError::RepeatedExpression { tree: typed_id });
@@ -975,6 +1122,17 @@ impl Validator<'_, '_> {
                 });
             }
             return Ok(());
+        }
+        if result_type == p.definitions.boolean
+            && matches!(
+                source_rhs.kind,
+                TreeKind::PhaseSpecific(UntypedNode::PrefixOp(_))
+            )
+            && matches!(node.kind, TreeKind::Select(_))
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_boolean_prefix(rhs, body, method, depth, seen);
         }
         self.source_typed_binding(rhs, body)?;
         self.root_source_typed_span(source_rhs.position, node.position, body)?;
