@@ -465,6 +465,19 @@ impl Validator<'_, '_> {
                 .ok_or(PickleError::InvalidTypedTree { tree: typed_arg })?;
             if matches!(
                 source_argument.kind,
+                TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+            ) {
+                self.validate_int_expression(
+                    source_arg,
+                    typed_arg,
+                    current_method,
+                    depth + 1,
+                    visited,
+                )?;
+                continue;
+            }
+            if matches!(
+                source_argument.kind,
                 TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
             ) && matches!(typed_argument.kind, TreeKind::Apply(_))
             {
@@ -1284,6 +1297,19 @@ impl Validator<'_, '_> {
                         .typed_ast
                         .try_get(typed_arg)
                         .ok_or(PickleError::InvalidTypedTree { tree: typed_arg })?;
+                    if matches!(
+                        source_argument.kind,
+                        TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+                    ) {
+                        self.validate_int_expression(
+                            source_arg,
+                            typed_arg,
+                            method,
+                            depth + 1,
+                            visited,
+                        )?;
+                        continue;
+                    }
                     if matches!(typed_argument.kind, TreeKind::Apply(_))
                         && matches!(
                             source_argument.kind,
