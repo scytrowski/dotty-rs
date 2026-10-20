@@ -869,13 +869,16 @@ impl SourceTyper<'_> {
             return Err(TyperError::UnknownSymbol { symbol });
         }
         let declaration = self.store.symbols.get(symbol);
+        let forbidden_flags = [
+            SymbolFlags::ABSTRACT,
+            SymbolFlags::STATIC,
+            SymbolFlags::EXTENSION,
+        ];
         if declaration.owner != Some(parent)
             || declaration.kind != SymbolKind::Method
-            || declaration.flags.contains(
-                SymbolFlags::ABSTRACT
-                    .union(SymbolFlags::STATIC)
-                    .union(SymbolFlags::EXTENSION),
-            )
+            || forbidden_flags
+                .iter()
+                .any(|flag| declaration.flags.contains(*flag))
             || declaration.visibility != Visibility::Public
         {
             return Err(TyperError::UnsupportedSuper {
@@ -884,18 +887,44 @@ impl SourceTyper<'_> {
                 reason: "selected parent member is not a public concrete instance method",
             });
         }
+        if let Some(
+            SourceDefinition::Canonical { source, tree }
+            | SourceDefinition::Derived { source, tree },
+        ) = self.index.definition_of(symbol)
+            && source == self.source
+            && !matches!(
+                self.arena.try_get(tree).map(|node| &node.kind),
+                Some(TreeKind::DefDef(definition)) if definition.rhs.is_some()
+            )
+        {
+            return Err(TyperError::UnsupportedSuper {
+                source: self.source,
+                tree_index,
+                reason: "selected source method has no implementation body",
+            });
+        }
         let method_type = self.completed_expression_symbol_info(symbol, info_journal)?;
-        let supported_signature = matches!(
-            self.store.types.try_get(method_type),
-            Some(Type::Method(method))
-                if method.kind == MethodKind::Plain
+        let supported_signature = match self.store.types.try_get(method_type) {
+            Some(Type::Method(method)) => {
+                method.kind == MethodKind::Plain
                     && method.params.iter().all(|parameter| {
                         !parameter.erased
                             && !parameter.varargs
-                            && !matches!(self.store.types.try_get(parameter.ty), Some(Type::ByName { .. }))
+                            && !matches!(
+                                self.store.types.try_get(parameter.ty),
+                                Some(Type::ByName { .. })
+                            )
                     })
-                    && !matches!(self.store.types.try_get(method.result), Some(Type::Method(_) | Type::Poly(_)))
-        );
+                    && !matches!(
+                        self.store.types.try_get(method.result),
+                        Some(Type::Method(_) | Type::Poly(_))
+                    )
+            }
+            // Parameterless `def m: T` is represented by its result type.
+            // Explicit `def m(): T` retains a zero-argument Method wrapper.
+            Some(ty) if !matches!(ty, Type::Poly(_) | Type::ByName { .. }) => true,
+            _ => false,
+        };
         if !supported_signature {
             return Err(TyperError::UnsupportedSuper {
                 source: self.source,

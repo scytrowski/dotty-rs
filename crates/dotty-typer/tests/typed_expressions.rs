@@ -274,7 +274,7 @@ fn types_a_monomorphic_application_through_the_public_pipeline() {
 
 #[test]
 fn types_explicit_super_calls_to_direct_parent_method_symbols() {
-    let text = "class Base { def value(): Int = 10; def add(x: Int): Int = x + 2 }; class Derived extends Base { override def value(): Int = super.value() + 1; def direct(): Int = super.add(4); def virtualCall(): Int = this.add(4) }";
+    let text = "class Base { def value(): Int = 10; def plainValue: Int = 12; def add(x: Int): Int = x + 2 }; class Derived extends Base { override def value(): Int = super.value() + 1; def direct(): Int = super.add(4); def parameterless(): Int = super.plainValue; def virtualCall(): Int = this.add(4) }";
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -326,11 +326,17 @@ fn types_explicit_super_calls_to_direct_parent_method_symbols() {
         if method_name == "add" {
             method_symbols.insert("base_add", method);
         }
+        if method_name == "plainValue" {
+            method_symbols.insert("base_plain_value", method);
+        }
         if method_name == "value" && typer.store().symbols.get(method).owner == Some(base_class) {
             method_symbols.insert("base_value", method);
         }
         if let Some(rhs) = definition.rhs
-            && matches!(method_name.as_str(), "value" | "direct" | "virtualCall")
+            && matches!(
+                method_name.as_str(),
+                "value" | "direct" | "parameterless" | "virtualCall"
+            )
         {
             let context = ExpressionContext {
                 lexical: index.declaration_context_of(method).unwrap(),
@@ -350,6 +356,7 @@ fn types_explicit_super_calls_to_direct_parent_method_symbols() {
 
     let base_value = method_symbols["base_value"];
     let base_add = method_symbols["base_add"];
+    let base_plain_value = method_symbols["base_plain_value"];
     let selected_symbols = typed_methods
         .values()
         .flat_map(|root| {
@@ -393,7 +400,34 @@ fn types_explicit_super_calls_to_direct_parent_method_symbols() {
     assert!(selected_symbols.iter().any(|(symbol, qualifier)| {
         *symbol == base_add && matches!(typer.typed_ast().get(*qualifier).kind, TreeKind::This(_))
     }));
-    assert_eq!(source_super_trees.len(), 2);
+    assert!(selected_symbols.iter().any(|(symbol, qualifier)| {
+        *symbol == base_plain_value
+            && matches!(typer.typed_ast().get(*qualifier).kind, TreeKind::Super(_))
+    }));
+    let plain_value_selection = parsed
+        .ast
+        .iter()
+        .find_map(|(source_tree, node)| {
+            let TreeKind::Select(selection) = &node.kind else {
+                return None;
+            };
+            (typer.store().names.resolve(selection.name.text()) == "plainValue"
+                && matches!(parsed.ast.get(selection.qualifier).kind, TreeKind::Super(_)))
+            .then(|| typer.source_typed_index().get(source, source_tree).unwrap())
+        })
+        .unwrap();
+    let plain_value_type = typer.typed_ast().get(plain_value_selection).ty;
+    assert!(matches!(
+        typer.store().types.get(plain_value_type),
+        Type::TermRef { prefix, target: TermRefTarget::Symbol(symbol) }
+            if *symbol == base_plain_value
+                && matches!(typer.store().types.get(*prefix), Type::SuperType { .. })
+    ));
+    assert_eq!(
+        typer.widen_expression_type(plain_value_type).unwrap(),
+        definitions.int
+    );
+    assert_eq!(source_super_trees.len(), 3);
     for source_super in source_super_trees {
         let typed_super = typer
             .source_typed_index()
@@ -441,7 +475,7 @@ fn types_explicit_super_calls_to_direct_parent_method_symbols() {
 
 #[test]
 fn rejects_unsupported_super_owners_members_and_application_shapes() {
-    let text = "class Root { def bad(): Int = super.value() }; class Base { def add(x: Int): Int = x; def value(): Int = 1 }; class Derived extends Base { def missing(): Int = super.missing(); def arity(): Int = super.add(); def argument(): Int = super.add(true); def qualified(): Int = super[Base].value() }";
+    let text = "class Root { def bad(): Int = super.value() }; class Base { def add(x: Int): Int = x; def value(): Int = 1; def plainValue: Int = 2; def abstractValue(): Int; def bodyless(): Int; def staticTarget(): Int = 3; def extensionTarget(): Int = 4 }; class Derived extends Base { def missing(): Int = super.missing(); def arity(): Int = super.add(); def argument(): Int = super.add(true); def qualified(): Int = super[Base].value(); def parameterlessApply(): Int = super.plainValue(); def abstractTarget(): Int = super.abstractValue(); def bodylessTarget(): Int = super.bodyless(); def staticFlagTarget(): Int = super.staticTarget(); def extensionFlagTarget(): Int = super.extensionTarget() }";
     let source = SourceId::from_index(1);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -463,6 +497,21 @@ fn rejects_unsupported_super_owners_members_and_application_shapes() {
         &mut packages,
     )
     .unwrap();
+    for (tree, node) in parsed.ast.iter() {
+        let TreeKind::DefDef(definition) = &node.kind else {
+            continue;
+        };
+        let flag = match store.names.resolve(definition.name.as_name().text()) {
+            "staticTarget" => Some(dotty_core::SymbolFlags::STATIC),
+            "extensionTarget" => Some(dotty_core::SymbolFlags::EXTENSION),
+            _ => None,
+        };
+        if let Some(flag) = flag {
+            let symbol = index.symbol_at(source, tree).unwrap();
+            let flags = store.symbols.get(symbol).flags | flag;
+            store.symbols.get_mut(symbol).flags = flags;
+        }
+    }
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -483,7 +532,16 @@ fn rejects_unsupported_super_owners_members_and_application_shapes() {
             .to_owned();
         if !matches!(
             name.as_str(),
-            "bad" | "missing" | "arity" | "argument" | "qualified"
+            "bad"
+                | "missing"
+                | "arity"
+                | "argument"
+                | "qualified"
+                | "parameterlessApply"
+                | "abstractTarget"
+                | "bodylessTarget"
+                | "staticFlagTarget"
+                | "extensionFlagTarget"
         ) {
             continue;
         }
@@ -495,6 +553,7 @@ fn rejects_unsupported_super_owners_members_and_application_shapes() {
             local_scopes: None,
         };
         outcomes.insert(name, typer.type_expression(rhs, context).unwrap_err());
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
     }
     assert!(matches!(
         outcomes["bad"],
@@ -526,6 +585,29 @@ fn rejects_unsupported_super_owners_members_and_application_shapes() {
             ..
         }
     ));
+    assert!(
+        matches!(
+            outcomes["parameterlessApply"],
+            TyperError::ApplicationCalleeNotMethod { .. }
+        ),
+        "{:?}",
+        outcomes["parameterlessApply"]
+    );
+    for method in ["abstractTarget", "bodylessTarget"] {
+        assert!(matches!(
+            outcomes[method],
+            TyperError::UnsupportedSuper { .. }
+        ));
+    }
+    for method in ["staticFlagTarget", "extensionFlagTarget"] {
+        assert!(matches!(
+            outcomes[method],
+            TyperError::UnsupportedSuper {
+                reason: "selected parent member is not a public concrete instance method",
+                ..
+            }
+        ));
+    }
 }
 
 #[test]
