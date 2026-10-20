@@ -481,6 +481,22 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Algorithms = arithmetic, booleans, short-circuit, eager, sumTo(5)=10", 10,
             ),
+            "example/Loop.tasty": (
+                "example.Loop", r"public int sumTo\(int\)", "LoopRuntime.java",
+                """public final class LoopRuntime {
+  public static void main(String[] args) {
+    example.Loop loop = new example.Loop();
+    int zero = loop.sumTo(0);
+    int one = loop.sumTo(1);
+    int five = loop.sumTo(5);
+    int negative = loop.sumTo(-1);
+    if (zero != 0 || one != 0 || five != 10 || negative != 0)
+      throw new AssertionError("unexpected Loop results");
+    System.out.println("Loop = " + zero + ", " + one + ", " + five + ", " + negative);
+  }
+}
+""", "Loop = 0, 0, 10, 0", 10,
+            ),
         }
         case = runtime_cases.get(relative.as_posix())
         if case is None:

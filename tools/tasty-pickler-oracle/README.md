@@ -12,5 +12,7 @@ the final expression returns `3`; the structural fixture asserts the preceding
 call statements remain in the TASTy stat list. The References case checks
 `new References().first() == 42`. The Mutable case verifies ordered local
 assignments and signed Int overflow through a fresh JVM. Ordinary
+`Loop.tasty` verification compiles a Rust-produced `while` loop and checks
+`sumTo(0)`, `sumTo(1)`, `sumTo(5)`, and `sumTo(-1)` in the fresh JVM. Ordinary
 `cargo test -p tasty-pickler-oracle --locked` uses the checked-in fixtures and
 environment-independent failure controls without invoking Scala.

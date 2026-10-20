@@ -3,6 +3,7 @@ use super::*;
 mod assignment;
 mod block;
 mod local;
+mod while_loop;
 
 impl Validator<'_, '_> {
     fn validate_int_expression(
