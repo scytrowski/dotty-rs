@@ -43,6 +43,32 @@ impl<'a> EncodingContext<'a> {
         Ok(symbols.all()[5..].contains(&target))
     }
 
+    pub(crate) fn is_registered_boolean_short_circuit_target(
+        &self,
+        target: SymbolId,
+    ) -> Result<bool, PickleError> {
+        let symbols = self.definitions.boolean_primitive_operator_ids().ok_or(
+            PickleError::BuiltinIdentity {
+                builtin: Builtin::Boolean,
+                ty: self.definitions.boolean,
+            },
+        )?;
+        Ok(target == symbols.and_then || target == symbols.or_else)
+    }
+
+    pub(crate) fn is_registered_boolean_unary_not_target(
+        &self,
+        target: SymbolId,
+    ) -> Result<bool, PickleError> {
+        let symbols = self.definitions.boolean_primitive_operator_ids().ok_or(
+            PickleError::BuiltinIdentity {
+                builtin: Builtin::Boolean,
+                ty: self.definitions.boolean,
+            },
+        )?;
+        Ok(target == symbols.unary_not)
+    }
+
     /// Projects one registered primitive operator selection.
     ///
     /// `receiver` is the already projected source receiver, and
