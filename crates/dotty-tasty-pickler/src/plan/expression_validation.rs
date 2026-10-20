@@ -12,6 +12,13 @@ impl Validator<'_, '_> {
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
+        let expression_depth_limit = self.limits.expression_depth_limit();
+        if depth > expression_depth_limit {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: expression_depth_limit,
+            });
+        }
         let source = self.source_tree(source_id)?;
         let typed = self
             .plan
@@ -19,6 +26,12 @@ impl Validator<'_, '_> {
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
         match (&source.kind, &typed.kind) {
+            (TreeKind::PhaseSpecific(UntypedNode::Parens(parens)), _) => {
+                self.source_typed_binding(source_id, typed_id)?;
+                self.span(source.position)?;
+                self.charge(1)?;
+                self.validate_int_expression(parens.inner, typed_id, method, depth + 1, visited)
+            }
             (TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)), TreeKind::Apply(_)) => {
                 self.validate_primitive_application(source_id, typed_id, method, depth, visited)
             }
@@ -112,6 +125,11 @@ impl Validator<'_, '_> {
                 expected: SourceRole::Body,
             });
         };
+        self.paired_source_typed_span(
+            source_tree.position,
+            typed_function.position,
+            application.function,
+        )?;
         let Type::TermRef {
             prefix,
             target: TermRefTarget::Symbol(target),
@@ -864,6 +882,20 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(body)
             .ok_or(PickleError::InvalidTypedTree { tree: body })?;
+        if matches!(
+            source_rhs.kind,
+            TreeKind::PhaseSpecific(UntypedNode::Parens(_))
+        ) {
+            if result_type != p.definitions.int {
+                return Err(PickleError::BodyType {
+                    tree: body,
+                    ty: node.ty,
+                });
+            }
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_int_expression(rhs, body, method, depth, seen);
+        }
         if matches!(
             source_rhs.kind,
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))

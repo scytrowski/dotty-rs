@@ -229,10 +229,11 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
     int nested = arithmetic.nested(2, 3, 4);
     int throughCall = arithmetic.throughCall(6, 7);
     int local = arithmetic.local(6, 7);
+    int compute = arithmetic.compute(2, 3);
     if (add != Integer.MIN_VALUE || subtract != Integer.MAX_VALUE ||
         multiply != Integer.MIN_VALUE || divide != -2 ||
         overflowDivide != Integer.MIN_VALUE || remainder != -1 ||
-        overflowRemainder != 0 || nested != 14 || throughCall != 13 || local != 13)
+        overflowRemainder != 0 || nested != 14 || throughCall != 13 || local != 13 || compute != 9)
       throw new AssertionError("unexpected Arithmetic results");
     try {
       arithmetic.divide(1, 0);
@@ -240,10 +241,10 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
     } catch (ArithmeticException expected) { }
     System.out.println("Arithmetic = " + add + ", " + subtract + ", " + multiply +
         ", " + divide + ", " + overflowDivide + ", " + remainder + ", " +
-        overflowRemainder + ", " + nested + ", " + throughCall + ", " + local);
+        overflowRemainder + ", " + nested + ", " + throughCall + ", " + local + ", " + compute);
   }
 }
-""", "Arithmetic = -2147483648, 2147483647, -2147483648, -2, -2147483648, -1, 0, 14, 13, 13", 14,
+""", "Arithmetic = -2147483648, 2147483647, -2147483648, -2, -2147483648, -1, 0, 14, 13, 13, 9", 14,
             ),
             "example/Answer.tasty": (
                 "example.Answer", r"public int value\(\)", "AnswerRuntime.java",
@@ -510,7 +511,7 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                     r"public int multiply\(int, int\)", r"public int divide\(int, int\)",
                     r"public int remainder\(int, int\)",
                     r"public int nested\(int, int, int\)", r"public int throughCall\(int, int\)",
-                    r"public int local\(int, int\)",
+                    r"public int local\(int, int\)", r"public int compute\(int, int\)",
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Arithmetic class has unexpected signatures: {javap}")
