@@ -29,6 +29,26 @@ pub(super) fn is_direct_subtype(
         .any(|superclass| superclass.class() == found && superclass.parent() == expected))
 }
 
+/// Returns whether a JVM value can flow to `expected` within one validated
+/// compilation unit. References may use only exact identity or the verified
+/// direct-parent edge; primitive values remain invariant.
+pub(super) fn is_assignable(
+    unit: Option<&JvmCompilationUnit<'_>>,
+    found: JvmType,
+    expected: JvmType,
+    definitions: &Definitions,
+) -> Result<bool, JvmCodegenError> {
+    if found == expected {
+        return Ok(true);
+    }
+    let (JvmType::Reference(found), JvmType::Reference(expected), Some(unit)) =
+        (found, expected, unit)
+    else {
+        return Ok(false);
+    };
+    is_direct_subtype(unit, found, expected, definitions)
+}
+
 pub(super) fn project_type(
     unit: &JvmCompilationUnit<'_>,
     ty: TypeId,

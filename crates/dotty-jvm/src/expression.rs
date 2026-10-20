@@ -1185,7 +1185,7 @@ fn emit_field_assignment(
         })?;
     match emit_expression(context, rhs, code, depth + 1)? {
         Flow::Diverges => Ok(Flow::Diverges),
-        Flow::Value(found) if found == field_type => {
+        Flow::Value(found) if flow_assignable(context, found, field_type)? => {
             match found {
                 JvmType::Reference(_) => code.astore(value_slot),
                 JvmType::Int | JvmType::Boolean => code.istore(value_slot),
@@ -1721,7 +1721,11 @@ fn emit_object_creation(
         .zip(target.argument_types().iter().copied())
     {
         let found = emit_expression(context, argument, code, depth + 1)?;
-        if found != Flow::Value(expected) {
+        let assignable = match found {
+            Flow::Value(found) => flow_assignable(context, found, expected)?,
+            Flow::Unit | Flow::Diverges => false,
+        };
+        if !assignable {
             return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
                 tree: tree_id,
                 argument,
@@ -2693,16 +2697,7 @@ fn reference_assignable(
     expected: JvmType,
     definitions: &Definitions,
 ) -> Result<bool, JvmCodegenError> {
-    if found == expected {
-        return Ok(true);
-    }
-    let (JvmType::Reference(found), JvmType::Reference(expected)) = (found, expected) else {
-        return Ok(false);
-    };
-    let Some(unit) = unit else {
-        return Ok(false);
-    };
-    crate::reference::is_direct_subtype(unit, found, expected, definitions)
+    crate::reference::is_assignable(unit, found, expected, definitions)
 }
 
 fn reference_type_mismatch(expected: JvmType, found: JvmType) -> Option<JvmCodegenError> {

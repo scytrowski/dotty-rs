@@ -6058,6 +6058,78 @@ fn derived_values_flow_to_base_parameters_and_returns() {
 }
 
 #[test]
+fn derived_values_flow_to_supported_constructor_arguments_and_reference_fields() {
+    let output = TestOutputDirectory::new("derived-to-base-constructor-and-field");
+    let source = "class Base { def value(): Int = 10 }\nclass Derived extends Base { override def value(): Int = 42 }\nclass Holder(initial: Base) { private var current: Base = initial; def replace(next: Derived): Unit = { current = next }; def get(): Base = current }\nclass Runner { def fromParameter(next: Derived): Holder = new Holder(next); def fromLocal(): Holder = { val next = new Derived(); new Holder(next) } }\n";
+    let artifacts = compile_source_classes(
+        source,
+        "DerivedToBaseConstructorAndField.scala",
+        output.path(),
+    )
+    .expect("verified Derived values flow to supported constructor and field positions");
+
+    let holder = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Holder")
+        .expect("Holder class is emitted");
+    let mut reader = Reader::new(holder.class.bytes());
+    let holder = ClassFile::decode(&mut reader).expect("decode emitted Holder class");
+    let constructor = holder
+        .methods
+        .iter()
+        .find(|method| holder.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .expect("Holder constructor is emitted");
+    assert_eq!(
+        holder.constant_pool.utf8(constructor.descriptor_index),
+        Ok("(LBase;)V")
+    );
+    let replace = emitted_method_code(&holder, "replace");
+    assert_field_reference(&holder, replace, 0xb5, "Holder", "current", "LBase;");
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output
+            .path()
+            .join("DerivedToBaseConstructorAndFieldHarness.java");
+        fs::write(
+            &harness,
+            "public final class DerivedToBaseConstructorAndFieldHarness { public static void main(String[] args) { Runner runner = new Runner(); Holder fromParameter = runner.fromParameter(new Derived()); if (fromParameter.get().value() != 42) throw new AssertionError(\"constructor parameter\"); fromParameter.replace(new Derived()); if (fromParameter.get().value() != 42) throw new AssertionError(\"reference field assignment\"); if (runner.fromLocal().get().value() != 42) throw new AssertionError(\"constructor local\"); System.out.println(\"Derived-to-Base constructor and field verified\"); } }\n",
+        )
+        .expect("write constructor and field harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected constructor and field harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "DerivedToBaseConstructorAndFieldHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected constructor and field classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "Derived-to-Base constructor and field verified"
+        );
+    }
+}
+
+#[test]
 fn source_typing_rejects_reverse_and_unrelated_reference_arguments() {
     for (label, source) in [
         (
