@@ -68,28 +68,11 @@ fn append_current_receiver(
             method: caller.symbol(),
         });
     }
-    let target_is_declared_here = class
+    if !class
         .methods()
         .iter()
         .any(|method| method.symbol() == target.method_symbol())
-        && target.owner_internal_name() == class.identity().internal_name();
-    let target_is_inherited_from_direct_parent = class
-        .superclass()
-        .filter(|superclass| {
-            superclass.class() == class_symbol
-                && superclass.parent_internal_name() == target.owner_internal_name()
-        })
-        .is_some_and(|superclass| {
-            class.dispatch_methods().iter().any(|entry| {
-                entry.receiver_class() == class_symbol
-                    && entry.declaring_class() == superclass.parent()
-                    && entry.method() == target.method_symbol()
-                    && entry.name() == target.method_name()
-                    && entry.descriptor().as_str() == target.descriptor().as_str()
-            })
-        });
-    if target.receiver_class() != class_symbol
-        || (!target_is_declared_here && !target_is_inherited_from_direct_parent)
+        || target.owner_internal_name() != class.identity().internal_name()
     {
         return Err(JvmCodegenError::MethodNotInJvmPlan {
             tree: call_id,
@@ -267,7 +250,7 @@ pub(super) fn lower_method_body(
     let mut code = CodeBuilder::new();
     let mut context = JvmLoweringContext::new(store, typed_ast, definitions, method);
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
-    append_method_return(None, definitions, method, body, flow, &mut code)?;
+    append_method_return(method, body, flow, &mut code)?;
     Ok(code)
 }
 
@@ -308,7 +291,7 @@ pub(super) fn lower_planned_method_body(
     context.local_layout = Some(&local_layout);
     context.call_context = Some((unit, class, &metadata));
     let flow = emit_expression(&mut context, body, &mut code, 0)?;
-    append_method_return(Some(unit), definitions, method, body, flow, &mut code)?;
+    append_method_return(method, body, flow, &mut code)?;
     // Branched references are checked after all symbolic references have been
     // staged in ClassFileBuilder. Its encode preflight analyzes CFG states and
     // generates frames before `emit_class` returns or publishes the class.
@@ -316,29 +299,18 @@ pub(super) fn lower_planned_method_body(
 }
 
 fn append_method_return(
-    unit: Option<&JvmCompilationUnit<'_>>,
-    definitions: &Definitions,
     method: &JvmMethodMetadata,
     body: TreeId<Typed>,
     flow: Flow,
     code: &mut CodeBuilder,
 ) -> Result<(), JvmCodegenError> {
-    if let (
-        JvmReturnType::Value(JvmType::Reference(expected)),
-        Flow::Value(JvmType::Reference(found)),
-    ) = (method.descriptor().result(), flow)
-        && reference_assignable(
-            unit,
-            JvmType::Reference(found),
-            JvmType::Reference(expected),
-            definitions,
-        )?
-    {
-        code.areturn()
-            .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
-        return Ok(());
-    }
     match (method.descriptor().result(), flow) {
+        (JvmReturnType::Value(JvmType::Reference(ty)), Flow::Value(JvmType::Reference(found)))
+            if ty == found =>
+        {
+            code.areturn()
+                .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
+        }
         (JvmReturnType::Value(expected), Flow::Value(found)) if expected == found => {
             code.ireturn()
                 .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
@@ -1185,7 +1157,7 @@ fn emit_field_assignment(
         })?;
     match emit_expression(context, rhs, code, depth + 1)? {
         Flow::Diverges => Ok(Flow::Diverges),
-        Flow::Value(found) if flow_assignable(context, found, field_type)? => {
+        Flow::Value(found) if found == field_type => {
             match found {
                 JvmType::Reference(_) => code.astore(value_slot),
                 JvmType::Int | JvmType::Boolean => code.istore(value_slot),
@@ -1262,22 +1234,12 @@ fn emit_block(
     let expression_type = context.tree(expr)?.ty;
     let flow = emit_expression(context, expr, code, depth + 1)?;
     match flow {
-        Flow::Value(value) => {
-            let block_matches =
-                block_types_match(context, tree_id, expr, declared_type, expression_type)?;
-            let expected = block_value_type(context, tree_id, declared_type, Some(expr))?;
-            if block_matches
-                && let Some(expected) = expected
-                && flow_assignable(context, value, expected)?
-            {
-                Ok(flow)
-            } else {
-                Err(JvmCodegenError::BlockResultTypeMismatch {
-                    tree: tree_id,
-                    declared: declared_type,
-                    found: public_flow(flow),
-                })
-            }
+        Flow::Value(value)
+            if block_types_match(context, tree_id, expr, declared_type, expression_type)?
+                && block_value_type(context, tree_id, declared_type, Some(expr))?
+                    == Some(value) =>
+        {
+            Ok(flow)
         }
         Flow::Unit
             if is_unit_type(context.store, declared_type, context.definitions)
@@ -1334,16 +1296,12 @@ fn emit_local_declaration(
     })?;
 
     let flow = emit_expression(context, rhs, code, depth + 1)?;
-    let assignable = match flow {
-        Flow::Value(found) => flow_assignable(context, found, local.ty())?,
-        Flow::Unit | Flow::Diverges => false,
-    };
-    if !assignable {
-        if let Flow::Value(found) = flow
-            && let Some(error) = reference_type_mismatch(local.ty(), found)
-        {
-            return Err(error);
-        }
+    if let Flow::Value(found) = flow
+        && let Some(error) = reference_type_mismatch(local.ty(), found)
+    {
+        return Err(error);
+    }
+    if flow != Flow::Value(local.ty()) {
         return Err(JvmCodegenError::LocalInitializerFlowMismatch {
             method,
             declaration,
@@ -1352,6 +1310,7 @@ fn emit_local_declaration(
             found: public_flow(flow),
         });
     }
+
     if matches!(local.ty(), JvmType::Reference(_)) {
         code.astore(usize::from(local.slot()))
             .map_err(|error| JvmCodegenError::CodeBuilder {
@@ -1387,10 +1346,7 @@ fn block_types_match(
 
     let declared = block_value_type(context, tree, declared, Some(expression_tree))?;
     let expression = block_value_type(context, tree, expression, Some(expression_tree))?;
-    match (declared, expression) {
-        (Some(expected), Some(found)) => flow_assignable(context, found, expected),
-        _ => Ok(false),
-    }
+    Ok(declared.is_some() && declared == expression)
 }
 
 fn block_value_type(
@@ -1631,7 +1587,7 @@ fn emit_apply(
 
     for (index, (argument, expected)) in arguments.into_iter().zip(parameters).enumerate() {
         let flow = emit_expression(context, argument, code, depth + 1)?;
-        if !call_argument_assignable(unit, flow, expected, context.definitions)? {
+        if flow != Flow::Value(expected) {
             return Err(JvmCodegenError::JvmCallArgumentMismatch {
                 tree: tree_id,
                 argument,
@@ -1721,11 +1677,7 @@ fn emit_object_creation(
         .zip(target.argument_types().iter().copied())
     {
         let found = emit_expression(context, argument, code, depth + 1)?;
-        let assignable = match found {
-            Flow::Value(found) => flow_assignable(context, found, expected)?,
-            Flow::Unit | Flow::Diverges => false,
-        };
-        if !assignable {
+        if found != Flow::Value(expected) {
             return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
                 tree: tree_id,
                 argument,
@@ -2620,18 +2572,7 @@ fn emit_return(
                 expected,
                 found: None,
             }),
-            Flow::Value(found) => {
-                let assignable = match expected {
-                    JvmReturnType::Value(expected) => flow_assignable(context, found, expected)?,
-                    JvmReturnType::Void => false,
-                };
-                if !assignable {
-                    return Err(JvmCodegenError::ReturnValueTypeMismatch {
-                        tree: tree_id,
-                        expected,
-                        found: Some(found),
-                    });
-                }
+            Flow::Value(found) if expected == JvmReturnType::Value(found) => {
                 match found {
                     JvmType::Reference(_) => code.areturn(),
                     JvmType::Int | JvmType::Boolean => code.ireturn(),
@@ -2642,6 +2583,11 @@ fn emit_return(
                 })?;
                 Ok(Flow::Diverges)
             }
+            Flow::Value(found) => Err(JvmCodegenError::ReturnValueTypeMismatch {
+                tree: tree_id,
+                expected,
+                found: Some(found),
+            }),
         },
         (None, JvmReturnType::Void) => {
             code.return_void()
@@ -2668,36 +2614,6 @@ fn public_flow(flow: Flow) -> JvmExpressionFlow {
         Flow::Unit => JvmExpressionFlow::Unit,
         Flow::Diverges => JvmExpressionFlow::Diverges,
     }
-}
-
-fn call_argument_assignable(
-    unit: &JvmCompilationUnit<'_>,
-    found: Flow,
-    expected: JvmType,
-    definitions: &Definitions,
-) -> Result<bool, JvmCodegenError> {
-    let Flow::Value(found) = found else {
-        return Ok(false);
-    };
-    reference_assignable(Some(unit), found, expected, definitions)
-}
-
-fn flow_assignable(
-    context: &JvmLoweringContext<'_>,
-    found: JvmType,
-    expected: JvmType,
-) -> Result<bool, JvmCodegenError> {
-    let unit = context.call_context.map(|(unit, _, _)| unit);
-    reference_assignable(unit, found, expected, context.definitions)
-}
-
-fn reference_assignable(
-    unit: Option<&JvmCompilationUnit<'_>>,
-    found: JvmType,
-    expected: JvmType,
-    definitions: &Definitions,
-) -> Result<bool, JvmCodegenError> {
-    crate::reference::is_assignable(unit, found, expected, definitions)
 }
 
 fn reference_type_mismatch(expected: JvmType, found: JvmType) -> Option<JvmCodegenError> {

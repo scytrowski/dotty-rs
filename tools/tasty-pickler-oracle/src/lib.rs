@@ -20,9 +20,7 @@ fn tag_name(tag: u8) -> String {
         VALDEF_TAG => "VALDEF",
         PARAM_TAG => "PARAM",
         APPLY_TAG => "APPLY",
-        ASSIGN_TAG => "ASSIGN",
         SELECTIN_TAG => "SELECTin",
-        SELECT_TAG => "SELECT",
         NEW_TAG => "NEW",
         THIS_TAG => "THIS",
         TYPEREF_TAG => "TYPEREF",
@@ -31,6 +29,7 @@ fn tag_name(tag: u8) -> String {
         TERMREFPKG_TAG => "TERMREFpkg",
         TYPEREFPKG_TAG => "TYPEREFpkg",
         IDENT_TAG => "IDENT",
+        SELECT_TAG => "SELECT",
         QUALTHIS_TAG => "QUALTHIS",
         IDENTTPT_TAG => "IDENTtpt",
         SHAREDTYPE_TAG => "SHAREDtype",
@@ -47,10 +46,8 @@ fn tag_name(tag: u8) -> String {
         SPLITCLAUSE_TAG => "SPLITCLAUSE",
         STABLE_TAG => "STABLE",
         ABSTRACT_TAG => "ABSTRACT",
-        MUTABLE_TAG => "MUTABLE",
         BLOCK_TAG => "BLOCK",
         IF_TAG => "IF",
-        WHILE_TAG => "WHILE",
         TYPED_TAG => "TYPED",
         _ => return format!("tag-{tag}"),
     };
@@ -309,20 +306,6 @@ pub fn inspect(bytes: &[u8], raw_addresses: bool) -> Result<Value> {
                     row["condition"] = json!(children[0]);
                     row["then"] = json!(children[1]);
                     row["else"] = json!(children[2]);
-                }
-                StructuredNode::Assign(_) => {
-                    if children.len() != 2 {
-                        return Err("assignment must have a left and right child".into());
-                    }
-                    row["left"] = json!(children[0]);
-                    row["right"] = json!(children[1]);
-                }
-                StructuredNode::While(_) => {
-                    if children.len() != 2 {
-                        return Err("while must have a condition and body".into());
-                    }
-                    row["condition"] = json!(children[0]);
-                    row["body"] = json!(children[1]);
                 }
                 StructuredNode::Parameter(p) => {
                     row["name"] = names.name(p.name())?;

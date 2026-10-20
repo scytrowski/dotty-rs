@@ -76,29 +76,6 @@ pub(super) fn emit_class(
     builder
         .set_access_flags(metadata.identity().access_flags())
         .map_err(|error| class_file_error(class_symbol, None, error))?;
-    let verification_hierarchy = unit
-        .class_hierarchy(definitions)?
-        .internal_name_edges()
-        .into_iter()
-        .map(|edge| {
-            (
-                edge.child_internal_name().to_owned(),
-                edge.parent_internal_name().to_owned(),
-            )
-        });
-    let verification_hierarchy = dotty_classfile::bytecode::ClassHierarchy::from_edges(
-        verification_hierarchy,
-    )
-    .map_err(|error| {
-        class_file_error(
-            class_symbol,
-            None,
-            dotty_classfile::class_file_builder::ClassFileBuildError::Analysis(
-                dotty_classfile::bytecode::AnalysisError::InvalidClassHierarchy(error),
-            ),
-        )
-    })?;
-    builder.set_verification_hierarchy(verification_hierarchy);
     if superclass.parent() != definitions.object_class {
         builder
             .set_super_class(Some(superclass.parent_internal_name()))

@@ -156,8 +156,6 @@ pub enum JvmConstructorInvocationKind {
 }
 
 /// A validated target for a typed instance call on a planned class receiver.
-/// Its symbolic owner is the class declaring the selected method; the
-/// receiver can be that class or its validated direct subclass.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmCallTarget {
     owner_internal_name: String,
@@ -1495,7 +1493,7 @@ impl JvmClassPlan {
         store: &SemanticStore,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, None, definitions, None, None, None)
+        identity::class_metadata(self, store, None, definitions, None, None)
     }
 
     /// Derives class, primitive-field, constructor, and selected method
@@ -1509,7 +1507,7 @@ impl JvmClassPlan {
         typed_ast: &TypedAst,
         definitions: &Definitions,
     ) -> Result<JvmClassMetadata, JvmCodegenError> {
-        identity::class_metadata(self, store, Some(typed_ast), definitions, None, None, None)
+        identity::class_metadata(self, store, Some(typed_ast), definitions, None, None)
     }
 }
 
@@ -1946,14 +1944,13 @@ impl JvmMethodPlan {
 }
 
 impl JvmCompilationUnit<'_> {
-    /// Projects a completed canonical type reference to an exact class in
+    /// Projects a completed canonical type reference to one exact class in
     /// this validated emission unit.
     ///
     /// This does not erase to `java/lang/Object`, follow aliases, or project
-    /// external, generic, anonymous, deeper-inheritance, or otherwise
-    /// unsupported class shapes. The result can describe expression/local
-    /// values and unit-aware method metadata, but it does not enable arbitrary
-    /// reference bytecode emission.
+    /// external, generic, anonymous, inherited, or otherwise unsupported class
+    /// shapes. The result can describe expression/local values and unit-aware
+    /// method metadata, but it does not enable reference bytecode emission.
     pub fn reference_type(
         &self,
         ty: TypeId,
@@ -2036,13 +2033,10 @@ impl JvmCompilationUnit<'_> {
     }
 
     /// Lowers one explicitly planned method body using this unit's validated
-    /// class, field, and method metadata. This method-level path supports
-    /// planned reference values and the validated direct `Derived` to
-    /// `Base` assignment for arguments, immutable local initializers, and
-    /// returns. It can also lower private primitive field reads and mutable
-    /// field assignments; it does not enable arbitrary `Object` upcasts.
-    /// [`emit_class`] installs only fields covered by a validated
-    /// primary constructor.
+    /// class, field, and method metadata. This method-level path supports exact
+    /// planned reference values and can lower private primitive field reads
+    /// and mutable field assignments; [`emit_class`] installs only fields
+    /// covered by a validated primary constructor.
     pub fn lower_method_body(
         &self,
         class: SymbolId,
@@ -2099,12 +2093,9 @@ impl JvmCompilationUnit<'_> {
     /// `call` must identify the complete typed `Apply` tree so the resolver can
     /// reject contextual application and validate the call result. Its
     /// function must be a canonical method reference in an `Ident` or a
-    /// `Select` whose receiver has an exact planned class identity. Its selected
-    /// method must be declared by that class or its validated direct parent and
-    /// appear unchanged in the receiver's effective dispatch metadata.
-    /// Resolution uses the selected method `SymbolId` and this unit's explicit
-    /// emission plan; it does not evaluate arguments, load a receiver, or emit
-    /// instructions.
+    /// `Select` whose receiver has an exact planned class identity. Resolution
+    /// uses the selected method `SymbolId` and this unit's explicit emission plan;
+    /// it does not evaluate arguments, load a receiver, or emit instructions.
     pub fn resolve_same_class_call(
         &self,
         caller_class: SymbolId,
@@ -2120,13 +2111,10 @@ impl JvmCompilationUnit<'_> {
     /// reference-valued planned call with an exact planned class identity.
     ///
     /// The selected `TermRef` symbol, receiver class, owner declaration scope,
-    /// class/method plans, visibility, descriptor, and call result must all
-    /// agree. An inherited target must be the exact planned public method
-    /// declared by the receiver's validated direct parent. This read-only
-    /// resolver emits no instructions; method-body lowering checks direct
-    /// subclass assignability for arguments, immutable local initializers,
-    /// and returns while evaluating each receiver once before arguments in
-    /// source order. Other reference conversions remain unsupported.
+    /// class/method plans, visibility, descriptor, and call result
+    /// must all agree. This read-only resolver emits no instructions and does
+    /// not validate argument flow; method-body lowering performs those checks
+    /// while evaluating the receiver once before arguments in source order.
     pub fn resolve_planned_instance_call(
         &self,
         caller_class: SymbolId,

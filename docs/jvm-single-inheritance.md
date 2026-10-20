@@ -15,8 +15,7 @@ class and `java -Xverify:all` instantiates it and invokes inherited methods.
 The broader `SingleInheritanceAudit.scala` fixture remains a characterization
 of override and subtype behavior. Exact direct-parent override validation now
 records effective dispatch identities without copying inherited bodies into a
-child plan. Inherited calls keep the selected declaration's owner in the JVM
-`Methodref`; the JVM performs dynamic override selection at runtime.
+child plan; inherited-reference compatibility remains a later increment.
 
 ## Current pipeline and identity contracts
 
@@ -25,7 +24,7 @@ Base`, the direct parent resolves to the canonical `Base` `SymbolId`. The
 typer's nominal subtype check walks those completed parent records, so a
 `Derived` argument can satisfy a `Base` formal without changing the argument's
 own class identity or inserting a backend cast. Member lookup returns the
-declaration symbol: an inherited selection such as `derived.doubled()` retains
+declaration symbol: an inherited selection such as `base.doubled()` retains
 the method's declaring owner, `Base`.
 
 The namer records source `override` as `SymbolFlags::OVERRIDE`. This is syntax
@@ -51,17 +50,9 @@ is Object. Its checked hierarchy proof requires a public accessible no-arg
 parent constructor and rejects cycles, deeper chains, external or missing
 parents, and unsupported class shapes before output. Emission uses the proven
 parent's canonical symbol and checked internal name. Instance-call resolution
-accepts the receiver's exact planned class or its validated direct parent as
-the selected method owner. For inherited calls, the resolver confirms the
-canonical method symbol is declared and planned by that parent and appears
-unchanged in the receiver's effective dispatch metadata. Reference
-assignability accepts a `Derived` value where `Base` is required only when the
-same validated direct-parent proof establishes that assignment. The bounded
-conversion applies to method arguments, immutable local initializers, and
-returns; it retains each value's exact source/JVM class identity and emits no
-cast. It does not enable mutable reference locals, arbitrary `Object` upcasts,
-or implicit reference conversions without the unit proof. These checks do not
-use method-name lookup or name-based class identity.
+and reference argument projection still require exact planned class identity;
+they are not generalized by this increment and must not be weakened by name
+comparison or by treating every reference as Object.
 
 Keep the source and class-file identities distinct:
 
@@ -99,14 +90,11 @@ the selected declaration, not from the static receiver type. Thus
 `Base.doubled` calling `Base.value` must reference owner `Base` with the exact
 method name and descriptor and use `invokevirtual`. At runtime the JVM resolves
 that virtual call against the receiver class, so `new Derived()` dispatches to
-`Derived.value`. `Runner.evaluate(base: Base)` must carry a `Base` formal
-descriptor; passing a typed `Derived` value, initializing an immutable `Base`
-local, or returning a `Derived` value from a method declared `Base` is accepted
-only through the validated direct-parent edge. The JVM verifier receives that
-same hierarchy proof, so no `checkcast` is needed. This must not be confused
-with merging two possible values at a control-flow join. A hierarchy-aware
-merge requires a separately defined least upper-bound operation; do not reuse
-the one-directional assignability check.
+`Derived.value`. `Runner.evaluate(base: Base)` should carry a `Base` formal
+descriptor; passing a typed `Derived` value is a source assignment-compatibility
+check. It must not be confused with merging two possible values at a control
+flow join. A hierarchy-aware merge requires a separately defined least upper
+bound operation; do not reuse the one-directional argument subtype check.
 
 This initial slice does not emit bridge methods. A covariant result or any
 override whose JVM name/descriptor does not match the inherited entry point
@@ -125,13 +113,12 @@ publish partial output.
 | --- | --- | --- | --- |
 | `class Base { def value(): Int = 20; def doubled(): Int = value() }` | Frontend and root-class emission support the shape | `Base.super_class = java/lang/Object`; `doubled` uses `invokevirtual Base.value:()I`; ordinary method receiver is initialized `Base` | Root-class source/JVM integration test |
 | `class Derived extends Base {}` | Source pipeline emits the batch when `Base` is a planned public no-arg class with Object as its parent | `Derived.super_class = Base`; constructor invokes `Base.<init>()V` exactly once before ordinary use | Covered by source-backed classfile regression and JDK verifier gate |
-| `def evaluate(base: Base) = base.doubled(); evaluate(new Derived())` | Accepted when the direct `Derived <: Base` proof is present in the emission unit | `evaluate` keeps descriptor `Base`; `invokevirtual Base.doubled` accepts the `Base` receiver, and no cast or merge is emitted | Other subtype depths and external hierarchy facts remain unsupported |
+| `def evaluate(base: Base) = base.doubled(); evaluate(new Derived())` | Typer accepts the source subtype argument, but exact-class JVM argument checks still reject it | The method descriptor can name `Base`; no cast or merge is emitted | Hierarchy-aware call-argument assignability is a separate `dotty-jvm` increment |
 | Unknown/wrong parent type | If name/type resolution cannot resolve it, reject in the frontend; otherwise hierarchy validation rejects noncanonical or non-class parents | No class file should be produced | Source resolution and canonical hierarchy projection; never lower by name guess |
 | Parent cycle (`A extends B`, `B extends A`) | `JvmSuperclassIssue::InheritanceCycle` | No `super_class` chain is emitted | Validated hierarchy graph in `dotty-jvm`, keyed by canonical symbols |
 | Extending a `final` class | `JvmSuperclassIssue::ParentIsFinal` | JVMS forbids extending a final class | Parent flag validation in the `dotty-jvm` hierarchy check |
 | Child method with the same JVM signature as a planned non-private final direct-parent method | `FinalJvmMethodOverride` before any class files are published; name-only conservative rejection if the parent method is unplanned | JVMS forbids overriding the final method | Exact JVM name-and-descriptor collision check in `dotty-jvm` |
 | Exact public `override def value(): Int` for public nonfinal `Base.value(): Int` | Accepted only with distinct canonical symbols, matching `()I` descriptors and a concrete child body | Child dispatch points to the child symbol; inherited methods retain the parent owner and are not re-emitted | `JvmClassMetadata::dispatch_methods()`; exact override validation in `dotty-jvm` |
-| `Derived` receiver selects inherited `Base.doubled()` | Accepted only with the validated direct `Derived -> Base` edge and exact planned `Base.doubled` symbol | Emits `invokevirtual Base.doubled:()I`; `Base.doubled` calls `invokevirtual Base.value:()I`, so a `Derived` runtime receiver reaches `Derived.value` | `JvmClassMetadata::dispatch_methods()` plus the explicit class-file verification hierarchy |
 | `override` with no matching or planned direct-parent method | `InvalidJvmOverride` before any class files are published | No dispatch entry may be invented | Canonical parent declaration and plan validation in `dotty-jvm` |
 | Override with incompatible parameter/result descriptor, semantic signature, or reduced visibility | `InvalidJvmOverride` before any class files are published; final methods retain `FinalJvmMethodOverride` | Same JVM name+descriptor identifies the virtual entry; access cannot be narrowed incompatibly | Exact descriptor, semantic MethodType, and visibility checks in `dotty-jvm`; bridge generation remains unsupported |
 | Trait parent or multiple parents | The hierarchy validator rejects traits and unsupported parent-list shapes before output | JVM has one direct `super_class`; interfaces require distinct metadata and dispatch rules | Explicitly reject traits/multiple parents in `dotty-jvm`; later interface support is separate |

@@ -221,7 +221,7 @@ pub(super) fn lower(
         let expected = field_value_type(field);
         let mut instructions = vec![JvmConstructorInitializerInstruction::LoadThis];
         let found = context.lower_expression(initializer, &mut instructions, 0)?;
-        if !crate::reference::is_assignable(Some(unit), found, expected, definitions)? {
+        if found != expected {
             return Err(JvmCodegenError::FieldInitializerTypeMismatch {
                 field: field.symbol(),
                 initializer,

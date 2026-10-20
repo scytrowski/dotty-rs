@@ -368,30 +368,6 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Operations = 42, 17, 7, 0", 42,
             ),
-            "example/Algorithms.tasty": (
-                "example.Algorithms", r"public int sumTo\(int\)", "AlgorithmsRuntime.java",
-                """public final class AlgorithmsRuntime {
-  public static void main(String[] args) {
-    example.Algorithms a = new example.Algorithms();
-    if (a.add(7, 3) != 10 || a.subtract(7, 3) != 4 || a.multiply(7, 3) != 21 ||
-        a.divide(7, 3) != 2 || a.remainder(7, 3) != 1 || a.less(2, 3) != true ||
-        a.lessOrEqual(3, 3) != true || a.greater(4, 3) != true ||
-        a.greaterOrEqual(3, 3) != true || a.negate(true) != false ||
-        !a.both(true, true) || a.both(true, false) || !a.either(false, true) ||
-        a.either(false, false) || !a.eagerAnd(true, true) ||
-        !a.eagerOr(false, true) || !a.exclusiveOr(true, false) ||
-        a.shortCircuitAnd() || !a.shortCircuitOr() || a.sumTo(0) != 0 ||
-        a.sumTo(1) != 0 || a.sumTo(5) != 10 || a.sumTo(-1) != 0)
-      throw new AssertionError("unexpected Algorithms results");
-    try { a.eagerAndEffect(); throw new AssertionError("& skipped its RHS"); }
-    catch (ArithmeticException expected) { }
-    try { a.eagerOrEffect(); throw new AssertionError("| skipped its RHS"); }
-    catch (ArithmeticException expected) { }
-    System.out.println("Algorithms = arithmetic, booleans, short-circuit, eager, sumTo(5)=10");
-  }
-}
-""", "Algorithms = arithmetic, booleans, short-circuit, eager, sumTo(5)=10", 10,
-            ),
         }
         case = runtime_cases.get(relative.as_posix())
         if case is None:
@@ -461,18 +437,6 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Decisions class has unexpected signatures: {javap}")
-            if relative.as_posix() == "example/Algorithms.tasty":
-                signatures = (
-                    r"public int add\(int, int\)", r"public int divide\(int, int\)",
-                    r"public boolean both\(boolean, boolean\)",
-                    r"public boolean shortCircuitAnd\(\)",
-                    r"public boolean shortCircuitOr\(\)",
-                    r"public boolean eagerAndEffect\(\)",
-                    r"public boolean eagerOrEffect\(\)",
-                    r"public int immutableLocal\(int\)", r"public int sumTo\(int\)",
-                )
-                if not all(re.search(pattern, javap) for pattern in signatures):
-                    raise RuntimeError(f"fresh Algorithms class has unexpected signatures: {javap}")
             scenario = "standard"
 
         if scenario == "calls":
@@ -540,32 +504,6 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
     generated.mkdir()
     generate(toolchain, binary, generated, check=True)
     results = []
-    algorithm_classes = directory / "algorithm-source-reference"
-    algorithm_classes.mkdir()
-    toolchain.compiler(["-d", algorithm_classes, FIXTURES / "Algorithms.scala"])
-    algorithm_harness = directory / "AlgorithmsSourceRuntime.java"
-    algorithm_harness.write_text("""public final class AlgorithmsSourceRuntime {
-  public static void main(String[] args) {
-    example.Algorithms a = new example.Algorithms();
-    if (a.shortCircuitAnd() || !a.shortCircuitOr() || a.sumTo(5) != 10)
-      throw new AssertionError("Scala source reference failed");
-    try { a.eagerAndEffect(); throw new AssertionError("& skipped its RHS"); }
-    catch (ArithmeticException expected) { }
-    try { a.eagerOrEffect(); throw new AssertionError("| skipped its RHS"); }
-    catch (ArithmeticException expected) { }
-    System.out.println("Algorithms source = short-circuit, eager, sumTo(5)=10");
-  }
-}
-""")
-    execute([toolchain.javac, "-classpath", algorithm_classes, "-d", algorithm_classes,
-             algorithm_harness])
-    algorithm_source_run = execute([toolchain.java, "-XX:-UsePerfData", "-classpath",
-                                    algorithm_classes, "AlgorithmsSourceRuntime"])
-    expected_algorithm_source = "Algorithms source = short-circuit, eager, sumTo(5)=10"
-    if expected_algorithm_source not in algorithm_source_run:
-        raise RuntimeError(f"pinned Scala Algorithms source returned unexpected values: {algorithm_source_run}")
-    results.append({"source_reference": "example.Algorithms", "scala_source_compile": True,
-                    "source_runtime_output": expected_algorithm_source})
     # Independently compile and execute the original Scala source. This is a
     # source-level reference: it does not consume the checked-in TASTy fixture.
     source_classes = directory / "source-reference"
@@ -606,8 +544,7 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
                     "source_runtime_output": expected_source_output})
     for candidate in sorted((FIXTURES / "tasty").rglob("*.tasty")):
         results.append(verify_candidate(toolchain, binary, candidate,
-                                        directory / f"verify-{candidate.stem}",
-                                        runtime=candidate.name == "Algorithms.tasty"))
+                                        directory / f"verify-{candidate.stem}"))
     answer = FIXTURES / "tasty/example/Answer.tasty"
     reduced = directory / "Reduced.tasty"
     execute([binary, "reduce-answer", answer, reduced])
@@ -644,7 +581,7 @@ def main() -> None:
     verify = subcommands.add_parser("verify", help="validate and independently compile a candidate")
     verify.add_argument("candidate", type=Path)
     verify.add_argument("--runtime", action="store_true",
-                        help="inspect, decompile, compile, and execute a supported fresh fixture class")
+                        help="inspect and execute the fresh Answer class; requires example/Answer")
     subcommands.add_parser("check", help="regenerate/check fixtures, compile originals/reduced Answer, run negative controls")
     args = parser.parse_args()
     binary = inspector()

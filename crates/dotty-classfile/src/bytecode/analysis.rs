@@ -2303,10 +2303,7 @@ impl Frame {
                         instruction,
                         parameter,
                     })?;
-                    if !self
-                        .hierarchy
-                        .is_assignable(actual.internal_name(), expected.internal_name())
-                    {
+                    if actual != expected {
                         return Err(AnalysisError::WrongExactMethodArgument {
                             instruction,
                             parameter,
@@ -4759,7 +4756,7 @@ mod tests {
     }
 
     #[test]
-    fn invokespecial_constructor_arguments_use_only_verified_assignability() {
+    fn invokespecial_constructor_arguments_keep_exact_reference_identity() {
         let mut builder = ConstantPoolBuilder::new();
         let client_class = builder.class("example/Client").unwrap();
         let holder_class = builder.class("example/Holder").unwrap();
@@ -4851,43 +4848,6 @@ mod tests {
                 expected: class_identity("example/Counter"),
                 actual: class_identity("example/Other"),
             })
-        );
-    }
-
-    #[test]
-    fn invokespecial_accepts_a_constructor_argument_with_verified_parent_type() {
-        let mut builder = ConstantPoolBuilder::new();
-        let client_class = builder.class("example/Client").unwrap();
-        let holder_class = builder.class("example/Holder").unwrap();
-        let constructor = builder
-            .method_ref("example/Holder", "<init>", "(Lexample/Base;)V")
-            .unwrap();
-        let pool = builder.finish().unwrap();
-        let mut construct = CodeSequence::new();
-        construct
-            .instruction(Instruction::New(ClassReference::new(operand(holder_class))))
-            .instruction(Instruction::Dup)
-            .instruction(Instruction::ALoad(LocalIndex::new(1)))
-            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
-                operand(constructor),
-            )))
-            .instruction(Instruction::AReturn);
-        let graph = ControlFlowGraph::build(&construct).unwrap();
-        let hierarchy =
-            ClassHierarchy::from_edges([("example/Derived".to_owned(), "example/Base".to_owned())])
-                .unwrap();
-
-        assert!(
-            CfgCodeAnalyzer::analyze_with_hierarchy(
-                &graph,
-                "make",
-                "(Lexample/Derived;)Lexample/Holder;",
-                false,
-                &pool,
-                client_class,
-                &hierarchy,
-            )
-            .is_ok()
         );
     }
 

@@ -450,7 +450,6 @@ pub(super) fn class_metadata(
     definitions: &Definitions,
     descriptor_context: Option<(&SemanticStore, &[JvmClassIdentity])>,
     superclass: Option<&crate::JvmSuperclassPlan>,
-    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<JvmClassMetadata, JvmCodegenError> {
     let identity = class_identity(store, plan.class)?;
     let mut fields = Vec::with_capacity(plan.fields.len());
@@ -467,17 +466,15 @@ pub(super) fn class_metadata(
                 field: field_plan.field,
             });
         }
+        let field_reference_identities = descriptor_context.map(|(_, identities)| identities);
         let field = field_metadata(
             field_plan,
             plan.class,
             store,
             typed_ast,
             definitions,
-            FieldMetadataContext {
-                class_identities: descriptor_context.map(|(_, identities)| identities),
-                superclass,
-                unit,
-            },
+            field_reference_identities,
+            superclass,
         )?;
         if let Some(previous) = field_names.insert(field.name().to_owned(), field.symbol()) {
             return Err(JvmCodegenError::DuplicateJvmFieldName {
@@ -540,25 +537,15 @@ pub(super) fn class_metadata(
     })
 }
 
-struct FieldMetadataContext<'a, 'unit> {
-    class_identities: Option<&'a [JvmClassIdentity]>,
-    superclass: Option<&'a crate::JvmSuperclassPlan>,
-    unit: Option<&'a crate::JvmCompilationUnit<'unit>>,
-}
-
 fn field_metadata(
     plan: &JvmFieldPlan,
     owner: dotty_core::SymbolId,
     store: &SemanticStore,
     typed_ast: Option<&dotty_core::ast::TypedAst>,
     definitions: &Definitions,
-    context: FieldMetadataContext<'_, '_>,
+    class_identities: Option<&[JvmClassIdentity]>,
+    superclass: Option<&crate::JvmSuperclassPlan>,
 ) -> Result<JvmFieldMetadata, JvmCodegenError> {
-    let FieldMetadataContext {
-        class_identities,
-        superclass,
-        unit,
-    } = context;
     let field = store
         .symbols
         .contains(plan.field)
@@ -698,7 +685,7 @@ fn field_metadata(
             symbol,
         });
     }
-    if !crate::reference::is_assignable(unit, initializer_type, field_type, definitions)? {
+    if initializer_type != field_type {
         return Err(JvmCodegenError::FieldInitializerTypeMismatch {
             field: plan.field,
             initializer: initializer_id,
@@ -943,7 +930,6 @@ pub(super) fn unit_metadata(
             definitions,
             Some((unit.store, &class_identities)),
             Some(superclass),
-            Some(unit),
         )?;
         metadata.push(class);
     }
