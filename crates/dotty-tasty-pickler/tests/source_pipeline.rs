@@ -19,6 +19,7 @@ const EXPLICIT_THIS_REFERENCES: &str =
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
 const ARITHMETIC: &str = "package example\nclass Arithmetic:\n  def add(x: Int, y: Int): Int = x + y\n  def subtract(x: Int, y: Int): Int = x - y\n  def multiply(x: Int, y: Int): Int = x * y\n  def divide(x: Int, y: Int): Int = x / y\n  def remainder(x: Int, y: Int): Int = x % y\n  def nested(x: Int, y: Int, z: Int): Int = x + y * z\n  def throughCall(x: Int, y: Int): Int = identity(x + y)\n  def local(x: Int, y: Int): Int =\n    val result: Int = x + y\n    result\n  def identity(value: Int): Int = value\n  def compute(a: Int, b: Int): Int = (a + b) * 2 - 1\n";
 const PARENTHESIZED_CALL_ARGUMENTS: &str = "package example\nclass ParenthesizedCallArguments:\n  def run(a: Int, b: Int): Int = identity((a + b))\n  def nested(a: Int, b: Int): Int = identity(identity((a + b)))\n  def identity(value: Int): Int = value\n";
+const COMPARISONS: &str = "package example\nclass Comparisons:\n  def positive(x: Int): Boolean = x > 0\n  def before(a: Int, b: Int): Boolean = a < b\n  def atMost(a: Int, b: Int): Boolean = a <= b\n  def atLeast(a: Int, b: Int): Boolean = a >= b\n  def nested(a: Int, b: Int): Boolean = (a + 1) >= b\n  def choose(x: Int): Int = if x > 0 then 1 else 0\n";
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
 const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
 const BLOCKS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Blocks.scala");
@@ -1793,12 +1794,192 @@ fn synthetic_int_operator_select_spans_are_validated() {
 }
 
 #[test]
-fn comparisons_remain_outside_the_int_arithmetic_increment() {
-    let source =
-        "package example\nclass Comparison:\n  def less(x: Int, y: Int): Boolean = x < y\n";
+fn canonical_int_comparisons_preserve_boolean_signed_names_and_composition() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(COMPARISONS, "Comparisons.scala", |_| {}).unwrap();
+    let (_, repeat) = source_outputs_named(COMPARISONS, "Comparisons.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeat.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    for (index, expected_name) in [(2, ">"), (3, "<"), (4, "<="), (5, ">=")] {
+        let body = addresses
+            .get(output.declarations()[index].address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap();
+        let RawTree::LengthNode(application) = body.rhs.unwrap() else {
+            panic!("expected comparison APPLY for {expected_name}")
+        };
+        let application = application.decode_apply().unwrap();
+        assert_eq!(application.arguments.len(), 1);
+        let RawTree::LengthNode(selection) = application.function else {
+            panic!("expected comparison SELECTin for {expected_name}")
+        };
+        let selection = selection.decode_select_in().unwrap();
+        assert_eq!(selection.tag, SELECTIN_TAG);
+        assert!(matches!(
+            file.render_signed_name(selection.name).unwrap(),
+            Some(RenderedSignedName::Signed { original, signature })
+                if original == expected_name
+                    && signature.result == "scala.Boolean"
+                    && signature.parameters == [RenderedParamSig::TermParameter("scala.Int".into())]
+        ));
+    }
+    let nested = addresses
+        .get(output.declarations()[6].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    assert!(matches!(nested.rhs, Some(RawTree::LengthNode(node)) if node.tag == APPLY_TAG));
+    let choose = addresses
+        .get(output.declarations()[7].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(conditional) = choose.rhs.unwrap() else {
+        panic!("expected comparison condition in IF body")
+    };
+    let StructuredNode::If(conditional) = conditional.decode_structured().unwrap() else {
+        panic!("expected IF body")
+    };
+    let RawTree::LengthNode(condition) = conditional.condition else {
+        panic!("expected comparison APPLY condition")
+    };
+    assert_eq!(condition.tag, APPLY_TAG);
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1357/generated/example/Comparisons.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1357/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 comparison gate");
+        assert!(
+            result.success(),
+            "Int comparison Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
+fn comparison_result_type_must_remain_boolean() {
+    let result = source_outputs_named_with_tree_edits(
+        COMPARISONS,
+        "Comparisons.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, store| {
+            let (source_id, _) = source_ast
+                .iter()
+                .find(|(_, tree)| {
+                    matches!(tree.kind, TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)))
+                })
+                .unwrap();
+            let typed_id = bindings.get(SourceId::from_index(7), source_id).unwrap();
+            let TreeKind::Apply(application) = &typed_ast.get(typed_id).kind else {
+                panic!("expected typed comparison application")
+            };
+            let function = typed_ast.get(application.function);
+            let Type::TermRef {
+                target: TermRefTarget::Symbol(target),
+                ..
+            } = store.types.get(function.ty)
+            else {
+                panic!("expected selected comparison symbol")
+            };
+            let SymbolInfo::Complete(signature) = store.symbols.get(*target).info else {
+                panic!("expected complete comparison signature")
+            };
+            let Type::Method(signature) = store.types.get(signature) else {
+                panic!("expected comparison method signature")
+            };
+            typed_ast.get_mut(typed_id).ty = signature.params[0].ty;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(result, PickleError::BodyType { .. }));
+}
+
+#[test]
+fn comparison_operands_must_remain_int() {
+    let result = source_outputs_named_with_tree_edits(
+        COMPARISONS,
+        "Comparisons.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, _| {
+            let source_id = source_ast
+                .iter()
+                .find_map(|(source_id, tree)| {
+                    matches!(tree.kind, TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)))
+                        .then_some(source_id)
+                })
+                .unwrap();
+            let typed_id = bindings.get(SourceId::from_index(7), source_id).unwrap();
+            let TreeKind::Apply(application) = &typed_ast.get(typed_id).kind else {
+                panic!("expected typed comparison application")
+            };
+            let argument = application.args[0];
+            let comparison_type = typed_ast.get(typed_id).ty;
+            typed_ast.get_mut(argument).ty = comparison_type;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(result, PickleError::BodyType { .. }));
+}
+
+#[test]
+fn comparison_selection_must_use_a_registered_primitive_symbol() {
+    let result = source_outputs_named_with_tree_edits(
+        COMPARISONS,
+        "Comparisons.scala",
+        ValidationLimits::default(),
+        |source_ast, typed_ast, bindings, store| {
+            let source_id = source_ast
+                .iter()
+                .find_map(|(source_id, tree)| {
+                    matches!(tree.kind, TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)))
+                        .then_some(source_id)
+                })
+                .unwrap();
+            let typed_id = bindings.get(SourceId::from_index(7), source_id).unwrap();
+            let TreeKind::Apply(application) = &typed_ast.get(typed_id).kind else {
+                panic!("expected typed comparison application")
+            };
+            let non_operator_reference = typed_ast
+                .iter()
+                .find_map(|(_, tree)| {
+                    if !matches!(tree.kind, TreeKind::Ident(_)) {
+                        return None;
+                    }
+                    let Type::TermRef {
+                        target: TermRefTarget::Symbol(symbol),
+                        ..
+                    } = store.types.get(tree.ty)
+                    else {
+                        return None;
+                    };
+                    (store.symbols.get(*symbol).kind == SymbolKind::Parameter).then_some(tree.ty)
+                })
+                .expect("fixture contains a typed parameter reference");
+            typed_ast.get_mut(application.function).ty = non_operator_reference;
+        },
+        |_| {},
+    )
+    .unwrap_err();
     assert!(matches!(
-        source_outputs_named(source, "Comparison.scala", |_| {}),
-        Err(PickleError::BodyType { .. })
+        result,
+        PickleError::Reference {
+            reason: ReferenceError::NotRegistered,
+            ..
+        }
     ));
 }
 

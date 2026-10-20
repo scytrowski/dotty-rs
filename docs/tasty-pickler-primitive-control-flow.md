@@ -2,10 +2,10 @@
 
 This audit records the Scala 3.9.0 source, typed-source and TASTy wire
 observations for primitive operators, mutable locals, assignment and `while`.
-The semantic pickler currently supports canonical `Int` arithmetic; the other
-operators and mutable control flow remain audit-only. The source compiler is
-pinned to `777528f19a58e794c9954a42f433373472ec57f8`; the emitted format is
-TASTy 28.9.0. Exact source and artifact hashes are in
+The semantic pickler supports canonical `Int` arithmetic and relational
+comparisons; other operators and mutable control flow remain audit-only. The
+source compiler is pinned to `777528f19a58e794c9954a42f433373472ec57f8`; the
+emitted format is TASTy 28.9.0. Exact source and artifact hashes are in
 [`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json).
 
 The independently compiled inputs are
@@ -43,22 +43,26 @@ choose an intrinsic from the token spelling alone.
 
 ## Current pickler coverage
 
-Issue #1356 enables only the five binary arithmetic members `Int.+`, `Int.-`,
-`Int.*`, `Int./` and `Int.%`. Validation pairs the source `InfixOp` with its
-typed `Apply`, verifies the canonical symbol, owner, method signature, result
-and receiver types, and checks the source-to-typed edges for the receiver and
-argument. Emission uses the ordinary `APPLY(SELECTin(...), argument)` shape,
-retaining the receiver before the argument and leaving overflow, division and
-remainder behavior to Scala/JVM evaluation. Nested arithmetic, arithmetic
-inside supported same-class calls and immutable local initializers are covered.
-Comparisons, Boolean operators, assignment and loops remain unsupported by the
-pickler.
+Issue #1356 enables the five binary arithmetic members `Int.+`, `Int.-`,
+`Int.*`, `Int./` and `Int.%`. Issue #1357 adds canonical relational members
+`Int.<`, `Int.<=`, `Int.>` and `Int.>=`, all with Boolean results. Validation
+pairs each source `InfixOp` with its typed `Apply`, verifies the canonical
+symbol, owner, method signature, result and receiver types, and checks the
+source-to-typed edges for the receiver and argument. Emission uses the ordinary
+`APPLY(SELECTin(...), argument)` shape and preserves the selected signed name;
+it leaves arithmetic and comparison semantics to Scala/JVM evaluation rather
+than computing values during serialization. Regression coverage includes all
+four relations, Int boundary values, a comparison over nested arithmetic, and a
+comparison used as an `if` condition. The pinned Scala runtime gate exercises
+the Rust-produced `Comparisons.tasty`. Boolean operators, assignment and loops
+remain unsupported by the pickler.
 
-The source pipeline regression test inspects signed semantic names and nested
-wire structure. When the explicit pinned Scala oracle is enabled, it also
-decompiles the standalone arithmetic artifact, compiles it with `-from-tasty`,
-and runs edge cases for overflow, negative division/remainder and division by
-zero.
+Source pipeline regression tests inspect signed semantic names and nested wire
+structure. When the explicit pinned Scala oracle is enabled, they also compile
+the standalone Rust-produced arithmetic and comparison artifacts with
+`-from-tasty`, then run overflow, negative division/remainder, division by zero,
+signed comparison boundaries, nested arithmetic and comparison-condition
+cases.
 
 ## Short-circuit behavior
 

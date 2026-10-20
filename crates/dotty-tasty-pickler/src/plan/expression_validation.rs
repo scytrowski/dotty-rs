@@ -33,7 +33,15 @@ impl Validator<'_, '_> {
                 self.validate_int_expression(parens.inner, typed_id, method, depth + 1, visited)
             }
             (TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)), TreeKind::Apply(_)) => {
-                self.validate_primitive_application(source_id, typed_id, method, depth, visited)
+                let result = self
+                    .validate_primitive_application(source_id, typed_id, method, depth, visited)?;
+                if result != self.plan.definitions.int {
+                    return Err(PickleError::BodyType {
+                        tree: typed_id,
+                        ty: self.plan.typed_ast.get(typed_id).ty,
+                    });
+                }
+                Ok(())
             }
             (TreeKind::Apply(_), TreeKind::Apply(_)) => {
                 self.validate_nested_application(source_id, typed_id, method, depth, visited)
@@ -68,7 +76,7 @@ impl Validator<'_, '_> {
         method: &MethodPicklePlan,
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
-    ) -> Result<(), PickleError> {
+    ) -> Result<TypeId, PickleError> {
         let expression_depth_limit = self.limits.expression_depth_limit();
         if depth > expression_depth_limit {
             return Err(PickleError::LimitExceeded {
@@ -98,14 +106,6 @@ impl Validator<'_, '_> {
         };
         if application.kind != ApplyKind::Regular || application.args.len() != 1 {
             return Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol)));
-        }
-        if typed_tree.ty != p.definitions.int
-            && !matches!(self.ty(typed_tree.ty)?, Type::Constant(Constant::Int(_)))
-        {
-            return Err(PickleError::BodyType {
-                tree: typed_id,
-                ty: typed_tree.ty,
-            });
         }
         if !visited.insert(application.function) {
             return Err(PickleError::RepeatedExpression {
@@ -154,8 +154,20 @@ impl Validator<'_, '_> {
                 reason: crate::ReferenceError::NotRegistered,
             });
         };
-        if index > 4 {
-            return Err(self.unsupported(UnsupportedFeature::PrimitiveOperator, Some(*target)));
+        let operator_result = if index < 5 {
+            p.definitions.int
+        } else {
+            p.definitions.boolean
+        };
+        let typed_result = self.ty(typed_tree.ty)?;
+        let result_matches = typed_tree.ty == operator_result
+            || matches!((operator_result, typed_result), (ty, Type::Constant(Constant::Int(_))) if ty == p.definitions.int)
+            || matches!((operator_result, typed_result), (ty, Type::Constant(Constant::Boolean(_))) if ty == p.definitions.boolean);
+        if !result_matches {
+            return Err(PickleError::BodyType {
+                tree: typed_id,
+                ty: typed_tree.ty,
+            });
         }
         let operator_name = self.symbol(*target)?.name;
         if infix.op != operator_name || selection.name != operator_name {
@@ -178,7 +190,7 @@ impl Validator<'_, '_> {
         }
         self.validate_int_expression(infix.left, selection.qualifier, method, depth + 1, visited)?;
         self.validate_int_expression(infix.right, application.args[0], method, depth + 1, visited)?;
-        Ok(())
+        Ok(operator_result)
     }
 
     fn same_class_method_target(
@@ -481,13 +493,19 @@ impl Validator<'_, '_> {
                 TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
             ) && matches!(typed_argument.kind, TreeKind::Apply(_))
             {
-                self.validate_primitive_application(
+                let result = self.validate_primitive_application(
                     source_arg,
                     typed_arg,
                     current_method,
                     depth + 1,
                     visited,
                 )?;
+                if result != p.definitions.int {
+                    return Err(PickleError::BodyType {
+                        tree: typed_arg,
+                        ty: typed_argument.ty,
+                    });
+                }
                 continue;
             }
             if matches!(source_argument.kind, TreeKind::Apply(_))
@@ -612,11 +630,15 @@ impl Validator<'_, '_> {
         source_id: TreeId<Untyped>,
         typed_id: TreeId<Typed>,
         method: &MethodPicklePlan,
+        depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
-        self.charge(1)?;
-        if !visited.insert(typed_id) {
-            return Err(PickleError::RepeatedExpression { tree: typed_id });
+        let depth_limit = self.limits.expression_depth_limit();
+        if depth > depth_limit {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: depth_limit,
+            });
         }
         let source = self.source_tree(source_id)?;
         let typed = self
@@ -624,6 +646,31 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source.kind {
+            self.source_typed_binding(source_id, typed_id)?;
+            self.span(source.position)?;
+            self.charge(1)?;
+            return self.validate_if_condition(parens.inner, typed_id, method, depth + 1, visited);
+        }
+        if matches!(
+            source.kind,
+            TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+        ) && matches!(typed.kind, TreeKind::Apply(_))
+        {
+            let result =
+                self.validate_primitive_application(source_id, typed_id, method, depth, visited)?;
+            if result != self.plan.definitions.boolean {
+                return Err(PickleError::BodyType {
+                    tree: typed_id,
+                    ty: typed.ty,
+                });
+            }
+            return Ok(());
+        }
+        self.charge(1)?;
+        if !visited.insert(typed_id) {
+            return Err(PickleError::RepeatedExpression { tree: typed_id });
+        }
         self.source_typed_binding(source_id, typed_id)?;
         self.paired_source_typed_span(source.position, typed.position, typed_id)?;
         match (&source.kind, &typed.kind) {
@@ -780,7 +827,7 @@ impl Validator<'_, '_> {
         };
         let source_if = *source_if;
         let typed_if = *typed_if;
-        self.validate_if_condition(source_if.cond, typed_if.cond, method, visited)?;
+        self.validate_if_condition(source_if.cond, typed_if.cond, method, depth, visited)?;
         let then_type = self.validate_if_branch(
             source_if.then_branch,
             typed_if.then_branch,
@@ -899,30 +946,35 @@ impl Validator<'_, '_> {
             source_rhs.kind,
             TreeKind::PhaseSpecific(UntypedNode::Parens(_))
         ) {
-            if result_type != p.definitions.int {
-                return Err(PickleError::BodyType {
-                    tree: body,
-                    ty: node.ty,
-                });
-            }
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
-            return self.validate_int_expression(rhs, body, method, depth, seen);
+            return if result_type == p.definitions.int {
+                self.validate_int_expression(rhs, body, method, depth, seen)
+            } else if result_type == p.definitions.boolean {
+                self.validate_if_condition(rhs, body, method, depth, seen)
+            } else {
+                Err(PickleError::BodyType {
+                    tree: body,
+                    ty: node.ty,
+                })
+            };
         }
         if matches!(
             source_rhs.kind,
             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
         ) && matches!(node.kind, TreeKind::Apply(_))
         {
-            if result_type != p.definitions.int {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            let operator_result =
+                self.validate_primitive_application(rhs, body, method, depth, seen)?;
+            if result_type != operator_result {
                 return Err(PickleError::BodyType {
                     tree: body,
                     ty: node.ty,
                 });
             }
-            let mut local_visited = HashSet::new();
-            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
-            return self.validate_primitive_application(rhs, body, method, depth, seen);
+            return Ok(());
         }
         self.source_typed_binding(rhs, body)?;
         self.root_source_typed_span(source_rhs.position, node.position, body)?;
@@ -1316,13 +1368,19 @@ impl Validator<'_, '_> {
                             TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
                         )
                     {
-                        self.validate_primitive_application(
+                        let result = self.validate_primitive_application(
                             source_arg,
                             typed_arg,
                             method,
                             depth + 1,
                             visited,
                         )?;
+                        if result != p.definitions.int {
+                            return Err(PickleError::BodyType {
+                                tree: typed_arg,
+                                ty: typed_argument.ty,
+                            });
+                        }
                         continue;
                     }
                     if matches!(source_argument.kind, TreeKind::Apply(_))
