@@ -8,7 +8,7 @@ use dotty_core::{
 };
 use dotty_tasty::tasty::{
     APPLY_TAG, ASSIGN_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, IF_TAG, INTCONST_TAG,
-    SimpleTerm, TRUECONST_TAG, TermValue, UNITCONST_TAG,
+    SimpleTerm, TRUECONST_TAG, TermValue, UNITCONST_TAG, WHILE_TAG,
 };
 
 use crate::{
@@ -28,17 +28,6 @@ struct ExpressionBudget {
 struct ExpressionState<'a> {
     depth: usize,
     budget: &'a mut ExpressionBudget,
-}
-
-fn child_expression_depth(ast: &TypedAst, tree: TreeId<Typed>, depth: usize) -> usize {
-    if matches!(
-        ast.try_get(tree).map(|tree| &tree.kind),
-        Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_))
-    ) {
-        depth + 1
-    } else {
-        depth
-    }
 }
 
 impl ExpressionBudget {
@@ -65,6 +54,17 @@ impl ExpressionBudget {
             return Err(PickleError::RepeatedExpression { tree });
         }
         Ok(())
+    }
+}
+
+fn child_expression_depth(ast: &TypedAst, tree: TreeId<Typed>, depth: usize) -> usize {
+    if matches!(
+        ast.try_get(tree).map(|tree| &tree.kind),
+        Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_))
+    ) {
+        depth + 1
+    } else {
+        depth
     }
 }
 
@@ -111,6 +111,90 @@ fn lower_expression_inner(
     let tree = ast
         .try_get(root)
         .ok_or(PickleError::InvalidTypedTree { tree: root })?;
+    if let TreeKind::While(while_expr) = &tree.kind {
+        if tree.ty != context.definitions().unit {
+            return Err(PickleError::BodyType {
+                tree: root,
+                ty: tree.ty,
+            });
+        }
+        let condition = ast
+            .try_get(while_expr.cond)
+            .ok_or(PickleError::InvalidTypedTree {
+                tree: while_expr.cond,
+            })?;
+        let boolean_parameter = matches!(
+            store.types.try_get(condition.ty),
+            Some(Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(symbol),
+            }) if *prefix == context.definitions().no_prefix
+                && parameters.contains(symbol)
+                && store.symbols.contains(*symbol)
+                && {
+                    let parameter = store.symbols.get(*symbol);
+                    parameter.kind == dotty_core::SymbolKind::Parameter
+                        && parameter.owner == Some(method)
+                        && parameter.info == SymbolInfo::Complete(context.definitions().boolean)
+                }
+        );
+        if condition.ty != context.definitions().boolean
+            && !matches!(
+                store.types.try_get(condition.ty),
+                Some(Type::Constant(Constant::Boolean(_)))
+            )
+            && !boolean_parameter
+        {
+            return Err(PickleError::BodyType {
+                tree: while_expr.cond,
+                ty: condition.ty,
+            });
+        }
+        let body = ast
+            .try_get(while_expr.body)
+            .ok_or(PickleError::InvalidTypedTree {
+                tree: while_expr.body,
+            })?;
+        if body.ty != context.definitions().unit
+            && !matches!(
+                store.types.try_get(body.ty),
+                Some(Type::Constant(Constant::Unit))
+            )
+        {
+            return Err(PickleError::BodyType {
+                tree: while_expr.body,
+                ty: body.ty,
+            });
+        }
+        let condition = lower_expression_inner(
+            store,
+            ast,
+            while_expr.cond,
+            method,
+            parameters,
+            ExpressionState {
+                depth: depth + 1,
+                budget,
+            },
+            context,
+        )?;
+        let body = lower_expression_inner(
+            store,
+            ast,
+            while_expr.body,
+            method,
+            parameters,
+            ExpressionState {
+                depth: depth + 1,
+                budget,
+            },
+            context,
+        )?;
+        return context.wire_node(AstNode::Length {
+            tag: WHILE_TAG,
+            fields: vec![AstField::Tree(condition), AstField::Tree(body)],
+        });
+    }
     if let TreeKind::Assign(assignment) = &tree.kind {
         if tree.ty != context.definitions().unit {
             return Err(PickleError::BodyType {

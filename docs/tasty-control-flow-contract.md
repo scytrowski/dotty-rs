@@ -18,6 +18,7 @@ change.
 | `{ if flag then 1 else 2; value }` | The source and typed blocks each retain the discarded `If` as their first stat and `value` as the final expression. The stat keeps its Int type; statement position discards its value without replacing the node with Unit. The block result type is Int. | `BLOCK` stores its result expression first, then stats in source order. Thus `value` precedes the discarded `IF` in the wire children. |
 | `{ val saved: Int = value; if flag then saved else 0 }` | `typed_local_binding_at(source, val_tree)` returns the exact typed `ValDef` and canonical local symbol. The method owns that local symbol; the `saved` branch reference has a `Type::TermRef` targeting the same symbol. The block has one typed `ValDef` stat and an `If` expression. | `BLOCK` stores the result expression first and `VALDEF(saved)` as a stat afterward. The expression root is a `TYPED` wrapper whose child is the `IF`. The `TERMREFdirect` for `saved` targets that exact `VALDEF` node, even though its target follows the reference in wire order. |
 | `{ var count: Int = value; count = count + 1; count }` | The read-only local binding identifies the method-owned `SymbolId` and exact typed declaration. Source `var` syntax and canonical `MUTABLE` flag must agree. `Assign` maps by exact source/typed root and child bindings, targets that visible mutable local, has an Int RHS, and has canonical Unit type. | The `VALDEF` carries the Scala 3.9 `MUTABLE` modifier. `BLOCK` stores its final `count` reference first, then `VALDEF(count)` and `ASSIGN` in source order. `ASSIGN` children are target then RHS; the direct target reference addresses the same `VALDEF`. |
+| `while i < n do total = total + i; i = i + 1` | The source `While` maps to a typed `While` with its exact Boolean condition and Unit body children. Its result type is canonical Unit. In the audited form, the Unit body is a Block whose assignment stats remain ordered and whose final expression is the second assignment. | `WHILE` children are condition then body. The body `BLOCK` stores its final assignment first, then preceding assignment stats in source order; both `ASSIGN` nodes keep target-before-RHS ordering. |
 
 The test-only source contract is `tests/tasty_control_flow_contract.rs`. It
 parses and names the checked-in Scala fixtures, completes their source method
@@ -69,10 +70,12 @@ blocks with a final supported expression plus ordered supported stats. For a
 local declaration, the audited case is an ordinary immutable Int `ValDef`
 with an Int initializer and references resolved to its canonical local symbol.
 The producer additionally accepts ordinary mutable Int `var` declarations and
-`Assign` statements whose target is the same in-scope method-local symbol. Only
-immutable ordinary `val` and mutable ordinary `var` are accepted. Emission
-must follow the pinned wire order above, preserve formal/local identity, and
-encode the `ValDef` as the declaration target for local direct references.
+`Assign` statements whose target is the same in-scope method-local symbol. It
+also accepts typed `while` statements with a supported Boolean condition and a
+Unit body consisting of ordered assignments. Only immutable ordinary `val` and
+mutable ordinary `var` are accepted. Emission must follow the pinned wire
+order above, preserve formal/local identity, and encode the `ValDef` as the
+declaration target for local direct references.
 
 Lazy, given, implicit, erased, inline, pattern, field, captured, and
 local-method definitions remain unsupported; arbitrary local types;

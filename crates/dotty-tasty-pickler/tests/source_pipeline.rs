@@ -18,6 +18,7 @@ const EXPLICIT_THIS_REFERENCES: &str =
     "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
 const MUTABLE: &str = include_str!("fixtures/Mutable.scala");
+const LOOP: &str = include_str!("fixtures/Loop.scala");
 const ARITHMETIC: &str = "package example\nclass Arithmetic:\n  def add(x: Int, y: Int): Int = x + y\n  def subtract(x: Int, y: Int): Int = x - y\n  def multiply(x: Int, y: Int): Int = x * y\n  def divide(x: Int, y: Int): Int = x / y\n  def remainder(x: Int, y: Int): Int = x % y\n  def nested(x: Int, y: Int, z: Int): Int = x + y * z\n  def throughCall(x: Int, y: Int): Int = identity(x + y)\n  def local(x: Int, y: Int): Int =\n    val result: Int = x + y\n    result\n  def identity(value: Int): Int = value\n  def compute(a: Int, b: Int): Int = (a + b) * 2 - 1\n";
 const PARENTHESIZED_CALL_ARGUMENTS: &str = "package example\nclass ParenthesizedCallArguments:\n  def run(a: Int, b: Int): Int = identity((a + b))\n  def nested(a: Int, b: Int): Int = identity(identity((a + b)))\n  def identity(value: Int): Int = value\n";
 const COMPARISONS: &str = "package example\nclass Comparisons:\n  def positive(x: Int): Boolean = x > 0\n  def before(a: Int, b: Int): Boolean = a < b\n  def atMost(a: Int, b: Int): Boolean = a <= b\n  def atLeast(a: Int, b: Int): Boolean = a >= b\n  def nested(a: Int, b: Int): Boolean = (a + 1) >= b\n  def choose(x: Int): Int = if x > 0 then 1 else 0\n";
@@ -3427,6 +3428,337 @@ fn mutable_assignment_rhs_obeys_projection_expression_depth_after_validation() {
             limit: 0,
         }
     );
+}
+
+#[test]
+fn typed_while_loops_serialize_condition_and_unit_body_in_oracle_order() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(LOOP, "Loop.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let method = addresses
+        .get(output.declarations()[2].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(outer_block) = method.rhs.unwrap() else {
+        panic!("sumTo body must be a BLOCK")
+    };
+    let StructuredNode::Block(outer_block) = outer_block.decode_structured().unwrap() else {
+        panic!("sumTo body must decode as BLOCK")
+    };
+    assert_eq!(outer_block.stats.len(), 3);
+    let local_names = outer_block.stats[..2]
+        .iter()
+        .map(|stat| {
+            let RawTree::LengthNode(value) = stat else {
+                panic!("loop locals must be VALDEF nodes")
+            };
+            assert_eq!(value.tag, VALDEF_TAG);
+            let DefinitionBody::ValDef { name, .. } = value.decode_definition_body().unwrap()
+            else {
+                panic!("loop local must decode as VALDEF")
+            };
+            file.render_name(name).unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(local_names, ["i", "total"]);
+    let RawTree::LengthNode(while_node) = &outer_block.stats[2] else {
+        panic!("while statement must be retained as a length node")
+    };
+    assert_eq!(while_node.tag, WHILE_TAG);
+    let while_node = while_node.decode_while().unwrap();
+    let RawTree::LengthNode(condition) = while_node.condition else {
+        panic!("while condition must retain the typed comparison")
+    };
+    assert_eq!(condition.tag, APPLY_TAG);
+    let RawTree::LengthNode(body) = while_node.body else {
+        panic!("while body must retain its source block")
+    };
+    assert_eq!(body.tag, BLOCK_TAG);
+    let StructuredNode::Block(body) = body.decode_structured().unwrap() else {
+        panic!("while body must decode as BLOCK")
+    };
+    assert_eq!(body.stats.len(), 1);
+    let RawTree::LengthNode(first_assignment) = &body.stats[0] else {
+        panic!("first loop assignment must remain a statement")
+    };
+    let RawTree::LengthNode(last_assignment) = &body.expression else {
+        panic!("last loop assignment must remain the block result")
+    };
+    assert_eq!(first_assignment.tag, ASSIGN_TAG);
+    assert_eq!(last_assignment.tag, ASSIGN_TAG);
+    let assignment_targets = [first_assignment, last_assignment]
+        .into_iter()
+        .map(|assignment| {
+            let assignment = assignment.decode_assign().unwrap();
+            let RawTree::Leaf(target) = assignment.left else {
+                panic!("loop assignment target must be a direct local reference")
+            };
+            assert_eq!(target.tag, TERMREFDIRECT_TAG);
+            let definition = addresses.get(target.ast_ref().unwrap().address).unwrap();
+            let DefinitionBody::ValDef { name, .. } = definition.decode_definition_body().unwrap()
+            else {
+                panic!("loop assignment target must point to its VALDEF")
+            };
+            file.render_name(name).unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(assignment_targets, ["total", "i"]);
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1360/generated/example/Loop.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1360/tmp"))
+            .status()
+            .expect("start pinned Scala 3.9 while-loop interoperability gate");
+        assert!(result.success(), "Loop Scala interoperability gate failed");
+    }
+}
+
+#[test]
+fn typed_while_accepts_boolean_formals_and_constant_unit_bodies() {
+    use dotty_tasty::tasty::*;
+
+    let (_, output) = source_outputs_named(LOOP, "Loop.scala", |_| {}).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+
+    let run = addresses
+        .get(output.declarations()[3].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(run_block) = run.rhs.unwrap() else {
+        panic!("run body must retain its local block")
+    };
+    let StructuredNode::Block(run_block) = run_block.decode_structured().unwrap() else {
+        panic!("run body must decode as BLOCK")
+    };
+    let RawTree::LengthNode(run_while) = &run_block.stats[1] else {
+        panic!("run block must retain its while statement")
+    };
+    let run_while = run_while.decode_while().unwrap();
+    let RawTree::Leaf(flag) = run_while.condition else {
+        panic!("Boolean formal condition must be a direct parameter reference")
+    };
+    assert_eq!(flag.tag, TERMREFDIRECT_TAG);
+
+    let empty = addresses
+        .get(output.declarations()[4].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(empty_block) = empty.rhs.unwrap() else {
+        panic!("empty Unit loop method must retain its result block")
+    };
+    let StructuredNode::Block(empty_block) = empty_block.decode_structured().unwrap() else {
+        panic!("empty Unit loop method must decode as BLOCK")
+    };
+    let RawTree::LengthNode(empty_while) = &empty_block.stats[0] else {
+        panic!("empty Unit loop body must remain a WHILE node")
+    };
+    let empty_while = empty_while.decode_while().unwrap();
+    let RawTree::Leaf(unit) = empty_while.body else {
+        panic!("empty Unit loop body must retain its Unit literal")
+    };
+    assert_eq!(unit.tag, UNITCONST_TAG);
+
+    let assigned = addresses
+        .get(output.declarations()[5].address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    let RawTree::LengthNode(assigned_block) = assigned.rhs.unwrap() else {
+        panic!("assignment loop method must retain its result block")
+    };
+    let StructuredNode::Block(assigned_block) = assigned_block.decode_structured().unwrap() else {
+        panic!("assignment loop method must decode as BLOCK")
+    };
+    let RawTree::LengthNode(assigned_while) = &assigned_block.stats[1] else {
+        panic!("assignment loop body must remain a WHILE node")
+    };
+    let assigned_while = assigned_while.decode_while().unwrap();
+    let RawTree::LengthNode(body) = assigned_while.body else {
+        panic!("assignment followed by Unit must retain its body BLOCK")
+    };
+    let StructuredNode::Block(body) = body.decode_structured().unwrap() else {
+        panic!("assignment followed by Unit must decode as BLOCK")
+    };
+    assert_eq!(body.stats.len(), 1);
+    let RawTree::Leaf(unit) = body.expression else {
+        panic!("Unit block result must remain a Unit literal")
+    };
+    assert_eq!(unit.tag, UNITCONST_TAG);
+}
+
+#[test]
+fn while_validation_rejects_forged_types_swapped_body_bindings_and_depth_exhaustion() {
+    let non_boolean = source_outputs_named_with_tree_edits(
+        LOOP,
+        "Loop.scala",
+        ValidationLimits::default(),
+        |_, typed_ast, _, _| {
+            let int_ty = typed_ast
+                .iter()
+                .find_map(|(_, tree)| {
+                    matches!(
+                        tree.kind,
+                        TreeKind::Literal(Literal {
+                            value: Constant::Int(_)
+                        })
+                    )
+                    .then_some(tree.ty)
+                })
+                .unwrap();
+            let (_, while_tree) = typed_ast
+                .iter()
+                .find(|(_, tree)| matches!(tree.kind, TreeKind::While(_)))
+                .unwrap();
+            let TreeKind::While(while_expr) = while_tree.kind else {
+                unreachable!()
+            };
+            typed_ast.get_mut(while_expr.cond).ty = int_ty;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(non_boolean, PickleError::BodyType { .. }));
+
+    let non_unit = source_outputs_named_with_tree_edits(
+        LOOP,
+        "Loop.scala",
+        ValidationLimits::default(),
+        |_, typed_ast, _, _| {
+            let int_ty = typed_ast
+                .iter()
+                .find_map(|(_, tree)| {
+                    matches!(
+                        tree.kind,
+                        TreeKind::Literal(Literal {
+                            value: Constant::Int(_)
+                        })
+                    )
+                    .then_some(tree.ty)
+                })
+                .unwrap();
+            let (while_id, _) = typed_ast
+                .iter()
+                .find(|(_, tree)| matches!(tree.kind, TreeKind::While(_)))
+                .unwrap();
+            typed_ast.get_mut(while_id).ty = int_ty;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(non_unit, PickleError::BodyType { .. }));
+
+    let swapped_body = source_outputs_named_with_tree_edits(
+        LOOP,
+        "Loop.scala",
+        ValidationLimits::default(),
+        |_, typed_ast, _, _| {
+            let (_, while_tree) = typed_ast
+                .iter()
+                .find(|(_, tree)| matches!(tree.kind, TreeKind::While(_)))
+                .unwrap();
+            let TreeKind::While(while_expr) = while_tree.kind else {
+                unreachable!()
+            };
+            let TreeKind::Block(body) = &mut typed_ast.get_mut(while_expr.body).kind else {
+                panic!("expected a source block as the loop body")
+            };
+            body.stats[0] = body.expr;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(swapped_body, PickleError::BodyBinding { .. }));
+
+    let depth = source_outputs_named_with_limits(
+        LOOP,
+        "Loop.scala",
+        ValidationLimits {
+            max_expression_depth: 0,
+            ..ValidationLimits::default()
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        depth,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+
+    let projection_depth = source_outputs_named_with_tree_edits_and_pickle_limits(
+        LOOP,
+        "Loop.scala",
+        ValidationLimits::default(),
+        PickleLimits {
+            projection: ProjectionLimits {
+                max_expression_depth: 0,
+                ..ProjectionLimits::default()
+            },
+            ..PickleLimits::default()
+        },
+        |_, _, _, _| {},
+        |_| {},
+    )
+    .unwrap_err();
+    assert_eq!(
+        projection_depth,
+        PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            limit: 0,
+        }
+    );
+
+    let unsupported_source = LOOP.replace(
+        "      total = total + i\n",
+        "      i + 1\n      total = total + i\n",
+    );
+    let unsupported = source_outputs_named(&unsupported_source, "Loop.scala", |_| {}).unwrap_err();
+    assert!(matches!(
+        unsupported,
+        PickleError::Unsupported {
+            feature: UnsupportedFeature::BodyExpression,
+            ..
+        }
+    ));
+
+    let missing_result = source_outputs_named_with_tree_edits(
+        LOOP,
+        "Loop.scala",
+        ValidationLimits::default(),
+        |_, typed_ast, _, _| {
+            let (while_id, _) = typed_ast
+                .iter()
+                .find(|(_, tree)| matches!(tree.kind, TreeKind::While(_)))
+                .unwrap();
+            let (outer_block_id, _) = typed_ast
+                .iter()
+                .find(|(_, tree)| matches!(&tree.kind, TreeKind::Block(block) if block.stats.len() == 3))
+                .unwrap();
+            let TreeKind::Block(block) = &mut typed_ast.get_mut(outer_block_id).kind else {
+                unreachable!()
+            };
+            block.expr = while_id;
+        },
+        |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(missing_result, PickleError::BodyType { .. }));
 }
 
 #[test]
