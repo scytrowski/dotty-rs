@@ -72,6 +72,7 @@ pub enum UnsupportedFeature {
     MethodCount,
     AbstractMethod,
     BodyExpression,
+    PrimitiveOperator,
     ResultTypeSyntax,
     Name,
 }
@@ -130,6 +131,27 @@ pub enum PickleError {
     IncompleteSymbol {
         symbol: SymbolId,
         info: SymbolInfo,
+    },
+    PrimitiveOperatorReceiver {
+        symbol: SymbolId,
+        expected: TypeId,
+        actual: TypeId,
+    },
+    PrimitiveOperatorArity {
+        symbol: SymbolId,
+        expected: Option<usize>,
+        actual: Option<usize>,
+    },
+    PrimitiveOperatorParameter {
+        symbol: SymbolId,
+        index: usize,
+        expected: TypeId,
+        actual: TypeId,
+    },
+    PrimitiveOperatorResult {
+        symbol: SymbolId,
+        expected: TypeId,
+        actual: TypeId,
     },
     SourceBinding {
         source: SourceId,
