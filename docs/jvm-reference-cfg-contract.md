@@ -24,42 +24,38 @@ of that allocation identity to initialized `C`. See
 [§4.10.1.4](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html#jvms-4.10.1.4),
 and [§4.10.1.9](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html#jvms-4.10.1.9).
 
-JVMS permits assignment-compatible subtyping in several operations. The
-class-file analyzers accept subtype assignments only when the caller supplies
-an explicit, validated `ClassHierarchy`; their default remains exact and
-never guesses an ancestor, interface, `java/lang/Object`, or common
-superclass. The Scala adapter supplies the single direct `Derived -> Base`
-edge that its emission-unit validator proved. This bounded proof enables
-method arguments, reference field writes, constructor arguments, and returns;
-it does not enable hierarchy-based control-flow joins.
+JVMS permits assignment-compatible subtyping in several operations. This
+backend's first supported reference slice deliberately requires exact owner
+identity instead: it has no hierarchy/classpath proof and must not guess an
+ancestor, interface, `java/lang/Object`, or a common superclass. That is a
+conservative implementation restriction, not a claim that JVMS requires exact
+type equality.
 
 ## Analysis boundaries
 
 `ValueKind::Reference` in the context-free `LinearCodeAnalyzer` records only a
-one-slot category. The class-aware paths retain initialized class identities
-for supported descriptors; with no hierarchy they require exact identity,
-and with an explicit hierarchy they accept only assignments proven by its
-edges. The CFG path is required whenever control flow or allocation-site
-initialization matters; a category-only result is not evidence of verifier
-safety.
+one-slot category. The class-aware linear path used by `ClassFileBuilder`
+retains exact initialized class identities for supported descriptors and
+rejects reference arguments whose identity is missing or different. The CFG
+path is required whenever control flow or allocation-site initialization
+matters; a category-only result is not evidence of verifier safety.
 
-`CfgCodeAnalyzer` tracks `Top`, integer, initialized class references,
-allocation-site-specific uninitialized references, and a bounded explicit
-class hierarchy for assignability checks. The operand stack requires exact
-compatible states at joins; locals with different incoming states degrade to
-`Top`. Ordinary instance methods seed local 0 with the exact emitting class,
-while branched constructors remain unsupported. The
+`CfgCodeAnalyzer` tracks `Top`, integer, exact initialized class references,
+and allocation-site-specific uninitialized references. The operand stack
+requires exact compatible states at joins; locals with different incoming
+states degrade to `Top`. Ordinary instance methods seed local 0 with the exact
+emitting class, while branched constructors remain unsupported. The
 `StackMapFrameGenerator` maps every initialized class through a validated
 `CONSTANT_Class` index and emits `Object(index)` entries.
 
 The constructor path in `ClassFileBuilder` rejects branched `<init>` bodies
 because it does not track the transition from `uninitializedThis` to
-initialized `this`. Class-file analysis supports exact object parameters and
-results by default, and explicitly proven subtype assignments when a
-`ClassHierarchy` is supplied. Source bytecode lowering supports planned
-reference parameters and results through `if`, `while`, and ordinary planned
-calls, plus the validated direct-parent conversions listed above. It still
-rejects mutable reference locals, hierarchy joins, arrays, null, and branched
+initialized `this`. Generic class-file analysis supports exact object
+parameters and results for `invokevirtual`, while the source backend enables
+only its separately planned subset. Source bytecode lowering supports exact
+planned reference parameters and results through `if`, `while`, and ordinary
+planned calls. It still rejects mutable reference locals, hierarchy joins,
+arrays, null, reference fields, reference constructor arguments, and branched
 constructors.
 
 ## Bounded state model
@@ -122,12 +118,12 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | --- | --- |
 | `aload` / `astore` | Load only an initialized exact-class local. Stores preserve the exact initialized class; reject unusable or uninitialized values. |
 | `dup` / `pop` | Preserve or discard the same abstract value; `dup` must retain one allocation-site identity, not initialize it. |
-| `getfield` / `putfield` | Validate the fieldref and descriptor. Receiver must be initialized and assignable to the field owner using the explicit hierarchy; a reference value must be assignable to the declared field class. |
-| `invokevirtual` | Validate methodref and descriptor. Pop supported arguments right-to-left; each object argument and receiver must be assignable to its declared class/owner using the explicit hierarchy. Push the exact object result or int-like result. Arrays and category-two types remain unsupported. |
+| `getfield` / `putfield` | Validate the fieldref and descriptor. Receiver must be initialized and its class must exactly equal the field owner. Values must match the field's supported primitive category. |
+| `invokevirtual` | Validate methodref and descriptor. Pop supported arguments right-to-left; each object argument and receiver must exactly match its declared class/owner. Push the exact object result or int-like result. Arrays and category-two types remain unsupported. |
 | `new` | Validate the `CONSTANT_Class`; push a fresh uninitialized allocation-site identity. |
-| `invokespecial <init>` | The constructor owner must equal the uninitialized allocation class; constructor arguments use explicit hierarchy assignability. On normal completion rewrite all aliases of that allocation to `Initialized(owner)`. |
+| `invokespecial <init>` | Consume only the matching uninitialized allocation and exact owner/descriptor. On normal completion rewrite all aliases of that allocation to `Initialized(owner)`. |
 | Integer instructions and branches | Preserve the existing integer transfer rules. Branch operands are int-like only; reference equality branches are out of scope. |
-| Returns | Preserve primitive/void checks; `areturn` requires an initialized reference assignable to the planned result class using the explicit hierarchy. |
+| Returns | Preserve primitive/void checks; `areturn` requires an initialized reference matching the exact planned result class. |
 
 Field and method constant-pool operands must be resolved to validated entry
 families, nested owner/class names, and parsed descriptors before transfer.
@@ -242,22 +238,18 @@ straight-line builder methods.
 | Missing, wrong-kind, or malformed CP `Class` entry | Existing typed constant-pool validation error; never manufacture a frame type | Builder/decoder validation remains the current boundary |
 | Branched constructor before `this`/super initialization | Keep rejected as unsupported constructor flow | `ClassFileBuilder` rejects branched `<init>` analysis |
 | Exact planned reference method parameter/result | Accept; seed parameter frames and require matching initialized `areturn` values | Source integration and mandatory JDK 21 verifier gate |
-| Direct `Derived -> Base` argument, field value, or return | Accept only with the explicit validated edge; preserve the concrete value class and emit no cast | `Inheritance.scala` source integration, decoded metadata assertions, and JDK 21 `-Xverify:all` harness |
 
-The backend converts exact planned reference-CFG cases and explicitly proven
-direct-parent assignments from negative to positive coverage. Remaining
-negative cases continue to pin owner, definite-initialization,
-constructor-safety, hierarchy-join, and descriptor boundaries.
+The backend converts only exact planned reference-CFG cases from negative to
+positive coverage. Remaining negative cases continue to pin exact-owner,
+definite-initialization, constructor-safety, and descriptor boundaries.
 
 ## Ownership for follow-up work
 
-- `dotty-classfile` owns JVM names, allocation sites, validated hierarchy
-  assignability, dataflow, constant pool checks, and frame encoding; it does
-  not depend on Scala symbols.
+- `dotty-classfile` owns JVM names, allocation sites, exact dataflow, constant
+  pool checks, and frame encoding; it does not depend on Scala symbols.
 - `dotty-jvm` maps validated plan identities to classfile names and emits only
   the bounded source forms described above.
 - Branched `<init>` and `UninitializedThis` remain a separate constructor-flow
-  problem. Hierarchy-aware joins, arrays, `null`, interface inheritance,
-  exception-flow joins, and arbitrary uninitialized values remain out of
-  scope. The source adapter currently proves only one direct same-unit
-  `Derived -> Base` edge.
+  problem. General inheritance/interface merges, arrays, `null`, reference
+  fields, reference constructor arguments, exception-flow joins, and arbitrary
+  uninitialized values remain out of scope.

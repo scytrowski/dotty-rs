@@ -7,17 +7,16 @@ refer to the Java SE 21 specification.
 
 ## Reproducible baseline
 
-The source-to-classfile regression compiles `Inheritance.scala` through the
-real lexer, parser, namer, typer, JVM adapter, and class-file encoder. It checks
-all three classes (`Base`, `Derived`, and `Runner`), constructor chains,
-overrides, inherited calls, subtype arguments and returns, conditional
-dispatch, and byte-for-byte equality from two fresh frontend sessions. In the
-mandatory JDK 21+ gate, `javap -c -v` inspects `Runner` and a Java harness runs
-all behavior with `java -Xverify:all`. Exact direct-parent override
-validation records effective dispatch identities without copying inherited
-bodies into a child plan. Inherited calls keep the selected declaration's
-owner in the JVM `Methodref`; the JVM performs dynamic override selection at
-runtime.
+The source-to-classfile regression compiles a same-batch `Base` and
+`Derived extends Base`, decodes `Derived.super_class`, checks the exact
+`Base.<init>()V` constructor target, and preserves `Base`'s Object-root
+constructor. In the mandatory JDK 21+ gate, `javap -c -v` inspects the child
+class and `java -Xverify:all` instantiates it and invokes inherited methods.
+The broader `SingleInheritanceAudit.scala` fixture remains a characterization
+of override and subtype behavior. Exact direct-parent override validation now
+records effective dispatch identities without copying inherited bodies into a
+child plan. Inherited calls keep the selected declaration's owner in the JVM
+`Methodref`; the JVM performs dynamic override selection at runtime.
 
 ## Current pipeline and identity contracts
 
@@ -58,12 +57,11 @@ canonical method symbol is declared and planned by that parent and appears
 unchanged in the receiver's effective dispatch metadata. Reference
 assignability accepts a `Derived` value where `Base` is required only when the
 same validated direct-parent proof establishes that assignment. The bounded
-conversion applies to method and constructor arguments, immutable local
-initializers, reference field writes, and returns; it retains each value's
-exact source/JVM class identity and emits no cast. It does not enable mutable
-reference locals, arbitrary `Object` upcasts, or implicit reference
-conversions without the unit proof. These checks do not use method-name lookup
-or name-based class identity.
+conversion applies to method arguments, immutable local initializers, and
+returns; it retains each value's exact source/JVM class identity and emits no
+cast. It does not enable mutable reference locals, arbitrary `Object` upcasts,
+or implicit reference conversions without the unit proof. These checks do not
+use method-name lookup or name-based class identity.
 
 Keep the source and class-file identities distinct:
 
@@ -128,7 +126,6 @@ publish partial output.
 | `class Base { def value(): Int = 20; def doubled(): Int = value() }` | Frontend and root-class emission support the shape | `Base.super_class = java/lang/Object`; `doubled` uses `invokevirtual Base.value:()I`; ordinary method receiver is initialized `Base` | Root-class source/JVM integration test |
 | `class Derived extends Base {}` | Source pipeline emits the batch when `Base` is a planned public no-arg class with Object as its parent | `Derived.super_class = Base`; constructor invokes `Base.<init>()V` exactly once before ordinary use | Covered by source-backed classfile regression and JDK verifier gate |
 | `def evaluate(base: Base) = base.doubled(); evaluate(new Derived())` | Accepted when the direct `Derived <: Base` proof is present in the emission unit | `evaluate` keeps descriptor `Base`; `invokevirtual Base.doubled` accepts the `Base` receiver, and no cast or merge is emitted | Other subtype depths and external hierarchy facts remain unsupported |
-| `Inheritance.scala` end-to-end fixture | Real Scala frontend compiles `Base`, `Derived`, and `Runner`; two fresh sessions emit byte-identical batches | Decoded class metadata and method references are asserted; `javap -c -v` and a Java 21+ `-Xverify:all` harness validate descriptors, frames, constructors, and dynamic dispatch | Mandatory JDK 21+ CI gate; local JDK is optional |
 | Unknown/wrong parent type | If name/type resolution cannot resolve it, reject in the frontend; otherwise hierarchy validation rejects noncanonical or non-class parents | No class file should be produced | Source resolution and canonical hierarchy projection; never lower by name guess |
 | Parent cycle (`A extends B`, `B extends A`) | `JvmSuperclassIssue::InheritanceCycle` | No `super_class` chain is emitted | Validated hierarchy graph in `dotty-jvm`, keyed by canonical symbols |
 | Extending a `final` class | `JvmSuperclassIssue::ParentIsFinal` | JVMS forbids extending a final class | Parent flag validation in the `dotty-jvm` hierarchy check |
@@ -142,9 +139,8 @@ publish partial output.
 | Missing or inaccessible parent `()V` constructor | `JvmSuperclassIssue::ParentConstructorUnavailable` | No constructor invocation or class output is emitted | Constructor metadata/access validation in `dotty-jvm`; constructor transfer in `dotty-classfile` |
 | `def read(): Int = super.value()` | Real source fails earlier at `PipelineFailure::Typer(TyperError::UnsupportedExpression { expression_kind: "expression or declaration tree", .. })`; method bodies are typed before JVM emission | No class file is produced, so no invocation instruction or constant-pool owner is emitted | First add source AST/typer support with the canonical selected parent declaration; only then add the separate checked `invokespecial` lowering path in `dotty-jvm` and analyzer support in `dotty-classfile` |
 
-The end-to-end tests guarantee the supported direct-parent constructor chain,
-runtime dispatch, subtype argument/return paths, and the earlier typer
-rejection for `super.method()`. Rejected hierarchy rows must remain typed
-failures without partial output. Rows that describe other future behavior are
-design constraints for follow-up increments and need focused exact-diagnostic
-regression coverage when implemented.
+The end-to-end tests guarantee the supported direct-parent constructor chain
+and the earlier typer rejection for `super.method()`. Rejected hierarchy rows
+must remain typed failures without partial output. Rows that describe other
+future behavior are design constraints for follow-up increments and need
+focused exact-diagnostic regression coverage when implemented.
