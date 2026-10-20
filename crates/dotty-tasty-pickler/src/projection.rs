@@ -7,6 +7,8 @@ use dotty_tasty::tasty::*;
 
 use crate::{Builtin, LimitKind, PickleError, ReferenceError, ValidatedPicklePlan};
 
+mod primitive_operator;
+
 /// Budgets for semantic projection; type and expression recursion have hard
 /// ceilings of 256 for stack safety.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
