@@ -458,6 +458,12 @@ pub enum TyperError {
         source: SourceId,
         tree_index: u32,
     },
+    /// A direct parent application selected a private constructor.
+    ParentConstructorInaccessible {
+        source: SourceId,
+        tree_index: u32,
+        constructor: SymbolId,
+    },
     /// A projected parent does not resolve to a class or trait declaration.
     UnresolvedParentClassKind {
         source: SourceId,

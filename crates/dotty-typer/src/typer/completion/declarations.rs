@@ -211,6 +211,7 @@ impl SourceTyper<'_> {
             .index
             .scope_of(symbol)
             .ok_or(TyperError::MissingClassScope { symbol })?;
+        let parent_types = parents.clone();
         let info = self.store.types.alloc(Type::ClassInfo(ClassInfo {
             prefix: self.definitions.no_prefix,
             class: symbol,
@@ -223,7 +224,244 @@ impl SourceTyper<'_> {
         self.store
             .symbols
             .set_info(symbol, SymbolInfo::Complete(info));
+
+        for (parent_tree, parent_type) in template.parents.iter().zip(&parent_types) {
+            if matches!(
+                self.arena.try_get(*parent_tree).map(|node| &node.kind),
+                Some(TreeKind::Apply(_))
+            ) {
+                self.type_parent_constructor_application(
+                    symbol,
+                    template.constructor,
+                    *parent_tree,
+                    *parent_type,
+                    info_journal,
+                )?;
+            }
+        }
         Ok(info)
+    }
+
+    fn type_parent_constructor_application(
+        &mut self,
+        class: SymbolId,
+        constructor_tree: TreeId<Untyped>,
+        parent_tree: TreeId<Untyped>,
+        parent_type: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        let Some(TreeKind::Apply(application)) =
+            self.arena.try_get(parent_tree).map(|node| &node.kind)
+        else {
+            return Ok(());
+        };
+        let valid_constructor_selection = application.kind == ApplyKind::Regular
+            && self
+                .arena
+                .try_get(application.function)
+                .is_some_and(|node| {
+                    matches!(&node.kind, TreeKind::Select(selection)
+                    if !selection.backquoted
+                        && self.store.names.resolve(selection.name.text()) == "<init>"
+                        && self.arena.try_get(selection.qualifier)
+                            .is_some_and(|qualifier| matches!(qualifier.kind, TreeKind::New(_))))
+                });
+        if !valid_constructor_selection {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+
+        let child_constructor = self.index.symbol_at(self.source, constructor_tree).ok_or(
+            TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            },
+        )?;
+        if self.store.symbols.get(child_constructor).kind != SymbolKind::Constructor
+            || self.store.symbols.get(child_constructor).owner != Some(class)
+        {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+        self.complete_symbol_inner(child_constructor, info_journal)?;
+        let context = self.expression_context_for(child_constructor)?;
+        let mut new_mappings = Vec::new();
+        let typed_parent = self.type_value_expression_inner(
+            parent_tree,
+            context,
+            info_journal,
+            &mut new_mappings,
+        )?;
+
+        let parent_class = self.instantiable_class_of_type(parent_type, info_journal)?;
+        let Some(TreeKind::Apply(typed_application)) = self
+            .typed_arena
+            .try_get(typed_parent)
+            .map(|node| &node.kind)
+        else {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        };
+        let selected_constructor = match self
+            .store
+            .types
+            .try_get(self.typed_arena.get(typed_application.function).ty)
+        {
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(constructor),
+                ..
+            }) => *constructor,
+            _ => {
+                return Err(TyperError::MalformedClassParent {
+                    source: self.source,
+                    tree_index: parent_tree.index(),
+                });
+            }
+        };
+        if !self.store.symbols.contains(selected_constructor)
+            || self.store.symbols.get(selected_constructor).kind != SymbolKind::Constructor
+            || self.store.symbols.get(selected_constructor).owner != Some(parent_class)
+        {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+        if matches!(
+            self.store.symbols.get(selected_constructor).visibility,
+            Visibility::Private | Visibility::PrivateWithin(_)
+        ) {
+            return Err(TyperError::ParentConstructorInaccessible {
+                source: self.source,
+                tree_index: parent_tree.index(),
+                constructor: selected_constructor,
+            });
+        }
+        self.validate_parent_constructor_signature(selected_constructor, parent_tree.index())?;
+        self.validate_primary_parent_constructor(parent_class, selected_constructor, parent_tree)?;
+        Ok(())
+    }
+
+    fn validate_parent_constructor_signature(
+        &self,
+        constructor: SymbolId,
+        tree_index: u32,
+    ) -> Result<(), TyperError> {
+        let SymbolInfo::Complete(info) = *self.store.symbols.info(constructor) else {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index,
+            });
+        };
+        let Some(Type::Method(method)) = self.store.types.try_get(info) else {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index,
+            });
+        };
+        if method.kind != MethodKind::Plain
+            || matches!(
+                self.store.types.try_get(method.result),
+                Some(Type::Method(_) | Type::Poly(_))
+            )
+            || method.params.iter().any(|parameter| {
+                parameter.erased
+                    || parameter.varargs
+                    || matches!(
+                        self.store.types.try_get(parameter.ty),
+                        Some(Type::ByName { .. } | Type::Repeated { .. })
+                    )
+            })
+        {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_primary_parent_constructor(
+        &self,
+        parent_class: SymbolId,
+        selected_constructor: SymbolId,
+        parent_tree: TreeId<Untyped>,
+    ) -> Result<(), TyperError> {
+        let Some(SourceDefinition::Canonical { source, tree }) =
+            self.index.definition_of(parent_class)
+        else {
+            return Ok(());
+        };
+        if source != self.source {
+            return Ok(());
+        }
+        let Some(class_node) = self.arena.try_get(tree) else {
+            return Err(TyperError::TreeOutsideArena {
+                source,
+                tree_index: tree.index(),
+            });
+        };
+        let template_tree = match &class_node.kind {
+            TreeKind::TypeDef(definition) => definition.rhs,
+            _ => {
+                return Err(TyperError::MalformedClassParent {
+                    source: self.source,
+                    tree_index: parent_tree.index(),
+                });
+            }
+        };
+        let Some(TreeKind::Template(template)) =
+            self.arena.try_get(template_tree).map(|node| &node.kind)
+        else {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        };
+        let primary = self.index.symbol_at(source, template.constructor).ok_or(
+            TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            },
+        )?;
+        if primary != selected_constructor {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+        let Some(TreeKind::DefDef(constructor)) = self
+            .arena
+            .try_get(template.constructor)
+            .map(|node| &node.kind)
+        else {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        };
+        if constructor
+            .value_param_clauses
+            .iter()
+            .flatten()
+            .any(|parameter| {
+                self.arena.try_get(*parameter).is_some_and(|node| {
+                matches!(&node.kind, TreeKind::ValDef(definition) if definition.rhs.is_some())
+            })
+            })
+        {
+            return Err(TyperError::MalformedClassParent {
+                source: self.source,
+                tree_index: parent_tree.index(),
+            });
+        }
+        Ok(())
     }
 
     pub(in crate::typer) fn project_parent_type(

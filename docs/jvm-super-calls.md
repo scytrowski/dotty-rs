@@ -1,10 +1,11 @@
 # Parameterized superclass constructors and explicit `super` calls
 
-This is an audit of the current source-to-JVM pipeline and a contract for the
-next bounded implementation steps. Source compatibility targets Scala 3.9.0
+This is an audit of the source-to-JVM pipeline and a contract for the next
+bounded implementation steps. Source compatibility targets Scala 3.9.0
 revision `777528f19a58e794c9954a42f433373472ec57f8`; verifier rules refer to
-Java SE 21. This document does not claim that parameterized parent calls or
-explicit `super` method calls are implemented.
+Java SE 21. Issue #1369 adds source typing for a narrow parent application;
+JVM constructor lowering and all explicit `super` method calls remain
+unimplemented.
 
 ## Reproduce the current behavior
 
@@ -12,6 +13,8 @@ The characterization tests exercise the real parser, namer, typer, and codegen
 pipeline:
 
 ```text
+cargo test -p dotty-typer --test typed_expressions parent_constructor --locked
+cargo test -p dotty-typer --test typed_expressions unsupported_parent_constructor --locked
 cargo test -p dotty --test jvm_source_compilation parameterized_parent_constructor --locked
 cargo test -p dotty --test jvm_source_compilation super_method_source_is_rejected_by_typer_before_jvm_emission --locked
 ```
@@ -33,20 +36,28 @@ That constructor-owned parameter identity is the source to use for a future
 parameter load; it must not be replaced by a class accessor or guessed from
 the parameter's text.
 
-`SourceTyper::complete_class` currently calls `project_parent_type` for each
-parent. That projection strips a parent `Apply` down to its function and
-projects the `New` type. Consequently `ClassInfo.parents` contains the parent
-type (`TypeRef(Base)`), not constructor expressions. Neither the parent
-application nor its argument is mapped in `SourceTypedIndex`. A parent type
-edge and a constructor invocation are different facts; do not put argument
-trees into `ClassInfo.parents`.
+`SourceTyper::complete_class` projects each parent type independently from its
+constructor application. Consequently `ClassInfo.parents` contains the parent
+type (`TypeRef(Base)`), not constructor expressions. For a supported plain
+parent application, the typer separately resolves and types the constructor
+call under the child primary constructor's expression context. The application
+and each original argument tree are mapped in `SourceTypedIndex`; argument
+order and source `TreeId`s remain available to a later adapter. The selected
+typed constructor reference carries the canonical constructor `SymbolId`, and
+an argument such as `start` carries the `TermRefTarget::Symbol` of the
+constructor-owned `Derived.<init>.start` parameter, not its class accessor.
+The call must select the parent's primary constructor with one plain,
+uncurried, non-generic clause; a private or unsupported signature fails during
+typing. A parent type edge and a constructor invocation are different facts;
+do not put argument trees into `ClassInfo.parents`.
 
 The current codegen accepts only the accessible public no-argument direct
 parent constructor. The parameterized source above reaches codegen but fails
 with `JvmCodegenError::InvalidJvmSuperclass` and
 `JvmSuperclassIssue::ParentConstructorUnavailable`; no class files are
-published. This is later than parent-argument typing, which is currently
-absent.
+published. Source argument typing now succeeds before this backend failure.
+The typed mapping is a frontend-owned proof source; `dotty-jvm` must consume
+the exact same-session source and typed IDs rather than retyping expressions.
 
 For all characterized source forms below, parsing accepts a method selection,
 but source typing fails first with
@@ -194,7 +205,7 @@ baseline for all follow-up work.
 
 | Source shape | Current observed result | Required boundary / next owner |
 | --- | --- | --- |
-| `class Derived(start: Int) extends Base(start)` | Parent `Apply` and `start` are preserved by the parser; typer stores only `TypeRef(Base)` in `ClassInfo.parents` and indexes neither argument; codegen rejects unavailable `()V` constructor and publishes no classes | Type and retain parent argument trees, keeping `ClassInfo.parents` type-only — [#1369](https://github.com/scytrowski/dotty-rs/issues/1369); validate pre-super initialization state and descriptor in class files — [#1370](https://github.com/scytrowski/dotty-rs/issues/1370); lower the proven bounded source forms — [#1371](https://github.com/scytrowski/dotty-rs/issues/1371) |
+| `class Derived(start: Int) extends Base(start)` | Typer retains the parent `Apply` and argument mappings, selects canonical `Base.<init>`, and binds `start` to the child constructor's derived parameter symbol; `ClassInfo.parents` remains `TypeRef(Base)`. Codegen still rejects unavailable `()V` and publishes no classes | Frontend proof/type mapping is implemented in [#1369](https://github.com/scytrowski/dotty-rs/issues/1369); validate pre-super initialization state and descriptor in class files — [#1370](https://github.com/scytrowski/dotty-rs/issues/1370); lower the proven bounded source forms — [#1371](https://github.com/scytrowski/dotty-rs/issues/1371) |
 | `super.value()` targeting direct `Base.value` | Parser preserves `Super` selection; typer returns generic `UnsupportedExpression`; no class file is published | Resolve the canonical direct-parent method symbol — [#1372](https://github.com/scytrowski/dotty-rs/issues/1372); separately validate initialized-receiver `invokespecial` — [#1373](https://github.com/scytrowski/dotty-rs/issues/1373); lower only a checked target as special dispatch — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
 | Parameterized parent plus explicit direct-super calls, run on the JVM | Not implemented; no output path exists for the required combination | Source-to-classfile-to-JDK integration and runtime behavior — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `extends Base` with accessible `Base.<init>()V` | Supported and verified by existing source-backed regression | Preserve direct-parent ownership and post-super analysis in `dotty-jvm` and `dotty-classfile` |

@@ -17527,6 +17527,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
             "UnableToFinalizeRawGenericNewInstanceType"
         }
         TyperError::MalformedClassParent { .. } => "MalformedClassParent",
+        TyperError::ParentConstructorInaccessible { .. } => "ParentConstructorInaccessible",
         TyperError::UnresolvedParentClassKind { .. } => "UnresolvedParentClassKind",
         TyperError::HigherKindedTypeParameterDeferred { .. } => "HigherKindedTypeParameterDeferred",
         TyperError::HigherKindedTypeAliasDeferred { .. } => "HigherKindedTypeAliasDeferred",

@@ -15,7 +15,7 @@ use dotty_core::{
     AstArena, Definitions, MemberRequest, MemberSelector, MemberSpace, Name, NoResolver, Packages,
     ResolutionError, ScopeId, SemanticStore, SourceContextId, SourceDefinition, SourceId,
     SourceSemanticIndex, SourceSpan, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin,
-    SymbolResolver, TreeId, TypeId, Typed, Untyped,
+    SymbolResolver, TreeId, TypeId, Typed, Untyped, Visibility,
 };
 
 use crate::{SourceTypeIndex, SourceTypedIndex};

@@ -462,6 +462,15 @@ For the tested subset, source Typer completion currently supports:
 - class header completion as `ClassInfo`, including its parent list, declared
   members, prefix, and explicit self type where supplied.
 - primary constructor signature normalization for a plain constructor.
+- direct source parent constructor applications with one plain, uncurried
+  primary-constructor clause. The typer resolves the selected constructor by
+  its canonical symbol, types the application under the child primary
+  constructor's expression context, checks ordinary arity and argument
+  conformance, and records the original application and argument trees in
+  `SourceTypedIndex`. `ClassInfo.parents` remains a list of parent types; it
+  does not carry constructor expressions. Curried, contextual, erased,
+  by-name, repeated, defaulted, generic, secondary, and private parent
+  constructors are rejected.
 
 Expression typing currently includes typed identifiers, stable term selections,
 ordinary method application on a direct constructor result, literal expressions,
