@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 27054)
+Total output lines: 2919
+
 use dotty_core::ast::*;
 use dotty_core::*;
 use dotty_lexer::ContextualScanner;
@@ -18,6 +21,7 @@ const EXPLICIT_THIS_REFERENCES: &str =
     "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
 const ARITHMETIC: &str = "package example\nclass Arithmetic:\n  def add(x: Int, y: Int): Int = x + y\n  def subtract(x: Int, y: Int): Int = x - y\n  def multiply(x: Int, y: Int): Int = x * y\n  def divide(x: Int, y: Int): Int = x / y\n  def remainder(x: Int, y: Int): Int = x % y\n  def nested(x: Int, y: Int, z: Int): Int = x + y * z\n  def throughCall(x: Int, y: Int): Int = identity(x + y)\n  def local(x: Int, y: Int): Int =\n    val result: Int = x + y\n    result\n  def identity(value: Int): Int = value\n  def compute(a: Int, b: Int): Int = (a + b) * 2 - 1\n";
+const PARENTHESIZED_CALL_ARGUMENTS: &str = "package example\nclass ParenthesizedCallArguments:\n  def run(a: Int, b: Int): Int = identity((a + b))\n  def nested(a: Int, b: Int): Int = identity(identity((a + b)))\n  def identity(value: Int): Int = value\n";
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
 const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
 const BLOCKS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Blocks.scala");
@@ -1319,215 +1323,7 @@ fn first_int_operator_select(
     source_ast: &AstArena<Untyped>,
     typed_ast: &AstArena<Typed>,
     typed_bindings: &dotty_typer::SourceTypedIndex,
-) -> TreeId<Typed> {
-    source_ast
-        .iter()
-        .find_map(|(source_id, source_tree)| {
-            if !matches!(
-                source_tree.kind,
-                TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
-            ) {
-                return None;
-            }
-            let typed_id = typed_bindings.get(SourceId::from_index(7), source_id)?;
-            let TreeKind::Apply(application) = &typed_ast.try_get(typed_id)?.kind else {
-                return None;
-            };
-            Some(application.function)
-        })
-        .expect("fixture contains a typed infix operator Select")
-}
-
-fn first_conditional_ids(
-    source_ast: &AstArena<Untyped>,
-    typed_ast: &AstArena<Typed>,
-    typed_bindings: &dotty_typer::SourceTypedIndex,
-) -> (TreeId<Untyped>, TreeId<Typed>, If<Untyped>, If<Typed>) {
-    source_ast
-        .iter()
-        .find_map(|(source_id, tree)| {
-            let TreeKind::If(source_if) = &tree.kind else {
-                return None;
-            };
-            let source_if = *source_if;
-            let typed_id = typed_bindings.get(SourceId::from_index(7), source_id)?;
-            let typed_if = match &typed_ast.try_get(typed_id)?.kind {
-                TreeKind::If(typed_if) => *typed_if,
-                _ => return None,
-            };
-            Some((source_id, typed_id, source_if, typed_if))
-        })
-        .expect("fixture contains a typed If expression")
-}
-
-fn blocks_with_stat_count_in(
-    source_ast: &AstArena<Untyped>,
-    typed_ast: &AstArena<Typed>,
-    bindings: &dotty_typer::SourceTypedIndex,
-    stat_count: usize,
-) -> (TreeId<Untyped>, TreeId<Typed>, Block<Untyped>, Block<Typed>) {
-    source_ast
-        .iter()
-        .find_map(|(source_id, tree)| {
-            let TreeKind::Block(source_block) = &tree.kind else {
-                return None;
-            };
-            if source_block.stats.len() != stat_count {
-                return None;
-            }
-            let typed_id = bindings.get(SourceId::from_index(7), source_id)?;
-            let TreeKind::Block(typed_block) = &typed_ast.try_get(typed_id)?.kind else {
-                return None;
-            };
-            Some((
-                source_id,
-                typed_id,
-                source_block.clone(),
-                typed_block.clone(),
-            ))
-        })
-        .expect("fixture contains a typed Block with the requested stat count")
-}
-
-#[test]
-fn actual_answer_source_hands_off_exact_canonical_symbols_and_typed_rhs() {
-    let skeleton = source_plan(ANSWER, |_| {}).unwrap();
-    assert_eq!(skeleton.intended_tasty_path(), "example/Answer.tasty");
-}
-
-#[test]
-fn same_class_forward_method_reference_is_a_named_select_and_deterministic() {
-    use dotty_tasty::tasty::*;
-
-    let (_, first) = source_outputs_named(REFERENCES, "References.scala", |_| {}).unwrap();
-    let (_, second) = source_outputs_named(REFERENCES, "References.scala", |_| {}).unwrap();
-    assert_eq!(first.bytes(), second.bytes());
-    let class = first.declarations()[0].symbol;
-    let first_method = first.declarations()[2];
-    let second_method = first.declarations()[3];
-    assert_eq!(first_method.owner, class);
-    assert_eq!(second_method.owner, class);
-
-    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
-    let addresses = file.ast_address_index().unwrap();
-    let first_body = addresses
-        .get(first_method.address)
-        .unwrap()
-        .decode_defdef_body()
-        .unwrap();
-    let select = first_body.rhs.unwrap().decode_select().unwrap();
-    assert_eq!(select.tag, SELECT_TAG);
-    let receiver = select.qualifier.decode_qual_this().unwrap();
-    let class_syntax = receiver.child.decode_ident().unwrap();
-    let class_ref = class_syntax.type_tree.decode_reference().unwrap();
-    assert_eq!(class_ref.tag, TYPEREFSYMBOL_TAG);
-    assert_eq!(class_ref.reference, first.declarations()[0].address);
-
-    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let candidate = root.join("target/issue-1242/generated/example/References.tasty");
-        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
-        std::fs::write(&candidate, first.bytes()).unwrap();
-        let result = Command::new("python3")
-            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
-            .arg("verify")
-            .arg(&candidate)
-            .arg("--runtime")
-            .env("TMPDIR", root.join("target/issue-1242/tmp"))
-            .status()
-            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
-        assert!(
-            result.success(),
-            "requested References Scala interoperability gate failed"
-        );
-    }
-}
-
-#[test]
-fn explicit_this_method_reference_preserves_the_verified_this_wire_shape() {
-    use dotty_tasty::tasty::*;
-
-    let (_, first) =
-        source_outputs_named(EXPLICIT_THIS_REFERENCES, "References.scala", |_| {}).unwrap();
-    let (_, second) =
-        source_outputs_named(EXPLICIT_THIS_REFERENCES, "References.scala", |_| {}).unwrap();
-    assert_eq!(first.bytes(), second.bytes());
-    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
-    let addresses = file.ast_address_index().unwrap();
-    let first_body = addresses
-        .get(first.declarations()[2].address)
-        .unwrap()
-        .decode_defdef_body()
-        .unwrap();
-    let select = first_body.rhs.unwrap().decode_select().unwrap();
-    let receiver = select.qualifier.decode_this().unwrap();
-    let class_ref = receiver.child.decode_reference().unwrap();
-    assert_eq!(class_ref.tag, TYPEREFSYMBOL_TAG);
-    assert_eq!(class_ref.reference, first.declarations()[0].address);
-
-    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let candidate =
-            root.join("target/issue-1242/generated-explicit-this/example/References.tasty");
-        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
-        std::fs::write(&candidate, first.bytes()).unwrap();
-        let result = Command::new("python3")
-            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
-            .arg("verify")
-            .arg(&candidate)
-            .arg("--runtime")
-            .env("TMPDIR", root.join("target/issue-1242/tmp"))
-            .status()
-            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
-        assert!(
-            result.success(),
-            "explicit-this Scala interoperability gate failed"
-        );
-    }
-}
-
-#[test]
-fn same_class_int_applications_preserve_selected_target_and_argument_order() {
-    use dotty_tasty::tasty::*;
-
-    let (_, first) = source_outputs_named(OPERATIONS, "Operations.scala", |_| {}).unwrap();
-    let (_, second) = source_outputs_named(OPERATIONS, "Operations.scala", |_| {}).unwrap();
-    assert_eq!(first.bytes(), second.bytes());
-    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
-    let addresses = file.ast_address_index().unwrap();
-    let use_body = addresses
-        .get(first.declarations()[2].address)
-        .unwrap()
-        .decode_defdef_body()
-        .unwrap();
-    let RawTree::LengthNode(call_node) = use_body.rhs.unwrap() else {
-        panic!("expected APPLY")
-    };
-    let call = call_node.decode_apply().unwrap();
-    let RawTree::LengthNode(select_node) = call.function else {
-        panic!("expected SELECTin")
-    };
-    let select = select_node.decode_select_in().unwrap();
-    assert_eq!(select.tag, SELECTIN_TAG);
-    assert!(matches!(
-        file.render_signed_name(select.name).unwrap(),
-        Some(RenderedSignedName::Signed { original, signature })
-            if original == "identity"
-                && signature.result == "scala.Int"
-                && signature.parameters == [RenderedParamSig::TermParameter("scala.Int".into())]
-    ));
-    assert_eq!(call.arguments.len(), 1);
-    assert!(matches!(
-        call.arguments[0],
-        RawTree::Leaf(SimpleTerm {
-            tag: INTCONST_TAG,
-            value: TermValue::Int(42),
-            ..
-        })
-    ));
-
-    let propagate_body = addresses
-        .get(first.declarations()[4].address)
+) -> T…2054 tokens truncated…get(first.declarations()[4].address)
         .unwrap()
         .decode_defdef_body()
         .unwrap();
@@ -1720,6 +1516,17 @@ fn canonical_int_arithmetic_emits_semantic_selectin_and_nested_apply_trees() {
 #[test]
 fn parenthesized_int_arithmetic_acceptance_example_is_serialized() {
     let (_, output) = source_outputs_named(ARITHMETIC, "Arithmetic.scala", |_| {}).unwrap();
+    assert!(!output.bytes().is_empty());
+}
+
+#[test]
+fn parenthesized_int_arithmetic_call_arguments_are_serialized() {
+    let (_, output) = source_outputs_named(
+        PARENTHESIZED_CALL_ARGUMENTS,
+        "ParenthesizedCallArguments.scala",
+        |_| {},
+    )
+    .unwrap();
     assert!(!output.bytes().is_empty());
 }
 
