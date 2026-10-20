@@ -50,8 +50,11 @@ class ImportPrefix1180ReconciliationTests(unittest.TestCase):
             "current_object_identities": "dotty.tools.dotc.ast.Trees",
             "current_module_class_identities": "dotty/tools/dotc/ast/Trees$",
             "classification": "module_shell_not_completed",
+            "module_lookup": "resolved|rolled_back",
             "completion": "unobserved",
             "member_lookup": "error|rolled_back",
+            "module_member_attempts": "1",
+            "distinct_module_member_requests": "member=Trees",
         }
         refreshed = reconcile(
             profile,
@@ -62,7 +65,9 @@ class ImportPrefix1180ReconciliationTests(unittest.TestCase):
         )
         self.assertEqual(refreshed[0]["current_qualifier_kind"], "Object")
         self.assertEqual(refreshed[0]["current_object_module_evidence_status"], "matched_object_module_evidence")
-        self.assertEqual(json.loads(refreshed[0]["current_object_module_evidence"])[0]["classification"], "module_shell_not_completed")
+        evidence = json.loads(refreshed[0]["current_object_module_evidence"])[0]
+        self.assertEqual(evidence["classifications"], ["module_shell_not_completed"])
+        self.assertEqual(evidence["member_outcomes"], ["error|rolled_back"])
 
 
 if __name__ == "__main__":
