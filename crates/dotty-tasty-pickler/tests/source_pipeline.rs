@@ -3410,7 +3410,7 @@ fn mutable_assignment_rhs_obeys_projection_expression_depth_after_validation() {
         }
     );
 
-    let nested_block = "package example\\nclass NestedAssignment:\\n  def run: Int =\\n    var count: Int = 0\\n    count = { count = 1; count + 1 }\\n    count\\n";
+    let nested_block = "package example\nclass NestedAssignment:\n  def run: Int =\n    var count: Int = 0\n    count = { count = 1; count + 1 }\n    count\n";
     let error = source_outputs_named_with_tree_edits_and_pickle_limits(
         nested_block,
         "NestedAssignment.scala",
