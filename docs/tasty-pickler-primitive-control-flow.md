@@ -1,12 +1,11 @@
 # Scala 3.9 primitive operators and mutable control flow audit
 
 This audit records the Scala 3.9.0 source, typed-source and TASTy wire
-observations needed before the semantic pickler accepts primitive operators,
-mutable locals, assignment and `while`. It adds independent fixtures, oracle
-assertions and source typer contract tests only. It does not add producer
-support or production APIs. The source compiler is pinned to
-`777528f19a58e794c9954a42f433373472ec57f8`; the emitted format is TASTy
-28.9.0. Exact source and artifact hashes are in
+observations for primitive operators, mutable locals, assignment and `while`.
+The semantic pickler currently supports canonical `Int` arithmetic; the other
+operators and mutable control flow remain audit-only. The source compiler is
+pinned to `777528f19a58e794c9954a42f433373472ec57f8`; the emitted format is
+TASTy 28.9.0. Exact source and artifact hashes are in
 [`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json).
 
 The independently compiled inputs are
@@ -41,6 +40,25 @@ and signature, source-to-typed mappings and receiver/argument identity. It also
 checks the custom `+` resolves to the user declaration, not `scala.Int.+`.
 Consequently a future producer must consume typed symbol identity; it must not
 choose an intrinsic from the token spelling alone.
+
+## Current pickler coverage
+
+Issue #1356 enables only the five binary arithmetic members `Int.+`, `Int.-`,
+`Int.*`, `Int./` and `Int.%`. Validation pairs the source `InfixOp` with its
+typed `Apply`, verifies the canonical symbol, owner, method signature, result
+and receiver types, and checks the source-to-typed edges for the receiver and
+argument. Emission uses the ordinary `APPLY(SELECTin(...), argument)` shape,
+retaining the receiver before the argument and leaving overflow, division and
+remainder behavior to Scala/JVM evaluation. Nested arithmetic, arithmetic
+inside supported same-class calls and immutable local initializers are covered.
+Comparisons, Boolean operators, assignment and loops remain unsupported by the
+pickler.
+
+The source pipeline regression test inspects signed semantic names and nested
+wire structure. When the explicit pinned Scala oracle is enabled, it also
+decompiles the standalone arithmetic artifact, compiles it with `-from-tasty`,
+and runs edge cases for overflow, negative division/remainder and division by
+zero.
 
 ## Short-circuit behavior
 

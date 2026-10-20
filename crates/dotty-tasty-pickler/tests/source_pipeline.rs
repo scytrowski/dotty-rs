@@ -17,6 +17,8 @@ const REFERENCES: &str = include_str!("../../../tests/fixtures/tasty_pickler/Ref
 const EXPLICIT_THIS_REFERENCES: &str =
     "package example\nclass References:\n  def first: Int = this.second\n  def second: Int = 42\n";
 const OPERATIONS: &str = "package example\nclass Operations:\n  def use: Int = identity(42)\n  def identity(x: Int): Int = x\n  def propagate(x: Int): Int = identity(x)\n  def explicit: Int = this.identity(42)\n  def pick(first: Int, second: Int): Int = second\n  def picks: Int = pick(11, 42)\n  def nested: Int = identity(identity(42))\n";
+const ARITHMETIC: &str = "package example\nclass Arithmetic:\n  def add(x: Int, y: Int): Int = x + y\n  def subtract(x: Int, y: Int): Int = x - y\n  def multiply(x: Int, y: Int): Int = x * y\n  def divide(x: Int, y: Int): Int = x / y\n  def remainder(x: Int, y: Int): Int = x % y\n  def nested(x: Int, y: Int, z: Int): Int = x + y * z\n  def throughCall(x: Int, y: Int): Int = identity(x + y)\n  def local(x: Int, y: Int): Int =\n    val result: Int = x + y\n    result\n  def identity(value: Int): Int = value\n  def compute(a: Int, b: Int): Int = (a + b) * 2 - 1\n";
+const PARENTHESIZED_CALL_ARGUMENTS: &str = "package example\nclass ParenthesizedCallArguments:\n  def run(a: Int, b: Int): Int = identity((a + b))\n  def nested(a: Int, b: Int): Int = identity(identity((a + b)))\n  def identity(value: Int): Int = value\n";
 const FLAGS: &str = "package example\nclass Flags:\n  def enabled: Boolean = true\n  def disabled: Boolean = false\n  def passthrough(flag: Boolean): Boolean = flag\n  def keep(flag: Boolean, value: Int): Int = value\n";
 const CONDITIONALS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Conditionals.scala");
 const BLOCKS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Blocks.scala");
@@ -1314,6 +1316,29 @@ fn nested_application_ids(
         .expect("fixture contains a nested application")
 }
 
+fn first_int_operator_select(
+    source_ast: &AstArena<Untyped>,
+    typed_ast: &AstArena<Typed>,
+    typed_bindings: &dotty_typer::SourceTypedIndex,
+) -> TreeId<Typed> {
+    source_ast
+        .iter()
+        .find_map(|(source_id, source_tree)| {
+            if !matches!(
+                source_tree.kind,
+                TreeKind::PhaseSpecific(UntypedNode::InfixOp(_))
+            ) {
+                return None;
+            }
+            let typed_id = typed_bindings.get(SourceId::from_index(7), source_id)?;
+            let TreeKind::Apply(application) = &typed_ast.try_get(typed_id)?.kind else {
+                return None;
+            };
+            Some(application.function)
+        })
+        .expect("fixture contains a typed infix operator Select")
+}
+
 fn first_conditional_ids(
     source_ast: &AstArena<Untyped>,
     typed_ast: &AstArena<Typed>,
@@ -1619,6 +1644,162 @@ fn same_class_int_applications_preserve_selected_target_and_argument_order() {
             "Operations Scala interoperability gate failed"
         );
     }
+}
+
+#[test]
+fn canonical_int_arithmetic_emits_semantic_selectin_and_nested_apply_trees() {
+    use dotty_tasty::tasty::*;
+
+    let (_, first) = source_outputs_named(ARITHMETIC, "Arithmetic.scala", |_| {}).unwrap();
+    let (_, second) = source_outputs_named(ARITHMETIC, "Arithmetic.scala", |_| {}).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(first.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let operator_call = |index: usize, expected_name: &str| {
+        let body = addresses
+            .get(first.declarations()[index].address)
+            .unwrap()
+            .decode_defdef_body()
+            .unwrap();
+        let RawTree::LengthNode(apply_node) = body.rhs.unwrap() else {
+            panic!("expected arithmetic APPLY for {expected_name}")
+        };
+        let apply = apply_node.decode_apply().unwrap();
+        let RawTree::LengthNode(select_node) = &apply.function else {
+            panic!("expected arithmetic SELECTin for {expected_name}")
+        };
+        let select = select_node.decode_select_in().unwrap();
+        assert_eq!(select.tag, SELECTIN_TAG);
+        assert!(matches!(
+            file.render_signed_name(select.name).unwrap(),
+            Some(RenderedSignedName::Signed { original, signature })
+                if original == expected_name
+                    && signature.result == "scala.Int"
+                    && signature.parameters == [RenderedParamSig::TermParameter("scala.Int".into())]
+        ));
+        assert_eq!(apply.arguments.len(), 1);
+        apply
+    };
+    for (index, name) in [(2, "+"), (3, "-"), (4, "*"), (5, "/"), (6, "%")] {
+        operator_call(index, name);
+    }
+    let nested = operator_call(7, "+");
+    let RawTree::LengthNode(inner_node) = &nested.arguments[0] else {
+        panic!("expected nested multiplication APPLY")
+    };
+    let inner = inner_node.decode_apply().unwrap();
+    let RawTree::LengthNode(inner_select_node) = inner.function else {
+        panic!("expected nested multiplication SELECTin")
+    };
+    let inner_select = inner_select_node.decode_select_in().unwrap();
+    assert!(matches!(
+        file.render_signed_name(inner_select.name).unwrap(),
+        Some(RenderedSignedName::Signed { original, .. }) if original == "*"
+    ));
+    assert_eq!(inner.arguments.len(), 1);
+
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1356/generated/example/Arithmetic.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, first.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1356/tmp"))
+            .status()
+            .expect("start explicitly requested Scala 3.9 -from-tasty gate");
+        assert!(
+            result.success(),
+            "Int arithmetic Scala interoperability gate failed"
+        );
+    }
+}
+
+#[test]
+fn parenthesized_int_arithmetic_acceptance_example_is_serialized() {
+    let (_, output) = source_outputs_named(ARITHMETIC, "Arithmetic.scala", |_| {}).unwrap();
+    assert!(!output.bytes().is_empty());
+}
+
+#[test]
+fn parenthesized_int_arithmetic_call_arguments_are_serialized() {
+    let (_, output) = source_outputs_named(
+        PARENTHESIZED_CALL_ARGUMENTS,
+        "ParenthesizedCallArguments.scala",
+        |_| {},
+    )
+    .unwrap();
+    assert!(!output.bytes().is_empty());
+}
+
+#[test]
+fn synthetic_int_operator_select_spans_are_validated() {
+    for foreign_source in [true, false] {
+        let mut select_id = None;
+        let result = source_outputs_named_with_tree_edits(
+            ARITHMETIC,
+            "Arithmetic.scala",
+            ValidationLimits::default(),
+            |source_ast, typed_ast, bindings, _| {
+                let select = first_int_operator_select(source_ast, typed_ast, bindings);
+                select_id = Some(select);
+                let position = if foreign_source {
+                    SourceSpan::new(
+                        SourceId::from_index(8),
+                        Span::without_point(TextRange::new(0, 1).unwrap()),
+                    )
+                } else {
+                    let source_operator = source_ast
+                        .iter()
+                        .find(|(_, tree)| {
+                            matches!(tree.kind, TreeKind::PhaseSpecific(UntypedNode::InfixOp(_)))
+                        })
+                        .unwrap()
+                        .1
+                        .position
+                        .unwrap();
+                    SourceSpan::new(
+                        SourceId::from_index(7),
+                        Span::without_point(
+                            TextRange::new(
+                                source_operator.span().range().start().saturating_add(1),
+                                source_operator.span().range().end().saturating_add(1),
+                            )
+                            .unwrap(),
+                        ),
+                    )
+                };
+                typed_ast.get_mut(select).position = Some(position);
+            },
+            |_| {},
+        )
+        .unwrap_err();
+        let select = select_id.unwrap();
+        if foreign_source {
+            assert_eq!(
+                result,
+                PickleError::SourceSpan {
+                    expected: SourceId::from_index(7),
+                    actual: SourceId::from_index(8),
+                }
+            );
+        } else {
+            assert_eq!(result, PickleError::BodySpan { tree: select });
+        }
+    }
+}
+
+#[test]
+fn comparisons_remain_outside_the_int_arithmetic_increment() {
+    let source =
+        "package example\nclass Comparison:\n  def less(x: Int, y: Int): Boolean = x < y\n";
+    assert!(matches!(
+        source_outputs_named(source, "Comparison.scala", |_| {}),
+        Err(PickleError::BodyType { .. })
+    ));
 }
 
 #[test]
