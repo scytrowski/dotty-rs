@@ -19,8 +19,7 @@ PROFILE_COLUMNS = [
 CURRENT_COLUMNS = [
     "current_import_selectors", "current_outcome", "current_method_blocker",
     "current_enclosing_attempt_blocker",
-    "current_method_typed", "current_blocker_origin", "current_selected_identity",
-    "final_import_identity",
+    "current_method_typed", "current_blocker_origin",
 ]
 
 
@@ -209,9 +208,6 @@ def reconcile(profile, targets, classpath_evidence, current_rows, object_module_
                 if qualifier_type == "Object"
                 else "no_object_qualifier"
             ),
-            "current_object_module_evidence": json.dumps(
-                object_evidence, sort_keys=True, separators=(",", ":")
-            ),
             **{column: current[column] for column in CURRENT_COLUMNS},
         }
         result.append(row)
@@ -230,21 +226,6 @@ def reconcile(profile, targets, classpath_evidence, current_rows, object_module_
 def summary(rows):
     blockers = Counter(row["current_method_blocker"] for row in rows)
     outcomes = Counter(row["current_outcome"] for row in rows)
-    object_module_states = Counter()
-    for row in rows:
-        if row["current_qualifier_kind"] != "Object":
-            continue
-        records = json.loads(row["current_object_module_evidence"])
-        if not records:
-            object_module_states["no_profile_match"] += 1
-            continue
-        for record in records:
-            object_module_states[
-                "|".join(
-                    ",".join(record.get(column, ["unknown"]))
-                    for column in ("classifications", "completion_outcomes", "member_outcomes")
-                )
-            ] += 1
     return [
         "frozen_observations=1063",
         "matched_observations=" + str(len(rows)),
@@ -259,7 +240,6 @@ def summary(rows):
         "distinct_current_object_qualifiers=" + str(len({row["current_qualifier_identity"] for row in rows if row["current_qualifier_kind"] == "Object"})),
         "rows_with_object_module_evidence=" + str(sum(row["current_object_module_evidence_status"] == "matched_object_module_evidence" for row in rows)),
         "object_module_evidence_is_attempt_only=true",
-        "object_module_profile_states=" + json.dumps(object_module_states, sort_keys=True),
     ]
 
 
