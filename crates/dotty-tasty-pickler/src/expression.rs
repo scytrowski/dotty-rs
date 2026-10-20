@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 
 use dotty_core::ast::{ApplyKind, TypedAst};
-use dotty_core::{Constant, SemanticStore, SymbolId, TermRefTarget, TreeId, TreeKind, Type, Typed};
+use dotty_core::{
+    Constant, SemanticStore, SymbolId, SymbolInfo, TermRefTarget, TreeId, TreeKind, Type, Typed,
+};
 use dotty_tasty::tasty::{
     APPLY_TAG, AstField, AstLabel, AstNode, FALSECONST_TAG, IF_TAG, INTCONST_TAG, SimpleTerm,
     TRUECONST_TAG, TermValue, UNITCONST_TAG,
@@ -181,6 +183,102 @@ fn lower_expression_inner(
                 tree: application.function,
             })?;
         budget.visit(application.function, depth)?;
+        if let TreeKind::Select(selection) = &function.kind
+            && let Some(Type::TermRef {
+                target: TermRefTarget::Symbol(target),
+                ..
+            }) = store.types.try_get(function.ty)
+            && context.is_registered_int_arithmetic_target(*target)?
+        {
+            if application.args.len() != 1 || application.kind != ApplyKind::Regular {
+                return Err(PickleError::PrimitiveOperatorArity {
+                    symbol: *target,
+                    expected: Some(1),
+                    actual: Some(application.args.len()),
+                });
+            }
+            let receiver =
+                ast.try_get(selection.qualifier)
+                    .ok_or(PickleError::InvalidTypedTree {
+                        tree: selection.qualifier,
+                    })?;
+            let receiver_depth = if matches!(
+                receiver.kind,
+                TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_)
+            ) {
+                depth + 1
+            } else {
+                depth
+            };
+            let receiver_label = lower_expression_inner(
+                store,
+                ast,
+                selection.qualifier,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: receiver_depth,
+                    budget,
+                },
+                context,
+            )?;
+            let argument = application.args[0];
+            let argument_depth = if matches!(
+                ast.try_get(argument).map(|argument| &argument.kind),
+                Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_))
+            ) {
+                depth + 1
+            } else {
+                depth
+            };
+            let argument_label = lower_expression_inner(
+                store,
+                ast,
+                argument,
+                method,
+                parameters,
+                ExpressionState {
+                    depth: argument_depth,
+                    budget,
+                },
+                context,
+            )?;
+            let SymbolInfo::Complete(signature_type) = store.symbols.get(*target).info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: *target,
+                    info: store.symbols.get(*target).info,
+                });
+            };
+            let Type::Method(signature) = store
+                .types
+                .try_get(signature_type)
+                .ok_or(PickleError::IncompleteType { ty: signature_type })?
+            else {
+                return Err(PickleError::MalformedType {
+                    ty: signature_type,
+                    role: crate::TypeRole::Parameter,
+                });
+            };
+            let parameter_types = signature
+                .params
+                .iter()
+                .map(|parameter| parameter.ty)
+                .collect::<Vec<_>>();
+            let result_type = signature.result;
+            let receiver_type = receiver.ty;
+            let selected = context.primitive_operator_select(
+                *target,
+                receiver_label,
+                receiver_type,
+                &parameter_types,
+                result_type,
+                Some(1),
+            )?;
+            return context.wire_node(AstNode::Length {
+                tag: APPLY_TAG,
+                fields: vec![AstField::Tree(selected), AstField::Tree(argument_label)],
+            });
+        }
         let Type::TermRef {
             prefix,
             target: TermRefTarget::Symbol(target),

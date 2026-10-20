@@ -15,6 +15,20 @@ struct OperatorContract {
 }
 
 impl<'a> EncodingContext<'a> {
+    pub(crate) fn is_registered_int_arithmetic_target(
+        &self,
+        target: SymbolId,
+    ) -> Result<bool, PickleError> {
+        let symbols = self
+            .definitions
+            .int_primitive_operator_symbols(self.store)
+            .ok_or(PickleError::BuiltinIdentity {
+                builtin: Builtin::Int,
+                ty: self.definitions.int,
+            })?;
+        Ok(symbols.all()[..5].contains(&target))
+    }
+
     /// Projects one registered primitive operator selection.
     ///
     /// `receiver` is the already projected source receiver, and
