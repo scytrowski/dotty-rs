@@ -31,7 +31,7 @@ identity; a rendered operator spelling by itself does not identify its owner.
 | --- | --- | --- | --- |
 | `a + b`, `a - b`, `a * b`, `a / b`, `a % b` | `APPLY(SELECTin)`; Int result | `scala.Int`; `(scala.Int): scala.Int` | Signed `+`, `-`, `*`, `/`, `%`; Int receiver and direct Int argument |
 | `a < b`, `a <= b`, `a > b`, `a >= b` | `APPLY(SELECTin)`; Boolean result | `scala.Int`; `(scala.Int): scala.Boolean` | Signed `<`, `<=`, `>`, `>=`; direct argument |
-| `!value` | `SELECT(unary_!)`; Boolean result | `scala.Boolean`; `(): scala.Boolean` | `SELECT` with unsigned `unary_!`; no `APPLY` wrapper |
+| `!value` | `SELECT(unary_!)`; Boolean result | `scala.Boolean`; parameterless member with result `scala.Boolean` (no argument clause) | `SELECT` with unsigned `unary_!`; no `APPLY` wrapper |
 | `a && b`, `a || b` | `APPLY(SELECTin)`; Boolean result | `scala.Boolean`; `(scala.Boolean): scala.Boolean` | Signed `&&` / `||`; RHS is represented as an application argument |
 | `a & b`, `a | b`, `a ^ b` | `APPLY(SELECTin)`; Boolean result | `scala.Boolean`; `(scala.Boolean): scala.Boolean` | Signed `&` / `|` / `^`; RHS is also an application argument |
 | user-defined `this + right` | Selection resolves to the class method `SymbolId` | `example.CustomOperators`; `(scala.Int): scala.Int` | Receiver is `THIS`, followed by direct `right` reference. Signed result text alone resembles the primitive `Int.+`; the source typed symbol and receiver establish this is the user method. |

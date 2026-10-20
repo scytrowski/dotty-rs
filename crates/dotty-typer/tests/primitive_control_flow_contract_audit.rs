@@ -294,6 +294,12 @@ fn pinned_int_and_boolean_operators_keep_exact_source_symbols_and_shapes() {
         Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
             if *symbol == boolean_symbols.unary_not
     ));
+    let SymbolInfo::Complete(unary_not_type) =
+        typer.store().symbols.get(boolean_symbols.unary_not).info
+    else {
+        panic!("canonical unary_! should have a completed parameterless member type")
+    };
+    assert_eq!(unary_not_type, expected_boolean);
     assert_eq!(
         typer
             .widen_expression_type(typer.typed_ast().get(typed).ty)
