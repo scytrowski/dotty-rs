@@ -20,7 +20,7 @@ Counts below are first-blocker method observations and affected source files, no
 | `ObjectModuleClassUnavailable` | 27 | 3 |
 | `AnonymousClassInstantiationDeferred` | 32 | 15 |
 
-The resolver observed 1,389,149 package-term requests, 469,642 canonical Object results across 127 external Object identities, 20 completed external ModuleClasses, and 144 external module-member successes across 25 distinct member identities. It recorded 8,949 `InvalidTastyFile::UnresolvedSupertype` member errors, across 279 files and 50 distinct requested class roots. The repeated error count is not a distinct-root count.
+The resolver observed 1,389,149 package-term requests, 469,642 canonical Object results across 127 external Object identities, 20 completed external ModuleClasses, and 144 external module-member successes across 25 distinct member identities. It recorded 8,949 `InvalidTastyFile::UnresolvedSupertype` member errors, across 279 files and 50 distinct requested class roots. The repeated error count is not a distinct-root count. Exact pinned-artifact lookup finds all 50 requested roots in the Scala 3.9.0 compiler or library JAR: 18 compiler roots account for 8,590 weighted observations, and 32 library roots account for 359. These are root-level weighted observations, not distinct broken artifacts. The root-to-resource mapping, artifact versions, and verified SHA-256 values are in [`typer-classpath-corpus-audit-post-compiler-modules-3.9.0-tasty-supertype-roots.tsv`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0-tasty-supertype-roots.tsv).
 
 ## Frozen import reconciliation
 
@@ -32,8 +32,8 @@ The row-level reconciliation is [`typer-classpath-corpus-audit-post-compiler-mod
 
 ## Next sprint recommendation
 
-Recommend exactly one next slice: **TASTy unresolved-supertype root resolution and compatibility classification**. It is now the broadest measured cross-corpus cause by distinct requested roots (50) and affected files (279), while retaining the repeated 8,949 observations as a separate weighted measure. Start with the stable root list and artifact provenance; keep unsupported or malformed parent references as explicit errors. Do not count repeated member errors as separate faulty roots or manufacture completed classes.
+Recommend exactly one next slice: **TASTy unresolved-supertype root resolution and compatibility classification**. It is now the broadest measured cross-corpus cause by distinct requested roots (50) and affected files (279), while retaining the repeated 8,949 observations as a separate weighted measure. Start with the stable root list and artifact provenance; prioritize the compiler JAR roots by weighted volume while investigating library roots separately. Keep unsupported or malformed parent references as explicit errors. Do not count repeated member errors as separate faulty roots or manufacture completed classes.
 
 ## Remaining #1342 gate
 
-This checkpoint records the completed local serial audit and its current outputs. It does not claim the issue's full Definition of Done: final focused behavior/rollback parity checks and the workspace CI checks still need to be recorded, and exact compiler-versus-library provenance for each unresolved-supertype root still needs to be included in the ranking before #1342 can be closed.
+This checkpoint records the completed local serial audit and its current outputs. It does not claim the issue's full Definition of Done: final focused behavior/rollback parity checks and the workspace CI checks still need to be recorded, and the 8-case rollback/atomicity matrix plus required workspace CI checks still need to be recorded before #1342 can be closed.
