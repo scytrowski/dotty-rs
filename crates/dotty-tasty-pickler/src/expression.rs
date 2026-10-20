@@ -30,6 +30,17 @@ struct ExpressionState<'a> {
     budget: &'a mut ExpressionBudget,
 }
 
+fn child_expression_depth(ast: &TypedAst, tree: TreeId<Typed>, depth: usize) -> usize {
+    if matches!(
+        ast.try_get(tree).map(|tree| &tree.kind),
+        Some(TreeKind::Apply(_) | TreeKind::Block(_) | TreeKind::If(_) | TreeKind::Select(_))
+    ) {
+        depth + 1
+    } else {
+        depth
+    }
+}
+
 impl ExpressionBudget {
     fn check_depth(&self, depth: usize) -> Result<(), PickleError> {
         if depth > self.max_depth {
@@ -147,13 +158,17 @@ fn lower_expression_inner(
             });
         }
         let lhs = context.local_reference(target, None)?;
+        let rhs_depth = child_expression_depth(ast, assignment.rhs, depth);
         let rhs = lower_expression_inner(
             store,
             ast,
             assignment.rhs,
             method,
             parameters,
-            ExpressionState { depth, budget },
+            ExpressionState {
+                depth: rhs_depth,
+                budget,
+            },
             context,
         )?;
         return context.wire_node(AstNode::Length {
