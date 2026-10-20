@@ -41,7 +41,7 @@ use crate::bytecode::code_builder::{
     SymbolicBranch, SymbolicCodeElement, SymbolicInstruction,
 };
 use crate::bytecode::{
-    AnalysisError, AssembleError, BranchInstruction, CfgCodeAnalyzer, CodeSequence,
+    AnalysisError, AssembleError, BranchInstruction, CfgCodeAnalyzer, CodeElement, CodeSequence,
     ControlFlowGraph, Instruction, LdcConstant, StackMapFrameGenerationError, StackMapTable,
     generate_stack_map_frames_with_receiver,
 };
@@ -740,6 +740,22 @@ impl ClassFileBuilder {
         // interned before the final pool is frozen; the append-only builder
         // guarantees these indices remain stable afterward.
         let preview_pool = pool_builder.clone().finish()?;
+        if !self.access_flags.contains(ACC_SUPER) {
+            for resolved in resolved_code.iter().flatten() {
+                for (instruction, operation) in resolved_code_instructions(resolved)? {
+                    if let Instruction::InvokeSpecial(reference) = operation
+                        && special_reference_is_ordinary_method(
+                            reference.index().get(),
+                            &preview_pool,
+                        )
+                    {
+                        return Err(ClassFileBuildError::Analysis(
+                            AnalysisError::DirectSuperMethodRequiresAccSuper { instruction },
+                        ));
+                    }
+                }
+            }
+        }
         for resolved in resolved_code.iter().flatten() {
             validate_field_operation_staticness(
                 resolved,
@@ -1121,7 +1137,7 @@ fn instruction_requires_exact_references(instruction: Instruction, pool: &Consta
         | Instruction::New(_)
         | Instruction::Ldc(LdcConstant::Reference(_)) => true,
         Instruction::InvokeSpecial(reference) => {
-            special_reference_is_constructor(reference.index().get(), pool)
+            special_reference_is_ordinary_method(reference.index().get(), pool)
         }
         Instruction::GetStatic(reference) | Instruction::PutStatic(reference) => {
             field_reference_has_reference_type(reference.index().get(), pool)
@@ -1133,23 +1149,46 @@ fn instruction_requires_exact_references(instruction: Instruction, pool: &Consta
     }
 }
 
-fn special_reference_is_constructor(index: ConstantPoolIndex, pool: &ConstantPool) -> bool {
-    match pool.get(index) {
-        Some(
-            ConstantPoolEntry::Methodref {
-                name_and_type_index,
-                ..
-            }
-            | ConstantPoolEntry::InterfaceMethodref {
-                name_and_type_index,
-                ..
-            },
-        ) => pool
-            .name_and_type(*name_and_type_index)
-            .map(|(name, _)| name == "<init>")
-            .unwrap_or(true),
-        _ => true,
+fn resolved_code_instructions(
+    code: &ResolvedMethodCode,
+) -> Result<Vec<(usize, Instruction)>, ClassFileBuildError> {
+    match code {
+        ResolvedMethodCode::Linear(instructions) => {
+            Ok(instructions.iter().copied().enumerate().collect())
+        }
+        ResolvedMethodCode::Branched(sequence) => {
+            let graph =
+                ControlFlowGraph::build(sequence).map_err(ClassFileBuildError::ControlFlow)?;
+            Ok(graph
+                .blocks()
+                .iter()
+                .flat_map(|block| {
+                    block
+                        .instructions
+                        .iter()
+                        .enumerate()
+                        .filter_map(move |(offset, element)| match element {
+                            CodeElement::Instruction(instruction) => {
+                                Some((block.instruction_range.start + offset, *instruction))
+                            }
+                            CodeElement::Branch(_) | CodeElement::Label(_) => None,
+                        })
+                })
+                .collect())
+        }
     }
+}
+
+fn special_reference_is_ordinary_method(index: ConstantPoolIndex, pool: &ConstantPool) -> bool {
+    let Some(ConstantPoolEntry::Methodref {
+        name_and_type_index,
+        ..
+    }) = pool.get(index)
+    else {
+        return false;
+    };
+    pool.name_and_type(*name_and_type_index)
+        .is_ok_and(|(name, _)| name != "<init>")
 }
 
 fn field_reference_has_reference_type(index: ConstantPoolIndex, pool: &ConstantPool) -> bool {

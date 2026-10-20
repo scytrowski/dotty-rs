@@ -196,13 +196,14 @@ whose owner is not the direct parent, and any target that is missing or
 ambiguous. These should become specific typed errors before class publication.
 
 Constructor and ordinary method uses of `invokespecial` are separate verifier
-cases. A constructor invocation consumes `UninitializedThis` and performs the
-initialization transition. An ordinary direct-super method invocation occurs
-only after `this` is initialized and consumes an ordinary initialized receiver
-plus the selected method's arguments. `dotty-classfile` must validate that the
-method reference is non-constructor, names the direct parent, has an exact
-descriptor, and receives compatible initialized values. Do not route it
-through pending-`new` constructor handling.
+cases. A constructor invocation consumes an uninitialized allocation and
+performs its allocation-specific initialization transition. An ordinary
+direct-super method invocation occurs only with an initialized receiver whose
+exact class is the emitting class. `dotty-classfile` validates that the
+`Methodref` is non-constructor, names the proved direct parent, has a supported
+descriptor, and receives compatible initialized arguments. The class-file
+builder also requires `ACC_SUPER`. This transfer does not use pending-`new`
+constructor handling or rewrite allocation aliases.
 
 With `ACC_SUPER`, JVMS 21 §6.5 `invokespecial` selects the method starting at
 the current class's direct superclass when the symbolic reference names a
@@ -227,7 +228,7 @@ baseline for all follow-up work.
 | Source shape | Current observed result | Required boundary / next owner |
 | --- | --- | --- |
 | `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then source-ordered arguments, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
-| `super.value()` targeting direct `Base.value` | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical Base symbol; JVM emission is not implemented | Separately validate initialized-receiver `invokespecial` — [#1373](https://github.com/scytrowski/dotty-rs/issues/1373); lower only a checked target as special dispatch — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
+| `super.value()` targeting direct `Base.value` | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical Base symbol; `dotty-classfile` validates initialized-receiver `invokespecial` with the exact direct-parent proof | Lower only a checked typed target as special dispatch in `dotty-jvm` — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
 | Parameterized parent plus explicit direct-super calls, run on the JVM | Not implemented; no output path exists for the required combination | Source-to-classfile-to-JDK integration and runtime behavior — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `extends Base` with accessible `Base.<init>()V` | Supported and verified by existing source-backed regression | Preserve direct-parent ownership and post-super analysis in `dotty-jvm` and `dotty-classfile` |
 | `base.value()` or inherited `derived.value()` | Supported virtual calls use the selected declaration's owner and `invokevirtual` | Preserve current dynamic-dispatch and `Methodref` behavior |

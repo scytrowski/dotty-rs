@@ -198,6 +198,95 @@ fn builds_and_roundtrips_owned_class_metadata_and_raw_code() {
 }
 
 #[test]
+fn class_builder_verifies_direct_super_invokespecial_and_requires_acc_super() {
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut builder = ClassFileBuilder::new("example/Derived", version).unwrap();
+    builder
+        .set_super_class(Some("example/Base"))
+        .unwrap()
+        .add_instance_method("superValue", "()I", |code| {
+            code.aload(0)?;
+            code.invokespecial("example/Base", "value", "()I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    assert!(class_file.access_flags.contains(ACC_SUPER));
+    let method = method_named(&class_file, "superValue");
+    let instructions = &code_attribute(method).code;
+    assert_eq!(instructions[0], 0x2a);
+    assert_eq!(instructions[1], 0xb7);
+    assert_eq!(instructions[4], 0xac);
+    let method_reference_index =
+        dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            instructions[2],
+            instructions[3],
+        ]));
+    let Some(ConstantPoolEntry::Methodref {
+        class_index,
+        name_and_type_index,
+    }) = class_file.constant_pool.get(method_reference_index)
+    else {
+        panic!("invokespecial uses a Methodref");
+    };
+    assert_eq!(
+        class_file.constant_pool.class_name(*class_index),
+        Ok("example/Base")
+    );
+    assert_eq!(
+        class_file.constant_pool.name_and_type(*name_and_type_index),
+        Ok(("value", "()I"))
+    );
+
+    let mut missing_acc_super = ClassFileBuilder::new("example/NoSuperFlag", version).unwrap();
+    missing_acc_super
+        .set_super_class(Some("example/Base"))
+        .unwrap()
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC))
+        .unwrap()
+        .add_instance_method("superValue", "()I", |code| {
+            code.aload(0)?;
+            code.invokespecial("example/Base", "value", "()I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        missing_acc_super.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::DirectSuperMethodRequiresAccSuper {
+                instruction: 1
+            }
+        ))
+    ));
+
+    let mut static_caller = ClassFileBuilder::new("example/StaticCaller", version).unwrap();
+    static_caller
+        .set_super_class(Some("example/Base"))
+        .unwrap()
+        .add_static_method("superValue", "(Lexample/StaticCaller;)I", |code| {
+            code.aload(0)?;
+            code.invokespecial("example/Base", "value", "()I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        static_caller.encode(),
+        Err(ClassFileBuildError::Analysis(
+            dotty_classfile::bytecode::AnalysisError::DirectSuperMethodRequiresInstanceContext {
+                instruction: 1
+            }
+        ))
+    ));
+}
+
+#[test]
 fn builds_constructor_and_static_method_using_raw_code() {
     let mut builder = ClassFileBuilder::new(
         "example/WithConstructor",
