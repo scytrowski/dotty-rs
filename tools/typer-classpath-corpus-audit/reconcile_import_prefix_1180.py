@@ -99,8 +99,47 @@ def object_module_index(rows):
             if identity and identity != "-"
         }
         for identity in identities:
-            evidence.setdefault(identity, []).append(row)
-    return evidence
+            item = evidence.setdefault(
+                identity,
+                {
+                    "canonical_identity": identity,
+                    "profile_rows": 0,
+                    "module_class_identities": set(),
+                    "classifications": set(),
+                    "module_lookups": set(),
+                    "completion_outcomes": set(),
+                    "member_outcomes": set(),
+                    "module_member_attempts": 0,
+                    "distinct_module_member_requests": set(),
+                },
+            )
+            item["profile_rows"] += 1
+            for column, field in (
+                ("current_module_class_identities", "module_class_identities"),
+                ("classification", "classifications"),
+                ("module_lookup", "module_lookups"),
+                ("completion", "completion_outcomes"),
+                ("member_lookup", "member_outcomes"),
+                ("distinct_module_member_requests", "distinct_module_member_requests"),
+            ):
+                item[field].update(
+                    value.replace("/", ".")
+                    for value in row[column].split(";")
+                    if value and value != "-"
+                )
+            try:
+                item["module_member_attempts"] += int(row["module_member_attempts"])
+            except (KeyError, ValueError):
+                pass
+    return {
+        identity: [
+            {
+                key: sorted(value) if isinstance(value, set) else value
+                for key, value in record.items()
+            }
+        ]
+        for identity, record in sorted(evidence.items())
+    }
 
 
 def reconcile(profile, targets, classpath_evidence, current_rows, object_module_rows=()):
@@ -203,8 +242,8 @@ def summary(rows):
         for record in records:
             object_module_states[
                 "|".join(
-                    record.get(column, "unknown")
-                    for column in ("classification", "completion", "member_lookup")
+                    ",".join(record.get(column, ["unknown"]))
+                    for column in ("classifications", "completion_outcomes", "member_outcomes")
                 )
             ] += 1
     return [
