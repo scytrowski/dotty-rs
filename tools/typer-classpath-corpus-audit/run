@@ -381,6 +381,7 @@ if [[ -n "$focused_manifest" || -n "$focused_cohort" ]]; then
 fi
 if [[ "$import_prefix_profile" == 1 ]]; then
     export SCALA39_IMPORT_PREFIX_BASELINE_PROFILE="$repo_root/docs/typer-classpath-import-prefix-profile-3.9.0.md"
+    export SCALA39_IMPORT_PREFIX_1180_PROFILE="$repo_root/docs/typer-classpath-import-prefix-profile-1180-3.9.0.md"
     for run in "${run_names[@]}"; do
         if ! (
             cd "$repo_root"
@@ -398,6 +399,8 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             | sed '1d;$d' >"$tmp_dir/$run.profile"
         sed -n '/^AUDIT_IMPORT_PREFIX_RECONCILIATION_BEGIN$/,/^AUDIT_IMPORT_PREFIX_RECONCILIATION_END$/p' "$tmp_dir/$run.log" \
             | sed '1d;$d' >"$tmp_dir/$run.reconciliation"
+        sed -n '/^AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_BEGIN$/,/^AUDIT_IMPORT_PREFIX_1180_RECONCILIATION_END$/p' "$tmp_dir/$run.log" \
+            | sed '1d;$d' >"$tmp_dir/$run.1180-reconciliation"
         if [[ ! -s "$tmp_dir/$run.profile" ]]; then
             cat "$tmp_dir/$run.log" >&2
             printf 'import-prefix audit markers were missing\n' >&2
@@ -429,6 +432,14 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             --qualified-cohort "$tmp_dir/$run.qualified-cohort.tsv" \
             --summary "$tmp_dir/$run.qualified-cohort-summary.txt" \
             2>/dev/null
+        PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/reconcile_import_prefix_1180.py" \
+            --profile "$repo_root/docs/typer-classpath-import-prefix-profile-1180-3.9.0.md" \
+            --targets "$repo_root/docs/typer-classpath-import-prefix-profile-1180-3.9.0-import-prefix-targets.tsv" \
+            --classpath-evidence "$repo_root/docs/typer-classpath-import-prefix-profile-1180-3.9.0-import-prefix-classpath-evidence.tsv" \
+            --current "$tmp_dir/$run.1180-reconciliation" \
+            --object-modules "$repo_root/docs/typer-classpath-corpus-audit-3.9.0-object-module-reprofile.tsv" \
+            --rows "$tmp_dir/$run.1180-current-reconciliation.tsv" \
+            --summary "$tmp_dir/$run.1180-current-summary.txt"
         printf '%s ' "$run"
         sed -n '/^IMPORT_PREFIX_TIMING /p' "$tmp_dir/$run.log"
     done
@@ -443,6 +454,13 @@ if [[ "$import_prefix_profile" == 1 ]]; then
             printf 'normalized import-prefix reconciliation was not deterministic\n' >&2
             exit 1
         fi
+        for sidecar in 1180-current-reconciliation.tsv 1180-current-summary.txt; do
+            if ! cmp -s "$tmp_dir/first.$sidecar" "$tmp_dir/second.$sidecar"; then
+                diff -u "$tmp_dir/first.$sidecar" "$tmp_dir/second.$sidecar" >&2 || true
+                printf 'normalized #1180 %s was not deterministic\n' "$sidecar" >&2
+                exit 1
+            fi
+        done
         for sidecar in \
             import-prefix-targets.tsv \
             import-prefix-evidence.tsv \
@@ -467,6 +485,8 @@ if [[ "$import_prefix_profile" == 1 ]]; then
     prefix_evidence_path="${output_path%.md}-import-prefix-classpath-evidence.tsv"
     prefix_candidates_path="${output_path%.md}-lexical-package-candidates.tsv"
     prefix_reconciliation_path="${output_path%.md}-reconciliation.tsv"
+    prefix_1180_reconciliation_path="${output_path%.md}-1180-current-reconciliation.tsv"
+    prefix_1180_summary_path="${output_path%.md}-1180-current-summary.txt"
     prefix_qualified_cohort_path="${output_path%.md}-qualified-cohort.tsv"
     prefix_qualified_summary_path="${output_path%.md}-qualified-cohort-summary.txt"
     profile_field() {
@@ -509,6 +529,9 @@ if [[ "$import_prefix_profile" == 1 ]]; then
         printf '| Distinct blocker origins | %s | %s |\n\n' "$baseline_origins" "$(sed -n 's/^observations=[0-9]* files=[0-9]* target_keys=[0-9]* unique_blocker_origins=\([0-9]*\).*/\1/p' "$tmp_dir/first.import-prefix-summary.txt" | head -1)"
         printf 'The exact frozen-row reconciliation contains `%s` rows: `%s` still fail with `ImportQualifierNotFound` at the same import tree, and `%s` have advanced to a later current method blocker. Resolver traces matched the frozen qualifier in `%s` rows; `%s` rows also record a selected package identity. These are separate from final selector outcomes: `%s` selectors have an observed final selected symbol and `%s` have no exact singular selected symbol recorded (wildcards are not reduced to one symbol). The full-method typed boolean is true for `%s` frozen rows. The separate unresolved-only view contains `%s` rows, including `%s` newly observed imports outside the frozen cohort. Across the selected roots there are `%s` unresolved-prefix observations, `%s` term/object materialization gaps, and `%s` without a matching failed resolver trace. The #1132 full-corpus local-method baseline remains 0 / 3,297; this import-prefix profile does not refresh that full-corpus count.\n\n' "$reconciliation_rows" "$reconciliation_unresolved" "$reconciliation_advanced" "$reconciliation_with_evidence" "$reconciliation_with_package_identity" "$reconciliation_final_resolved" "$reconciliation_final_absent" "$reconciliation_method_typed" "$current_unresolved" "$new_current_observations" "$current_import_failures" "$current_term_gaps" "$current_unmatched"
         printf '## Historical qualified-candidate cohort\n\n'
+        printf 'The separate frozen post-#1180 cohort is also joined by its stable source/method/enclosing-attempt/import identity. The current reconciliation retains every one of its 1,063 observations, all 31 target keys, 81 files and 393 blocker origins, including rows that move beyond the original import failure. Resolved Object qualifier observations are joined to the available #1051 Object ModuleClass profile by canonical identity. Those rows retain the profile classification and raw completion/member outcomes; they are historical audit attempts, so `rolled_back` work is not counted as successful current completion. See [`%s`](%s) and [`%s`](%s) for the row-level results and summary.\n\n' \
+            "$(basename -- "$prefix_1180_reconciliation_path")" "$(basename -- "$prefix_1180_reconciliation_path")" \
+            "$(basename -- "$prefix_1180_summary_path")" "$(basename -- "$prefix_1180_summary_path")"
         printf 'The frozen #1128 source-qualified cohort is joined independently from the remaining rows. It retains all 1,615 historically evidenced observations, with current package identity and member selection reported only when the audit observed them. A missing current identity is not treated as successful lexical resolution.\n\n'
         cat "$tmp_dir/first.qualified-cohort-summary.txt"
         printf '\nSee [`%s`](%s) for all 1,615 joined candidate rows, [`%s`](%s) for the full 2,394-row enriched reconciliation, and [`%s`](%s) for the standalone before/after target summary. The original source-package probe, ordered historical candidate evidence, current same-import probe, other failed import trees observed in the same method, final selector outcome, and full-method status remain separate columns.\n\n' \
@@ -535,6 +558,8 @@ if [[ "$import_prefix_profile" == 1 ]]; then
     cp "$tmp_dir/first.import-prefix-evidence.tsv" "$prefix_evidence_path"
     cp "$tmp_dir/first.lexical-package-candidates.tsv" "$prefix_candidates_path"
     cp "$tmp_dir/first.reconciliation-enriched.tsv" "$prefix_reconciliation_path"
+    cp "$tmp_dir/first.1180-current-reconciliation.tsv" "$prefix_1180_reconciliation_path"
+    cp "$tmp_dir/first.1180-current-summary.txt" "$prefix_1180_summary_path"
     cp "$tmp_dir/first.qualified-cohort.tsv" "$prefix_qualified_cohort_path"
     cp "$tmp_dir/first.qualified-cohort-summary.txt" "$prefix_qualified_summary_path"
     printf 'Wrote import-prefix profile to %s and TSVs to %s / %s / %s / %s / %s / %s\n' \
