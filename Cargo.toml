@@ -24,7 +24,7 @@ members = [
 resolver = "3"
 
 [profile.test]
-opt-level = 1
+opt-level = 0
 
 [dependencies]
 dotty-tasty = { path = "crates/dotty-tasty" }
