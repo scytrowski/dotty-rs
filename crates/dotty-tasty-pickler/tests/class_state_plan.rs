@@ -8,7 +8,7 @@ use dotty_parser::parse_compilation_unit;
 use dotty_tasty_pickler::*;
 use dotty_typer::SourceTyper;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Bindings(HashMap<(SourceId, TreeId<Untyped>), TreeId<Typed>>);
 
 impl SourceTypedBindings for Bindings {
@@ -86,6 +86,21 @@ fn symbol_for_tree(
     index
         .symbol_at(source, tree)
         .expect("canonical source symbol")
+}
+
+fn class_tree_for(
+    ast: &AstArena<Untyped>,
+    source: SourceId,
+    index: &SourceSemanticIndex,
+    class: SymbolId,
+) -> TreeId<Untyped> {
+    ast.iter()
+        .find_map(|(tree, node)| {
+            (index.symbol_at(source, tree) == Some(class)
+                && matches!(node.kind, TreeKind::TypeDef(_)))
+            .then_some(tree)
+        })
+        .expect("class source tree")
 }
 
 fn class_state_plan<'a>(
@@ -183,6 +198,91 @@ fn class_state_plan<'a>(
     }
     let _ = source_name;
     (class, members, constructor, bindings)
+}
+
+fn with_mutable_frontend<R>(
+    source_text: &str,
+    class_name: &str,
+    source_name: &str,
+    f: impl FnOnce(
+        &mut SemanticStore,
+        &AstArena<Untyped>,
+        SourceId,
+        &SourceSemanticIndex,
+        &Definitions,
+        &AstArena<Typed>,
+        SymbolId,
+        Vec<ClassMemberPicklePlan>,
+        PrimaryConstructorInputPlan,
+        Bindings,
+    ) -> R,
+) -> R {
+    let source = SourceId::from_index(1390);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let parsed = parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        source_name,
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } => {
+            assert!(diagnostics.is_empty(), "{diagnostics:?}");
+            index
+        }
+        NamingOutcome::Rejected { diagnostics } => panic!("namer rejected source: {diagnostics:?}"),
+    };
+    let (class, members, constructor, bindings, typed_ast) = {
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let (class, members, constructor, bindings) = class_state_plan(
+            &parsed.ast,
+            source,
+            &index,
+            &definitions,
+            &mut typer,
+            class_name,
+            source_name,
+        );
+        let mut typed_ast = AstArena::new();
+        for (_, tree) in typer.typed_ast().iter() {
+            typed_ast.alloc(tree.clone());
+        }
+        (class, members, constructor, bindings, typed_ast)
+    };
+    f(
+        &mut store,
+        &parsed.ast,
+        source,
+        &index,
+        &definitions,
+        &typed_ast,
+        class,
+        members,
+        constructor,
+        bindings,
+    )
 }
 
 #[test]
@@ -505,4 +605,192 @@ fn unsupported_visibility_order_and_missing_bindings_are_rejected() {
             })
         ));
     });
+}
+
+#[test]
+fn corrupted_initializer_types_and_constructor_records_are_rejected() {
+    let source_text = "package example\nclass Counter(start: Int):\n  private val seed: Int = 42\n";
+    with_mutable_frontend(
+        source_text,
+        "Counter",
+        "Counter.scala",
+        |store,
+         ast,
+         source,
+         index,
+         definitions,
+         typed_ast,
+         class,
+         members,
+         constructor,
+         bindings| {
+            let class_tree = class_tree_for(ast, source, index, class);
+            let ClassMemberPicklePlan::Field(field) = members[0] else {
+                unreachable!()
+            };
+            let TreeKind::ValDef(definition) = &ast.get(field.source_tree).kind else {
+                unreachable!()
+            };
+            let source_rhs = definition.rhs.unwrap();
+            let typed_position = typed_ast.get(field.typed_initializer).position;
+            let changed_type = store.types.alloc(Type::Constant(Constant::Int(7)));
+            let mut changed_typed_ast = AstArena::<Typed>::new();
+            let changed_initializer = changed_typed_ast.alloc(Tree {
+                kind: TreeKind::Literal(Literal {
+                    value: Constant::Int(7),
+                }),
+                position: typed_position,
+                ty: changed_type,
+            });
+            let mut changed_members = members.clone();
+            let ClassMemberPicklePlan::Field(field) = &mut changed_members[0] else {
+                unreachable!()
+            };
+            field.typed_initializer = changed_initializer;
+            let mut changed_bindings = bindings.clone();
+            changed_bindings
+                .0
+                .insert((source, source_rhs), changed_initializer);
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: &changed_typed_ast,
+                    source_index: index,
+                    typed_bindings: &changed_bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor: constructor.clone(),
+                    members: &changed_members,
+                }
+                .validate(),
+                Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::UnsafeFieldInitializer,
+                    ..
+                })
+            ));
+
+            let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
+            let term_ref = store.types.alloc(Type::TermRef {
+                prefix: definitions.no_prefix,
+                target: TermRefTarget::Symbol(int_symbol),
+            });
+            let mut malformed_members = members.clone();
+            let ClassMemberPicklePlan::Field(field) = &mut malformed_members[0] else {
+                unreachable!()
+            };
+            field.declared_type = term_ref;
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast,
+                    source_index: index,
+                    typed_bindings: &bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor: constructor.clone(),
+                    members: &malformed_members,
+                }
+                .validate(),
+                Err(PickleError::UnsupportedTypeReference { ty }) if ty == term_ref
+            ));
+
+            let invalid_prefix = store.types.alloc(Type::TypeRef {
+                prefix: definitions.object_type,
+                target: TypeRefTarget::Symbol(int_symbol),
+            });
+            let mut malformed_members = members.clone();
+            let ClassMemberPicklePlan::Field(field) = &mut malformed_members[0] else {
+                unreachable!()
+            };
+            field.declared_type = invalid_prefix;
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast,
+                    source_index: index,
+                    typed_bindings: &bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor: constructor.clone(),
+                    members: &malformed_members,
+                }
+                .validate(),
+                Err(PickleError::UnsupportedTypeReference { ty }) if ty == invalid_prefix
+            ));
+
+            store.symbols.get_mut(constructor.symbol).flags = SymbolFlags::MUTABLE;
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast,
+                    source_index: index,
+                    typed_bindings: &bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor: constructor.clone(),
+                    members: &members,
+                }
+                .validate(),
+                Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::PrimaryConstructorInput,
+                    symbol: Some(symbol),
+                }) if symbol == constructor.symbol
+            ));
+            store.symbols.get_mut(constructor.symbol).flags = SymbolFlags::EMPTY;
+
+            let parameter = constructor.parameter_clauses[0][0];
+            let ClassMemberPicklePlan::Field(field) = members[0] else {
+                unreachable!()
+            };
+            let seed = match &ast.get(field.source_tree).kind {
+                TreeKind::ValDef(definition) => *definition.name.as_name(),
+                _ => unreachable!(),
+            };
+            store.symbols.get_mut(parameter).name = seed;
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast,
+                    source_index: index,
+                    typed_bindings: &bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor,
+                    members: &members,
+                }
+                .validate(),
+                Err(PickleError::SourceDefinition { symbol }) if symbol == parameter
+            ));
+        },
+    );
 }
