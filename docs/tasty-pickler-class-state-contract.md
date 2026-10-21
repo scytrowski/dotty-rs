@@ -125,6 +125,33 @@ The fresh Rust-produced `PrivateFields.tasty` passes Scala decompilation,
 `-from-tasty`, and runtime checks for both receiver forms, an `Int` field, a
 `Boolean` field, and a same-named local variable.
 
-This increment does not add constructor parameters, constructor accessors,
-mutable field writes, or backing-storage ABI guarantees. Existing
-`ValidatedPicklePlan` output forms remain unchanged.
+This increment does not add constructor parameters, constructor accessors, or
+backing-storage ABI guarantees. Existing `ValidatedPicklePlan` output forms
+remain unchanged.
+
+## Canonical private mutable-field assignments (#1393)
+
+An assignment in a class method may target a planned private mutable primitive
+field when its typed `TermRef` identifies that exact class-owned `Field`, the
+field retains the `MUTABLE` flag, its completed type matches the field plan,
+and its receiver is the current class. The source and typed assignment targets
+must retain the same identifier and source binding. Only `Int` and `Boolean`
+field values are supported; RHS validation uses the corresponding existing
+primitive expression validator, and the assignment itself must have Unit type.
+Writes through explicit receivers, to immutable or foreign fields, or through
+stale/mismatched semantic records are rejected.
+
+Scala 3.9 encodes these assignments as
+`ASSIGN(SELECT(QUALTHIS(IDENTtpt(Class)), fieldName), rhs)`, rather than as a
+direct reference to the field declaration. A direct `set(value): Unit =
+current = value` remains an `ASSIGN`; source-ordered mutation followed by a read
+remains a `BLOCK` with the assignment in its statements and the read as its
+final expression. The Rust-produced fixture is checked for those exact wire
+shapes, decompiled by the pinned Scala compiler, compiled with `-from-tasty`
+without adjacent source/class files, and executed to check independent object
+state, assignment, and increment behavior. This validates TASTy semantics and
+Scala-reader/runtime behavior; it does not claim a JVM backing-field ABI.
+
+The increment does not add writes to constructor parameters, locals represented
+as fields, public/protected fields, explicit receivers, or unsupported
+primitive/reference types. It does not modify `ValidatedPicklePlan` output.
