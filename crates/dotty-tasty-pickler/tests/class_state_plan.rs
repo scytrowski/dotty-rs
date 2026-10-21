@@ -642,7 +642,7 @@ fn corrupted_initializer_types_and_constructor_records_are_rejected() {
             let mut changed_typed_ast = AstArena::<Typed>::new();
             let changed_initializer = changed_typed_ast.alloc(Tree {
                 kind: TreeKind::Literal(Literal {
-                    value: Constant::Int(7),
+                    value: Constant::Int(42),
                 }),
                 position: typed_position,
                 ty: changed_type,
@@ -674,10 +674,7 @@ fn corrupted_initializer_types_and_constructor_records_are_rejected() {
                     members: &changed_members,
                 }
                 .validate(),
-                Err(PickleError::Unsupported {
-                    feature: UnsupportedFeature::UnsafeFieldInitializer,
-                    ..
-                })
+                Err(PickleError::FieldType { actual, .. }) if actual == changed_type
             ));
 
             let int_symbol = store.types.get(definitions.int).reference_symbol().unwrap();
@@ -795,6 +792,76 @@ fn corrupted_initializer_types_and_constructor_records_are_rejected() {
                 }
                 .validate(),
                 Err(PickleError::SourceDefinition { symbol }) if symbol == parameter
+            ));
+        },
+    );
+}
+
+#[test]
+fn constant_initializer_types_must_match_boolean_literal_values() {
+    let source_text =
+        "package example\nclass PrivateValues:\n  private val enabled: Boolean = true\n";
+    with_mutable_frontend(
+        source_text,
+        "PrivateValues",
+        "PrivateValues.scala",
+        |store,
+         ast,
+         source,
+         index,
+         definitions,
+         typed_ast,
+         class,
+         members,
+         constructor,
+         bindings| {
+            let class_tree = class_tree_for(ast, source, index, class);
+            let ClassMemberPicklePlan::Field(field) = members[0] else {
+                unreachable!()
+            };
+            let TreeKind::ValDef(definition) = &ast.get(field.source_tree).kind else {
+                unreachable!()
+            };
+            let source_rhs = definition.rhs.unwrap();
+            let typed_position = typed_ast.get(field.typed_initializer).position;
+            let changed_type = store.types.alloc(Type::Constant(Constant::Boolean(false)));
+            let mut changed_typed_ast = AstArena::<Typed>::new();
+            let changed_initializer = changed_typed_ast.alloc(Tree {
+                kind: TreeKind::Literal(Literal {
+                    value: Constant::Boolean(true),
+                }),
+                position: typed_position,
+                ty: changed_type,
+            });
+            let mut changed_members = members.clone();
+            let ClassMemberPicklePlan::Field(field) = &mut changed_members[0] else {
+                unreachable!()
+            };
+            field.typed_initializer = changed_initializer;
+            let mut changed_bindings = bindings.clone();
+            changed_bindings
+                .0
+                .insert((source, source_rhs), changed_initializer);
+
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast: &changed_typed_ast,
+                    source_index: index,
+                    typed_bindings: &changed_bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "PrivateValues.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor,
+                    members: &changed_members,
+                }
+                .validate(),
+                Err(PickleError::FieldType { actual, .. }) if actual == changed_type
             ));
         },
     );
