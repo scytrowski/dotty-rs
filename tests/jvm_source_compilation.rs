@@ -15,7 +15,8 @@ use dotty_core::{
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmFieldPlan, JvmFieldSourceVisibility, JvmLocalBinding,
-    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, emit_class,
+    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, JvmReturnType,
+    JvmType, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -1173,7 +1174,43 @@ class Runner:
                     arms, expected,
                     "{method_name} retains the exact sibling symbols"
                 );
+                let projection = unit
+                    .project_sibling_union_to_expected_type(body.ty, signature.result, definitions)
+                    .expect("the declared Base result proves the audited sibling projection");
+                assert_eq!(projection.source_type(), body.ty);
+                assert_eq!(projection.expected_type(), signature.result);
+                assert_eq!(projection.representation(), JvmType::Reference(base));
+                let projected_arms = projection.source_arms();
+                assert_eq!(
+                    projected_arms,
+                    [
+                        audit_type_symbol(unit, *then_ty).unwrap(),
+                        audit_type_symbol(unit, *else_ty).unwrap(),
+                    ],
+                    "the checked projection keeps arm identity and source order"
+                );
             }
+
+            let metadata = unit
+                .metadata(definitions)
+                .expect("the source declarations retain exact JVM signatures");
+            let choose_symbol = audit_method_named(unit, runner, "choose").method;
+            let choose_descriptor = metadata
+                .iter()
+                .find(|class| class.identity().symbol() == runner)
+                .and_then(|class| {
+                    class
+                        .methods()
+                        .iter()
+                        .find(|method| method.symbol() == choose_symbol)
+                })
+                .expect("choose has projected method metadata")
+                .descriptor();
+            assert_eq!(choose_descriptor.as_str(), "(ZI)LBase;");
+            assert_eq!(
+                choose_descriptor.result(),
+                JvmReturnType::Value(JvmType::Reference(base))
+            );
 
             let base_doubled = audit_method_named(unit, base, "doubled").method;
             let choose = audit_method_named(unit, runner, "choose").method;
@@ -1194,6 +1231,22 @@ class Runner:
                 audit_type_symbol(unit, accept_signature.params[0].ty),
                 Some(base),
                 "the argument context is explicitly Base-typed"
+            );
+            let choose_body = unit.typed_ast.get(
+                audit_method_named(unit, runner, "choose")
+                    .body
+                    .expect("choose has body"),
+            );
+            let argument_context_projection = unit
+                .project_sibling_union_to_expected_type(
+                    choose_body.ty,
+                    accept_signature.params[0].ty,
+                    definitions,
+                )
+                .expect("the actual accept formal supplies the canonical Base expectation");
+            assert_eq!(
+                argument_context_projection.representation(),
+                JvmType::Reference(base)
             );
             let via_argument = audit_method_named(unit, runner, "viaArgument");
             let argument_targets =
