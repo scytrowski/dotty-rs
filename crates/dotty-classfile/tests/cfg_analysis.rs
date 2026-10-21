@@ -350,15 +350,15 @@ fn sibling_references_join_to_their_checked_shared_ancestor() {
         .instruction(Instruction::AReturn);
     let graph = ControlFlowGraph::build(&sequence).unwrap();
     let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
-            &graph,
-            "checkedSiblingJoin",
-            "(ILexample/Derived;Lexample/Other;)Lexample/Base;",
-            false,
-            &pool,
-            owner,
-            &hierarchy,
-        )
-        .unwrap();
+        &graph,
+        "checkedSiblingJoin",
+        "(ILexample/Derived;Lexample/Other;)Lexample/Base;",
+        false,
+        &pool,
+        owner,
+        &hierarchy,
+    )
+    .unwrap();
     let join = graph.blocks().last().unwrap().id;
     assert!(matches!(
         flow.entry_state(join).unwrap().operand_stack.as_slice(),
@@ -518,7 +518,12 @@ fn sibling_and_base_inputs_to_a_multiway_join_use_the_same_base_in_every_order()
     .unwrap();
 
     for order in [
-        [3, 4, 5], [3, 5, 4], [4, 3, 5], [4, 5, 3], [5, 3, 4], [5, 4, 3],
+        [3, 4, 5],
+        [3, 5, 4],
+        [4, 3, 5],
+        [4, 5, 3],
+        [5, 3, 4],
+        [5, 4, 3],
     ] {
         let mut sequence = CodeSequence::new();
         let second = sequence.new_label().unwrap();
@@ -666,16 +671,18 @@ fn sibling_input_on_a_backedge_converges_to_the_shared_ancestor() {
         .instruction(Instruction::AReturn);
     let graph = ControlFlowGraph::build(&sequence).unwrap();
     let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
-            &graph,
-            "loopSiblingJoin",
-            "(ZLexample/Base;Lexample/Left;Lexample/Right;)Lexample/Base;",
-            false,
-            &pool,
-            owner,
-            &hierarchy,
-        )
+        &graph,
+        "loopSiblingJoin",
+        "(ZLexample/Base;Lexample/Left;Lexample/Right;)Lexample/Base;",
+        false,
+        &pool,
+        owner,
+        &hierarchy,
+    )
+    .unwrap();
+    let head_state = flow
+        .entry_state(graph.block_for_label(&head).unwrap())
         .unwrap();
-    let head_state = flow.entry_state(graph.block_for_label(&head).unwrap()).unwrap();
     assert!(matches!(
         head_state.operand_stack.as_slice(),
         [FlowValue::Object(class)] if class.internal_name() == "example/Base"

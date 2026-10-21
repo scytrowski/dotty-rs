@@ -1629,6 +1629,113 @@ fn ancestor_reference_stack_join_frames_verify_with_jdk() {
 }
 
 #[test]
+fn sibling_reference_stack_join_frames_verify_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    fs::create_dir_all(directory.path().join("example")).unwrap();
+    for (name, parent) in [
+        ("Base", "java/lang/Object"),
+        ("Left", "example/Base"),
+        ("Right", "example/Base"),
+    ] {
+        let internal_name = format!("example/{name}");
+        let mut class = ClassFileBuilder::new(&internal_name, version).unwrap();
+        class
+            .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+            .unwrap();
+        class.set_super_class(Some(parent)).unwrap();
+        class
+            .add_instance_method("<init>", "()V", move |code| {
+                code.aload(0)?;
+                code.invokespecial(parent, "<init>", "()V")?;
+                code.return_void()?;
+                Ok(())
+            })
+            .unwrap();
+        fs::write(
+            directory.path().join(format!("example/{name}.class")),
+            class.encode().unwrap(),
+        )
+        .unwrap();
+    }
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Left".to_owned(), "example/Base".to_owned()),
+        ("example/Right".to_owned(), "example/Base".to_owned()),
+        ("example/Base".to_owned(), "java/lang/Object".to_owned()),
+    ])
+    .unwrap();
+    let mut joins = ClassFileBuilder::new("example/SiblingJoin", version).unwrap();
+    joins
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    joins.set_super_class(Some("java/lang/Object")).unwrap();
+    joins.set_verification_hierarchy(hierarchy);
+    for (name, left_first) in [("choose", true), ("chooseReversed", false)] {
+        joins
+            .add_static_method(
+                name,
+                "(ZLexample/Left;Lexample/Right;)Lexample/Base;",
+                move |code| {
+                    let otherwise = code.new_label()?;
+                    let join = code.new_label()?;
+                    code.iload(0)?;
+                    code.ifeq(otherwise.clone())?;
+                    code.aload(if left_first { 1 } else { 2 })?;
+                    code.goto(join.clone())?;
+                    code.mark(otherwise)?;
+                    code.aload(if left_first { 2 } else { 1 })?;
+                    code.mark(join)?;
+                    code.areturn()?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    fs::write(
+        directory.path().join("example/SiblingJoin.class"),
+        joins.encode().unwrap(),
+    )
+    .unwrap();
+    let harness = directory.path().join("SiblingJoinHarness.java");
+    fs::write(&harness, "import example.*; public class SiblingJoinHarness { public static void main(String[] args) { Left left = new Left(); Right right = new Right(); if (SiblingJoin.choose(true, left, right) != left || SiblingJoin.choose(false, left, right) != right || SiblingJoin.chooseReversed(true, left, right) != right || SiblingJoin.chooseReversed(false, left, right) != left) throw new AssertionError(); System.out.println(\"sibling-stack-join=ok\"); } }\n").unwrap();
+    let dir = directory.path().to_str().unwrap();
+    let javac = run(
+        "javac",
+        &["-classpath", dir, "-d", dir, harness.to_str().unwrap()],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed: {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &["-Xverify:all", "-classpath", dir, "SiblingJoinHarness"],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all failed: {}",
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "sibling-stack-join=ok"
+    );
+    let javap = run(
+        "javap",
+        &["-classpath", dir, "-c", "-v", "example.SiblingJoin"],
+    );
+    assert!(javap.status.success());
+    assert!(String::from_utf8_lossy(&javap.stdout).contains("example/Base"));
+}
+
+#[test]
 fn integer_arithmetic_instructions_execute_with_jvm_signed_semantics() {
     let directory = TempDir::new();
     let version = ClassFileVersion {

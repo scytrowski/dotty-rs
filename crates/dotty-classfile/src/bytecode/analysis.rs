@@ -179,9 +179,7 @@ impl ClassHierarchy {
             {
                 return Some(candidate);
             }
-            let Some(parent) = self.direct_superclass(&candidate) else {
-                return None;
-            };
+            let parent = self.direct_superclass(&candidate)?;
             candidate = parent.clone();
         }
         None
@@ -5941,7 +5939,7 @@ mod tests {
                 .map(|_| ())
             });
             result.unwrap();
-            assert_eq!(joined.operand_stack, [base.clone()]);
+            assert_eq!(joined.operand_stack.as_slice(), std::slice::from_ref(&base));
         }
 
         assert_eq!(
