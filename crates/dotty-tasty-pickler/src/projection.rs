@@ -185,7 +185,7 @@ impl<'a> EncodingContext<'a> {
         Ok(context)
     }
 
-    fn reserve_local_value(
+    pub(crate) fn reserve_local_value(
         &mut self,
         symbol: SymbolId,
         method: SymbolId,
@@ -226,6 +226,28 @@ impl<'a> EncodingContext<'a> {
         self.local_values_by_typed_declaration
             .get(&typed_declaration)
             .copied()
+    }
+
+    pub(crate) fn reserve_local_binding(
+        &mut self,
+        binding: crate::LocalValueBinding,
+    ) -> Result<(), PickleError> {
+        let owner = self
+            .symbol(binding.symbol)?
+            .owner
+            .ok_or(reference(binding.symbol, ReferenceError::Owner))?;
+        self.reserve_local_value(binding.symbol, owner, binding.scope)?;
+        self.local_value_symbols.insert(binding.symbol);
+        if self
+            .local_values_by_typed_declaration
+            .insert(binding.typed_declaration, binding.symbol)
+            .is_some()
+        {
+            return Err(PickleError::DuplicateDeclaration {
+                symbol: binding.symbol,
+            });
+        }
+        Ok(())
     }
     fn run<T>(
         &mut self,
