@@ -397,7 +397,6 @@ impl From<TastyFileError> for TastyDecodeError {
         Self::Parse(source)
     }
 }
-
 impl From<AstError> for TastyDecodeError {
     fn from(source: AstError) -> Self {
         Self::Ast(source)
@@ -2042,6 +2041,12 @@ fn resolve_reference_prefix_at_depth(
             resolve_reference_prefix_at_depth(file, &target, current_package, depth + 1)
         }
         _ => match prefix.decode_structured().ok()? {
+            StructuredTree::AstChild(child) => {
+                resolve_reference_prefix_at_depth(file, &child.child, current_package, depth + 1)
+            }
+            StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+                resolve_reference_prefix_at_depth(file, &type_tree, current_package, depth + 1)
+            }
             StructuredTree::Reference(ReferenceNode {
                 tag: TERMREFPKG_TAG,
                 reference,
@@ -2236,9 +2241,16 @@ fn resolve_reference_name_at_depth(
                 if matches!(prefix, "scala/package" | "scala/package$") {
                     return None;
                 }
+                let selected_name = name.rsplit('/').next().unwrap_or(&name);
                 if prefix.is_empty() || prefix == "_root_" {
                     Some(ReferenceResolution::Resolved(BinaryName::from_internal(
                         name,
+                    )))
+                } else if matches!(selection.qualifier, RawTree::Ast { .. })
+                    && prefix.rsplit('/').next() == Some(selected_name)
+                {
+                    Some(ReferenceResolution::Resolved(BinaryName::from_internal(
+                        prefix.to_owned(),
                     )))
                 } else {
                     Some(ReferenceResolution::Resolved(BinaryName::from_internal(
@@ -2250,6 +2262,9 @@ fn resolve_reference_name_at_depth(
         }
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
             resolve_reference_name_at_depth(file, &type_tree, current_package, depth + 1)
+        }
+        StructuredTree::AstChild(child) => {
+            resolve_reference_name_at_depth(file, &child.child, current_package, depth + 1)
         }
         _ => ReferenceResolution::NotAReference,
     }
@@ -2965,6 +2980,19 @@ mod tests {
             .filter(|line| !line.trim().is_empty())
             .map(|line| line.split('\t').next().expect("root row has identity"))
             .collect::<std::collections::BTreeSet<_>>();
+        let frozen_root_weights = roots
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                assert_eq!(fields.len(), 6, "invalid frozen-root row: {line}");
+                (
+                    fields[0].to_owned(),
+                    fields[1].parse::<u64>().expect("weight is numeric"),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let observed_requested_roots = source_audit_metrics
             .keys()
             .map(String::as_str)
@@ -3275,13 +3303,85 @@ mod tests {
                 counts
             },
         );
+        let historical_profile =
+            include_str!("../../../docs/classloader-unresolved-tasty-parent-profile-3.9.0.tsv");
+        let historical_headers = historical_profile
+            .lines()
+            .next()
+            .expect("historical parent profile has headers")
+            .split('\t')
+            .collect::<Vec<_>>();
+        let historical_root_index = historical_headers
+            .iter()
+            .position(|header| *header == "requested_class_root")
+            .expect("historical profile has root column");
+        let historical_cause_index = historical_headers
+            .iter()
+            .position(|header| *header == "deepest_typed_cause")
+            .expect("historical profile has cause column");
+        let historical_unresolved_roots = historical_profile
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| {
+                let fields = line.split('\t').collect::<Vec<_>>();
+                (fields.get(historical_cause_index) == Some(&"tasty.unresolved_supertype"))
+                    .then(|| fields[historical_root_index].to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let current_unresolved_roots = load_causes
+            .iter()
+            .filter_map(|(root, cause)| {
+                (*cause == "tasty.unresolved_supertype").then_some(root.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let recovered_roots = historical_unresolved_roots
+            .difference(&current_unresolved_roots)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let newly_unresolved_roots = current_unresolved_roots
+            .difference(&historical_unresolved_roots)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let weighted_roots = |roots: &std::collections::BTreeSet<String>| {
+            roots
+                .iter()
+                .map(|root| {
+                    *frozen_root_weights
+                        .get(root)
+                        .expect("root has frozen weight")
+                })
+                .sum::<u64>()
+        };
+        let historical_weight = weighted_roots(&historical_unresolved_roots);
+        let current_weight = weighted_roots(&current_unresolved_roots);
+        let recovered_weight = weighted_roots(&recovered_roots);
+        let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
+        assert_eq!(historical_unresolved_roots.len(), 41);
+        assert_eq!(current_unresolved_roots.len(), 34);
+        assert_eq!(
+            historical_unresolved_roots.len() - current_unresolved_roots.len(),
+            7
+        );
+        assert!(!recovered_roots.is_empty());
+        assert_eq!(
+            historical_weight + newly_unresolved_weight,
+            current_weight + recovered_weight
+        );
         assert_eq!(
             load_cause_counts.get("tasty.unresolved_supertype"),
-            Some(&41)
+            Some(&current_unresolved_roots.len())
         );
-        assert_eq!(load_cause_counts.get("tasty.missing_type_def"), Some(&6));
-        assert_eq!(load_cause_counts.get("none"), Some(&3));
         std::fs::write(&output_path, rows).expect("write parent profile TSV");
+        eprintln!(
+            "parent outcomes: {} to {} distinct unresolved roots; {} recovered roots / {recovered_weight} recovered weighted observations, {} newly unresolved roots / {newly_unresolved_weight} newly unresolved weighted observations ({} -> {} unresolved weighted observations)",
+            historical_unresolved_roots.len(),
+            current_unresolved_roots.len(),
+            recovered_roots.len(),
+            newly_unresolved_roots.len(),
+            historical_weight,
+            current_weight,
+        );
         eprintln!(
             "wrote {root_count} roots ({total_weight} weighted observations) to {}",
             output_path.display()
@@ -3393,15 +3493,17 @@ mod tests {
         )
         .expect("the pinned compiler class identity is readable from 28.8 TASTy");
 
-        let residual = decode_module_class_with_resolvers(
+        let decoded = decode_module_class_with_resolvers(
             &types,
             &BinaryName::from_internal("dotty/tools/dotc/core/Types$"),
             |_, _| None,
             |_, _| None,
         )
-        .expect_err("unsupported compiler parents remain a typed semantic error");
-        assert!(matches!(residual, TastyDecodeError::UnresolvedSupertype(_)));
-        assert_ne!(residual.root_cause_code(), "tasty.unsupported_version");
+        .expect("the authoritative TypeUtils parent should decode from compiler TASTy");
+        assert_eq!(
+            decoded.super_class.as_internal(),
+            "dotty/tools/dotc/core/TypeUtils"
+        );
 
         let contexts = fixture_bytes("scala3-compiler/dotty/tools/dotc/core/Contexts.tasty");
         decode_module_identity(
@@ -3530,6 +3632,35 @@ mod tests {
     }
 
     #[test]
+    fn resolves_a_frozen_compiler_parent_through_an_ast_wrapped_reference() {
+        let bytes = fixture_bytes("scala3-compiler/dotty/tools/dotc/core/Symbols.tasty");
+        let profiles = profile_parent_references(
+            &bytes,
+            &BinaryName::from_internal("dotty/tools/dotc/core/Symbols$"),
+            true,
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("the pinned compiler TASTy should profile");
+        let sym_utils = profiles
+            .iter()
+            .find(|p| p.reference.parent_index == 0)
+            .expect("Symbols parent 0 is SymUtils");
+        assert_eq!(
+            sym_utils.reference.reference_name.as_deref(),
+            Some("SymUtils")
+        );
+        assert_eq!(
+            sym_utils.reference.reference_prefix.as_deref(),
+            Some("dotty/tools/dotc/core")
+        );
+        assert_eq!(
+            sym_utils.resolved_binary_name.as_deref(),
+            Some("dotty/tools/dotc/core/SymUtils")
+        );
+    }
+
+    #[test]
     fn parent_profiles_report_absolute_template_addresses_from_the_ast_index() {
         for (fixture, requested, expected_address) in [
             (
@@ -3566,18 +3697,21 @@ mod tests {
                 "{requested}: {profiles:#?}"
             );
 
-            let error = decode_module_class_with_resolvers(
+            let expected_parent = if requested.ends_with("Symbols$") {
+                "dotty/tools/dotc/core/SymUtils"
+            } else {
+                "dotty/tools/dotc/core/TypeUtils"
+            };
+            let decoded = decode_module_class_with_resolvers(
                 &bytes,
                 &BinaryName::from_internal(requested),
                 |_, _| None,
                 |_, _| None,
             )
-            .expect_err("the pinned module parent should remain unresolved without fallbacks");
-            let TastyDecodeError::UnresolvedSupertype(parent) = error else {
-                panic!("expected unresolved module parent for {requested}: {error:?}");
-            };
+            .unwrap_or_else(|error| panic!("authoritative parent for {requested}: {error:?}"));
             assert_eq!(
-                parent.template_wire_address, expected_address,
+                decoded.super_class.as_internal(),
+                expected_parent,
                 "{requested}"
             );
         }
@@ -3597,13 +3731,15 @@ mod tests {
             panic!("expected an unresolved parent profile, got {error:?}");
         };
 
-        assert_eq!(parent.parent_index, 0);
+        assert_eq!(parent.parent_index, 1);
         assert!(parent.template_wire_address > 0, "profile: {parent:#?}");
         assert!(parent.has_semantic_reference, "profile: {parent:#?}");
         assert!(parent.has_reference_prefix, "profile: {parent:#?}");
         assert!(
-            parent.visible_names.iter().any(|name| name == "Annotation"),
-            "profile: {parent:#?}"
+            parent
+                .visible_names
+                .iter()
+                .any(|name| name == "StaticAnnotation")
         );
         assert!(
             parent
@@ -3611,19 +3747,12 @@ mod tests {
                 .iter()
                 .any(|name| name == "scala/annotation")
         );
-        assert_eq!(parent.shape, "package-qualified", "profile: {parent:#?}");
-        assert_eq!(
-            parent.reference_tag.as_deref(),
-            Some("0x75"),
-            "profile: {parent:#?}"
-        );
-        assert!(
-            parent
-                .reference_name
-                .as_deref()
-                .is_some_and(|name| name == "Annotation"),
-            "profile: {parent:#?}"
-        );
+        assert_eq!(parent.shape, "selected-qualified", "profile: {parent:#?}");
+        assert_eq!(parent.reference_tag.as_deref(), Some("0x71"));
+        assert_eq!(parent.reference_name.as_deref(), Some("StaticAnnotation"));
+        assert_eq!(parent.reference_prefix.as_deref(), Some("scala/annotation"));
+        assert_eq!(parent.alias_owner.as_deref(), Some("scala/annotation"));
+        assert_eq!(parent.alias_name.as_deref(), Some("StaticAnnotation"));
     }
 
     #[test]
@@ -4097,7 +4226,6 @@ mod tests {
             Some(package("me/cytrowski/tastyfixtures/visibility"))
         );
     }
-
     fn qualified_tail(tag: u8, child: RawTree<'static>) -> Vec<DefinitionTail<'static>> {
         vec![DefinitionTail::QualifiedModifier(AstChildNode {
             tag,
@@ -4197,7 +4325,6 @@ mod tests {
     #[test]
     fn a_private_or_protected_val_parameter_is_a_field_with_that_access() {
         let fields = decoded_fields("Q");
-
         assert_eq!(field_names(&fields), vec!["d", "e"]);
         assert!(fields[0].flags.is_private());
         assert!(fields[1].flags.is_protected());

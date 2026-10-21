@@ -462,8 +462,11 @@ generics, annotations).
 Parent-name recovery follows the compiled TASTy reference tree. Qualified,
 root-qualified, applied, shared, and direct symbol references retain the
 package or owner encoded by that tree; an applied parent's binary identity is
-read from its type constructor. Shared references are followed through their
-TASTy address with the same depth bound as other reference chains. Known
+read from its type constructor. AST-child and identifier wrappers around
+semantic references are traversed with the same depth bound, and a repeated
+`SelectIn` name is not appended when its AST-child qualifier already proves
+that exact final segment. Shared references are followed through their TASTy
+address with the same depth bound as other reference chains. Known
 Scala aliases such as `scala.AnyRef` still normalize to their canonical JVM
 identity. A semantic reference with an unreadable prefix remains
 `UnresolvedSupertype`, except for the separately validated Scala package-object
@@ -851,10 +854,11 @@ without a `$`-name heuristic. `dotty.tools.dotc.core.Types`, `Contexts`,
 `Symbols`, and `dotty.tools.dotc.parsing.Tokens` each provide an authoritative
 package-owned Object/ModuleClass pair. `Contexts` completes through its real
 TASTy hierarchy and exposes `withFreshTyperState` through the Object term
-prefix; repeated lookup reuses the same declaration. The other three retain
-their exact unsupported-parent errors (`TypeUtils`, `SymUtils`, and
-`TokensCommon`, respectively), and failed completion rolls back store and
-session changes while preserving the already established identity shells.
+prefix; repeated lookup reuses the same declaration. The `Types`, `Symbols`,
+and `Tokens` module classes also complete through their exact package-owned
+parents (`TypeUtils`, `SymUtils`, and `TokensCommon`). Failed completion still
+rolls back store and session changes while preserving already established
+identity shells.
 If a source-owned Object of the same name exists without a session-validated
 ModuleClass pair, package-term resolution reports an identity conflict and
 leaves the source package, Object, and ModuleClass entries untouched.
