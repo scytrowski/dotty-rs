@@ -20,6 +20,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
+  RUST_MIN_STACK: '16777216'
 
 jobs:
   checks:
@@ -38,7 +39,7 @@ jobs:
             ~/.cargo/git
             target/debug
             target/.rustc_info.json
-          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}-test-no-debug-no-incremental
+          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}-test-opt-0-no-debug-no-incremental
           restore-keys: |
             ${{ runner.os }}-cargo-debug-
 
@@ -94,7 +95,7 @@ jobs:
             ~/.cargo/git
             target/debug
             target/.rustc_info.json
-          key: ${{ runner.os }}-cargo-classfile-jvm-${{ hashFiles('**/Cargo.lock') }}-${{ steps.rust-version.outputs.version }}-test-no-debug-no-incremental
+          key: ${{ runner.os }}-cargo-classfile-jvm-${{ hashFiles('**/Cargo.lock') }}-${{ steps.rust-version.outputs.version }}-test-opt-0-no-debug-no-incremental
           restore-keys: |
             ${{ runner.os }}-cargo-classfile-jvm-${{ steps.rust-version.outputs.version }}-
 
