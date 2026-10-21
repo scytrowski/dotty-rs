@@ -37,7 +37,7 @@ use std::rc::Rc;
 const MAX_INHERITANCE_DEPTH: usize = 256;
 
 #[derive(Debug)]
-enum TastyAliasResolutionError {
+pub(crate) enum TastyAliasResolutionError {
     ClassPath(BinaryName, ClassPathError),
     InvalidTasty(
         BinaryName,
@@ -69,7 +69,7 @@ impl TastyAliasResolutionError {
 /// classpath. Bare names in alias RHS trees can be relative to the defining
 /// package, so both the decoded name and that package-qualified name are
 /// checked; ambiguity remains unresolved instead of choosing by guess.
-fn resolve_tasty_alias<E: ClassPathEntry>(
+pub(crate) fn resolve_tasty_alias<E: ClassPathEntry>(
     class_path: &E,
     owner: &BinaryName,
     alias: &str,
@@ -87,7 +87,7 @@ fn resolve_tasty_alias<E: ClassPathEntry>(
 /// Resolves an unqualified reference against the package and Scala/Java
 /// implicit-import namespaces, but only when exactly one candidate is
 /// present on the classpath.
-fn resolve_tasty_bare_reference<E: ClassPathEntry>(
+pub(crate) fn resolve_tasty_bare_reference<E: ClassPathEntry>(
     class_path: &E,
     package: &str,
     simple_name: &str,
