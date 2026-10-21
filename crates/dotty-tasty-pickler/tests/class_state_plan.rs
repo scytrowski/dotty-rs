@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Command;
 
 use dotty_core::ast::*;
 use dotty_core::*;
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
+use dotty_tasty::tasty::*;
 use dotty_tasty_pickler::*;
 use dotty_typer::SourceTyper;
 
@@ -109,6 +112,14 @@ fn clone_typed_ast(ast: &AstArena<Typed>) -> AstArena<Typed> {
         cloned.alloc(tree.clone());
     }
     cloned
+}
+
+fn raw_tree_tag(tree: &RawTree<'_>) -> u8 {
+    match tree {
+        RawTree::Leaf(term) => term.tag,
+        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
+        RawTree::LengthNode(node) => node.tag,
+    }
 }
 
 fn class_state_plan<'a>(
@@ -411,7 +422,183 @@ fn source_typer_counter_and_private_values_satisfy_the_read_only_plan() {
         }
         .validate()
         .unwrap();
-    });
+    })
+}
+
+fn private_fields_output() -> (PickledTasty, SymbolId, Vec<SymbolId>, TreeId<Typed>) {
+    let source_text = "package example\nclass PrivateFields:\n  private val seed: Int = 42\n  private val enabled: Boolean = true\n  private var counter: Int = 0\n  def constant(): Int = 1\n";
+    with_frontend(source_text, |ast, source, index, definitions, typer| {
+        let (class, members, constructor, mut bindings) = class_state_plan(
+            ast,
+            source,
+            index,
+            definitions,
+            typer,
+            "PrivateFields",
+            "PrivateFields.scala",
+        );
+        let ClassMemberPicklePlan::Method {
+            symbol: method,
+            source_tree: method_tree,
+        } = members[3]
+        else {
+            unreachable!()
+        };
+        let TreeKind::DefDef(method_definition) = &ast.get(method_tree).kind else {
+            unreachable!()
+        };
+        let method_rhs = method_definition.rhs.unwrap();
+        let method_context = typer.expression_context_for(method).unwrap();
+        let typed_method_rhs = typer
+            .type_expression_expected(method_rhs, method_context, definitions.int)
+            .unwrap();
+        bindings.0.insert((source, method_rhs), typed_method_rhs);
+        let class_tree = class_tree_for(ast, source, index, class);
+        let output = ClassStatePicklePlan {
+            store: typer.store(),
+            definitions,
+            source_ast: ast,
+            typed_ast: typer.typed_ast(),
+            source_index: index,
+            typed_bindings: &bindings,
+            source: SourceMetadata {
+                id: source,
+                name: "PrivateFields.scala".into(),
+            },
+            class,
+            class_tree,
+            constructor,
+            members: &members,
+        }
+        .validate()
+        .unwrap()
+        .pickle()
+        .unwrap();
+
+        let method_source_tree = match members[3] {
+            ClassMemberPicklePlan::Method { source_tree, .. } => source_tree,
+            _ => unreachable!(),
+        };
+        let method_body = match &ast.get(method_source_tree).kind {
+            TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+            _ => unreachable!(),
+        };
+        let method_body = bindings.typed_at(source, method_body).unwrap();
+        (
+            output,
+            class,
+            members
+                .iter()
+                .map(|member| match member {
+                    ClassMemberPicklePlan::Field(field) => field.symbol,
+                    ClassMemberPicklePlan::Method { symbol, .. } => *symbol,
+                })
+                .collect(),
+            method_body,
+        )
+    })
+}
+
+#[test]
+fn validated_private_fields_emit_source_ordered_valdefs_and_preserve_methods() {
+    let (output, class, members, method_body) = private_fields_output();
+    let (other_session, _, _, _) = private_fields_output();
+    assert_eq!(output.bytes(), other_session.bytes());
+    assert_eq!(output.intended_tasty_path(), "example/PrivateFields.tasty");
+    assert_eq!(output.declarations().len(), 6);
+    assert_eq!(
+        output.body(output.declarations()[5].symbol),
+        Some(method_body)
+    );
+    assert_eq!(
+        output.declarations()[2..]
+            .iter()
+            .map(|declaration| declaration.symbol)
+            .collect::<Vec<_>>(),
+        members
+    );
+
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let fields = output.declarations()[2..5]
+        .iter()
+        .map(|declaration| {
+            assert_eq!(declaration.owner, class);
+            index
+                .get(declaration.address)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let expected = [
+        (
+            "seed",
+            IDENTTPT_TAG,
+            INTCONST_TAG,
+            vec![PRIVATE_TAG, LOCAL_TAG],
+        ),
+        (
+            "enabled",
+            IDENTTPT_TAG,
+            TRUECONST_TAG,
+            vec![PRIVATE_TAG, LOCAL_TAG],
+        ),
+        (
+            "counter",
+            IDENTTPT_TAG,
+            INTCONST_TAG,
+            vec![PRIVATE_TAG, LOCAL_TAG, MUTABLE_TAG],
+        ),
+    ];
+    for (field, (name, type_tag, rhs_tag, modifiers)) in fields.iter().zip(expected) {
+        let DefinitionBody::ValDef {
+            name: name_ref,
+            type_tree,
+            rhs,
+            tail,
+        } = field
+        else {
+            panic!("class field is a VALDEF")
+        };
+        assert_eq!(file.render_name(*name_ref).unwrap(), name);
+        assert_eq!(raw_tree_tag(type_tree), type_tag);
+        assert_eq!(raw_tree_tag(rhs.as_ref().unwrap()), rhs_tag);
+        assert_eq!(
+            tail.iter()
+                .map(|modifier| match modifier {
+                    DefinitionTail::Modifier(tag) => *tag,
+                    _ => panic!("field has only plain modifiers"),
+                })
+                .collect::<Vec<_>>(),
+            modifiers
+        );
+    }
+    let method = output.declarations()[5];
+    let method = index
+        .get(method.address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    assert_eq!(file.render_name(method.name).unwrap(), "constant");
+    assert_eq!(method.clauses, [EMPTYCLAUSE_TAG]);
+    assert_eq!(raw_tree_tag(&method.rhs.unwrap()), INTCONST_TAG);
+
+    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1391/generated/example/PrivateFields.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1391/tmp"))
+            .status()
+            .expect("start the pinned Scala 3.9 -from-tasty gate");
+        assert!(result.success(), "PrivateFields -from-tasty gate failed");
+    }
 }
 
 #[test]
