@@ -855,6 +855,135 @@ fn class_state_lowers_implicit_and_explicit_private_primitive_field_reads() {
 }
 
 #[test]
+fn class_state_serializes_private_mutable_field_assignments() {
+    let source = "package example\nclass MutableFieldWrites:\n  private var current: Int = 0\n  private var enabled: Boolean = false\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n  def isEnabled(): Boolean = enabled\n  def setEnabled(value: Boolean): Unit = enabled = value\n  def increment(): Int =\n    current = current + 1\n    current\n";
+    let output = emit_class_state_source(
+        source,
+        "MutableFieldWrites",
+        "MutableFieldWrites.scala",
+        None,
+    )
+    .expect("private mutable field assignment should preserve source TASTy semantics");
+    assert_eq!(
+        output.intended_tasty_path(),
+        "example/MutableFieldWrites.tasty"
+    );
+    TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let methods = output.declarations()[3..]
+        .iter()
+        .filter_map(|declaration| {
+            let body = addresses
+                .get(declaration.address)
+                .unwrap()
+                .decode_defdef_body()
+                .ok()?;
+            Some((file.render_name(body.name).unwrap(), body.rhs?))
+        })
+        .collect::<HashMap<_, _>>();
+    let RawTree::LengthNode(set_node) = &methods["set"] else {
+        panic!("set body must be ASSIGN")
+    };
+    assert_eq!(set_node.tag, ASSIGN_TAG);
+    let set = set_node.decode_assign().unwrap();
+    let RawTree::NatAst { tag, child, .. } = set.left else {
+        panic!("field assignment target must be SELECT")
+    };
+    assert_eq!(tag, SELECT_TAG);
+    let RawTree::Ast { tag, .. } = *child else {
+        panic!("field assignment receiver must be QUALTHIS")
+    };
+    assert_eq!(tag, QUALTHIS_TAG);
+    assert_eq!(raw_tree_tag(&set.right), TERMREFDIRECT_TAG);
+
+    let RawTree::LengthNode(increment_node) = &methods["increment"] else {
+        panic!("increment body must preserve its source block")
+    };
+    assert_eq!(increment_node.tag, BLOCK_TAG);
+    let StructuredNode::Block(increment) = increment_node.decode_structured().unwrap() else {
+        panic!("increment body must decode as BLOCK")
+    };
+    assert_eq!(increment.stats.len(), 1);
+    let RawTree::LengthNode(assign_node) = &increment.stats[0] else {
+        panic!("increment statement must be ASSIGN")
+    };
+    assert_eq!(assign_node.tag, ASSIGN_TAG);
+    let assignment = assign_node.decode_assign().unwrap();
+    assert_eq!(raw_tree_tag(&assignment.left), SELECT_TAG);
+    assert_eq!(raw_tree_tag(&increment.expression), SELECT_TAG);
+
+    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1393/generated/example/MutableFieldWrites.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1393/tmp"))
+            .status()
+            .expect("start the pinned Scala 3.9 mutable field gate");
+        assert!(
+            result.success(),
+            "MutableFieldWrites -from-tasty gate failed"
+        );
+    }
+}
+
+#[test]
+fn class_state_rejects_assignments_to_fields_without_mutable_flag() {
+    let source = "package example\nclass ImmutableTarget:\n  private var current: Int = 0\n  def set(value: Int): Unit = current = value\n";
+    with_mutable_frontend(
+        source,
+        "ImmutableTarget",
+        "ImmutableTarget.scala",
+        |store,
+         ast,
+         source,
+         index,
+         definitions,
+         typed_ast,
+         class,
+         members,
+         constructor,
+         bindings| {
+            let field = members
+                .iter()
+                .find_map(|member| match member {
+                    ClassMemberPicklePlan::Field(field) => Some(field.symbol),
+                    _ => None,
+                })
+                .unwrap();
+            store.symbols.get_mut(field).flags = SymbolFlags::EMPTY;
+            let class_tree = class_tree_for(ast, source, index, class);
+            let rejected = ClassStatePicklePlan {
+                store,
+                definitions,
+                source_ast: ast,
+                typed_ast,
+                source_index: index,
+                typed_bindings: &bindings,
+                source: SourceMetadata {
+                    id: source,
+                    name: "ImmutableTarget.scala".into(),
+                },
+                class,
+                class_tree,
+                constructor,
+                members: &members,
+            }
+            .validate()
+            .is_err();
+            assert!(rejected, "immutable assignment target accepted");
+        },
+    );
+}
+
+#[test]
 fn class_state_registers_local_values_and_rejects_forged_method_bodies() {
     let source = "package example\nclass LocalState:\n  private val seed: Int = 1\n  def run(): Int = { val saved: Int = 1; saved + 1 }\n  def sumTo(limit: Int): Int = { var total: Int = 0; var index: Int = 0; while index < limit do { total = total + index; index = index + 1 }; total }\n";
     let output = emit_class_state_source(source, "LocalState", "LocalState.scala", None).unwrap();
