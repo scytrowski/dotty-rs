@@ -3,7 +3,8 @@
 use std::collections::HashSet;
 
 use dotty_core::ast::{
-    AstArena, DefParamClauseOrder, Modifier, Tree, TreeKind, Typed, Untyped, VisibilitySyntax,
+    AstArena, DefParamClauseOrder, Modifier, NumberKind, Tree, TreeKind, Typed, Untyped,
+    UntypedNode, VisibilitySyntax,
 };
 use dotty_core::{
     Constant, Definitions, MethodKind, Name, SemanticStore, SourceDefinition, SourceSemanticIndex,
@@ -73,6 +74,29 @@ struct ClassStateValidator<'p, 'a> {
 }
 
 impl ClassStateValidator<'_, '_> {
+    fn source_int_literal(&self, literal: &dotty_core::ast::NumberLiteral) -> Option<i32> {
+        let NumberKind::Whole(radix) = literal.kind else {
+            return None;
+        };
+        let text = self.plan.store.names.try_resolve(literal.text)?;
+        let digits = text.replace('_', "");
+        let digits = match radix {
+            2 => digits
+                .strip_prefix("0b")
+                .or_else(|| digits.strip_prefix("0B"))?,
+            8 => digits
+                .strip_prefix("0o")
+                .or_else(|| digits.strip_prefix("0O"))?,
+            10 => digits.as_str(),
+            16 => digits
+                .strip_prefix("0x")
+                .or_else(|| digits.strip_prefix("0X"))?,
+            _ => return None,
+        };
+        let value = u32::from_str_radix(digits, radix).ok()?;
+        i32::try_from(value).ok()
+    }
+
     fn charge(&mut self, amount: usize) -> Result<(), PickleError> {
         self.remaining = self
             .remaining
@@ -124,20 +148,20 @@ impl ClassStateValidator<'_, '_> {
             Some(Type::Constant(Constant::Boolean(_))) => self.plan.definitions.boolean,
             _ => actual,
         };
-        let actual_symbol = self
-            .plan
-            .store
-            .types
-            .try_get(actual)
-            .and_then(Type::reference_symbol);
-        let expected_symbol = self
-            .plan
-            .store
-            .types
-            .try_get(expected)
-            .and_then(Type::reference_symbol);
-        actual == expected
-            || matches!((actual_symbol, expected_symbol), (Some(a), Some(e)) if a == e)
+        let expected_symbol = match self.plan.store.types.try_get(expected) {
+            Some(Type::TypeRef {
+                prefix,
+                target: dotty_core::TypeRefTarget::Symbol(symbol),
+            }) if *prefix == self.plan.definitions.no_prefix => *symbol,
+            _ => return false,
+        };
+        matches!(
+            self.plan.store.types.try_get(actual),
+            Some(Type::TypeRef {
+                prefix,
+                target: dotty_core::TypeRefTarget::Symbol(symbol),
+            }) if *prefix == self.plan.definitions.no_prefix && *symbol == expected_symbol
+        )
     }
 
     fn package_owner_chain(&self, class: SymbolId) -> Result<(), PickleError> {
@@ -498,6 +522,16 @@ impl ClassStateValidator<'_, '_> {
             *definition.name.as_name(),
             class,
         )?;
+        let constructor_symbol = self.symbol(plan.symbol)?;
+        if constructor_symbol.visibility != Visibility::Public
+            || !constructor_symbol.flags.is_empty()
+            || !constructor_symbol.annotations.is_empty()
+        {
+            return Err(PickleError::Unsupported {
+                feature: UnsupportedFeature::PrimaryConstructorInput,
+                symbol: Some(plan.symbol),
+            });
+        }
         if self
             .plan
             .store
@@ -605,6 +639,7 @@ impl ClassStateValidator<'_, '_> {
                     || !canonical_record.flags.is_empty()
                     || !canonical_record.annotations.is_empty()
                     || canonical_record.name != *parameter.name.as_name()
+                    || self.symbol(symbol)?.name != *parameter.name.as_name()
                     || self.symbol(symbol)?.origin != SymbolOrigin::Source(self.plan.source.id)
                     || self.symbol(symbol)?.visibility != Visibility::Public
                     || !self.symbol(symbol)?.flags.is_empty()
@@ -772,17 +807,26 @@ impl ClassStateValidator<'_, '_> {
                 typed_tree: field.typed_initializer,
             });
         }
+        let source_initializer = self.source_tree(source_rhs)?;
         let typed = self.typed_tree(field.typed_initializer)?;
-        match &typed.kind {
-            TreeKind::Literal(literal)
+        match (&source_initializer.kind, &typed.kind) {
+            (
+                TreeKind::PhaseSpecific(UntypedNode::Number(source_literal)),
+                TreeKind::Literal(literal),
+            ) if is_int
+                && matches!(literal.value, Constant::Int(value) if self.source_int_literal(source_literal) == Some(value)) =>
+                {}
+            (TreeKind::Literal(source_literal), TreeKind::Literal(literal))
                 if matches!(
                     (&literal.value, is_int),
                     (Constant::Int(_), true) | (Constant::Boolean(_), false)
-                ) => {}
-            TreeKind::Ident(_) => {
+                ) && source_literal.value == literal.value => {}
+            (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident))
+                if source_ident.name == typed_ident.name =>
+            {
                 let Some(Type::TermRef {
+                    prefix,
                     target: TermRefTarget::Symbol(target),
-                    ..
                 }) = self.plan.store.types.try_get(typed.ty)
                 else {
                     return Err(PickleError::Unsupported {
@@ -790,9 +834,11 @@ impl ClassStateValidator<'_, '_> {
                         symbol: Some(field.symbol),
                     });
                 };
-                if fields_seen.contains(target)
+                if *prefix != self.plan.definitions.no_prefix
+                    || fields_seen.contains(target)
                     || self.symbol(*target)?.kind != SymbolKind::Parameter
                     || self.symbol(*target)?.owner != Some(constructor.symbol)
+                    || self.symbol(*target)?.name != source_ident.name
                     || !constructor
                         .parameter_clauses
                         .iter()
@@ -805,6 +851,11 @@ impl ClassStateValidator<'_, '_> {
                     });
                 }
             }
+            (TreeKind::Ident(source_ident), TreeKind::Literal(literal))
+                if !is_int
+                    && matches!(literal.value, Constant::Boolean(value)
+                        if self.plan.store.names.try_resolve(source_ident.name.text())
+                            == Some(if value { "true" } else { "false" })) => {}
             _ => {
                 return Err(PickleError::Unsupported {
                     feature: UnsupportedFeature::UnsafeFieldInitializer,
