@@ -180,10 +180,23 @@ impl ClassStateValidator<'_, '_> {
         )
     }
 
-    fn initializer_has_type(&self, actual: TypeId, expected: TypeId) -> bool {
+    fn initializer_has_type(
+        &self,
+        actual: TypeId,
+        expected: TypeId,
+        initializer: &Tree<Typed>,
+    ) -> bool {
         match self.plan.store.types.try_get(actual) {
-            Some(Type::Constant(Constant::Int(_))) => expected == self.plan.definitions.int,
-            Some(Type::Constant(Constant::Boolean(_))) => expected == self.plan.definitions.boolean,
+            Some(Type::Constant(value)) => {
+                matches!(
+                    &initializer.kind,
+                    TreeKind::Literal(literal) if &literal.value == value
+                ) && match value {
+                    Constant::Int(_) => expected == self.plan.definitions.int,
+                    Constant::Boolean(_) => expected == self.plan.definitions.boolean,
+                    _ => false,
+                }
+            }
             _ => self.same_canonical_type(actual, expected),
         }
     }
@@ -895,7 +908,7 @@ impl ClassStateValidator<'_, '_> {
             Some(_) => typed.ty,
             None => return Err(PickleError::InvalidType { ty: typed.ty }),
         };
-        if !self.initializer_has_type(initializer_type, field.declared_type) {
+        if !self.initializer_has_type(initializer_type, field.declared_type, typed) {
             return Err(PickleError::FieldType {
                 symbol: field.symbol,
                 expected: field.declared_type,
