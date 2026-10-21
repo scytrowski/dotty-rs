@@ -78,6 +78,9 @@ pub(crate) struct DecodedTastyModuleIdentity {
 pub struct UnresolvedParentReference {
     /// Zero-based position in the `Template` parent list.
     pub parent_index: usize,
+    /// AST-section address of the enclosing `Template` node. Together with
+    /// `parent_index`, this identifies a parent without relying on arena IDs.
+    pub template_wire_address: usize,
     /// Coarse deterministic shape category.
     pub shape: String,
     /// Whether the parent contains a semantic reference tree.
@@ -86,9 +89,31 @@ pub struct UnresolvedParentReference {
     pub has_reference_prefix: bool,
     /// Name-table spellings visible in the raw parent tree.
     pub visible_names: Vec<String>,
-    /// Debug rendering of the raw parent tree, including wire tags and
-    /// reference addresses.
+    /// TASTy reference/selection tag at the first semantic reference shape,
+    /// as a stable hexadecimal tag byte when the tree contains one.
+    pub reference_tag: Option<String>,
+    /// Name-table spelling carried by the first semantic reference.
+    pub reference_name: Option<String>,
+    /// Package/selection prefix recoverable from the first semantic reference.
+    pub reference_prefix: Option<String>,
+    /// Owner and alias name when the tree contains a package-object alias
+    /// candidate. This is evidence about the encoded owner, not proof that
+    /// the alias target exists on the classpath.
+    pub alias_owner: Option<String>,
+    pub alias_name: Option<String>,
+    /// Bounded normalized rendering of the raw parent tree's wire tag shape.
     pub raw_tree: String,
+}
+
+/// Test/audit view of one declared TASTy template parent. It records whether
+/// the current structural and classpath fallback resolvers found a binary
+/// identity; it does not attempt to load that parent's dependencies.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ParentReferenceProfile {
+    pub reference: UnresolvedParentReference,
+    pub resolved_binary_name: Option<String>,
+    pub resolution_stage: &'static str,
 }
 
 /// A `.tasty` class-level visibility modifier that `ClassAccessFlags`
@@ -451,6 +476,142 @@ pub(crate) fn decode_module_class_with_resolvers(
     )
 }
 
+/// Profiles every parent of the requested top-level TASTy definition using
+/// the same reference resolution callbacks as class decoding. Keeping this
+/// separate from `decode_impl` lets focused diagnostics inspect later parents
+/// even when an earlier parent is unresolved; it does not change acceptance or
+/// loading behavior.
+#[cfg(test)]
+pub(crate) fn profile_parent_references(
+    bytes: &[u8],
+    requested: &BinaryName,
+    module_class: bool,
+    mut resolve_alias: impl FnMut(&BinaryName, &str) -> Option<BinaryName>,
+    mut resolve_bare: impl FnMut(&str, &str) -> Option<BinaryName>,
+) -> Result<Vec<ParentReferenceProfile>, TastyDecodeError> {
+    let file = parse_classloader_tasty(bytes)?;
+    let index = file.ast_address_index()?;
+    let requested_internal = requested.as_internal();
+    let simple_name = requested_internal
+        .rsplit('/')
+        .next()
+        .unwrap_or(requested_internal);
+    let package = requested_internal
+        .rsplit_once('/')
+        .map_or("", |(package, _)| package);
+    let mut matching_nodes = index.iter().filter(|node| {
+        if node.tag != TYPEDEF_TAG {
+            return false;
+        }
+        let Ok(StructuredNode::TypeDef(DefinitionBody::TypeDef {
+            name,
+            tail,
+            type_or_template,
+        })) = node.decode_structured()
+        else {
+            return false;
+        };
+        if module_class {
+            module_class_wire_name(&file, name).as_deref() == Some(simple_name)
+                && has_modifier(&tail, OBJECT_TAG)
+                && is_in_requested_top_level_package(&file, &index, node.offset, package)
+                && matches!(type_or_template, RawTree::LengthNode(template) if template.tag == TEMPLATE_TAG)
+        } else {
+            wire_name(&file, name).as_deref() == Some(simple_name)
+        }
+    });
+    let node = matching_nodes
+        .next()
+        .ok_or(TastyDecodeError::MissingTypeDef)?;
+    if matching_nodes.next().is_some() {
+        return Err(TastyDecodeError::AmbiguousModuleIdentity);
+    }
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef {
+        type_or_template, ..
+    }) = node.decode_structured()?
+    else {
+        return Err(TastyDecodeError::MissingTypeDef);
+    };
+    let RawTree::LengthNode(template_node) = type_or_template else {
+        return Err(TastyDecodeError::NoTemplateBody);
+    };
+    if template_node.tag != TEMPLATE_TAG {
+        return Err(TastyDecodeError::NoTemplateBody);
+    }
+    let StructuredNode::Template(template) = template_node.decode_structured()? else {
+        return Err(TastyDecodeError::NoTemplateBody);
+    };
+    let template_wire_address = index
+        .children_of(node.offset as u32)
+        .find(|child| child.tag == TEMPLATE_TAG)
+        .map(|child| child.offset)
+        .ok_or(TastyDecodeError::NoTemplateBody)?;
+
+    template
+        .parents
+        .iter()
+        .enumerate()
+        .map(|(parent_index, parent)| {
+            let alias_candidate = unresolved_alias_reference(&file, parent)
+                .filter(|(owner, _)| matches!(owner.simple_name(), "package" | "package$"));
+            let mut alias_attempted = false;
+            let mut alias_resolved = false;
+            let mut bare_attempted = false;
+            let mut bare_resolved = false;
+            let resolved = resolve_parent_name_with_alias(
+                &file,
+                parent,
+                package,
+                &mut |owner, alias| {
+                    alias_attempted = true;
+                    let result = resolve_alias(owner, alias);
+                    alias_resolved = result.is_some();
+                    result
+                },
+                &mut |owner_package, simple_name| {
+                    bare_attempted = true;
+                    let result = resolve_bare(owner_package, simple_name);
+                    bare_resolved = result.is_some();
+                    result
+                },
+            );
+            let resolution_stage = if alias_resolved {
+                "package-object-alias-resolved"
+            } else if bare_resolved {
+                "classpath-bare-candidate-resolved"
+            } else if resolved.is_some() {
+                "semantic-or-structural-reference-resolved"
+            } else if alias_attempted || alias_candidate.is_some() {
+                "package-object-alias-unresolved"
+            } else if bare_attempted {
+                "classpath-bare-candidate-unresolved"
+            } else {
+                match resolve_reference_name_in_package(&file, parent, Some(package)) {
+                    ReferenceResolution::Unresolved => "semantic-prefix-unresolved",
+                    ReferenceResolution::NotAReference
+                        if parent_has_semantic_reference(&file, parent, package) =>
+                    {
+                        "unsupported-semantic-reference-shape"
+                    }
+                    ReferenceResolution::NotAReference => "unsupported-nonsemantic-parent-shape",
+                    ReferenceResolution::Resolved(_) => "semantic-reference-unresolved",
+                }
+            };
+            Ok(ParentReferenceProfile {
+                reference: unresolved_parent_reference(
+                    &file,
+                    parent,
+                    parent_index,
+                    package,
+                    template_wire_address,
+                ),
+                resolved_binary_name: resolved.map(|name| name.as_internal().to_owned()),
+                resolution_stage,
+            })
+        })
+        .collect()
+}
+
 /// Parses the two stable TASTy formats validated for Scala 3.9 classpath
 /// artifacts. This policy is intentionally narrower than the generic
 /// compatible-minor relation: the compiler artifacts used by this
@@ -763,6 +924,11 @@ fn decode_impl(
     let StructuredNode::Template(template) = template_node.decode_structured()? else {
         return Err(TastyDecodeError::NoTemplateBody);
     };
+    let template_wire_address = index
+        .children_of(node.offset as u32)
+        .find(|child| child.tag == TEMPLATE_TAG)
+        .map(|child| child.offset)
+        .ok_or(TastyDecodeError::NoTemplateBody)?;
 
     let mut parents = template.parents.iter().enumerate();
     let super_class = match parents.next() {
@@ -779,7 +945,13 @@ fn decode_impl(
                 (None, false) => BinaryName::from_internal("java/lang/Object"),
                 (None, true) => {
                     return Err(TastyDecodeError::UnresolvedSupertype(Box::new(
-                        unresolved_parent_reference(&file, parent, parent_index, package),
+                        unresolved_parent_reference(
+                            &file,
+                            parent,
+                            parent_index,
+                            package,
+                            template_wire_address,
+                        ),
                     )));
                 }
             }
@@ -803,6 +975,7 @@ fn decode_impl(
                 parent,
                 parent_index,
                 package,
+                template_wire_address,
             )))
         })?);
     }
@@ -832,6 +1005,7 @@ fn unresolved_parent_reference(
     parent: &RawTree<'_>,
     parent_index: usize,
     package: &str,
+    template_wire_address: usize,
 ) -> UnresolvedParentReference {
     let visible_names = parent_visible_names(file, parent);
     let has_semantic_reference = parent_has_semantic_reference(file, parent, package);
@@ -847,13 +1021,182 @@ fn unresolved_parent_reference(
         "other" if has_semantic_reference => "unsupported-prefix".to_owned(),
         shape => shape.to_owned(),
     };
+    let reference_details = parent_reference_details(file, parent, 0);
+    let alias = unresolved_alias_reference(file, parent);
     UnresolvedParentReference {
         parent_index,
+        template_wire_address,
         shape,
         has_semantic_reference,
         has_reference_prefix,
         visible_names,
+        reference_tag: reference_details
+            .as_ref()
+            .map(|details| details.tag.clone()),
+        reference_name: reference_details
+            .as_ref()
+            .and_then(|details| details.name.clone()),
+        reference_prefix: reference_details.and_then(|details| details.prefix),
+        alias_owner: alias
+            .as_ref()
+            .map(|(owner, _)| owner.as_internal().to_owned()),
+        alias_name: alias.map(|(_, alias)| alias),
         raw_tree: parent_raw_shape(parent, 0),
+    }
+}
+
+struct ParentReferenceDetails {
+    tag: String,
+    name: Option<String>,
+    prefix: Option<String>,
+}
+
+fn parent_reference_details(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<ParentReferenceDetails> {
+    const MAX_PARENT_PROFILE_DEPTH: usize = 128;
+    if depth >= MAX_PARENT_PROFILE_DEPTH {
+        return None;
+    }
+    match tree.decode_structured().ok() {
+        Some(StructuredTree::Reference(reference)) => Some(ParentReferenceDetails {
+            tag: format!("0x{:02x}", reference.tag),
+            name: resolve_qualified_name(file, reference.reference),
+            prefix: resolve_reference_prefix(file, &reference.qualifier),
+        }),
+        Some(StructuredTree::Ident(ident)) => {
+            parent_reference_details(file, &ident.type_tree, depth + 1)
+        }
+        Some(StructuredTree::Select(selection)) => Some(ParentReferenceDetails {
+            tag: format!("0x{:02x}", selection.tag),
+            name: wire_name(file, selection.name),
+            prefix: parent_profile_owner(file, &selection.qualifier, depth + 1),
+        }),
+        Some(StructuredTree::AstChild(child)) => {
+            parent_reference_details(file, &child.child, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::Apply(apply))) => {
+            parent_reference_details(file, &apply.function, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::TypeApply(apply))) => {
+            parent_reference_details(file, &apply.function, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
+            parent_reference_details(file, &applied.tycon, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::Typed(typed))) => {
+            parent_reference_details(file, &typed.type_tree, depth + 1)
+                .or_else(|| parent_reference_details(file, &typed.expression, depth + 1))
+        }
+        Some(StructuredTree::Length(StructuredNode::SelectOuter(selection))) => {
+            parent_reference_details(file, &selection.underlying_type, depth + 1)
+                .or_else(|| parent_reference_details(file, &selection.qualifier, depth + 1))
+        }
+        Some(StructuredTree::Length(StructuredNode::SelectIn(selection))) => {
+            parent_reference_details(file, &selection.underlying_type, depth + 1).or_else(|| {
+                Some(ParentReferenceDetails {
+                    tag: format!("0x{:02x}", selection.tag),
+                    name: wire_name(file, selection.name),
+                    prefix: parent_profile_owner(file, &selection.qualifier, depth + 1),
+                })
+            })
+        }
+        _ => match tree {
+            RawTree::Leaf(term) if term.ast_ref().is_some() => {
+                let reference = term.ast_ref()?;
+                let shared = decode_shared_tree(file, reference.address)?;
+                parent_reference_details(file, &shared, depth + 1)
+            }
+            RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
+                parent_reference_details(file, child, depth + 1)
+            }
+            _ => None,
+        },
+    }
+}
+
+fn parent_profile_owner(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> Option<String> {
+    parent_wire_path(file, tree, depth).or_else(|| {
+        parent_visible_names(file, tree)
+            .into_iter()
+            .find(|name| name.contains('/'))
+    })
+}
+
+/// Reconstructs a bounded diagnostic path from structural TASTy nodes. This
+/// deliberately does not feed the production parent resolver: it preserves
+/// nested owners for the profile without widening accepted classpath names.
+fn parent_wire_path(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> Option<String> {
+    const MAX_PARENT_PROFILE_DEPTH: usize = 128;
+    if depth >= MAX_PARENT_PROFILE_DEPTH {
+        return None;
+    }
+    if let Ok(structured) = tree.decode_structured() {
+        let path = match structured {
+            StructuredTree::Reference(reference) => {
+                let name = resolve_qualified_name(file, reference.reference)?;
+                if matches!(reference.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG) {
+                    let prefix = parent_wire_path(file, &reference.qualifier, depth + 1);
+                    Some(match prefix.as_deref() {
+                        None | Some("") | Some("_root_") => name,
+                        Some(owner) => format!("{}/{name}", owner.trim_matches('/')),
+                    })
+                } else {
+                    Some(name)
+                }
+            }
+            StructuredTree::Select(selection) => {
+                let owner = parent_wire_path(file, &selection.qualifier, depth + 1)?;
+                let name = wire_name(file, selection.name)?;
+                Some(format!("{owner}/{name}"))
+            }
+            StructuredTree::AstChild(child) => parent_wire_path(file, &child.child, depth + 1),
+            StructuredTree::Ident(ident) => parent_wire_path(file, &ident.type_tree, depth + 1),
+            StructuredTree::Length(StructuredNode::AppliedType(applied)) => {
+                parent_wire_path(file, &applied.tycon, depth + 1)
+            }
+            StructuredTree::Length(StructuredNode::Apply(apply)) => {
+                parent_wire_path(file, &apply.function, depth + 1)
+            }
+            StructuredTree::Length(StructuredNode::TypeApply(apply)) => {
+                parent_wire_path(file, &apply.function, depth + 1)
+            }
+            StructuredTree::Length(StructuredNode::SelectIn(selection)) => {
+                let owner = parent_wire_path(file, &selection.qualifier, depth + 1)?;
+                let name = wire_name(file, selection.name)?;
+                Some(format!("{owner}/{name}"))
+            }
+            StructuredTree::Length(StructuredNode::Typed(typed)) => {
+                parent_wire_path(file, &typed.type_tree, depth + 1)
+                    .or_else(|| parent_wire_path(file, &typed.expression, depth + 1))
+            }
+            StructuredTree::Length(StructuredNode::SelectOuter(selection)) => {
+                parent_wire_path(file, &selection.underlying_type, depth + 1)
+                    .or_else(|| parent_wire_path(file, &selection.qualifier, depth + 1))
+            }
+            _ => None,
+        };
+        if path.is_some() {
+            return path;
+        }
+    }
+    match tree {
+        RawTree::Leaf(term) if term.ast_ref().is_some() => {
+            let reference = term.ast_ref()?;
+            resolve_symbol_address(file, reference.address).or_else(|| {
+                let shared = decode_shared_tree(file, reference.address)?;
+                parent_wire_path(file, &shared, depth + 1)
+            })
+        }
+        RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
+            parent_wire_path(file, child, depth + 1)
+        }
+        RawTree::Leaf(term) if term.name_ref().is_some() => {
+            resolve_qualified_name(file, term.name_ref()?)
+        }
+        _ => None,
     }
 }
 
@@ -887,6 +1230,9 @@ fn parent_has_reference_prefix(
             Ok(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
                 parent_has_reference_prefix(file, &applied.tycon, package, depth + 1)
             }
+            Ok(StructuredTree::Length(StructuredNode::TypeApply(apply))) => {
+                parent_has_reference_prefix(file, &apply.function, package, depth + 1)
+            }
             Ok(StructuredTree::Length(StructuredNode::Apply(apply))) => {
                 parent_has_reference_prefix(file, &apply.function, package, depth + 1)
             }
@@ -898,6 +1244,14 @@ fn parent_has_reference_prefix(
                         package,
                         depth + 1,
                     )
+            }
+            Ok(StructuredTree::Length(StructuredNode::Typed(typed))) => {
+                parent_has_reference_prefix(file, &typed.type_tree, package, depth + 1)
+                    || parent_has_reference_prefix(file, &typed.expression, package, depth + 1)
+            }
+            Ok(StructuredTree::Length(StructuredNode::SelectOuter(selection))) => {
+                parent_has_reference_prefix(file, &selection.underlying_type, package, depth + 1)
+                    || parent_has_reference_prefix(file, &selection.qualifier, package, depth + 1)
             }
             Ok(StructuredTree::Ident(ident)) => {
                 parent_has_reference_prefix(file, &ident.type_tree, package, depth + 1)
@@ -936,7 +1290,41 @@ fn parent_raw_shape(tree: &RawTree<'_>, depth: usize) -> String {
             "NatAst(tag={tag}, child={})",
             parent_raw_shape(child, depth + 1)
         ),
-        RawTree::LengthNode(node) => format!("LengthNode(tag={})", node.tag),
+        RawTree::LengthNode(node) => match node.decode_structured() {
+            Ok(StructuredNode::Apply(apply)) => format!(
+                "Apply(function={}, arguments={})",
+                parent_raw_shape(&apply.function, depth + 1),
+                apply.arguments.len()
+            ),
+            Ok(StructuredNode::TypeApply(apply)) => format!(
+                "TypeApply(function={}, arguments={})",
+                parent_raw_shape(&apply.function, depth + 1),
+                apply.type_arguments.len()
+            ),
+            Ok(StructuredNode::AppliedType(applied)) => format!(
+                "AppliedType(tycon={}, arguments={})",
+                parent_raw_shape(&applied.tycon, depth + 1),
+                applied.arguments.len()
+            ),
+            Ok(StructuredNode::Typed(typed)) => format!(
+                "Typed(expression={}, type={})",
+                parent_raw_shape(&typed.expression, depth + 1),
+                parent_raw_shape(&typed.type_tree, depth + 1)
+            ),
+            Ok(StructuredNode::SelectOuter(selection)) => format!(
+                "SelectOuter(qualifier={}, underlying={})",
+                parent_raw_shape(&selection.qualifier, depth + 1),
+                parent_raw_shape(&selection.underlying_type, depth + 1)
+            ),
+            Ok(StructuredNode::SelectIn(selection)) => format!(
+                "SelectIn(tag={}, name={}, qualifier={}, underlying={})",
+                selection.tag,
+                selection.name,
+                parent_raw_shape(&selection.qualifier, depth + 1),
+                parent_raw_shape(&selection.underlying_type, depth + 1)
+            ),
+            _ => format!("LengthNode(tag={})", node.tag),
+        },
     }
 }
 
@@ -977,6 +1365,17 @@ fn parent_visible_names_at_depth(
             &applied.tycon,
             depth + 1,
         ));
+    } else if let Ok(StructuredTree::Length(StructuredNode::TypeApply(apply))) =
+        tree.decode_structured()
+    {
+        names.extend(parent_visible_names_at_depth(
+            file,
+            &apply.function,
+            depth + 1,
+        ));
+        for argument in &apply.type_arguments {
+            names.extend(parent_visible_names_at_depth(file, argument, depth + 1));
+        }
     } else if let RawTree::Leaf(term) = tree
         && let Some(reference) = term.ast_ref()
         && let Some(shared) = decode_shared_tree(file, reference.address)
@@ -1015,6 +1414,28 @@ fn parent_visible_names_at_depth(
         names.extend(parent_visible_names_at_depth(
             file,
             &selection.underlying_type,
+            depth + 1,
+        ));
+    } else if let Ok(StructuredTree::Length(StructuredNode::Typed(typed))) =
+        tree.decode_structured()
+    {
+        names.extend(parent_visible_names_at_depth(
+            file,
+            &typed.type_tree,
+            depth + 1,
+        ));
+        names.extend(parent_visible_names_at_depth(
+            file,
+            &typed.expression,
+            depth + 1,
+        ));
+    } else if let Ok(StructuredTree::Select(selection)) = tree.decode_structured() {
+        if let Some(name) = wire_name(file, selection.name) {
+            names.push(name);
+        }
+        names.extend(parent_visible_names_at_depth(
+            file,
+            &selection.qualifier,
             depth + 1,
         ));
     }
@@ -1068,6 +1489,9 @@ fn parent_has_semantic_reference_at_depth(
             Ok(StructuredTree::Length(StructuredNode::Apply(apply))) => {
                 parent_has_semantic_reference_at_depth(file, &apply.function, package, depth + 1)
             }
+            Ok(StructuredTree::Length(StructuredNode::TypeApply(apply))) => {
+                parent_has_semantic_reference_at_depth(file, &apply.function, package, depth + 1)
+            }
             Ok(StructuredTree::Length(StructuredNode::SelectIn(selection))) => {
                 parent_has_semantic_reference_at_depth(
                     file,
@@ -1077,6 +1501,28 @@ fn parent_has_semantic_reference_at_depth(
                 ) || parent_has_semantic_reference_at_depth(
                     file,
                     &selection.underlying_type,
+                    package,
+                    depth + 1,
+                )
+            }
+            Ok(StructuredTree::Length(StructuredNode::Typed(typed))) => {
+                parent_has_semantic_reference_at_depth(file, &typed.type_tree, package, depth + 1)
+                    || parent_has_semantic_reference_at_depth(
+                        file,
+                        &typed.expression,
+                        package,
+                        depth + 1,
+                    )
+            }
+            Ok(StructuredTree::Length(StructuredNode::SelectOuter(selection))) => {
+                parent_has_semantic_reference_at_depth(
+                    file,
+                    &selection.underlying_type,
+                    package,
+                    depth + 1,
+                ) || parent_has_semantic_reference_at_depth(
+                    file,
+                    &selection.qualifier,
                     package,
                     depth + 1,
                 )
@@ -1123,6 +1569,9 @@ fn parent_reference_shape_at_depth(
         },
         Ok(StructuredTree::Select(_)) => "selected-qualified".to_owned(),
         Ok(StructuredTree::Length(StructuredNode::AppliedType(_))) => "applied".to_owned(),
+        Ok(StructuredTree::Length(StructuredNode::TypeApply(apply))) => {
+            parent_reference_shape_at_depth(file, &apply.function, depth + 1)
+        }
         Ok(StructuredTree::Length(StructuredNode::Apply(apply))) => {
             parent_reference_shape_at_depth(file, &apply.function, depth + 1)
         }
@@ -1138,6 +1587,17 @@ fn parent_reference_shape_at_depth(
             } else {
                 underlying_shape
             }
+        }
+        Ok(StructuredTree::Length(StructuredNode::Typed(typed))) => {
+            let ty_shape = parent_reference_shape_at_depth(file, &typed.type_tree, depth + 1);
+            if ty_shape == "other" {
+                parent_reference_shape_at_depth(file, &typed.expression, depth + 1)
+            } else {
+                ty_shape
+            }
+        }
+        Ok(StructuredTree::Length(StructuredNode::SelectOuter(selection))) => {
+            parent_reference_shape_at_depth(file, &selection.underlying_type, depth + 1)
         }
         Ok(StructuredTree::Ident(ident)) => {
             let inner = parent_reference_shape_at_depth(file, &ident.type_tree, depth + 1);
@@ -2404,6 +2864,430 @@ mod tests {
     use super::*;
     use dotty_tasty::tasty::{AstChildNode, SimpleTerm};
 
+    fn tsv_cell(value: &str) -> String {
+        if value.is_empty() {
+            return "-".to_owned();
+        }
+        value
+            .replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\r', "\\r")
+            .replace('\n', "\\n")
+    }
+
+    /// Opt-in profile of the frozen #1342 roots. This reads only the pinned
+    /// TASTy resources named by the root TSV and loads those roots and their
+    /// dependencies; it never runs source corpus typing and does not change
+    /// the semantic report used by CI.
+    #[test]
+    #[ignore = "run with pinned Scala 3.9 JAR paths and SCALA39_PARENT_PROFILE_OUTPUT"]
+    fn profile_frozen_unresolved_supertype_parent_roots() {
+        use crate::class_path::{ClassFormat, ClassPathEntry, CompositeClassPath};
+        use crate::jar_class_path::JarClassPath;
+        use crate::jdk_class_path::JdkClassPath;
+        use std::path::PathBuf;
+
+        let compiler_jar =
+            PathBuf::from(std::env::var("SCALA39_COMPILER_JAR").expect("set SCALA39_COMPILER_JAR"));
+        let library_jar =
+            PathBuf::from(std::env::var("SCALA39_LIBRARY_JAR").expect("set SCALA39_LIBRARY_JAR"));
+        let scala3_library_jar =
+            PathBuf::from(std::env::var("SCALA39_LIBRARY3_JAR").expect("set SCALA39_LIBRARY3_JAR"));
+        let jdk_jmods =
+            PathBuf::from(std::env::var("JAVA_HOME").expect("set JAVA_HOME to Temurin 21.0.8"))
+                .join("jmods");
+        let output_path = PathBuf::from(
+            std::env::var("SCALA39_PARENT_PROFILE_OUTPUT")
+                .expect("set SCALA39_PARENT_PROFILE_OUTPUT"),
+        );
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(JarClassPath::new(&compiler_jar, 21).expect("open compiler JAR")),
+            Box::new(JarClassPath::new(&library_jar, 21).expect("open Scala library JAR")),
+            Box::new(JarClassPath::new(&scala3_library_jar, 21).expect("open Scala 3 library JAR")),
+            Box::new(JdkClassPath::new(jdk_jmods.clone()).expect("open JDK 21 jmods")),
+        ]);
+        let load_class_path = CompositeClassPath::new(vec![
+            Box::new(JarClassPath::new(&compiler_jar, 21).expect("open compiler JAR for loading")),
+            Box::new(
+                JarClassPath::new(&library_jar, 21).expect("open Scala library JAR for loading"),
+            ),
+            Box::new(
+                JarClassPath::new(&scala3_library_jar, 21)
+                    .expect("open Scala 3 library JAR for loading"),
+            ),
+            Box::new(JdkClassPath::new(jdk_jmods).expect("open JDK 21 jmods for loading")),
+        ]);
+        let mut semantic_store = dotty_core::SemanticStore::new();
+        let mut class_loader =
+            crate::loader::ClassLoader::new(load_class_path, &mut semantic_store);
+        let roots = include_str!(
+            "../../../docs/typer-classpath-corpus-audit-post-compiler-modules-3.9.0-tasty-supertype-roots.tsv"
+        );
+        let mut rows = String::from(
+            "requested_class_root\trequested_identity\tweighted_observations\tresource_path\tartifact\tartifact_version\tartifact_sha256\ttemplate_wire_address\tparent_index\tshape\tresolution_stage\tresolved_binary_name\treference_tag\treference_name\treference_prefix\talias_owner\talias_name\thas_semantic_reference\thas_reference_prefix\tvisible_names\traw_tree\tprofile_first_unresolved_parent_index\tstandalone_decode_parent_index\tstandalone_decode_cause\tdeepest_typed_cause\tfailing_binary_name\tfailure_parent_index\tfailure_parent_template_wire_address\tfailure_parent_shape\tfailure_reference_tag\tfailure_reference_name\tfailure_reference_prefix\tdependency_chain\tdeepest_resource_origin\tsource_audit_observations\tsource_audit_files\n",
+        );
+        let mut root_count = 0usize;
+        let mut total_weight = 0u64;
+        let mut compiler_count = 0usize;
+        let mut compiler_weight = 0u64;
+        let mut library_count = 0usize;
+        let mut library_weight = 0u64;
+        let mut load_causes = std::collections::BTreeMap::new();
+        let mut source_audit_metrics =
+            std::collections::BTreeMap::<String, (u64, std::collections::BTreeSet<String>)>::new();
+        for line in include_str!(
+            "../../../docs/classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv"
+        )
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 3, "invalid source-provenance row: {line}");
+            let (_, requested_and_root) = fields[0]
+                .split_once("::requested=")
+                .expect("source-provenance key includes requested identity");
+            let (requested_root, _) = requested_and_root
+                .split_once("::root=")
+                .expect("source-provenance key includes deepest root");
+            let observations = fields[2]
+                .parse::<u64>()
+                .expect("source-provenance observations are numeric");
+            let (total, files) = source_audit_metrics
+                .entry(requested_root.to_owned())
+                .or_default();
+            *total += observations;
+            files.insert(fields[1].to_owned());
+        }
+        let frozen_requested_roots = roots
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.split('\t').next().expect("root row has identity"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let observed_requested_roots = source_audit_metrics
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(frozen_requested_roots.len(), 50);
+        assert_eq!(observed_requested_roots, frozen_requested_roots);
+        assert_eq!(
+            source_audit_metrics
+                .values()
+                .map(|(observations, _)| observations)
+                .sum::<u64>(),
+            8_948
+        );
+        assert_eq!(
+            source_audit_metrics
+                .values()
+                .flat_map(|(_, files)| files.iter())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            279
+        );
+
+        let mut joined_source_observations = 0u64;
+        for line in roots.lines().skip(1).filter(|line| !line.trim().is_empty()) {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 6, "invalid frozen-root row: {line}");
+            let requested_root = fields[0];
+            let weighted_observations = fields[1].parse::<u64>().expect("weight is numeric");
+            let resource_path = fields[2];
+            let artifact = fields[3];
+            let resource_name = resource_path
+                .strip_suffix(".tasty")
+                .expect("frozen resource path is a TASTy entry");
+            let resource = class_path
+                .find_class(&BinaryName::from_internal(resource_name))
+                .expect("read frozen TASTy resource")
+                .expect("frozen resource exists on pinned classpath");
+            assert_eq!(resource.format(), ClassFormat::Tasty, "{requested_root}");
+            let selected_origin = match resource.origin() {
+                crate::class_path::ClassOrigin::Jar(path) => path,
+                origin => panic!("expected pinned JAR origin for {requested_root}, got {origin:?}"),
+            };
+            let expected_jar = if artifact.starts_with("scala3-compiler_") {
+                &compiler_jar
+            } else {
+                &library_jar
+            };
+            assert_eq!(
+                selected_origin, expected_jar,
+                "resource origin for {requested_root}"
+            );
+
+            let requested = BinaryName::from_internal(requested_root);
+            let profiles = profile_parent_references(
+                resource.bytes(),
+                &requested,
+                requested_root.ends_with('$'),
+                |owner, alias| {
+                    crate::loader::resolve_tasty_alias(&class_path, owner, alias)
+                        .ok()
+                        .flatten()
+                },
+                |package, simple_name| {
+                    crate::loader::resolve_tasty_bare_reference(&class_path, package, simple_name)
+                        .ok()
+                        .flatten()
+                },
+            )
+            .unwrap_or_else(|error| panic!("profile {requested_root}: {error}"));
+            assert!(!profiles.is_empty(), "{requested_root} has no parents");
+            let first_unresolved_parent = profiles
+                .iter()
+                .find(|profile| profile.resolved_binary_name.is_none())
+                .map(|profile| profile.reference.parent_index);
+            let decode_result = if requested_root.ends_with('$') {
+                decode_module_class_with_resolvers(
+                    resource.bytes(),
+                    &requested,
+                    |owner, alias| {
+                        crate::loader::resolve_tasty_alias(&class_path, owner, alias)
+                            .ok()
+                            .flatten()
+                    },
+                    |package, simple_name| {
+                        crate::loader::resolve_tasty_bare_reference(
+                            &class_path,
+                            package,
+                            simple_name,
+                        )
+                        .ok()
+                        .flatten()
+                    },
+                )
+            } else {
+                decode_with_resolvers(
+                    resource.bytes(),
+                    &requested,
+                    |owner, alias| {
+                        crate::loader::resolve_tasty_alias(&class_path, owner, alias)
+                            .ok()
+                            .flatten()
+                    },
+                    |package, simple_name| {
+                        crate::loader::resolve_tasty_bare_reference(
+                            &class_path,
+                            package,
+                            simple_name,
+                        )
+                        .ok()
+                        .flatten()
+                    },
+                )
+            };
+            let (standalone_parent_index, standalone_decode_cause) = match decode_result {
+                Err(error) => {
+                    let parent_index = match &error {
+                        TastyDecodeError::UnresolvedSupertype(parent) => Some(parent.parent_index),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        parent_index, first_unresolved_parent,
+                        "independent per-parent profile must identify the decoder's first failure for {requested_root}"
+                    );
+                    (parent_index, error.root_cause_code())
+                }
+                Ok(_) => (None, "none"),
+            };
+            let (load_cause, failing_binary_name, failure_parent, dependency_chain, failure_origin) =
+                match class_loader.load_class_detailed(&requested) {
+                    Ok(_) => ("none", String::new(), None, String::new(), String::new()),
+                    Err(failure) => {
+                        let mut chain = Vec::new();
+                        let mut deepest = &failure.error;
+                        while let crate::error::ClassLoadError::DependencyFailure {
+                            owner,
+                            dependency,
+                            source,
+                        } = deepest
+                        {
+                            chain.push(format!(
+                                "{}=>{}",
+                                owner.as_internal(),
+                                dependency.as_internal()
+                            ));
+                            deepest = source.as_ref();
+                        }
+                        let (failing_name, parent) = match deepest {
+                            crate::error::ClassLoadError::InvalidTastyFile(
+                                name,
+                                TastyDecodeError::UnresolvedSupertype(parent),
+                            ) => (name.as_internal().to_owned(), Some(parent.as_ref().clone())),
+                            _ => match deepest {
+                                crate::error::ClassLoadError::NotFound(name)
+                                | crate::error::ClassLoadError::Io(name, _)
+                                | crate::error::ClassLoadError::InvalidClassFile(name, _)
+                                | crate::error::ClassLoadError::UnsupportedClassVersion(name, _)
+                                | crate::error::ClassLoadError::MalformedReference(name, _)
+                                | crate::error::ClassLoadError::MalformedDescriptor(name, _)
+                                | crate::error::ClassLoadError::MalformedSignature(name, _)
+                                | crate::error::ClassLoadError::InvalidTastyFile(name, _)
+                                | crate::error::ClassLoadError::CircularInheritance(name)
+                                | crate::error::ClassLoadError::InheritanceDepthExceeded(name) => {
+                                    (name.as_internal().to_owned(), None)
+                                }
+                                crate::error::ClassLoadError::NameMismatch {
+                                    requested, ..
+                                } => (requested.as_internal().to_owned(), None),
+                                crate::error::ClassLoadError::IdentityConflict { name, .. } => {
+                                    (name.as_internal().to_owned(), None)
+                                }
+                                crate::error::ClassLoadError::UnresolvedTypeVariable(name, _) => {
+                                    (name.as_internal().to_owned(), None)
+                                }
+                                crate::error::ClassLoadError::DependencyFailure { .. } => {
+                                    unreachable!("dependency wrapper was unwrapped above")
+                                }
+                            },
+                        };
+                        let origin = match failure.origin.as_ref() {
+                            Some(crate::class_path::ClassOrigin::Jar(path)) => format!(
+                                "jar:{}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                            Some(crate::class_path::ClassOrigin::Directory(path)) => format!(
+                                "directory:{}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                            Some(crate::class_path::ClassOrigin::Jmod(path)) => format!(
+                                "jmod:{}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                            None => String::new(),
+                        };
+                        (
+                            failure.root_cause_code(),
+                            failing_name,
+                            parent,
+                            chain.join("|"),
+                            origin,
+                        )
+                    }
+                };
+            load_causes.insert(requested_root.to_owned(), load_cause);
+
+            for profile in profiles {
+                let reference = profile.reference;
+                let cells = [
+                    requested_root.to_owned(),
+                    if requested_root.ends_with('$') {
+                        "ModuleClass".to_owned()
+                    } else {
+                        "Class".to_owned()
+                    },
+                    weighted_observations.to_string(),
+                    resource_path.to_owned(),
+                    artifact.to_owned(),
+                    fields[4].to_owned(),
+                    fields[5].to_owned(),
+                    reference.template_wire_address.to_string(),
+                    reference.parent_index.to_string(),
+                    reference.shape,
+                    profile.resolution_stage.to_owned(),
+                    profile.resolved_binary_name.unwrap_or_default(),
+                    reference.reference_tag.unwrap_or_default(),
+                    reference.reference_name.unwrap_or_default(),
+                    reference.reference_prefix.unwrap_or_default(),
+                    reference.alias_owner.unwrap_or_default(),
+                    reference.alias_name.unwrap_or_default(),
+                    reference.has_semantic_reference.to_string(),
+                    reference.has_reference_prefix.to_string(),
+                    reference.visible_names.join("|"),
+                    reference.raw_tree,
+                    first_unresolved_parent
+                        .map(|index| index.to_string())
+                        .unwrap_or_default(),
+                    standalone_parent_index
+                        .map(|index| index.to_string())
+                        .unwrap_or_default(),
+                    standalone_decode_cause.to_owned(),
+                    load_cause.to_owned(),
+                    failing_binary_name.clone(),
+                    failure_parent
+                        .as_ref()
+                        .map(|parent| parent.parent_index.to_string())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .map(|parent| parent.template_wire_address.to_string())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .map(|parent| parent.shape.clone())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .and_then(|parent| parent.reference_tag.clone())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .and_then(|parent| parent.reference_name.clone())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .and_then(|parent| parent.reference_prefix.clone())
+                        .unwrap_or_default(),
+                    dependency_chain.clone(),
+                    failure_origin.clone(),
+                    source_audit_metrics
+                        .get(requested_root)
+                        .map(|(observations, _)| observations.to_string())
+                        .unwrap_or_else(|| "0".to_owned()),
+                    source_audit_metrics
+                        .get(requested_root)
+                        .map(|(_, files)| files.len().to_string())
+                        .unwrap_or_else(|| "0".to_owned()),
+                ];
+                for (index, cell) in cells.iter().enumerate() {
+                    if index > 0 {
+                        rows.push('\t');
+                    }
+                    rows.push_str(&tsv_cell(cell));
+                }
+                rows.push('\n');
+            }
+            joined_source_observations += source_audit_metrics
+                .get(requested_root)
+                .expect("every frozen root has source-audit observations")
+                .0;
+            root_count += 1;
+            total_weight += weighted_observations;
+            if artifact.starts_with("scala3-compiler_") {
+                compiler_count += 1;
+                compiler_weight += weighted_observations;
+            } else {
+                library_count += 1;
+                library_weight += weighted_observations;
+            }
+        }
+
+        assert_eq!((root_count, total_weight), (50, 8_949));
+        assert_eq!(joined_source_observations, 8_948);
+        assert_eq!((compiler_count, compiler_weight), (18, 8_590));
+        assert_eq!((library_count, library_weight), (32, 359));
+        let load_cause_counts = load_causes.values().fold(
+            std::collections::BTreeMap::<&str, usize>::new(),
+            |mut counts, cause| {
+                *counts.entry(cause).or_default() += 1;
+                counts
+            },
+        );
+        assert_eq!(
+            load_cause_counts.get("tasty.unresolved_supertype"),
+            Some(&41)
+        );
+        assert_eq!(load_cause_counts.get("tasty.missing_type_def"), Some(&6));
+        assert_eq!(load_cause_counts.get("none"), Some(&3));
+        std::fs::write(&output_path, rows).expect("write parent profile TSV");
+        eprintln!(
+            "wrote {root_count} roots ({total_weight} weighted observations) to {}",
+            output_path.display()
+        );
+    }
+
     fn fixture_bytes(relative_path: &str) -> Vec<u8> {
         std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2646,6 +3530,60 @@ mod tests {
     }
 
     #[test]
+    fn parent_profiles_report_absolute_template_addresses_from_the_ast_index() {
+        for (fixture, requested, expected_address) in [
+            (
+                "scala3-compiler/dotty/tools/dotc/core/Types.tasty",
+                "dotty/tools/dotc/core/Types$",
+                410usize,
+            ),
+            (
+                "scala3-compiler/dotty/tools/dotc/core/Symbols.tasty",
+                "dotty/tools/dotc/core/Symbols$",
+                308usize,
+            ),
+        ] {
+            let bytes = fixture_bytes(fixture);
+            let file = parse_classloader_tasty(&bytes).unwrap();
+            let index = file.ast_address_index().unwrap();
+            let profiles = profile_parent_references(
+                &bytes,
+                &BinaryName::from_internal(requested),
+                true,
+                |_, _| None,
+                |_, _| None,
+            )
+            .unwrap();
+
+            assert!(!profiles.is_empty(), "{requested}");
+            assert!(
+                profiles.iter().all(|profile| {
+                    profile.reference.template_wire_address == expected_address
+                        && index
+                            .get_node(expected_address as u32)
+                            .is_some_and(|node| node.tag == TEMPLATE_TAG)
+                }),
+                "{requested}: {profiles:#?}"
+            );
+
+            let error = decode_module_class_with_resolvers(
+                &bytes,
+                &BinaryName::from_internal(requested),
+                |_, _| None,
+                |_, _| None,
+            )
+            .expect_err("the pinned module parent should remain unresolved without fallbacks");
+            let TastyDecodeError::UnresolvedSupertype(parent) = error else {
+                panic!("expected unresolved module parent for {requested}: {error:?}");
+            };
+            assert_eq!(
+                parent.template_wire_address, expected_address,
+                "{requested}"
+            );
+        }
+    }
+
+    #[test]
     fn profiles_retains_cap_parent_references_through_apply_and_select_in() {
         let bytes = fixture_bytes("scala3-library/scala/annotation/retainsCap.tasty");
         let error = decode_with_resolvers(
@@ -2660,6 +3598,7 @@ mod tests {
         };
 
         assert_eq!(parent.parent_index, 0);
+        assert!(parent.template_wire_address > 0, "profile: {parent:#?}");
         assert!(parent.has_semantic_reference, "profile: {parent:#?}");
         assert!(parent.has_reference_prefix, "profile: {parent:#?}");
         assert!(
@@ -2673,6 +3612,18 @@ mod tests {
                 .any(|name| name == "scala/annotation")
         );
         assert_eq!(parent.shape, "package-qualified", "profile: {parent:#?}");
+        assert_eq!(
+            parent.reference_tag.as_deref(),
+            Some("0x75"),
+            "profile: {parent:#?}"
+        );
+        assert!(
+            parent
+                .reference_name
+                .as_deref()
+                .is_some_and(|name| name == "Annotation"),
+            "profile: {parent:#?}"
+        );
     }
 
     #[test]
@@ -2882,6 +3833,16 @@ mod tests {
         };
         assert_eq!(parent.shape, "applied");
         assert_eq!(parent.parent_index, 1);
+        assert!(parent.template_wire_address > 0, "profile: {parent:#?}");
+        assert_eq!(
+            parent.reference_tag.as_deref(),
+            Some("0x75"),
+            "profile: {parent:#?}"
+        );
+        assert_eq!(parent.reference_name.as_deref(), Some("Iterator"));
+        assert_eq!(parent.reference_prefix.as_deref(), Some("scala/package"));
+        assert_eq!(parent.alias_owner.as_deref(), Some("scala/package"));
+        assert_eq!(parent.alias_name.as_deref(), Some("Iterator"));
         assert!(parent.has_semantic_reference);
         assert!(!parent.has_reference_prefix);
         assert!(parent.visible_names.iter().any(|name| name == "Iterator"));
