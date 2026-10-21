@@ -86,7 +86,9 @@ jobs:
         env:
           DOTTY_CLASSFILE_REQUIRE_JDK: '1'
         run: |
-          cargo +stable test -p dotty-classfile --test classfile_jvm_encoder --locked -- --nocapture
-          cargo +stable test -p dotty-jvm --lib --locked -- --nocapture
-          cargo +stable test --test jvm_source_compilation --locked -- --nocapture
-          cargo +stable test --test jvm_stateful_class_contract --locked -- --nocapture
+          cargo +stable test \
+            -p dotty-classfile --test classfile_jvm_encoder \
+            -p dotty-jvm --lib \
+            -p dotty --test jvm_source_compilation \
+            --test jvm_stateful_class_contract \
+            --locked -- --nocapture
