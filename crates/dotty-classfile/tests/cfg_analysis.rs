@@ -325,7 +325,7 @@ fn hierarchy_graph_rejects_duplicates_conflicts_cycles_and_excessive_depth() {
 }
 
 #[test]
-fn superclass_proofs_do_not_create_stack_join_types() {
+fn sibling_references_do_not_join_to_their_shared_ancestor() {
     let mut pool_builder = ConstantPoolBuilder::new();
     let owner = pool_builder.class("example/Client").unwrap();
     let pool = pool_builder.finish().unwrap();
@@ -361,6 +361,101 @@ fn superclass_proofs_do_not_create_stack_join_types() {
         ),
         Err(AnalysisError::IncompatibleStackValue { .. })
     ));
+}
+
+#[test]
+fn ancestor_reference_stack_joins_converge_for_reversed_edges_and_backedges() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Leaf".to_owned(), "example/Middle".to_owned()),
+        ("example/Middle".to_owned(), "example/Base".to_owned()),
+    ])
+    .unwrap();
+
+    for middle_on_fallthrough in [true, false] {
+        let mut sequence = CodeSequence::new();
+        let otherwise = sequence.new_label().unwrap();
+        let done = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(local(1)))
+            .branch(BranchInstruction::IfEq(otherwise.clone()))
+            .instruction(Instruction::ALoad(local(if middle_on_fallthrough {
+                2
+            } else {
+                3
+            })))
+            .branch(BranchInstruction::Goto(done.clone()))
+            .bind(otherwise)
+            .unwrap()
+            .instruction(Instruction::ALoad(local(if middle_on_fallthrough {
+                3
+            } else {
+                2
+            })))
+            .bind(done.clone())
+            .unwrap()
+            .instruction(Instruction::AReturn);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "choose",
+            "(ZLexample/Middle;Lexample/Leaf;)Lexample/Base;",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .unwrap();
+        let join = flow
+            .entry_state(graph.block_for_label(&done).unwrap())
+            .unwrap();
+        assert!(matches!(
+            join.operand_stack.as_slice(),
+            [FlowValue::Object(class)] if class.internal_name() == "example/Middle"
+        ));
+    }
+
+    let mut loop_sequence = CodeSequence::new();
+    let head = loop_sequence.new_label().unwrap();
+    let done = loop_sequence.new_label().unwrap();
+    loop_sequence
+        .instruction(Instruction::ALoad(local(3)))
+        .branch(BranchInstruction::Goto(head.clone()))
+        .bind(head.clone())
+        .unwrap()
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(done.clone()))
+        .instruction(Instruction::Pop)
+        .instruction(Instruction::ALoad(local(2)))
+        .branch(BranchInstruction::Goto(head.clone()))
+        .bind(done.clone())
+        .unwrap()
+        .instruction(Instruction::AReturn);
+    let loop_graph = ControlFlowGraph::build(&loop_sequence).unwrap();
+    let loop_flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+        &loop_graph,
+        "loopJoin",
+        "(ZLexample/Middle;Lexample/Leaf;)Lexample/Base;",
+        false,
+        &pool,
+        owner,
+        &hierarchy,
+    )
+    .unwrap();
+    let head_state = loop_flow
+        .entry_state(loop_graph.block_for_label(&head).unwrap())
+        .unwrap();
+    let done_state = loop_flow
+        .entry_state(loop_graph.block_for_label(&done).unwrap())
+        .unwrap();
+    for state in [head_state, done_state] {
+        assert!(matches!(
+            state.operand_stack.as_slice(),
+            [FlowValue::Object(class)] if class.internal_name() == "example/Middle"
+        ));
+    }
 }
 
 fn assert_local_object(state: &FlowLocalState, expected: &str) {
