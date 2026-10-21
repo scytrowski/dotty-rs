@@ -192,10 +192,11 @@ or macro support is part of this contract.
 `JvmType::Reference(SymbolId)` carries the exact canonical identity of one
 ordinary, top-level, non-generic class in the validated emission unit. The
 checked `JvmCompilationUnit::reference_type` projection accepts only a
-canonical `TypeRef` to a planned class with supported metadata and `Object` as
-its sole direct parent. It rejects `Object` itself, external or unplanned
+canonical `TypeRef` to a planned class with supported metadata and a complete
+validated Object-rooted ancestry of up to two user-class edges. It rejects
+`Object` itself, external or unplanned
 classes, anonymous/generic classes, aliases, unions, applied types, `TermRef`s,
-and classes with another superclass. `local_value_type` applies the same rule
+and classes with unvalidated or unsupported parent shapes. `local_value_type` applies the same rule
 to a completed local symbol type. Both projections are read-only and do not
 allocate semantic symbols or types.
 
@@ -208,9 +209,9 @@ unqualified `this` can be read with `aload_0` after its `ThisType` matches the
 current planned class. Exact planned references may be returned with `areturn`,
 passed to virtual calls, used as call results or receivers, and discarded with
 `pop`. The local's checked class identity must match the initializer's
-`Flow::Value`, except for the verified direct `Derived` to `Base` assignment
-supported by the current emission unit; the local and descriptor keep the
-declared class identity. Read-before-store and mutable reference locals fail
+`Flow::Value`, except for an assignment proved through up to two validated
+same-unit ancestry edges; the local and descriptor keep the declared class
+identity. Read-before-store and mutable reference locals fail
 with typed errors. Reference values may be discarded as category-one
 block statements with `pop`. Planned reference parameters and results, plus
 reference virtual-call arguments and results, are supported. Primary
@@ -218,8 +219,8 @@ constructor metadata retains exact parameter descriptors for classes in the
 same compilation unit. Method-body constructor calls may pass a reference
 parameter, an initialized immutable local of a planned class, or the current
 unqualified `this` when it is assignable to the constructor parameter by exact
-identity or the verified direct-parent edge. These references may appear
-between primitive arguments; each is loaded once in source order as part of
+identity or up to two validated same-unit ancestry edges. These references may
+appear between primitive arguments; each is loaded once in source order as part of
 the `new`/`dup`/arguments/`invokespecial` sequence.
 Mutable reference locals, fields, nested allocations, method-call results, and
 branching expressions remain unsupported as constructor arguments. The
@@ -242,10 +243,10 @@ unsupported states remain typed build errors.
 | Source shape | Planned JVM lowering | CFG/verifier rule |
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
-| Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and declared value descriptor; a field write may use the verified direct `Derived` to `Base` edge |
-| Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver owner is exact or a validated ancestor; arguments and results use exact types or the bounded `Derived` to `Base` assignment |
+| Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and declared value descriptor; a field write may use up to two validated same-unit ancestry edges |
+| Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver owner is exact or a validated ancestor; arguments and results use exact types or the bounded two-edge assignment |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
-| Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified direct-parent relation; full allocation sequence remains in one basic block |
+| Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified ancestry relation of up to two edges; full allocation sequence remains in one basic block |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
 | Different reference classes at a stack join | No classfile emitted | Typed exact-class merge error; no inferred `Object`/common parent |
 
@@ -913,8 +914,8 @@ Derived reference frames and branch target PCs before JDK execution.
 The source/classfile negative tests retain typed rejection and empty source
 output batches; the existing publisher still stages only fully encoded batches.
 This increment extends hierarchy validation, transitive inherited method
-lookup, and direct-parent `super` selection through the bounded chain.
-Transitive constructor argument assignability, hierarchy-aware reference
-joins, nested allocation arguments, arbitrary effectful pre-super evaluation,
+lookup, direct-parent `super` selection, and two-edge reference assignability
+through the bounded chain. Hierarchy-aware reference joins, nested allocation
+arguments, arbitrary effectful pre-super evaluation,
 branched constructors, qualified/trait super, and Scala ABI/TASTy emission also
 remain deferred.

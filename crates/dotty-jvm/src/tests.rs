@@ -1243,6 +1243,123 @@ fn reference_projection_requires_the_complete_unit_proof_for_a_deep_class() {
 }
 
 #[test]
+fn reference_assignability_uses_only_the_validated_two_edge_ancestor_path() {
+    let mut fixture = HierarchyFixture::new();
+    let owner = fixture.store.symbols.get(fixture.base).owner.unwrap();
+    let other = add_reference_class(
+        &mut fixture.store,
+        owner,
+        "Other",
+        fixture.definitions.no_prefix,
+        fixture.definitions.object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    let foreign_base = add_reference_class(
+        &mut fixture.store,
+        owner,
+        "Base",
+        fixture.definitions.no_prefix,
+        fixture.definitions.object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    let unit = fixture.unit(&[fixture.base, fixture.derived, fixture.third, other]);
+    let reference = |class| JvmType::Reference(class);
+
+    assert!(
+        crate::reference::is_assignable(
+            Some(&unit),
+            reference(fixture.third),
+            reference(fixture.base),
+            &fixture.definitions,
+        )
+        .unwrap()
+    );
+    assert!(
+        crate::reference::is_assignable(
+            Some(&unit),
+            reference(fixture.third),
+            reference(fixture.derived),
+            &fixture.definitions,
+        )
+        .unwrap()
+    );
+    assert!(
+        crate::reference::is_assignable(
+            Some(&unit),
+            reference(fixture.derived),
+            reference(fixture.base),
+            &fixture.definitions,
+        )
+        .unwrap()
+    );
+    assert!(
+        !crate::reference::is_assignable(
+            Some(&unit),
+            reference(fixture.base),
+            reference(fixture.third),
+            &fixture.definitions,
+        )
+        .unwrap()
+    );
+    assert!(
+        !crate::reference::is_assignable(
+            Some(&unit),
+            reference(other),
+            reference(fixture.base),
+            &fixture.definitions,
+        )
+        .unwrap()
+    );
+    assert!(
+        !crate::reference::is_assignable(
+            None,
+            reference(fixture.third),
+            reference(fixture.base),
+            &fixture.definitions,
+        )
+        .unwrap()
+    );
+
+    let unplanned_unit = fixture.unit(&[fixture.base, fixture.derived]);
+    assert_eq!(
+        crate::reference::is_assignable(
+            Some(&unplanned_unit),
+            reference(fixture.third),
+            reference(fixture.base),
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+            class: fixture.third,
+        })
+    );
+
+    assert_eq!(
+        crate::reference::is_assignable(
+            Some(&unit),
+            reference(fixture.third),
+            reference(foreign_base),
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+            class: foreign_base,
+        })
+    );
+    assert_eq!(
+        crate::reference::is_assignable(
+            Some(&unit),
+            reference(foreign_base),
+            reference(foreign_base),
+            &fixture.definitions,
+        ),
+        Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
+            class: foreign_base,
+        })
+    );
+}
+
+#[test]
 fn whole_class_emission_uses_the_validated_parent_for_class_and_constructor() {
     let fixture = HierarchyFixture::new();
     let unit = fixture.unit(&[fixture.base, fixture.derived]);

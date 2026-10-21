@@ -11,9 +11,9 @@ use crate::{
     UnsupportedJvmReferenceTypeKind,
 };
 
-/// Returns whether `found` is assignable to `expected` through the exact
-/// direct-parent edge validated for this emission unit.
-pub(super) fn is_direct_subtype(
+/// Returns whether `found` is assignable to `expected` through the validated
+/// canonical ancestry in this emission unit, bounded to two user-class edges.
+pub(super) fn is_validated_subtype(
     unit: &JvmCompilationUnit<'_>,
     found: SymbolId,
     expected: SymbolId,
@@ -22,16 +22,41 @@ pub(super) fn is_direct_subtype(
     if found == expected {
         return Ok(true);
     }
-    Ok(unit
-        .class_hierarchy(definitions)?
-        .superclasses()
-        .iter()
-        .any(|superclass| superclass.class() == found && superclass.parent() == expected))
+    let hierarchy = unit.class_hierarchy(definitions)?;
+    for class in [found, expected] {
+        if !hierarchy
+            .superclasses()
+            .iter()
+            .any(|superclass| superclass.class() == class)
+        {
+            return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
+        }
+    }
+
+    let object = definitions.object_class;
+    let mut current = found;
+    for _ in 0..2 {
+        let Some(superclass) = hierarchy
+            .superclasses()
+            .iter()
+            .find(|superclass| superclass.class() == current)
+        else {
+            return Ok(false);
+        };
+        current = superclass.parent();
+        if current == expected {
+            return Ok(true);
+        }
+        if current == object {
+            return Ok(false);
+        }
+    }
+    Ok(false)
 }
 
 /// Returns whether a JVM value can flow to `expected` within one validated
-/// compilation unit. References may use only exact identity or the verified
-/// direct-parent edge; primitive values remain invariant.
+/// compilation unit. References may use exact identity or at most two verified
+/// user-class ancestry edges; primitive values remain invariant.
 pub(super) fn is_assignable(
     unit: Option<&JvmCompilationUnit<'_>>,
     found: JvmType,
@@ -39,6 +64,16 @@ pub(super) fn is_assignable(
     definitions: &Definitions,
 ) -> Result<bool, JvmCodegenError> {
     if found == expected {
+        if let (JvmType::Reference(class), Some(unit)) = (found, unit) {
+            let hierarchy = unit.class_hierarchy(definitions)?;
+            if !hierarchy
+                .superclasses()
+                .iter()
+                .any(|superclass| superclass.class() == class)
+            {
+                return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
+            }
+        }
         return Ok(true);
     }
     let (JvmType::Reference(found), JvmType::Reference(expected), Some(unit)) =
@@ -46,7 +81,7 @@ pub(super) fn is_assignable(
     else {
         return Ok(false);
     };
-    is_direct_subtype(unit, found, expected, definitions)
+    is_validated_subtype(unit, found, expected, definitions)
 }
 
 pub(super) fn project_type(

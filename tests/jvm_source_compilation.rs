@@ -7194,6 +7194,189 @@ fn derived_values_flow_to_base_parameters_and_returns() {
 }
 
 #[test]
+fn transitive_leaf_values_flow_through_base_method_boundaries_without_casts() {
+    let output = TestOutputDirectory::new("transitive-leaf-to-base-method-boundaries");
+    let source = r#"class Base { def value(): Int = 10; def doubled(): Int = value() * 2 }
+class Middle extends Base { override def value(): Int = 20 }
+class Leaf extends Middle { override def value(): Int = 21 }
+class Holder(initial: Base) { private var current: Base = initial; def replace(next: Leaf): Unit = { current = next }; def get(): Base = current }
+class InitializedHolder(initial: Leaf) { private val current: Base = initial; def get(): Base = current }
+class Runner { def evaluate(base: Base): Int = base.doubled(); def viaLeaf(): Int = evaluate(new Leaf()); def viaLocal(): Int = { val base: Base = new Leaf(); evaluate(base) }; def producedBase(): Base = new Leaf(); def producedMiddle(): Middle = new Leaf(); def directReturn(leaf: Leaf): Base = leaf; def passThrough(leaf: Leaf): Base = evaluateAndReturn(leaf); def evaluateAndReturn(base: Base): Base = base; def holder(leaf: Leaf): Holder = new Holder(leaf); def initializedHolder(leaf: Leaf): InitializedHolder = new InitializedHolder(leaf) }
+"#;
+    let artifacts = compile_source_classes(
+        source,
+        "TransitiveReferenceAssignability.scala",
+        output.path(),
+    )
+    .expect("Leaf values flow to Base and Middle boundaries through the verified hierarchy");
+    let second_output =
+        TestOutputDirectory::new("transitive-leaf-to-base-method-boundaries-repeat");
+    let second_artifacts = compile_source_classes(
+        source,
+        "TransitiveReferenceAssignability.scala",
+        second_output.path(),
+    )
+    .expect("a fresh frontend session compiles the same ancestry deterministically");
+    assert_eq!(artifacts.len(), second_artifacts.len());
+    for (first, second) in artifacts.iter().zip(&second_artifacts) {
+        assert_eq!(first.class.internal_name(), second.class.internal_name());
+        assert_eq!(first.class.bytes(), second.class.bytes());
+    }
+    let runner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner is emitted");
+    let mut reader = Reader::new(runner_artifact.class.bytes());
+    let runner = ClassFile::decode(&mut reader).expect("decode emitted Runner class");
+    runner
+        .validate_references()
+        .expect("transitive method descriptors remain valid");
+
+    for (name, descriptor) in [
+        ("evaluate", "(LBase;)I"),
+        ("producedBase", "()LBase;"),
+        ("producedMiddle", "()LMiddle;"),
+        ("directReturn", "(LLeaf;)LBase;"),
+        ("passThrough", "(LLeaf;)LBase;"),
+    ] {
+        let method = runner
+            .methods
+            .iter()
+            .find(|method| runner.constant_pool.utf8(method.name_index) == Ok(name))
+            .unwrap_or_else(|| panic!("{name} method is emitted"));
+        assert_eq!(
+            runner.constant_pool.utf8(method.descriptor_index),
+            Ok(descriptor)
+        );
+        let instructions = decode_subset_instructions(emitted_method_code(&runner, name));
+        assert!(
+            instructions.iter().all(|(_, opcode)| *opcode != 0xc0),
+            "{name} emits no checkcast"
+        );
+    }
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "viaLeaf"),
+        &[
+            (0xb7, "Leaf", "<init>", "()V"),
+            (0xb6, "Runner", "evaluate", "(LBase;)I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "viaLocal"),
+        &[
+            (0xb7, "Leaf", "<init>", "()V"),
+            (0xb6, "Runner", "evaluate", "(LBase;)I"),
+        ],
+    );
+    assert!(
+        decode_subset_instructions(emitted_method_code(&runner, "producedBase"))
+            .iter()
+            .any(|(_, opcode)| *opcode == 0xb0),
+        "Base-declared result returns the actual Leaf reference"
+    );
+
+    for (class_name, constructor_descriptor) in
+        [("Holder", "(LBase;)V"), ("InitializedHolder", "(LLeaf;)V")]
+    {
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == class_name)
+            .unwrap_or_else(|| panic!("{class_name} is emitted"));
+        let mut reader = Reader::new(artifact.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("decode reference-holder class");
+        let constructor = class
+            .methods
+            .iter()
+            .find(|method| class.constant_pool.utf8(method.name_index) == Ok("<init>"))
+            .expect("holder constructor is emitted");
+        assert_eq!(
+            class.constant_pool.utf8(constructor.descriptor_index),
+            Ok(constructor_descriptor)
+        );
+        let current_field = class
+            .fields
+            .iter()
+            .find(|field| class.constant_pool.utf8(field.name_index) == Ok("current"))
+            .expect("holder stores a Base field");
+        assert_eq!(
+            class.constant_pool.utf8(current_field.descriptor_index),
+            Ok("LBase;")
+        );
+        assert_field_reference(
+            &class,
+            emitted_method_code(&class, "<init>"),
+            0xb5,
+            class_name,
+            "current",
+            "LBase;",
+        );
+    }
+    let holder_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Holder")
+        .expect("Holder is emitted");
+    let mut holder_reader = Reader::new(holder_artifact.class.bytes());
+    let holder = ClassFile::decode(&mut holder_reader).expect("decode Holder class");
+    assert_field_reference(
+        &holder,
+        emitted_method_code(&holder, "replace"),
+        0xb5,
+        "Holder",
+        "current",
+        "LBase;",
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "holder"),
+        &[(0xb7, "Holder", "<init>", "(LBase;)V")],
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output
+            .path()
+            .join("TransitiveReferenceAssignabilityHarness.java");
+        fs::write(
+            &harness,
+            "public final class TransitiveReferenceAssignabilityHarness { public static void main(String[] args) { Runner runner = new Runner(); Leaf leaf = new Leaf(); if (runner.evaluate(leaf) != 42 || runner.viaLeaf() != 42 || runner.viaLocal() != 42 || runner.directReturn(leaf) != leaf || runner.passThrough(leaf) != leaf) throw new AssertionError(); if (!(runner.producedBase() instanceof Leaf) || runner.producedBase().value() != 21) throw new AssertionError(); if (!(runner.producedMiddle() instanceof Leaf)) throw new AssertionError(); Holder holder = runner.holder(leaf); holder.replace(leaf); if (holder.get() != leaf) throw new AssertionError(); InitializedHolder initialized = runner.initializedHolder(leaf); if (initialized.get() != leaf) throw new AssertionError(); System.out.println(\"transitive reference assignability verified\"); } }\n",
+        )
+        .expect("write transitive-assignability harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected transitive-assignability harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "TransitiveReferenceAssignabilityHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected transitive-reference classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "transitive reference assignability verified"
+        );
+    }
+}
+
+#[test]
 fn derived_values_flow_to_supported_constructor_arguments_and_reference_fields() {
     let output = TestOutputDirectory::new("derived-to-base-constructor-and-field");
     let source = "class Base { def value(): Int = 10 }\nclass Derived extends Base { override def value(): Int = 42 }\nclass Holder(initial: Base) { private var current: Base = initial; def replace(next: Derived): Unit = { current = next }; def get(): Base = current }\nclass InitializedHolder(initial: Derived) { private val current: Base = initial; def get(): Base = current }\nclass Runner { def fromParameter(next: Derived): Holder = new Holder(next); def fromLocal(): Holder = { val next = new Derived(); new Holder(next) }; def initialized(next: Derived): InitializedHolder = new InitializedHolder(next) }\n";
@@ -7298,6 +7481,10 @@ fn source_typing_rejects_reverse_and_unrelated_reference_arguments() {
         (
             "base-to-derived-argument",
             "class Base { def value(): Int = 1 }\nclass Derived extends Base {}\nclass Runner { def use(value: Derived): Int = value.value(); def invalid(base: Base): Int = use(base) }\n",
+        ),
+        (
+            "base-to-leaf-argument-through-middle",
+            "class Base { def value(): Int = 1 }\nclass Middle extends Base {}\nclass Leaf extends Middle {}\nclass Runner { def use(value: Leaf): Int = value.value(); def invalid(base: Base): Int = use(base) }\n",
         ),
         (
             "unrelated-to-base-argument",
