@@ -229,19 +229,53 @@ fn lower_expression_inner(
             return Err(PickleError::InvalidSymbol { symbol: target });
         }
         let symbol = store.symbols.get(target);
-        if symbol.kind != dotty_core::SymbolKind::Local
-            || symbol.owner != Some(method)
-            || symbol.flags != dotty_core::SymbolFlags::MUTABLE
-            || symbol.name != ident.name
-            || *prefix != context.definitions().no_prefix
-            || symbol.info != SymbolInfo::Complete(context.definitions().int)
-        {
-            return Err(PickleError::Reference {
-                symbol: target,
-                reason: crate::ReferenceError::NotRegistered,
-            });
-        }
-        let lhs = context.local_reference(target, None)?;
+        let lhs = match symbol.kind {
+            dotty_core::SymbolKind::Local
+                if symbol.owner == Some(method)
+                    && symbol.flags == dotty_core::SymbolFlags::MUTABLE
+                    && symbol.name == ident.name
+                    && *prefix == context.definitions().no_prefix
+                    && symbol.info == SymbolInfo::Complete(context.definitions().int) =>
+            {
+                context.local_reference(target, None)?
+            }
+            dotty_core::SymbolKind::Field => {
+                let class = store
+                    .symbols
+                    .contains(method)
+                    .then(|| store.symbols.get(method).owner)
+                    .flatten()
+                    .ok_or(PickleError::InvalidSymbol { symbol: method })?;
+                let SymbolInfo::Complete(field_type) = symbol.info else {
+                    return Err(PickleError::IncompleteSymbol {
+                        symbol: target,
+                        info: symbol.info,
+                    });
+                };
+                if symbol.owner != Some(class)
+                    || symbol.flags != dotty_core::SymbolFlags::MUTABLE
+                    || symbol.name != ident.name
+                    || !matches!(
+                        store.types.try_get(*prefix),
+                        Some(Type::ThisType { class: prefix_class }) if *prefix_class == class
+                    )
+                    || (field_type != context.definitions().int
+                        && field_type != context.definitions().boolean)
+                {
+                    return Err(PickleError::Reference {
+                        symbol: target,
+                        reason: crate::ReferenceError::Metadata,
+                    });
+                }
+                context.same_class_field_select(class, target, false)?
+            }
+            _ => {
+                return Err(PickleError::Reference {
+                    symbol: target,
+                    reason: crate::ReferenceError::NotRegistered,
+                });
+            }
+        };
         let rhs_depth = child_expression_depth(ast, assignment.rhs, depth);
         let rhs = lower_expression_inner(
             store,
