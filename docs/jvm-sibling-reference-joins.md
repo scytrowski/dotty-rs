@@ -155,6 +155,22 @@ separate from class-file dataflow. This audit does not authorize a global
 union-to-class projection, inferred fallback to `java/lang/Object`, a cast,
 or a change to the typer.
 
+`JvmClassHierarchy::nearest_common_non_object_ancestor(left, right)` now
+answers that source-independent proof query from its validated canonical
+`SymbolId` edges. It returns the nearest shared planned class for siblings
+(`Left`, `Right` → `Base`), ancestor pairs (`Leaf`, `Middle` → `Middle`), and
+identity pairs (`Left`, `Left` → `Left`). The answer is symmetric and
+independent of class-plan order. It returns `None` for an unplanned input or
+when `java/lang/Object` is the only common ancestor. The public edge and proof
+queries remain read-only; no names are used to recover source identity.
+
+For the real source graph, `JvmClassHierarchy::internal_name_edges()` still
+projects the exact `Left → Base` and `Right → Base` edges. These checked JVM
+names are accepted by `dotty_classfile::bytecode::ClassHierarchy`; the source
+proof itself remains in `dotty-jvm` and does not pass `SymbolId` values into
+the class-file crate. The returned common ancestor is evidence only: it does
+not change a typed `If`, method signature, or code-generation policy.
+
 Keep these cases outside the accepted subset until separately specified and
 tested:
 
