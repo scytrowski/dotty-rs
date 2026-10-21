@@ -585,6 +585,39 @@ impl<'a> EncodingContext<'a> {
             Ok(label)
         })
     }
+
+    /// Reserves the canonical class-owned private field identity after its
+    /// source/member contract has been validated by `ClassStatePicklePlan`.
+    pub fn reserve_class_field(
+        &mut self,
+        symbol: SymbolId,
+        class: SymbolId,
+        source_tree: dotty_core::TreeId<dotty_core::Untyped>,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            context.charge(1)?;
+            let record = context.symbol(symbol)?;
+            if record.kind != SymbolKind::Field
+                || record.origin != SymbolOrigin::Source(context.source)
+                || record.owner != Some(class)
+                || record.visibility != Visibility::Private
+                || !(record.flags.is_empty() || record.flags == SymbolFlags::MUTABLE)
+                || !record.annotations.is_empty()
+                || context.source_index.symbol_at(context.source, source_tree) != Some(symbol)
+            {
+                return Err(reference(symbol, ReferenceError::Metadata));
+            }
+            context.namespace(symbol, false)?;
+            context.text(record.name.text())?;
+            context.complete(symbol)?;
+            if context.declarations.contains_key(&symbol) {
+                return Err(PickleError::DuplicateDeclaration { symbol });
+            }
+            let label = context.wire.reserve().map_err(construction)?;
+            context.declarations.insert(symbol, label);
+            Ok(label)
+        })
+    }
     /// Binds an existing declaration to a downstream-supplied wire node. This
     /// increment does not build definition trees. Its tag must match symbol kind.
     pub fn bind_declaration(&mut self, symbol: SymbolId, node: AstNode) -> Result<(), PickleError> {
