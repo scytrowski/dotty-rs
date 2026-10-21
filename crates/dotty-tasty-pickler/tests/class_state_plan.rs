@@ -810,7 +810,7 @@ fn class_state_lowers_implicit_and_explicit_private_primitive_field_reads() {
     let source = "package example\nclass PrivateFields:\n  private val seed: Int = 42\n  private val enabled: Boolean = true\n  private var counter: Int = 0\n  def seedValue(): Int = seed\n  def seedViaThis(): Int = this.seed\n  def enabledValue(): Boolean = enabled\n";
     let source = source.replace(
         "  def enabledValue(): Boolean = enabled\n",
-        "  def enabledValue(): Boolean = enabled\n  def shadowedSeed(): Int = { val seed: Int = 7; seed }\n  def constant(): Int = 1\n  def enabledBranch(): Int = if enabled then 1 else 0\n  def enabledViaThis(): Boolean = this.enabled\n  def disabled(): Boolean = !enabled\n  def seedBranch(flag: Boolean): Int = if flag then seed else 0\n",
+        "  def enabledValue(): Boolean = enabled\n  def shadowedSeed(): Int = { val seed: Int = 7; seed }\n  def constant(): Int = 1\n  def enabledBranch(): Int = if enabled then 1 else 0\n  def enabledViaThis(): Boolean = this.enabled\n  def disabled(): Boolean = !enabled\n  def seedBranch(flag: Boolean): Int = if flag then seed else 0\n  def seedViaThisBranch(flag: Boolean): Int = if flag then this.seed else 0\n  def seedParenBranch(flag: Boolean): Int = if flag then (seed) else 0\n",
     );
     let output = emit_class_state_source(&source, "PrivateFields", "PrivateFields.scala", None)
         .expect("canonical private field reads and local shadowing should serialize");
