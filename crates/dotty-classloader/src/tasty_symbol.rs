@@ -2266,7 +2266,7 @@ fn resolve_reference_name_at_depth(
             };
             if !member
                 .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
+                .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
             {
                 return ReferenceResolution::Unresolved;
             }
@@ -2506,7 +2506,7 @@ fn resolve_parent_name_in_package_with_bare(
     .filter(|name| {
         name.simple_name()
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
     })
 }
 
@@ -2535,7 +2535,7 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
         // is available instead of treating source spelling as a path.
         if !selected_member
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
+            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
         {
             return None;
         }
@@ -2578,7 +2578,7 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
             if !resolved
                 .simple_name()
                 .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
+                .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
             {
                 return None;
             }
@@ -2620,7 +2620,7 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
         name.split('/').any(|segment| {
             !segment
                 .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$'))
+                .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$'))
         })
     }) {
         return None;
@@ -3917,6 +3917,16 @@ mod tests {
 
     #[test]
     fn does_not_flatten_nested_select_in_owner_or_accept_operator_source_name() {
+        let unicode_child = fixture_bytes("scala3-parent-unicode/review/Child.tasty");
+        let decoded = decode_with_resolvers(
+            &unicode_child,
+            &BinaryName::from_internal("review/Child"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("valid Unicode superclass names must remain resolvable");
+        assert_eq!(decoded.super_class.as_internal(), "review/Żółw");
+
         let recheck = fixture_bytes("scala3-compiler/dotty/tools/dotc/transform/Recheck.tasty");
         let error = decode_with_resolvers(
             &recheck,

@@ -18,12 +18,12 @@ this alone does not mean that loading their dependency graph succeeds.
 
 The profile also runs `ClassLoader::load_class_detailed` for every root. The
 post-#1414 run compared with the checked-in pre-#1414 snapshot moves
-`tasty.unresolved_supertype` from 41 roots / 379 weighted observations to 24
-roots / 120 observations: 17 roots / 259 weighted observations recovered,
+`tasty.unresolved_supertype` from 41 roots / 379 weighted observations to 27
+roots / 124 observations: 14 roots / 255 weighted observations recovered,
 with no newly unresolved roots. The full-loader outcomes are now
 `tasty.missing_type_def` for 7 roots / 8,560 observations,
-`classloader.not_found` for 8 / 29, `classpath.invalid_binary_name` for 2 / 3,
-`tasty.unresolved_supertype` for 24 / 120, and success for 9 / 237. The seven
+`classloader.not_found` for 7 / 28,
+`tasty.unresolved_supertype` for 27 / 124, and success for 9 / 237. The seven
 missing-type roots are
 `dotty/tools/dotc/ast/tpd$` (1,715), `dotty/tools/dotc/ast/untpd$` (141),
 `dotty/tools/dotc/config/SourceVersion$` (19),
@@ -46,7 +46,7 @@ diagnostic pass, which continues after an earlier unresolved parent. Root
 artifacts, versions and SHA-256 hashes are retained on each row. The profile
 includes stable wire addresses and bounded raw shapes; it does not use arena
 IDs or debug formatting. The pinned profile asserts the updated per-root
-movement (41 to 24 unresolved roots, 379 to 120 weighted observations), the
+movement (41 to 27 unresolved roots, 379 to 124 weighted observations), the
 full-load outcome classification, and the 50-root weighted accounting.
 
 A single instrumented source audit pass now records the source-file-to-root
@@ -109,7 +109,7 @@ asserts exact coverage of all 50 frozen roots and that the joined observations
 sum to 8,948 across 279 source files. This makes the checked-in profile
 directly reproducible without rerunning the source corpus audit. Two focused
 profile runs produced byte-identical final output (SHA-256
-`aa04ce7f1ecaaf5bcd129beb432d328177a243cb9bb1ee2152941351f09c7f37`). Empty
+`7b74d1f4bfdb5ea8b5df5802fff7900e9a93e71495476cdccaa1afc6cb7b9c9d`). Empty
 TSV cells use `-`. No semantic corpus baseline or production behavior was
 changed.
 
@@ -141,4 +141,4 @@ sha256sum /tmp/parent-profile-a.tsv /tmp/parent-profile-b.tsv
 ```
 
 Both files should hash to
-`aa04ce7f1ecaaf5bcd129beb432d328177a243cb9bb1ee2152941351f09c7f37`.
+`7b74d1f4bfdb5ea8b5df5802fff7900e9a93e71495476cdccaa1afc6cb7b9c9d`.
