@@ -1124,9 +1124,10 @@ fn parent_profile_owner(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) 
     })
 }
 
-/// Reconstructs a bounded diagnostic path from structural TASTy nodes. This
-/// deliberately does not feed the production parent resolver: it preserves
-/// nested owners for the profile without widening accepted classpath names.
+/// Reconstructs a bounded structural path from TASTy nodes. The path alone is
+/// not sufficient evidence for production resolution: the selected-parent
+/// caller separately requires exactly one terminal type selection, rejecting
+/// nested owners whose JVM binary name is not established by this path.
 fn parent_wire_path(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> Option<String> {
     const MAX_PARENT_PROFILE_DEPTH: usize = 128;
     if depth >= MAX_PARENT_PROFILE_DEPTH {
