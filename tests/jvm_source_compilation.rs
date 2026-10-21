@@ -10311,3 +10311,240 @@ fn verify_parameterized_super_calls_with_jdk(output: &Path) {
         "parameterized super calls verified"
     );
 }
+
+#[test]
+fn super_calls_reject_unsupported_source_before_publishing_the_batch() {
+    for (label, source) in [
+        (
+            "parent-private",
+            "class Base private (seed: Int) {}\nclass Derived(start: Int) extends Base(start) {}",
+        ),
+        (
+            "parent-arity",
+            "class Base(seed: Int) {}\nclass Derived(start: Int) extends Base() {}",
+        ),
+        (
+            "parent-type",
+            "class Base(seed: Int) {}\nclass Derived(start: Int) extends Base(true) {}",
+        ),
+        (
+            "parent-this",
+            "class Base(seed: Int) {}\nclass Derived(start: Int) extends Base(this.read()) { def read(): Int = 1 }",
+        ),
+        (
+            "parent-branch",
+            "class Base(seed: Int) {}\nclass Derived(start: Int) extends Base(if true then start else 0) {}",
+        ),
+        (
+            "parent-new",
+            "class Dep {}\nclass Base(dep: Dep) {}\nclass Derived(start: Int) extends Base(new Dep()) {}",
+        ),
+        (
+            "parent-effects",
+            "class Base(seed: Int) {}\nclass Derived(start: Int) extends Base({ var n: Int = start; n = n + 1; n }) {}",
+        ),
+        (
+            "super-mixin",
+            "class Base(seed: Int) { def value(): Int = 1 }\nclass Derived(start: Int) extends Base(start) { def value2(): Int = super[Base].value() }",
+        ),
+        (
+            "super-qualified",
+            "class Base(seed: Int) { def value(): Int = 1 }\nclass Derived(start: Int) extends Base(start) { def value2(): Int = Derived.super.value() }",
+        ),
+        (
+            "super-private",
+            "class Base(seed: Int) { private def value(): Int = 1 }\nclass Derived(start: Int) extends Base(start) { def value2(): Int = super.value() }",
+        ),
+        (
+            "super-missing",
+            "class Base(seed: Int) {}\nclass Derived(start: Int) extends Base(start) { def value(): Int = super.missing() }",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(&format!("super-calls-{label}"));
+        let error = compile_source_classes(source, "RejectedSuperCalls.scala", output.path())
+            .expect_err("unsupported source must fail closed");
+        let expected = match label {
+            "parent-private" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ParentConstructorInaccessible { .. })
+            ),
+            "parent-arity" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArityMismatch {
+                    expected: 1,
+                    actual: 0,
+                    ..
+                })
+            ),
+            "parent-type" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    ..
+                })
+            ),
+            "parent-this" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::UninitializedParentArgumentReceiver { .. })
+            ),
+            "parent-branch" | "parent-new" | "parent-effects" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::InvalidPrimaryConstructor {
+                    issue: dotty_jvm::JvmConstructorIssue::ParentConstructorTypedShape,
+                    ..
+                })
+            ),
+            "super-mixin" | "super-qualified" | "super-private" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::UnsupportedSuper { .. })
+            ),
+            "super-missing" => {
+                matches!(
+                    &error,
+                    PipelineFailure::Typer(TyperError::MemberNotFound { .. })
+                )
+            }
+            _ => unreachable!(),
+        };
+        assert!(expected, "{label} failed at an unexpected stage: {error:?}");
+        assert!(
+            output.class_files().is_empty(),
+            "{label} published a partial batch"
+        );
+    }
+}
+
+#[test]
+fn super_calls_keep_canonical_targets_and_exact_frames_in_ordinary_branches() {
+    let source = fs::read_to_string(fixture_path("SuperCalls.scala")).unwrap()
+        + "\nclass Branching { def choose(flag: Boolean, value: Derived): Int = if flag then value.original() else value.advance() }\n";
+    let output = TestOutputDirectory::new("super-calls-branches");
+    let mut checked_calls = 0;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        let derived = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                unit.store
+                    .names
+                    .try_resolve(unit.store.symbols.get(plan.class).name.text())
+                    == Some("Derived")
+            })
+            .unwrap();
+        let parent = unit
+            .class_hierarchy(definitions)
+            .unwrap()
+            .superclasses()
+            .iter()
+            .find(|edge| edge.class() == derived.class)
+            .unwrap()
+            .parent();
+        // Follow each real method body so the resolver sees its actual caller.
+        for caller in &derived.methods {
+            let mut pending = vec![caller.body.unwrap()];
+            while let Some(call) = pending.pop() {
+                match &unit.typed_ast.get(call).kind {
+                    TreeKind::Apply(apply) => {
+                        pending.push(apply.function);
+                        pending.extend(apply.args.iter().copied());
+                        let TreeKind::Select(select) = &unit.typed_ast.get(apply.function).kind
+                        else {
+                            continue;
+                        };
+                        if !matches!(
+                            unit.typed_ast.get(select.qualifier).kind,
+                            TreeKind::Super(_)
+                        ) {
+                            continue;
+                        }
+                        let Some(Type::TermRef {
+                            target: TermRefTarget::Symbol(selected),
+                            ..
+                        }) = unit
+                            .store
+                            .types
+                            .try_get(unit.typed_ast.get(apply.function).ty)
+                        else {
+                            panic!("canonical selected method");
+                        };
+                        let target = unit
+                            .resolve_direct_super_call(
+                                derived.class,
+                                caller.method,
+                                call,
+                                definitions,
+                            )
+                            .unwrap();
+                        assert_eq!(target.method_symbol(), *selected);
+                        assert_eq!(
+                            target.invocation_kind(),
+                            dotty_jvm::JvmInvocationKind::SpecialSuper
+                        );
+                        assert_eq!(unit.store.symbols.get(*selected).owner, Some(parent));
+                        checked_calls += 1;
+                    }
+                    TreeKind::Select(select) => pending.push(select.qualifier),
+                    TreeKind::Super(node) => pending.push(node.qual),
+                    TreeKind::This(_) | TreeKind::Literal(_) | TreeKind::Ident(_) => {}
+                    other => panic!("unexpected fixture expression: {other:?}"),
+                }
+            }
+        }
+    };
+    let artifacts = compile_source_batch_observed(
+        &source,
+        "SuperCallsBranches.scala",
+        output.path(),
+        SourceId::from_index(1375),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut observe),
+    )
+    .unwrap();
+    assert_eq!(checked_calls, 3);
+    let branching = decode_emitted_class(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Branching")
+            .unwrap(),
+    );
+    let frames = stack_map_frames(&branching, "choose");
+    let targets = decode_branch_targets(emitted_method_code(&branching, "choose"));
+    assert!(!targets.is_empty());
+    for (_, _, target) in targets {
+        assert!(frames.iter().any(|frame| frame.pc == target));
+    }
+    assert!(frames.iter().all(|frame| {
+        frame
+            .locals
+            .contains(&StackMapVerificationType::Object("Derived".to_owned()))
+    }));
+    if require_jdk_or_skip() {
+        let harness = output.path().join("SuperCallsBranchesHarness.java");
+        fs::write(&harness, "public class SuperCallsBranchesHarness { public static void main(String[] args) { Branching b = new Branching(); Derived d = new Derived(10); if (b.choose(true, d) != 10 || b.choose(false, d) != 11 || b.choose(true, d) != 11) throw new AssertionError(); } }").unwrap();
+        let classpath = output.path().to_str().unwrap();
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(harness)
+            .output()
+            .unwrap();
+        assert!(
+            javac.status.success(),
+            "{}",
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "SuperCallsBranchesHarness",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            java.status.success(),
+            "{}",
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
