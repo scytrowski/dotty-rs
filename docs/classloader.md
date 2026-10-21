@@ -858,3 +858,11 @@ session changes while preserving the already established identity shells.
 If a source-owned Object of the same name exists without a session-validated
 ModuleClass pair, package-term resolution reports an identity conflict and
 leaves the source package, Object, and ModuleClass entries untouched.
+
+## Post-compiler-module Scala 3.9 audit (#1342)
+
+Current classloader and Object ModuleClass corpus measurements, including the
+preserved 29-key class gate and row-level #1180 Object correlation, are recorded
+in the [post-compiler-module audit checkpoint](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md).
+Object identity remains grounded in semantic TASTy evidence; rolled-back
+completion or member attempts are not reported as successful completion.

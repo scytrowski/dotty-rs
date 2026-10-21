@@ -452,3 +452,11 @@ after about 20 minutes and roughly 295,000 module-identity requests. The later
 normalized reports and deferred-cohort sidecars; p95 completion depth was 0
 and maximum completed fanout was 9, within the issue limits of 6 and 16. Fresh
 current blocker counts and direct origins are in the [#1180 blocker sidecar](typer-classpath-corpus-audit-1180-current-blockers.tsv).
+
+## Post-compiler-module audit checkpoint (#1342)
+
+The current serial full-corpus measurements, refreshed import blocker counts,
+ModuleClass attempt profile, and next-sprint recommendation are recorded in the
+[post-compiler-module audit checkpoint](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md).
+Rolled-back completion and member work remains evidence of an attempt, not a
+committed success.
