@@ -1,0 +1,20 @@
+historical_qualified_rows=1615
+historical_qualified_keys=5
+historical_qualified_files=130
+historical_qualified_blocker_origins=584
+current_same_original_import_first_segment_failures=0
+current_rows_with_other_failed_import_observations_in_method=2
+current_import_blocker_relations={"current_first_blocker_is_not_import_qualifier_not_found": 1613, "different_import_failure_observed_in_same_method": 2}
+current_selected_package_identity_observed=1615
+current_fully_typed_methods=0
+current_method_blockers={"ImportQualifierNotFound": 2, "LocalBlockDeclarationDeferred::type definition": 5, "MemberLookup": 2, "SymbolResolution": 1547, "TermNameNotFound": 23, "TypeNameNotFound": 33, "UnstableSelectionPrefix": 3}
+historical_qualified_target_list=ast,core,io,transform,util
+historical_qualified_by_target={"ast": {"blocker_origins": 81, "files": 22, "observations": 212}, "core": {"blocker_origins": 490, "files": 106, "observations": 1329}, "io": {"blocker_origins": 2, "files": 1, "observations": 2}, "transform": {"blocker_origins": 7, "files": 1, "observations": 66}, "util": {"blocker_origins": 4, "files": 3, "observations": 6}}
+
+| Target | Frozen rows | Files | Blocker origins | Same original prefix still failing | Other failed import observed in method | Package identity recorded | Fully typed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ast` | 212 | 22 | 81 | 0 | 0 | 212 | 0 |
+| `core` | 1329 | 106 | 490 | 0 | 2 | 1329 | 0 |
+| `io` | 2 | 1 | 2 | 0 | 0 | 2 | 0 |
+| `transform` | 66 | 1 | 7 | 0 | 0 | 66 | 0 |
+| `util` | 6 | 3 | 4 | 0 | 0 | 6 | 0 |

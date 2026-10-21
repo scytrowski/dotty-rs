@@ -866,3 +866,5 @@ preserved 29-key class gate and row-level #1180 Object correlation, are recorded
 in the [post-compiler-module audit checkpoint](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md).
 Object identity remains grounded in semantic TASTy evidence; rolled-back
 completion or member attempts are not reported as successful completion.
+The checkpoint's final closeout table maps the module failure, caller rollback,
+source-owned identity, and same-session retry cases to their regression tests.

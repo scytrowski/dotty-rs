@@ -1787,3 +1787,12 @@ summarized in the [post-compiler-module audit checkpoint](typer-classpath-corpus
 These measurements preserve the 3,297-method denominator and distinguish
 Object qualification, ModuleClass attempts, selector outcomes, and fully typed
 methods.
+
+### #1342 final audit closeout
+
+The post-compiler-module checkpoint records the two serial, byte-identical
+Scala 3.9.0 corpus runs, current blocker ranking, #1180 reconciliation, and a
+single evidence-based next-sprint recommendation. Its final closeout evidence
+maps the eight required rollback/atomicity cases to the focused production and
+`AuditResolver` regressions and records the successful workspace CI run. See
+[`the #1342 audit checkpoint`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md#final-closeout-evidence).

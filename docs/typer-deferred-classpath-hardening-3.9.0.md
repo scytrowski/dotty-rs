@@ -460,3 +460,5 @@ ModuleClass attempt profile, and next-sprint recommendation are recorded in the
 [post-compiler-module audit checkpoint](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md).
 Rolled-back completion and member work remains evidence of an attempt, not a
 committed success.
+The checkpoint's final closeout section records the eight transactional cases,
+retained historical cohorts, and passing CI run used for issue #1342.

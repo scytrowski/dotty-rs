@@ -1,0 +1,9 @@
+frozen_observations=1063
+matched_observations=1063
+distinct_files=81
+distinct_target_keys=31
+distinct_blocker_origins=393
+current_method_blockers={"ExplicitTypeApplicationCalleeNotPoly": 1, "ExternalGenericInstantiationDeferred": 1, "ImportQualifierNotFound": 25, "MemberLookup": 1, "SymbolResolution": 997, "TermNameNotFound": 18, "TypeNameNotFound": 18, "WritableAssignmentTypeUnavailable": 2}
+current_import_outcomes={"ImportQualifierNotFound::Ok(None)::package unresolved::truly unresolved next segment": 25, "advanced past ImportQualifierNotFound::ExplicitTypeApplicationCalleeNotPoly": 1, "advanced past ImportQualifierNotFound::ExternalGenericInstantiationDeferred": 1, "advanced past ImportQualifierNotFound::MemberLookup": 1, "advanced past ImportQualifierNotFound::SymbolResolution": 997, "advanced past ImportQualifierNotFound::TermNameNotFound": 18, "advanced past ImportQualifierNotFound::TypeNameNotFound": 18, "advanced past ImportQualifierNotFound::WritableAssignmentTypeUnavailable": 2}
+current_method_typed=0
+rows_with_selected_identity=0
