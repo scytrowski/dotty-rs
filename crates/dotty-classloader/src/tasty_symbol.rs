@@ -2282,9 +2282,9 @@ fn resolve_reference_name_at_depth(
     }
 }
 
-/// Returns true only for a selection path with one terminal type selection.
-/// Multiple type selections can encode nested owners, whose JVM `$` identity
-/// cannot be recovered by joining package segments.
+/// Returns true only when this is one terminal type selection over package
+/// selections. A type selection inside its qualifier can encode a nested
+/// owner, whose JVM `$` identity cannot be recovered by joining segments.
 fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> bool {
     fn count(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> Option<usize> {
         const MAX_SELECTION_DEPTH: usize = 256;
@@ -2310,7 +2310,11 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
         }
     }
 
-    count(file, tree, depth) == Some(1)
+    let Ok(StructuredTree::Select(selection)) = tree.decode_structured() else {
+        return false;
+    };
+    selection.tag == dotty_tasty::tasty::SELECTTPT_TAG
+        && count(file, &selection.qualifier, depth + 1) == Some(0)
 }
 
 /// Resolves a TASTy-local symbol address through its defining tree and owner
