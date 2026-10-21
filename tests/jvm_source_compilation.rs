@@ -568,6 +568,351 @@ fn audit_type_symbol(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> O
     }
 }
 
+fn audit_class_parent(unit: &JvmCompilationUnit<'_>, class: SymbolId) -> SymbolId {
+    let dotty_core::SymbolInfo::Complete(class_info) = unit.store.symbols.get(class).info else {
+        panic!("class {class:?} has no completed semantic info");
+    };
+    let Type::ClassInfo(info) = unit.store.types.get(class_info) else {
+        panic!("class {class:?} info is not ClassInfo");
+    };
+    let [parent] = info.parents.as_slice() else {
+        panic!("class {class:?} does not have exactly one parent");
+    };
+    audit_type_symbol(unit, *parent).expect("canonical parent has a symbol target")
+}
+
+fn audit_class_named(unit: &JvmCompilationUnit<'_>, name: &str) -> SymbolId {
+    unit.classes
+        .iter()
+        .map(|plan| plan.class)
+        .find(|class| {
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(*class).name.text())
+                == name
+        })
+        .unwrap_or_else(|| panic!("missing planned class {name}"))
+}
+
+fn audit_method_named<'unit>(
+    unit: &'unit JvmCompilationUnit<'_>,
+    class: SymbolId,
+    name: &str,
+) -> &'unit JvmMethodPlan {
+    let plan = unit
+        .classes
+        .iter()
+        .find(|plan| plan.class == class)
+        .expect("class has a JVM plan");
+    plan.methods
+        .iter()
+        .find(|method| {
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(method.method).name.text())
+                == name
+        })
+        .unwrap_or_else(|| panic!("missing method {name} on {class:?}"))
+}
+
+fn typed_tree_targets(unit: &JvmCompilationUnit<'_>, root: TreeId<Typed>) -> Vec<SymbolId> {
+    let mut work = vec![root];
+    let mut targets = Vec::new();
+    while let Some(tree_id) = work.pop() {
+        let tree = unit.typed_ast.get(tree_id);
+        match &tree.kind {
+            TreeKind::Select(select) => work.push(select.qualifier),
+            TreeKind::Super(super_tree) => work.push(super_tree.qual),
+            TreeKind::Apply(application) => {
+                if let Some(target) =
+                    term_type_target(unit, unit.typed_ast.get(application.function).ty)
+                {
+                    targets.push(target);
+                }
+                work.push(application.function);
+                work.extend(application.args.iter().copied());
+            }
+            TreeKind::If(if_tree) => {
+                work.extend([if_tree.cond, if_tree.then_branch, if_tree.else_branch])
+            }
+            TreeKind::Block(block) => {
+                work.extend(block.stats.iter().copied());
+                work.push(block.expr);
+            }
+            TreeKind::Typed(typed) => work.extend([typed.expr, typed.tpt]),
+            TreeKind::New(new_tree) => work.push(new_tree.tpt),
+            _ => {}
+        }
+        if let TreeKind::Select(select) = &tree.kind
+            && matches!(
+                unit.typed_ast.get(select.qualifier).kind,
+                TreeKind::Super(_)
+            )
+            && let Some(target) = term_type_target(unit, tree.ty)
+        {
+            targets.push(target);
+        }
+    }
+    targets
+}
+
+#[test]
+fn multilevel_source_audit_records_typed_identity_and_current_backend_rejection() {
+    let source = r#"
+class Base(seed: Int):
+  private var current: Int = seed
+  def value(): Int = current
+  def doubled(): Int = value() + value()
+
+class Middle(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 1
+
+class Leaf(seed: Int) extends Middle(seed):
+  override def value(): Int = super.value() + 1
+  def parentValue(): Int = super.value()
+
+class Runner:
+  def evaluate(base: Base): Int = base.doubled()
+  def run(seed: Int): Int = evaluate(new Leaf(seed))
+  def choose(flag: Boolean, seed: Int): Middle =
+    if flag then new Middle(seed) else new Leaf(seed)
+  def chooseReverse(flag: Boolean, seed: Int): Middle =
+    if flag then new Leaf(seed) else new Middle(seed)
+  def chosenValue(flag: Boolean, seed: Int): Int = choose(flag, seed).value()
+"#;
+    let output = TestOutputDirectory::new("multilevel-source-audit");
+    let mut observed = false;
+    let mut audited_parent = None;
+    let mut audited_leaf = None;
+    let result = compile_source_batch_observed(
+        source,
+        "MultilevelAudit.scala",
+        output.path(),
+        SourceId::from_index(1401),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, definitions| {
+            observed = true;
+            let base = audit_class_named(unit, "Base");
+            let middle = audit_class_named(unit, "Middle");
+            let leaf = audit_class_named(unit, "Leaf");
+            let runner = audit_class_named(unit, "Runner");
+            audited_parent = Some(middle);
+            audited_leaf = Some(leaf);
+            assert_eq!(audit_class_parent(unit, base), definitions.object_class);
+            assert_eq!(audit_class_parent(unit, middle), base);
+            assert_eq!(audit_class_parent(unit, leaf), middle);
+
+            let base_plan = unit.classes.iter().find(|plan| plan.class == base).unwrap();
+            let JvmClassInitializationPlan::PrimaryConstructor(base_constructor) =
+                &base_plan.initialization
+            else {
+                panic!("Base source primary constructor should be retained");
+            };
+            assert_eq!(base_constructor.parameters().len(), 1);
+            let base_formal = base_constructor.parameters()[0];
+            assert_eq!(
+                unit.store.symbols.get(base_formal).owner,
+                Some(base_constructor.symbol())
+            );
+            assert_eq!(
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(base_formal).name.text()),
+                "seed"
+            );
+
+            for (class, parent) in [(middle, base), (leaf, middle)] {
+                let plan = unit
+                    .classes
+                    .iter()
+                    .find(|plan| plan.class == class)
+                    .unwrap();
+                let JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+                    &plan.initialization
+                else {
+                    panic!("source primary constructor should be retained");
+                };
+                assert_eq!(constructor.parameters().len(), 1);
+                let formal = constructor.parameters()[0];
+                assert_eq!(
+                    unit.store.symbols.get(formal).owner,
+                    Some(constructor.symbol())
+                );
+                assert_eq!(
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(formal).name.text()),
+                    "seed"
+                );
+                let super_call = constructor
+                    .direct_super_constructor()
+                    .expect("parameterized direct parent constructor is recorded");
+                assert_eq!(super_call.parent_class(), parent);
+                assert_eq!(
+                    unit.store
+                        .symbols
+                        .get(super_call.parent_constructor())
+                        .owner,
+                    Some(parent)
+                );
+            }
+
+            let base_value = audit_method_named(unit, base, "value").method;
+            let base_doubled = audit_method_named(unit, base, "doubled").method;
+            let doubled = audit_method_named(unit, base, "doubled");
+            let doubled_targets = typed_tree_targets(unit, doubled.body.unwrap());
+            let value_targets = doubled_targets
+                .into_iter()
+                .filter(|target| {
+                    unit.store.symbols.get(*target).owner == Some(base)
+                        && unit
+                            .store
+                            .names
+                            .resolve(unit.store.symbols.get(*target).name.text())
+                            == "value"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(value_targets, [base_value, base_value]);
+
+            let evaluate = audit_method_named(unit, runner, "evaluate");
+            assert_eq!(
+                typed_tree_targets(unit, evaluate.body.unwrap()),
+                [base_doubled]
+            );
+
+            let chosen_value = audit_method_named(unit, runner, "chosenValue");
+            let value_owner_targets = typed_tree_targets(unit, chosen_value.body.unwrap())
+                .into_iter()
+                .filter(|target| {
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(*target).name.text())
+                        == "value"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                value_owner_targets,
+                [audit_method_named(unit, middle, "value").method]
+            );
+
+            for (class, method_name, parent) in [
+                (middle, "value", base),
+                (leaf, "value", middle),
+                (leaf, "parentValue", middle),
+            ] {
+                let method = audit_method_named(unit, class, method_name);
+                let targets = typed_tree_targets(unit, method.body.unwrap());
+                let mut super_targets = targets
+                    .into_iter()
+                    .filter(|target| {
+                        unit.store.symbols.get(*target).owner == Some(parent)
+                            && unit
+                                .store
+                                .names
+                                .resolve(unit.store.symbols.get(*target).name.text())
+                                == "value"
+                    })
+                    .collect::<Vec<_>>();
+                super_targets.sort_by_key(|target| target.index());
+                super_targets.dedup();
+                assert_eq!(
+                    super_targets.len(),
+                    1,
+                    "{method_name} uses direct super.value"
+                );
+            }
+
+            for method_name in ["choose", "chooseReverse"] {
+                let method = audit_method_named(unit, runner, method_name);
+                let body = unit.typed_ast.get(method.body.unwrap());
+                let TreeKind::If(_) = body.kind else {
+                    panic!("{method_name} retains a canonical typed If root");
+                };
+                assert_eq!(audit_type_symbol(unit, body.ty), Some(middle));
+            }
+
+            let proof = dotty_classfile::bytecode::ClassHierarchy::from_edges([
+                ("Base".to_owned(), "java/lang/Object".to_owned()),
+                ("Middle".to_owned(), "Base".to_owned()),
+                ("Leaf".to_owned(), "Middle".to_owned()),
+            ])
+            .expect("the JVM-only explicit hierarchy accepts a checked chain");
+            assert!(proof.is_assignable("Leaf", "Base"));
+            assert!(proof.is_assignable("Leaf", "Middle"));
+            assert!(!proof.is_assignable("Base", "Leaf"));
+        }),
+    );
+
+    assert!(observed, "source passed through the canonical frontend");
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: dotty_jvm::JvmSuperclassIssue::InheritanceTooDeep,
+        })) if Some(class) == audited_leaf && Some(parent) == audited_parent
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "failed class batches publish nothing"
+    );
+}
+
+#[test]
+fn unrelated_source_branch_reaches_typed_or_then_fails_exact_jvm_join_policy() {
+    let source = r#"
+class Root
+class Left extends Root
+class Right extends Root
+class Branch:
+  def choose(flag: Boolean): Root =
+    if flag then new Left() else new Right()
+"#;
+    let output = TestOutputDirectory::new("unrelated-source-join-audit");
+    let mut observed = false;
+    let result = compile_source_batch_observed(
+        source,
+        "UnrelatedJoinAudit.scala",
+        output.path(),
+        SourceId::from_index(1402),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, _| {
+            observed = true;
+            let branch = audit_class_named(unit, "Branch");
+            let choose = audit_method_named(unit, branch, "choose");
+            let body = unit.typed_ast.get(choose.body.unwrap());
+            let TreeKind::If(_) = body.kind else {
+                panic!("unrelated branch remains a canonical typed If");
+            };
+            let Type::Or { left, right } = unit.store.types.get(body.ty) else {
+                panic!("unrelated classes retain the typer's Or result");
+            };
+            let mut targets = [
+                audit_type_symbol(unit, *left).expect("left Or arm has a class identity"),
+                audit_type_symbol(unit, *right).expect("right Or arm has a class identity"),
+            ];
+            targets.sort_by_key(|symbol| symbol.index());
+            let mut expected = [
+                audit_class_named(unit, "Left"),
+                audit_class_named(unit, "Right"),
+            ];
+            expected.sort_by_key(|symbol| symbol.index());
+            assert_eq!(targets, expected);
+        }),
+    );
+    assert!(observed, "frontend pipeline stopped early: {result:?}");
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::ReferenceTypeMismatch { .. }
+            ))
+        ),
+        "unexpected first backend rejection: {result:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
 fn audit_symbol_name(unit: &JvmCompilationUnit<'_>, symbol: SymbolId) -> String {
     let info = unit.store.symbols.get(symbol);
     let name = unit.store.names.resolve(info.name.text());
