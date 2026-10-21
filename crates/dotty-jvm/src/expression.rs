@@ -2609,20 +2609,44 @@ fn merge_if_flows(
 ) -> Result<Flow, JvmCodegenError> {
     validate_branch(context, then_tree, then_flow)?;
     validate_branch(context, else_tree, else_flow)?;
+    let expected = block_value_type(context, tree, result_ty, None)?;
     let merged = match (then_flow, else_flow) {
         (Flow::Value(left), Flow::Value(right)) => {
             if left != right {
-                if let Some(error) = reference_type_mismatch(left, right) {
-                    return Err(error);
+                if matches!(left, JvmType::Reference(_)) && matches!(right, JvmType::Reference(_)) {
+                    let ancestor_related = flow_assignable(context, left, right)?
+                        || flow_assignable(context, right, left)?;
+                    if ancestor_related
+                        && let Some(JvmType::Reference(result)) = expected
+                        && flow_assignable(context, left, JvmType::Reference(result))?
+                        && flow_assignable(context, right, JvmType::Reference(result))?
+                    {
+                        Flow::Value(JvmType::Reference(result))
+                    } else {
+                        if let Some(error) = reference_type_mismatch(left, right) {
+                            return Err(error);
+                        }
+                        return Err(JvmCodegenError::IfBranchTypeMismatch {
+                            tree,
+                            branch: else_tree,
+                            expected: left,
+                            found: Some(right),
+                        });
+                    }
+                } else {
+                    if let Some(error) = reference_type_mismatch(left, right) {
+                        return Err(error);
+                    }
+                    return Err(JvmCodegenError::IfBranchTypeMismatch {
+                        tree,
+                        branch: else_tree,
+                        expected: left,
+                        found: Some(right),
+                    });
                 }
-                return Err(JvmCodegenError::IfBranchTypeMismatch {
-                    tree,
-                    branch: else_tree,
-                    expected: left,
-                    found: Some(right),
-                });
+            } else {
+                Flow::Value(left)
             }
-            Flow::Value(left)
         }
         (Flow::Value(value), Flow::Diverges) | (Flow::Diverges, Flow::Value(value)) => {
             Flow::Value(value)
@@ -2637,9 +2661,14 @@ fn merge_if_flows(
             });
         }
     };
-    let expected = block_value_type(context, tree, result_ty, None)?;
     match merged {
         Flow::Value(found) if expected == Some(found) => Ok(Flow::Value(found)),
+        Flow::Value(found @ JvmType::Reference(_))
+            if let Some(expected @ JvmType::Reference(_)) = expected
+                && flow_assignable(context, found, expected)? =>
+        {
+            Ok(Flow::Value(expected))
+        }
         Flow::Unit if is_unit_type(context.store, result_ty, context.definitions) => Ok(Flow::Unit),
         Flow::Diverges => Ok(Flow::Diverges),
         found => Err(JvmCodegenError::IfResultTypeMismatch {

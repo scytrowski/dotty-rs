@@ -893,6 +893,122 @@ class Runner:
 }
 
 #[test]
+fn ancestor_related_reference_ifs_lower_as_the_typed_result_class() {
+    let source = r#"
+class Base(seed: Int):
+  private var current: Int = seed
+  def value(): Int = current
+
+class Middle(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 1
+
+class Leaf(seed: Int) extends Middle(seed):
+  override def value(): Int = super.value() + 1
+
+class Runner:
+  def choose(flag: Boolean, seed: Int): Middle =
+    if flag then new Middle(seed) else new Leaf(seed)
+  def chooseReverse(flag: Boolean, seed: Int): Middle =
+    if flag then new Leaf(seed) else new Middle(seed)
+  def accept(value: Middle): Int = value.value()
+  def viaArgument(flag: Boolean, seed: Int): Int = accept(choose(flag, seed))
+  def viaReceiver(flag: Boolean, seed: Int): Int = choose(flag, seed).value()
+  def reverseViaReceiver(flag: Boolean, seed: Int): Int = chooseReverse(flag, seed).value()
+"#;
+    let output = TestOutputDirectory::new("ancestor-related-reference-ifs");
+    let artifacts =
+        compile_source_classes(source, "AncestorRelatedReferenceIfs.scala", output.path())
+            .expect("ancestor-related source If expressions lower to their typed result class");
+    assert_eq!(artifacts.len(), 4);
+
+    let runner = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner artifact");
+    let runner = decode_emitted_class(runner);
+    for method_name in ["choose", "chooseReverse"] {
+        let code = emitted_method_code(&runner, method_name);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xc0),
+            "{method_name} must not insert a checkcast"
+        );
+        assert!(
+            stack_map_frames(&runner, method_name).iter().any(|frame| {
+                frame.stack == [StackMapVerificationType::Object("Middle".to_owned())]
+            }),
+            "{method_name} must encode its join as Object(Middle)"
+        );
+    }
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "viaReceiver"),
+        &[
+            (0xb6, "Runner", "choose", "(ZI)LMiddle;"),
+            (0xb6, "Middle", "value", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "viaArgument"),
+        &[
+            (0xb6, "Runner", "choose", "(ZI)LMiddle;"),
+            (0xb6, "Runner", "accept", "(LMiddle;)I"),
+        ],
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness = output.path().join("AncestorRelatedReferenceIfHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class AncestorRelatedReferenceIfHarness {
+    public static void main(String[] args) {
+        Runner runner = new Runner();
+        if (!(runner.choose(true, 10) instanceof Middle)) throw new AssertionError("middle branch");
+        if (!(runner.choose(false, 10) instanceof Leaf)) throw new AssertionError("leaf branch");
+        if (!(runner.chooseReverse(true, 10) instanceof Leaf)) throw new AssertionError("reverse leaf branch");
+        if (!(runner.chooseReverse(false, 10) instanceof Middle)) throw new AssertionError("reverse middle branch");
+        if (runner.viaArgument(true, 10) != 11 || runner.viaArgument(false, 10) != 12) throw new AssertionError("reference argument");
+        if (runner.viaReceiver(true, 10) != 11 || runner.viaReceiver(false, 10) != 12) throw new AssertionError("virtual receiver");
+        if (runner.reverseViaReceiver(true, 10) != 12 || runner.reverseViaReceiver(false, 10) != 11) throw new AssertionError("reversed virtual receiver");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javac = Command::new("javac")
+        .args(["-classpath", &classpath, "-d", &classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for ancestor-related reference If harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the reference If harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "AncestorRelatedReferenceIfHarness",
+        ])
+        .output()
+        .expect("start java for ancestor-related reference If harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected the generated reference If classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+#[test]
 fn unrelated_source_branch_reaches_typed_or_then_fails_exact_jvm_join_policy() {
     let source = r#"
 class Root
