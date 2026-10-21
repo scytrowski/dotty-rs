@@ -34,6 +34,53 @@ The row-level reconciliation is [`typer-classpath-corpus-audit-post-compiler-mod
 
 Recommend exactly one next slice: **TASTy unresolved-supertype root resolution and compatibility classification**. It is now the broadest measured cross-corpus cause by distinct requested roots (50) and affected files (279), while retaining the repeated 8,949 observations as a separate weighted measure. Start with the stable root list and artifact provenance; prioritize the compiler JAR roots by weighted volume while investigating library roots separately. Keep unsupported or malformed parent references as explicit errors. Do not count repeated member errors as separate faulty roots or manufacture completed classes.
 
-## Remaining #1342 gate
+## #1342 closeout status
 
-This checkpoint records the completed local serial audit and its current outputs. It does not claim the issue's full Definition of Done: final focused behavior/rollback parity checks and the workspace CI checks still need to be recorded, and the 8-case rollback/atomicity matrix plus required workspace CI checks still need to be recorded before #1342 can be closed.
+The local serial audit and current outputs are recorded above. Final focused
+behavior/rollback parity checks, the eight rollback/atomicity cases, retained
+cohort references, and required workspace CI results are mapped in “Final
+closeout evidence” below.
+
+## Final closeout evidence
+
+The following focused regressions are present on the audited mainline and ran
+as part of the successful workspace CI run for PR #1376
+([run 39514452922](https://github.com/scytrowski/dotty-rs/actions/runs/39514452922)).
+The table maps each rollback-matrix requirement to its direct regression; it
+does not infer semantic success from work later rolled back.
+
+| Required case | Regression evidence |
+| --- | --- |
+| Object identity resolves, requested member is absent | `audit_and_classpath_resolvers_match_for_real_scala_source_module` checks the real `scala.io.Source` module and both successful `stdin` and unresolved `noSuchMember` lookups. |
+| Incomplete ModuleClass has malformed or unsupported parent | `audit_module_completion_failure_is_atomic` checks a malformed completion failure leaves the shell Missing and the store checkpoint unchanged; `real_scala39_compiler_objects_have_canonical_module_identities` checks pinned compiler Object identities and their exact completion outcomes. |
+| Module/member completes, then a later source expression fails | `source_expression_failure_rolls_back_module_before_successful_member_retry` checks the real `Source.stdin` path, rollback, and successful retry. |
+| Pre-existing Missing shell is completed, then caller rolls back | `audit_resolver_forwards_module_completion_and_preserves_caller_rollback` checks restoration of the pre-existing shell and successful repeat completion. |
+| New Object/ModuleClass pair is created, then rolled back | `audit_resolver_rolls_back_a_newly_created_module_identity_pair` checks store checkpoint restoration and removal of both new identities. |
+| Source-owned package/class/Object survives classpath lookup | `compiler_tasty_lookup_does_not_shadow_a_source_owned_module_pair`, `package_term_does_not_replace_an_unbacked_source_owned_object`, and `source_owned_object_keeps_priority_over_same_named_compiler_tasty_object` cover backed-pair conflicts, unbacked Object preservation, and source typing precedence. |
+| Ambiguous/duplicate or failed member operation follows partial classpath work | `missing_ambiguous_and_failed_members_are_atomic_and_retryable` checks no partial state survives missing, ambiguous, or failed member requests and that retry works. |
+| Same resolver session retries to one canonical pair and a real member | `audit_and_classpath_resolvers_match_for_module_rollbacks_and_retry` compares wrapper and production resolver behavior across rollback/retry; `audit_and_classpath_resolvers_match_for_real_scala_source_module` checks canonical module identity and actual member lookup. |
+
+### Preserved cohort evidence
+
+| Cohort | Current evidence retained |
+| --- | --- |
+| Post-#1180 import-prefix observations | All 1,063 rows / 31 target keys in [`1180-current-reconciliation.tsv`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0-1180-current-reconciliation.tsv); the #1180 frozen baseline itself remains intact. |
+| #1128 import cohort | All 2,394 rows joined in [`the #1132 reconciliation`](typer-classpath-import-prefix-profile-1132-3.9.0-reconciliation.tsv). |
+| #1046 and #1051 module cohorts | The 369-row #1046 and 576-row #1051 checkpoints and their outcome profiles remain in [`the append-only corpus audit`](typer-classpath-corpus-audit-3.9.0.md); the post-module Object/ModuleClass reprofile is retained in [`the 576-row sidecar`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0-object-module-reprofile.tsv). |
+| Earlier semantic feature cohorts | Their frozen baselines and subsequent checkpoint outcomes remain in [`the append-only corpus audit`](typer-classpath-corpus-audit-3.9.0.md) and [`the deferred-classpath hardening log`](typer-deferred-classpath-hardening-3.9.0.md); this closeout does not rewrite those snapshots. |
+
+The final blocker ranking and exactly one next-sprint recommendation are the
+post-module results above: investigate TASTy unresolved-supertype roots,
+ranking 50 distinct roots and 279 files separately from 8,949 repeated
+observations. Full-audit limits and determinism evidence are in “Inputs and
+run method”; the full corpus is not rerun for this documentation closeout.
+
+### CI record
+
+CI run #39514452922 passed both `Rust checks` (format, frontend boundaries,
+Clippy, rustdoc, workspace tests, and diff check) and `Classfile JVM encoder
+gate`. The PR also records 38 serial focused `audit_` tests, a producer test,
+65 audit-tool tests, and a successful producer-to-consumer reconciliation of
+all 1,063 #1180 rows. No hosted full-corpus workflow was dispatched. The full
+corpus evidence above comes from the two serial local runs; peak RSS was not
+captured.
