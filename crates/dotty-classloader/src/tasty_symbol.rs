@@ -2260,6 +2260,18 @@ fn resolve_reference_name_at_depth(
             })
             .unwrap_or(ReferenceResolution::Unresolved)
         }
+        StructuredTree::Select(_) => {
+            let Some(name) = parent_wire_path(file, tree, depth + 1)
+                .map(|name| name.strip_prefix("_root_/").unwrap_or(&name).to_owned())
+                .filter(|name| name.contains('/') && !name.starts_with('/'))
+            else {
+                return ReferenceResolution::Unresolved;
+            };
+            if !has_one_terminal_type_selection(file, tree, depth + 1) {
+                return ReferenceResolution::Unresolved;
+            }
+            ReferenceResolution::Resolved(BinaryName::from_internal(name))
+        }
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
             resolve_reference_name_at_depth(file, &type_tree, current_package, depth + 1)
         }
@@ -2268,6 +2280,37 @@ fn resolve_reference_name_at_depth(
         }
         _ => ReferenceResolution::NotAReference,
     }
+}
+
+/// Returns true only for a selection path with one terminal type selection.
+/// Multiple type selections can encode nested owners, whose JVM `$` identity
+/// cannot be recovered by joining package segments.
+fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> bool {
+    fn count(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> Option<usize> {
+        const MAX_SELECTION_DEPTH: usize = 256;
+        if depth >= MAX_SELECTION_DEPTH {
+            return None;
+        }
+        if let RawTree::Leaf(term) = tree
+            && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
+        {
+            let reference = term.ast_ref()?;
+            let target = decode_shared_tree(file, reference.address)?;
+            return count(file, &target, depth + 1);
+        }
+        match tree.decode_structured().ok()? {
+            StructuredTree::AstChild(child) => count(file, &child.child, depth + 1),
+            StructuredTree::Ident(ident) => count(file, &ident.type_tree, depth + 1),
+            StructuredTree::Select(selection) => {
+                let own = usize::from(selection.tag == dotty_tasty::tasty::SELECTTPT_TAG);
+                Some(own + count(file, &selection.qualifier, depth + 1)?)
+            }
+            StructuredTree::Reference(reference) => count(file, &reference.qualifier, depth + 1),
+            _ => Some(0),
+        }
+    }
+
+    count(file, tree, depth) == Some(1)
 }
 
 /// Resolves a TASTy-local symbol address through its defining tree and owner
@@ -3720,39 +3763,128 @@ mod tests {
     #[test]
     fn profiles_retains_cap_parent_references_through_apply_and_select_in() {
         let bytes = fixture_bytes("scala3-library/scala/annotation/retainsCap.tasty");
-        let error = decode_with_resolvers(
+        let decoded = decode_with_resolvers(
             &bytes,
             &BinaryName::from_internal("scala/annotation/retainsCap"),
             |_, _| None,
             |_, _| None,
         )
-        .expect_err("without classpath fallbacks, retainsCap must expose its parent profile");
-        let TastyDecodeError::UnresolvedSupertype(parent) = error else {
-            panic!("expected an unresolved parent profile, got {error:?}");
-        };
+        .expect("the package-owned Annotation parents are fully identifiable in TASTy");
+        assert_eq!(
+            decoded.super_class.as_internal(),
+            "scala/annotation/Annotation"
+        );
+        assert_eq!(
+            decoded.interfaces[0].as_internal(),
+            "scala/annotation/StaticAnnotation"
+        );
 
-        assert_eq!(parent.parent_index, 1);
-        assert!(parent.template_wire_address > 0, "profile: {parent:#?}");
-        assert!(parent.has_semantic_reference, "profile: {parent:#?}");
-        assert!(parent.has_reference_prefix, "profile: {parent:#?}");
+        let profiles = profile_parent_references(
+            &bytes,
+            &BinaryName::from_internal("scala/annotation/retainsCap"),
+            false,
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("the parent trees should retain their diagnostic evidence");
+        let parent = &profiles[1];
+
+        assert_eq!(parent.reference.parent_index, 1);
+        assert!(
+            parent.reference.template_wire_address > 0,
+            "profile: {parent:#?}"
+        );
+        assert!(
+            parent.reference.has_semantic_reference,
+            "profile: {parent:#?}"
+        );
+        assert!(
+            parent.reference.has_reference_prefix,
+            "profile: {parent:#?}"
+        );
         assert!(
             parent
+                .reference
                 .visible_names
                 .iter()
                 .any(|name| name == "StaticAnnotation")
         );
         assert!(
             parent
+                .reference
                 .visible_names
                 .iter()
                 .any(|name| name == "scala/annotation")
         );
-        assert_eq!(parent.shape, "selected-qualified", "profile: {parent:#?}");
-        assert_eq!(parent.reference_tag.as_deref(), Some("0x71"));
-        assert_eq!(parent.reference_name.as_deref(), Some("StaticAnnotation"));
-        assert_eq!(parent.reference_prefix.as_deref(), Some("scala/annotation"));
-        assert_eq!(parent.alias_owner.as_deref(), Some("scala/annotation"));
-        assert_eq!(parent.alias_name.as_deref(), Some("StaticAnnotation"));
+        assert_eq!(
+            parent.reference.shape, "selected-qualified",
+            "profile: {parent:#?}"
+        );
+        assert_eq!(parent.reference.reference_tag.as_deref(), Some("0x71"));
+        assert_eq!(
+            parent.reference.reference_name.as_deref(),
+            Some("StaticAnnotation")
+        );
+        assert_eq!(
+            parent.reference.reference_prefix.as_deref(),
+            Some("scala/annotation")
+        );
+        assert_eq!(
+            parent.reference.alias_owner.as_deref(),
+            Some("scala/annotation")
+        );
+        assert_eq!(
+            parent.reference.alias_name.as_deref(),
+            Some("StaticAnnotation")
+        );
+        assert_eq!(
+            parent.resolved_binary_name.as_deref(),
+            Some("scala/annotation/StaticAnnotation")
+        );
+    }
+
+    #[test]
+    fn pins_predef_parent_to_its_exact_same_package_identity() {
+        let bytes = fixture_bytes("scala3-library/scala/Predef.tasty");
+        let profiles = profile_parent_references(
+            &bytes,
+            &BinaryName::from_internal("scala/Predef$"),
+            true,
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("the pinned Scala 3.9 Predef TASTy should be structurally readable");
+        let parent = profiles.first().expect("Predef declares a parent");
+
+        assert_eq!(parent.reference.parent_index, 0);
+        assert_eq!(parent.reference.shape, "package-qualified");
+        assert_eq!(
+            parent.reference.reference_name.as_deref(),
+            Some("LowPriorityImplicits")
+        );
+        assert!(parent.reference.has_semantic_reference);
+        assert!(parent.reference.has_reference_prefix);
+        assert_eq!(parent.reference.reference_prefix.as_deref(), Some("scala"));
+        assert_eq!(
+            parent.resolution_stage,
+            "semantic-or-structural-reference-resolved"
+        );
+        assert_eq!(
+            parent.resolved_binary_name.as_deref(),
+            Some("scala/LowPriorityImplicits")
+        );
+
+        let decoded = decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/Predef$"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("Predef's TASTy hierarchy should decode without import fallback");
+        assert_eq!(
+            decoded.super_class.as_internal(),
+            "scala/LowPriorityImplicits"
+        );
     }
 
     #[test]
