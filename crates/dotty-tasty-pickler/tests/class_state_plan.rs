@@ -801,6 +801,115 @@ fn corrupted_initializer_types_and_constructor_records_are_rejected() {
 }
 
 #[test]
+fn constant_types_are_limited_to_initializer_expressions() {
+    let source_text = "package example\nclass Counter(start: Int):\n  private val seed: Int = 42\n";
+    with_mutable_frontend(
+        source_text,
+        "Counter",
+        "Counter.scala",
+        |store,
+         ast,
+         source,
+         index,
+         definitions,
+         typed_ast,
+         class,
+         members,
+         constructor,
+         bindings| {
+            let class_tree = class_tree_for(ast, source, index, class);
+            let ClassMemberPicklePlan::Field(field) = members[0] else {
+                unreachable!()
+            };
+            let constant = store.types.alloc(Type::Constant(Constant::Int(7)));
+
+            let original_field_info = store.symbols.get(field.symbol).info;
+            store.symbols.get_mut(field.symbol).info = SymbolInfo::Complete(constant);
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast,
+                    source_index: index,
+                    typed_bindings: &bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor: constructor.clone(),
+                    members: &members,
+                }
+                .validate(),
+                Err(PickleError::FieldType { symbol, .. }) if symbol == field.symbol
+            ));
+            store.symbols.get_mut(field.symbol).info = original_field_info;
+
+            let original_constructor_info = store.symbols.get(constructor.symbol).info;
+            let SymbolInfo::Complete(signature_id) = original_constructor_info else {
+                panic!("constructor signature is complete")
+            };
+            let Some(Type::Method(mut signature)) = store.types.try_get(signature_id).cloned()
+            else {
+                panic!("constructor has a method signature")
+            };
+            signature.params[0].ty = constant;
+            let malformed_signature = store.types.alloc(Type::Method(signature));
+            store.symbols.get_mut(constructor.symbol).info =
+                SymbolInfo::Complete(malformed_signature);
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast,
+                    source_index: index,
+                    typed_bindings: &bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor: constructor.clone(),
+                    members: &members,
+                }
+                .validate(),
+                Err(PickleError::UnsupportedTypeReference { .. })
+            ));
+            store.symbols.get_mut(constructor.symbol).info = original_constructor_info;
+
+            let parameter = constructor.parameter_clauses[0][0];
+            let original_parameter_info = store.symbols.get(parameter).info;
+            store.symbols.get_mut(parameter).info = SymbolInfo::Complete(constant);
+            assert!(matches!(
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast,
+                    source_index: index,
+                    typed_bindings: &bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor,
+                    members: &members,
+                }
+                .validate(),
+                Err(PickleError::UnsupportedTypeReference { .. })
+            ));
+            store.symbols.get_mut(parameter).info = original_parameter_info;
+        },
+    );
+}
+
+#[test]
 fn constructor_parameter_initializer_references_match_source_name_target_and_prefix() {
     let source_text = "package example\nclass Counter(start: Int, other: Int):\n  private val seed: Int = start\n";
     with_mutable_frontend(
@@ -876,4 +985,40 @@ fn constructor_parameter_initializer_references_match_source_name_target_and_pre
             }
         },
     );
+}
+
+#[test]
+fn signed_and_full_width_int_literals_keep_exact_source_values() {
+    let source_text = "package example\nclass LiteralEdges:\n  private val minusOne: Int = -1\n  private val minInt: Int = -2147483648\n  private val hexOnes: Int = 0xffffffff\n  private val hexMin: Int = 0x80000000\n";
+    with_frontend(source_text, |ast, source, index, definitions, typer| {
+        let (class, members, constructor, bindings) = class_state_plan(
+            ast,
+            source,
+            index,
+            definitions,
+            typer,
+            "LiteralEdges",
+            "LiteralEdges.scala",
+        );
+        let class_tree = class_tree_for(ast, source, index, class);
+        assert_eq!(members.len(), 4);
+        ClassStatePicklePlan {
+            store: typer.store(),
+            definitions,
+            source_ast: ast,
+            typed_ast: typer.typed_ast(),
+            source_index: index,
+            typed_bindings: &bindings,
+            source: SourceMetadata {
+                id: source,
+                name: "LiteralEdges.scala".into(),
+            },
+            class,
+            class_tree,
+            constructor,
+            members: &members,
+        }
+        .validate()
+        .unwrap();
+    });
 }
