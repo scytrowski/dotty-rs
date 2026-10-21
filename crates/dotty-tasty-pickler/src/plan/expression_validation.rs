@@ -394,6 +394,66 @@ impl Validator<'_, '_> {
         Ok(())
     }
 
+    fn same_class_field_target(
+        &mut self,
+        target: SymbolId,
+        source_name: dotty_core::Name,
+        prefix: TypeId,
+        typed_tree: TreeId<Typed>,
+        result_type: TypeId,
+    ) -> Result<(), PickleError> {
+        let p = self.plan;
+        let field = self
+            .class_members
+            .and_then(|members| {
+                members.iter().find_map(|member| match member {
+                    ClassMemberPicklePlan::Field(field) if field.symbol == target => Some(*field),
+                    _ => None,
+                })
+            })
+            .ok_or(PickleError::Reference {
+                symbol: target,
+                reason: crate::ReferenceError::NotRegistered,
+            })?;
+        let record = self.symbol(target)?;
+        if record.kind != SymbolKind::Field
+            || record.owner != Some(p.class)
+            || record.origin != SymbolOrigin::Source(p.source.id)
+            || record.visibility != Visibility::Private
+            || !(record.flags.is_empty() || record.flags == SymbolFlags::MUTABLE)
+            || !record.annotations.is_empty()
+            || record.name != source_name
+            || p.source_index.symbol_at(p.source.id, field.source_tree) != Some(target)
+            || p.source_index.definition_of(target)
+                != Some(SourceDefinition::Canonical {
+                    source: p.source.id,
+                    tree: field.source_tree,
+                })
+        {
+            return Err(PickleError::Reference {
+                symbol: target,
+                reason: crate::ReferenceError::Metadata,
+            });
+        }
+        self.span(record.position)?;
+        if self.complete(target)? != field.declared_type || field.declared_type != result_type {
+            return Err(PickleError::BodyType {
+                tree: typed_tree,
+                ty: result_type,
+            });
+        }
+        if result_type != p.definitions.int && result_type != p.definitions.boolean {
+            return Err(PickleError::UnsupportedTypeReference { ty: result_type });
+        }
+        if !matches!(self.ty(prefix)?, Type::ThisType { class } if *class == p.class) {
+            return Err(PickleError::Reference {
+                symbol: target,
+                reason: crate::ReferenceError::Owner,
+            });
+        }
+        Ok(())
+    }
+
     fn same_class_method_application_target(
         &mut self,
         target: SymbolId,
@@ -1180,6 +1240,18 @@ impl Validator<'_, '_> {
                     }
                     self.same_class_method_target(*target, source_ident.name, *prefix, rhs)?;
                     None
+                } else if self.class_members.is_some()
+                    && p.store.symbols.contains(*target)
+                    && p.store.symbols.get(*target).kind == SymbolKind::Field
+                {
+                    self.same_class_field_target(
+                        *target,
+                        source_ident.name,
+                        *prefix,
+                        body,
+                        result_type,
+                    )?;
+                    None
                 } else if self.registered_local_symbols.contains(target) {
                     self.kind(*target, SymbolKind::Local)?;
                     self.owner(*target, Some(method.symbol))?;
@@ -1287,28 +1359,39 @@ impl Validator<'_, '_> {
                         ty: node.ty,
                     });
                 };
-                if !p
-                    .methods
-                    .iter()
-                    .any(|candidate| candidate.symbol == *target)
-                {
-                    return Err(PickleError::Reference {
-                        symbol: *target,
-                        reason: crate::ReferenceError::NotRegistered,
-                    });
-                }
-                if result_type != p.definitions.int {
-                    return Err(PickleError::BodyType {
-                        tree: body,
-                        ty: node.ty,
-                    });
-                }
-                self.same_class_method_target(*target, source_select.name, *prefix, rhs)?;
                 if !matches!(self.ty(typed_qualifier.ty)?, Type::ThisType { class } if *class == p.class)
                 {
                     return Err(PickleError::Reference {
                         symbol: *target,
                         reason: crate::ReferenceError::Owner,
+                    });
+                }
+                if p.methods
+                    .iter()
+                    .any(|candidate| candidate.symbol == *target)
+                {
+                    if result_type != p.definitions.int {
+                        return Err(PickleError::BodyType {
+                            tree: body,
+                            ty: node.ty,
+                        });
+                    }
+                    self.same_class_method_target(*target, source_select.name, *prefix, rhs)?;
+                } else if self.class_members.is_some()
+                    && p.store.symbols.contains(*target)
+                    && p.store.symbols.get(*target).kind == SymbolKind::Field
+                {
+                    self.same_class_field_target(
+                        *target,
+                        source_select.name,
+                        *prefix,
+                        body,
+                        result_type,
+                    )?;
+                } else {
+                    return Err(PickleError::Reference {
+                        symbol: *target,
+                        reason: crate::ReferenceError::NotRegistered,
                     });
                 }
                 None
