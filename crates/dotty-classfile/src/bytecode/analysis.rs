@@ -3475,12 +3475,9 @@ impl CfgCodeAnalyzer {
                 limit: MAX_FLOW_STATE_SLOTS,
             });
         }
-        // Locals can degrade once to Top. Each operand-stack value can widen
-        // at most once per edge in the bounded superclass chain. The bound is
-        // increased as the observed stack maximum grows.
-        let mut max_steps = block_count
-            .saturating_mul(local_count.saturating_add(1))
-            .max(1);
+        // Locals can degrade once to Top, stack values can widen along the
+        // bounded superclass chain, and retained class evidence can cause
+        // proof-only reprocessing as it reaches other blocks.
         let mut block_entries = vec![None; block_count];
         let mut block_stack_join_evidence = vec![None; block_count];
         let entry = graph.entry_block();
@@ -3488,8 +3485,12 @@ impl CfgCodeAnalyzer {
             return Err(AnalysisError::InvalidControlFlowGraph { block: entry });
         };
         *entry_state = Some(initial_state.clone());
-        block_stack_join_evidence[entry.index()] = Some(stack_join_evidence(&initial_state));
+        let initial_evidence = stack_join_evidence(&initial_state);
+        let mut retained_evidence_classes = stack_join_evidence_count(&initial_evidence);
+        block_stack_join_evidence[entry.index()] = Some(initial_evidence);
         let mut retained_state_slots = initial_state_slots;
+        let mut max_steps =
+            flow_analysis_step_limit(block_count, local_count, 0, retained_evidence_classes);
 
         let mut pending = std::collections::VecDeque::from([entry]);
         let mut queued = vec![false; block_count];
@@ -3545,13 +3546,12 @@ impl CfgCodeAnalyzer {
             }
             frame.ensure_no_pending_allocation(block.instruction_range.end.saturating_sub(1))?;
             max_stack = max_stack.max(frame.max_stack);
-            max_steps = max_steps.max(
-                block_count.saturating_mul(
-                    local_count
-                        .saturating_add(max_stack.saturating_mul(MAX_HIERARCHY_DEPTH))
-                        .saturating_add(1),
-                ),
-            );
+            max_steps = max_steps.max(flow_analysis_step_limit(
+                block_count,
+                local_count,
+                max_stack,
+                retained_evidence_classes,
+            ));
             let outgoing = state_from_frame(&frame)?;
 
             for successor in &block.successors {
@@ -3562,6 +3562,9 @@ impl CfgCodeAnalyzer {
                 else {
                     return Err(AnalysisError::InvalidControlFlowGraph { block: *successor });
                 };
+                let previous_evidence_count = evidence_slot
+                    .as_deref()
+                    .map_or(0, stack_join_evidence_count);
                 let changed = match slot {
                     Some(existing) => match evidence_slot {
                         Some(evidence) => merge_flow_states_with_evidence(
@@ -3596,6 +3599,18 @@ impl CfgCodeAnalyzer {
                         true
                     }
                 };
+                let current_evidence_count = evidence_slot
+                    .as_deref()
+                    .map_or(0, stack_join_evidence_count);
+                retained_evidence_classes = retained_evidence_classes
+                    .saturating_sub(previous_evidence_count)
+                    .saturating_add(current_evidence_count);
+                max_steps = max_steps.max(flow_analysis_step_limit(
+                    block_count,
+                    local_count,
+                    max_stack,
+                    retained_evidence_classes,
+                ));
                 if changed && !queued[successor.index()] {
                     pending.push_back(*successor);
                     queued[successor.index()] = true;
@@ -4037,6 +4052,26 @@ fn stack_join_evidence(state: &BlockEntryState) -> Vec<std::collections::BTreeSe
         .collect()
 }
 
+fn stack_join_evidence_count(evidence: &[std::collections::BTreeSet<ClassIdentity>]) -> usize {
+    evidence.iter().map(std::collections::BTreeSet::len).sum()
+}
+
+fn flow_analysis_step_limit(
+    block_count: usize,
+    local_count: usize,
+    max_stack: usize,
+    retained_evidence_classes: usize,
+) -> usize {
+    block_count
+        .saturating_mul(
+            local_count
+                .saturating_add(max_stack.saturating_mul(MAX_HIERARCHY_DEPTH))
+                .saturating_add(retained_evidence_classes)
+                .saturating_add(1),
+        )
+        .max(1)
+}
+
 fn join_flow_values_with_evidence(
     left: &FlowValue,
     right: &FlowValue,
@@ -4044,6 +4079,10 @@ fn join_flow_values_with_evidence(
     evidence: &mut std::collections::BTreeSet<ClassIdentity>,
 ) -> Result<FlowValue, (FlowValue, FlowValue)> {
     match (left, right) {
+        (FlowValue::Object(existing), FlowValue::Object(incoming)) if existing == incoming => {
+            evidence.insert(incoming.clone());
+            Ok(left.clone())
+        }
         (FlowValue::Object(_), FlowValue::Object(incoming)) => {
             let mut classes = evidence.iter().collect::<Vec<_>>();
             classes.push(incoming);

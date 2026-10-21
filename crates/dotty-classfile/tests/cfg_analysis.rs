@@ -689,6 +689,94 @@ fn sibling_input_on_a_backedge_converges_to_the_shared_ancestor() {
     ));
 }
 
+#[test]
+fn wide_sibling_evidence_and_shared_tail_stay_within_the_worklist_bound() {
+    const SIBLING_COUNT: usize = 150;
+    const TAIL_BLOCK_COUNT: usize = 150;
+
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let methods = (0..SIBLING_COUNT)
+        .map(|index| {
+            pool_builder
+                .method_ref(
+                    "example/Client",
+                    &format!("make{index}"),
+                    &format!("()Lexample/Sibling{index};"),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges(
+        (0..SIBLING_COUNT)
+            .map(|index| (format!("example/Sibling{index}"), "example/Base".to_owned()))
+            .chain([("example/Base".to_owned(), "java/lang/Object".to_owned())]),
+    )
+    .unwrap();
+
+    let mut sequence = CodeSequence::new();
+    let next_paths = (0..SIBLING_COUNT - 1)
+        .map(|_| sequence.new_label().unwrap())
+        .collect::<Vec<_>>();
+    let join = sequence.new_label().unwrap();
+    for (index, next) in next_paths.iter().enumerate() {
+        sequence
+            .instruction(Instruction::ILoad(local(1)))
+            .branch(BranchInstruction::IfEq(next.clone()))
+            .instruction(Instruction::ALoad(local(0)))
+            .instruction(Instruction::InvokeVirtual(
+                dotty_classfile::bytecode::VirtualMethodReference::new(
+                    dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(methods[index])
+                        .unwrap(),
+                ),
+            ))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(next.clone())
+            .unwrap();
+    }
+    sequence
+        .instruction(Instruction::ALoad(local(0)))
+        .instruction(Instruction::InvokeVirtual(
+            dotty_classfile::bytecode::VirtualMethodReference::new(
+                dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(
+                    methods[SIBLING_COUNT - 1],
+                )
+                .unwrap(),
+            ),
+        ))
+        .branch(BranchInstruction::Goto(join.clone()))
+        .bind(join)
+        .unwrap();
+    let tail = (0..TAIL_BLOCK_COUNT)
+        .map(|_| sequence.new_label().unwrap())
+        .collect::<Vec<_>>();
+    sequence.branch(BranchInstruction::Goto(tail[0].clone()));
+    for (index, label) in tail.iter().enumerate() {
+        sequence.bind(label.clone()).unwrap();
+        if let Some(next) = tail.get(index + 1) {
+            sequence.branch(BranchInstruction::Goto(next.clone()));
+        }
+    }
+    sequence.instruction(Instruction::AReturn);
+
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+        &graph,
+        "chooseWideSibling",
+        "(Z)Lexample/Base;",
+        false,
+        &pool,
+        owner,
+        &hierarchy,
+    )
+    .unwrap();
+    assert!(flow.block_entries().iter().flatten().any(|state| matches!(
+        state.operand_stack.as_slice(),
+        [FlowValue::Object(class)] if class.internal_name() == "example/Base"
+    )));
+}
+
 fn assert_local_object(state: &FlowLocalState, expected: &str) {
     assert!(matches!(state, FlowLocalState::Object(class) if class.internal_name() == expected));
 }
@@ -1441,6 +1529,44 @@ fn max_locals_limit_rejects_an_unrepresentable_index() {
             index: u16::MAX,
             width: 1
         })
+    ));
+}
+
+#[test]
+fn identical_object_stack_values_join_without_a_hierarchy_proof() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let mut sequence = CodeSequence::new();
+    let otherwise = sequence.new_label().unwrap();
+    let join = sequence.new_label().unwrap();
+    sequence
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(otherwise.clone()))
+        .instruction(Instruction::ALoad(local(2)))
+        .branch(BranchInstruction::Goto(join.clone()))
+        .bind(otherwise)
+        .unwrap()
+        .instruction(Instruction::ALoad(local(2)))
+        .bind(join)
+        .unwrap()
+        .instruction(Instruction::AReturn);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let flow = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "chooseObject",
+        "(ZLjava/lang/Object;)Ljava/lang/Object;",
+        false,
+        &pool,
+        owner,
+    )
+    .unwrap();
+    assert!(matches!(
+        flow.entry_state(graph.blocks().last().unwrap().id)
+            .unwrap()
+            .operand_stack
+            .as_slice(),
+        [FlowValue::Object(class)] if class.internal_name() == "java/lang/Object"
     ));
 }
 
