@@ -2261,6 +2261,15 @@ fn resolve_reference_name_at_depth(
                 .unwrap_or(ReferenceResolution::Unresolved)
         }
         StructuredTree::Length(StructuredNode::SelectIn(selection)) => {
+            let Some(member) = render_member_name(file, selection.name) else {
+                return ReferenceResolution::Unresolved;
+            };
+            if !member
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
+            {
+                return ReferenceResolution::Unresolved;
+            }
             if let ReferenceResolution::Resolved(name) = resolve_reference_name_at_depth(
                 file,
                 &selection.underlying_type,
@@ -2272,7 +2281,7 @@ fn resolve_reference_name_at_depth(
             let Some(name) = render_member_name(file, selection.name) else {
                 return ReferenceResolution::Unresolved;
             };
-            resolve_reference_prefix_at_depth(
+            let resolution = resolve_reference_prefix_at_depth(
                 file,
                 &selection.qualifier,
                 current_package,
@@ -2311,8 +2320,8 @@ fn resolve_reference_name_at_depth(
                         format!("{prefix}/{name}"),
                     )))
                 }
-            })
-            .unwrap_or(ReferenceResolution::Unresolved)
+            });
+            resolution.unwrap_or(ReferenceResolution::Unresolved)
         }
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
             resolve_reference_name_at_depth(file, &type_tree, current_package, depth + 1)
@@ -2494,6 +2503,11 @@ fn resolve_parent_name_in_package_with_bare(
         resolve_bare,
         0,
     )
+    .filter(|name| {
+        name.simple_name()
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
+    })
 }
 
 fn resolve_parent_name_in_package_with_bare_at_depth(
@@ -2507,6 +2521,41 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
     const MAX_PARENT_TREE_DEPTH: usize = 256;
     if depth >= MAX_PARENT_TREE_DEPTH {
         return None;
+    }
+    if let Some(selection) = find_select_in_reference(parent, 0) {
+        let (selected_member, nested_owner) = match selection.decode_structured().ok()? {
+            StructuredTree::Length(StructuredNode::SelectIn(selection)) => (
+                render_member_name(file, selection.name)?,
+                contains_nested_ast_child(&selection.underlying_type, 0),
+            ),
+            _ => return None,
+        };
+        // Operator names require Scala's name mangling before they can be
+        // used as JVM binary names. Keep them unresolved until that encoding
+        // is available instead of treating source spelling as a path.
+        if !selected_member
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
+        {
+            return None;
+        }
+        // A nested AST owner needs a verified JVM nested name. Otherwise a
+        // package path guess can turn `Phases.Phase` into `Phases/Phase`.
+        if nested_owner {
+            return match resolve_reference_name_in_package(file, &selection, package_scope) {
+                ReferenceResolution::Resolved(name)
+                    if name.simple_name().contains('$') && name.is_path_safe() =>
+                {
+                    Some(name)
+                }
+                _ => None,
+            };
+        }
+        match resolve_reference_name_in_package(file, &selection, package_scope) {
+            ReferenceResolution::Resolved(name) => return Some(name),
+            ReferenceResolution::Unresolved => return None,
+            ReferenceResolution::NotAReference => {}
+        }
     }
     if let Ok(StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. }))) =
         parent.decode_structured()
@@ -2526,6 +2575,13 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
     };
     match reference {
         ReferenceResolution::Resolved(resolved) => {
+            if !resolved
+                .simple_name()
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
+            {
+                return None;
+            }
             if matches!(
                 resolved.as_internal(),
                 "scala/Any" | "scala/AnyRef" | "scala/Object"
@@ -2559,6 +2615,16 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
         .into_iter()
         .filter_map(|reference| wire_name(file, reference))
         .collect();
+
+    if names.iter().any(|name| {
+        name.split('/').any(|segment| {
+            !segment
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$'))
+        })
+    }) {
+        return None;
+    }
 
     if names.is_empty() {
         return match package_scope {
@@ -2607,6 +2673,64 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
         format!("{package}/{joined}")
     };
     Some(BinaryName::from_internal(qualified))
+}
+
+fn find_select_in_reference<'a>(tree: &RawTree<'a>, depth: usize) -> Option<RawTree<'a>> {
+    const MAX_DEPTH: usize = 128;
+    if depth >= MAX_DEPTH {
+        return None;
+    }
+    if let RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } = tree {
+        return find_select_in_reference(child, depth + 1);
+    }
+    if let RawTree::LengthNode(node) = tree {
+        if node.tag == dotty_tasty::tasty::SELECTIN_TAG {
+            return Some(tree.clone());
+        }
+        return match node.decode_structured().ok()? {
+            StructuredNode::Apply(apply) => find_select_in_reference(&apply.function, depth + 1),
+            StructuredNode::TypeApply(apply) => {
+                find_select_in_reference(&apply.function, depth + 1)
+            }
+            StructuredNode::AppliedType(applied) => {
+                find_select_in_reference(&applied.tycon, depth + 1)
+            }
+            _ => None,
+        };
+    }
+    match tree.decode_structured().ok()? {
+        StructuredTree::AstChild(child) => find_select_in_reference(&child.child, depth + 1),
+        StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+            find_select_in_reference(&type_tree, depth + 1)
+        }
+        _ => None,
+    }
+}
+
+fn contains_nested_ast_child(tree: &RawTree<'_>, depth: usize) -> bool {
+    const MAX_DEPTH: usize = 128;
+    if depth >= MAX_DEPTH {
+        return true;
+    }
+    if matches!(tree, RawTree::Ast { .. }) {
+        return true;
+    }
+    if let RawTree::NatAst { child, .. } = tree {
+        return contains_nested_ast_child(child, depth + 1);
+    }
+    match tree.decode_structured() {
+        Ok(StructuredTree::AstChild(child)) => contains_nested_ast_child(&child.child, depth + 1),
+        Ok(StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. }))) => {
+            contains_nested_ast_child(&function, depth + 1)
+        }
+        Ok(StructuredTree::Length(StructuredNode::AppliedType(AppliedTypeNode {
+            tycon, ..
+        }))) => contains_nested_ast_child(&tycon, depth + 1),
+        Ok(StructuredTree::Ident(IdentNode { type_tree, .. })) => {
+            contains_nested_ast_child(&type_tree, depth + 1)
+        }
+        _ => false,
+    }
 }
 
 /// Returns the simple name only for an unresolved named TYPEREF/TERMREF,
@@ -3430,15 +3554,15 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 24);
+        assert_eq!(current_unresolved_roots.len(), 27);
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            17
+            14
         );
         assert_eq!(historical_weight, 379);
-        assert_eq!(current_weight, 120);
-        assert_eq!(recovered_roots.len(), 17);
-        assert_eq!(recovered_weight, 259);
+        assert_eq!(current_weight, 124);
+        assert_eq!(recovered_roots.len(), 14);
+        assert_eq!(recovered_weight, 255);
         assert!(newly_unresolved_roots.is_empty());
         assert_eq!(newly_unresolved_weight, 0);
         assert_eq!(
@@ -3787,6 +3911,42 @@ mod tests {
                 decoded.interfaces,
                 vec![BinaryName::from_internal(expected_trait)],
                 "{requested}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_flatten_nested_select_in_owner_or_accept_operator_source_name() {
+        let recheck = fixture_bytes("scala3-compiler/dotty/tools/dotc/transform/Recheck.tasty");
+        let error = decode_with_resolvers(
+            &recheck,
+            &BinaryName::from_internal("dotty/tools/dotc/transform/Recheck"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect_err("the nested Phase owner must not be flattened into a package path");
+        assert!(matches!(
+            error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("Phase")
+        ));
+
+        for tuple in ["Tuple2", "Tuple3"] {
+            let bytes = fixture_bytes(&format!("scala3-library/scala/{tuple}.tasty"));
+            let error = decode_with_resolvers(
+                &bytes,
+                &BinaryName::from_internal(format!("scala/{tuple}")),
+                |_, _| None,
+                |_, _| None,
+            )
+            .expect_err("source operator spelling is not a binary constructor name");
+            assert!(
+                matches!(
+                    error,
+                    TastyDecodeError::UnresolvedSupertype(ref parent)
+                        if parent.parent_index == 0 && parent.reference_name.as_deref() == Some("*:")
+                ),
+                "{tuple}: {error:?}"
             );
         }
     }
