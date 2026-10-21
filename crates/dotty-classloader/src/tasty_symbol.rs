@@ -3430,12 +3430,17 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 34);
+        assert_eq!(current_unresolved_roots.len(), 24);
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            7
+            17
         );
-        assert!(!recovered_roots.is_empty());
+        assert_eq!(historical_weight, 379);
+        assert_eq!(current_weight, 120);
+        assert_eq!(recovered_roots.len(), 17);
+        assert_eq!(recovered_weight, 259);
+        assert!(newly_unresolved_roots.is_empty());
+        assert_eq!(newly_unresolved_weight, 0);
         assert_eq!(
             historical_weight + newly_unresolved_weight,
             current_weight + recovered_weight
