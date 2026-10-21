@@ -197,7 +197,6 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             _ => None,
         }
     }
-
     fn transact<T>(
         &mut self,
         store: &mut SemanticStore,
@@ -1597,7 +1596,6 @@ mod tests {
     }
 
     struct EmptyCountingClassPath(Arc<AtomicUsize>);
-
     #[derive(Clone)]
     struct CompletionClassPath {
         classes: Arc<Mutex<std::collections::HashMap<BinaryName, Vec<u8>>>>,
@@ -2216,6 +2214,22 @@ mod tests {
                     Some(companion_class)
                 );
                 assert_eq!(store.symbols.get(module_class).links.companion, None);
+            }
+
+            if matches!(binary.simple_name(), "Types" | "Symbols" | "Tokens") {
+                assert_eq!(
+                    resolver.complete_module_class(&mut store, module_class),
+                    Ok(true),
+                    "the authoritative compiler parent should permit completion for {binary}"
+                );
+                let SymbolInfo::Complete(info) = store.symbols.get(module_class).info else {
+                    panic!("{binary} ModuleClass should be complete after parent resolution");
+                };
+                let Type::ClassInfo(info) = store.types.get(info) else {
+                    panic!("{binary} should complete to ClassInfo");
+                };
+                assert_eq!(info.class, module_class);
+                continue;
             }
 
             if binary.simple_name() == "Contexts" {
@@ -4097,7 +4111,6 @@ mod tests {
         let resolver = ClasspathSymbolResolver::new(path, definitions, LoadingSession::new());
         (store, definitions, resolver)
     }
-
     #[test]
     fn resolves_only_packages_with_classpath_evidence_and_reuses_their_identity() {
         let (mut store, _, mut resolver) = setup();
@@ -5897,7 +5910,6 @@ mod tests {
 
         resolver.rollback_to(&mut store, resolver_checkpoint);
         store.rollback_to(store_checkpoint);
-
         assert!(
             store
                 .scopes
