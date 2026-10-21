@@ -302,7 +302,7 @@ fn resolve_instance_call_body(
         ));
     }
     if let Some(expected_parent) = direct_super_parent {
-        if method_owner != expected_parent {
+        if !is_validated_ancestor(unit, expected_parent, method_owner, definitions)? {
             return Err(JvmCodegenError::WrongOwner {
                 symbol: method,
                 expected: expected_parent,
@@ -310,13 +310,7 @@ fn resolve_instance_call_body(
             });
         }
     } else if method_owner != receiver_class
-        && !unit
-            .class_hierarchy(definitions)?
-            .superclasses()
-            .iter()
-            .any(|superclass| {
-                superclass.class() == receiver_class && superclass.parent() == method_owner
-            })
+        && !is_validated_ancestor(unit, receiver_class, method_owner, definitions)?
     {
         return Err(JvmCodegenError::WrongOwner {
             symbol: method,
@@ -394,9 +388,6 @@ fn resolve_instance_call_body(
             method,
         })?;
     if method_owner != receiver_class && direct_super_parent.is_none() {
-        let is_direct_parent = receiver_metadata
-            .superclass()
-            .is_some_and(|superclass| superclass.parent() == method_owner);
         let is_effective_inherited_method =
             receiver_metadata.dispatch_methods().iter().any(|entry| {
                 entry.receiver_class() == receiver_class
@@ -405,10 +396,32 @@ fn resolve_instance_call_body(
                     && entry.name() == method_metadata.name()
                     && entry.descriptor().as_str() == method_metadata.descriptor().as_str()
             });
-        if !is_direct_parent || !is_effective_inherited_method {
+        if !is_effective_inherited_method {
             return Err(JvmCodegenError::WrongOwner {
                 symbol: method,
                 expected: receiver_class,
+                actual: Some(method_owner),
+            });
+        }
+    }
+    if let Some(parent) = direct_super_parent
+        && method_owner != parent
+    {
+        let parent_metadata = all_metadata
+            .iter()
+            .find(|metadata| metadata.identity().symbol() == parent)
+            .ok_or(JvmCodegenError::MissingClassPlan { class: parent })?;
+        let is_effective_parent_method = parent_metadata.dispatch_methods().iter().any(|entry| {
+            entry.receiver_class() == parent
+                && entry.declaring_class() == method_owner
+                && entry.method() == method
+                && entry.name() == method_metadata.name()
+                && entry.descriptor().as_str() == method_metadata.descriptor().as_str()
+        });
+        if !is_effective_parent_method {
+            return Err(JvmCodegenError::WrongOwner {
+                symbol: method,
+                expected: parent,
                 actual: Some(method_owner),
             });
         }
@@ -424,8 +437,16 @@ fn resolve_instance_call_body(
         });
     }
 
+    let invocation_owner = direct_super_parent
+        .filter(|_| invocation == JvmInvocationKind::SpecialSuper)
+        .and_then(|parent| {
+            all_metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == parent)
+        })
+        .unwrap_or(class_metadata);
     Ok(JvmCallTarget {
-        owner_internal_name: class_metadata.identity().internal_name().to_owned(),
+        owner_internal_name: invocation_owner.identity().internal_name().to_owned(),
         method_name: method_metadata.name().to_owned(),
         descriptor: method_metadata.descriptor().clone(),
         method,
@@ -434,6 +455,30 @@ fn resolve_instance_call_body(
         receiver_tree,
         receiver_class,
     })
+}
+
+fn is_validated_ancestor(
+    unit: &JvmCompilationUnit<'_>,
+    class: SymbolId,
+    ancestor: SymbolId,
+    definitions: &Definitions,
+) -> Result<bool, JvmCodegenError> {
+    let hierarchy = unit.class_hierarchy(definitions)?;
+    let mut current = class;
+    for _ in 0..=hierarchy.superclasses().len() {
+        if current == ancestor {
+            return Ok(true);
+        }
+        let Some(superclass) = hierarchy
+            .superclasses()
+            .iter()
+            .find(|superclass| superclass.class() == current)
+        else {
+            return Ok(false);
+        };
+        current = superclass.parent();
+    }
+    Ok(current == ancestor)
 }
 
 fn validate_direct_super_receiver(

@@ -112,10 +112,10 @@ Exact planned class references in unit-aware method, constructor, and field
 metadata require the complete unit hierarchy proof; standalone projections
 remain restricted to metadata they can validate locally. The projection also
 rejects a child method with the same JVM name and descriptor as a projected
-non-private final method in its direct parent. If that parent method is not
-planned, the backend conservatively rejects a child method with the same name.
-General override conformance and hierarchy-aware reference joins remain outside
-this contract.
+non-private final method in any validated ancestor. If an ancestor method is
+not planned, the backend conservatively rejects a child method with the same
+name. Override conformance and inherited dispatch are checked across this
+bounded chain; hierarchy-aware reference joins remain outside this contract.
 
 ## Method descriptor projection
 
@@ -243,7 +243,7 @@ unsupported states remain typed build errors.
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
 | Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and declared value descriptor; a field write may use the verified direct `Derived` to `Base` edge |
-| Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver owner is exact or the verified direct parent; arguments and results use exact types or the bounded `Derived` to `Base` assignment |
+| Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver owner is exact or a validated ancestor; arguments and results use exact types or the bounded `Derived` to `Base` assignment |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
 | Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified direct-parent relation; full allocation sequence remains in one basic block |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
@@ -258,8 +258,9 @@ contract records the verifier constraints that bound the emitted subset.
 ## Planned virtual instance calls
 
 `JvmCompilationUnit::resolve_planned_instance_call` resolves a typed regular
-`Apply(Select(receiver, method), args)` to the exact method symbol in the
-receiver class's plan and declaration scope. Receivers are current `this`, a
+`Apply(Select(receiver, method), args)` to the exact planned method symbol in
+its declaring class and validates that owner against the receiver's class or
+validated ancestry. Receivers are current `this`, a
 validated direct `new C(args)`, an immutable local or parameter, or a completed
 planned call returning an exact reference class. Public methods may be called across emitted
 classes; plain private methods are callable only from their owning class.
@@ -275,8 +276,8 @@ value on the stack; `Unit` leaves no value. The source typer accepts direct-new 
 for ordinary method application. Calls on exact planned reference receivers
 and completed allocations are also supported in `if`, `while`, and short-
 circuit branches. The target still comes from the canonical planned method
-symbol; external, inherited, interface, private cross-class, and other
-unplanned receivers remain rejected.
+symbol; external, interface, private cross-class, and other unplanned receivers
+remain rejected.
 
 ### Real-source object interaction gate
 
@@ -479,10 +480,10 @@ An explicit unqualified `super.method(args)` follows a separate checked path.
 `Super(This)` with no mixin qualifier, verifies its `SuperType` against the
 current class and planned direct parent, and retains the selected canonical
 method symbol. The selected method must be public, concrete, planned, and
-declared by that direct parent. Lowering pushes `aload(0)`, evaluates each
+effective on the direct parent. Lowering pushes `aload(0)`, evaluates each
 argument once in source order against the exact descriptor, and emits one
-`invokespecial` using the parent's JVM owner and the selected method name and
-descriptor. The result uses the selected method's validated return type.
+`invokespecial` using the direct parent's JVM owner and the selected method
+name and descriptor. The result uses the selected method's validated return type.
 Qualified/mixin super, mismatched semantic types or owners, unplanned methods,
 and unsupported method signatures fail with typed errors before a class is
 published. Ordinary calls continue through the virtual resolver and emit
@@ -692,7 +693,7 @@ sessions. It checks exact `Methodref` owners/descriptors for direct `super`
 calls with Int and Boolean arguments, Unit and reference results, and both
 branches of an `if`; the branch has a `StackMapTable`. It separately confirms
 that `Base.doubled` and `Runner.evaluate` retain `invokevirtual`, rejects
-qualified/root/grandparent-only super shapes before publishing classes, and
+qualified and root-class super shapes before publishing classes, and
 requires byte-identical ordered class output. The JDK gate inspects these
 instructions with `javap` and executes the methods using JDK 21
 `java -Xverify:all`.
@@ -911,8 +912,9 @@ selected method symbols against their direct-parent owners and verifies exact
 Derived reference frames and branch target PCs before JDK execution.
 The source/classfile negative tests retain typed rejection and empty source
 output batches; the existing publisher still stages only fully encoded batches.
-This increment extends hierarchy validation and exact planned-class projection;
-multilevel constructor or method lowering is still deferred. Nested allocation
-arguments, arbitrary effectful pre-super evaluation, branched constructors,
-qualified/trait super, grandparent methods, and Scala ABI/TASTy emission also
+This increment extends hierarchy validation, transitive inherited method
+lookup, and direct-parent `super` selection through the bounded chain.
+Transitive constructor argument assignability, hierarchy-aware reference
+joins, nested allocation arguments, arbitrary effectful pre-super evaluation,
+branched constructors, qualified/trait super, and Scala ABI/TASTy emission also
 remain deferred.

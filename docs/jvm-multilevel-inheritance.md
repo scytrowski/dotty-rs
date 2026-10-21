@@ -1,14 +1,14 @@
 # JVM multilevel inheritance and reference joins audit
 
 This is a characterization of the Scala 3.9.0 source pipeline and Java SE 21
-class-file rules. It does not enable multilevel inheritance or reference class
-joins. The source test
-`multilevel_source_audit_records_typed_identity_and_current_backend_rejection`
-drives the real lexer, parser, namer, typer, and JVM test adapter from one source
-unit. It observes the canonical symbols and typed arena before emission, then
-asserts the first backend failure and the absence of published class files.
-The second test records how a sibling join is typed and where the current JVM
-policy rejects it.
+class-file rules. The current JVM backend accepts the bounded three-class
+`Base → Middle → Leaf` chain and transitive inherited method dispatch; it does
+not enable arbitrary-depth inheritance or reference class joins. The source
+test `multilevel_source_audit_validates_the_three_level_hierarchy_proofs`
+drives the real lexer, parser, namer, typer, and JVM adapter from one source
+unit and checks canonical symbols and per-edge proofs. Separate source-to-JVM
+tests verify inherited calls and runtime dispatch. Another test records how a
+sibling join is typed and where the current JVM policy rejects it.
 
 ## Source evidence and current result
 
@@ -44,26 +44,13 @@ Scala-independent class-file graph also accepts the explicit edges
 both Middle and Base.
 
 The first rejection of the complete four-class source unit is during JVM
-codegen validation, not parsing, naming, or typing:
-
-```text
-PipelineFailure::Codegen(
-  JvmCodegenError::InvalidJvmSuperclass {
-    class: Leaf,
-    parent: Some(Middle),
-    issue: JvmSuperclassIssue::InheritanceTooDeep,
-  }
-)
-```
-
-`identity::unit_hierarchy` currently requires every non-Object parent itself to
-have Object as its parent. It validates the whole emission unit before class
-bytes are published, so this error leaves the output directory without `.class`
-files. This means the audit test proves typed semantics and the first backend
-blocker; it does **not** claim that the complete program currently emits or
-runs. The expected outputs `run(10) = 24`, `parentValue() = 11`, and
-`chosenValue(false, 10) = 12` are Scala/JVM behavior targets for follow-up
-implementation and execution tests.
+The three-class source program passes JVM codegen validation. Its exact
+ancestor method symbols remain distinct from each class's declared methods;
+effective dispatch metadata points to the nearest override without copying
+method bodies. Ordinary calls use the canonical declaring class as the
+`Methodref` owner, while explicit `super` calls use the immediate parent as the
+symbolic owner so `ACC_SUPER` applies the JVMS selection rule. The
+source-to-JVM regression runs the emitted classes under `java -Xverify:all`.
 
 The source test separately uses `Root`, `Left extends Root`, and
 `Right extends Root`. The typed `If` result is `Type::Or` whose arms refer to
@@ -78,14 +65,14 @@ hierarchy could be supplied.
 
 | Concern | Current behavior | Follow-up requirement |
 | --- | --- | --- |
-| Unit hierarchy | `identity::unit_hierarchy` verifies canonical one-parent `ClassInfo`, planned/public parent, cycles, `final`, constructor access, and then rejects a parent whose parent is not Object (`InheritanceTooDeep`). | Keep the proof keyed by canonical symbols and bounded. Permit only the explicitly scoped same-batch chain after all ancestor edges and constraints validate. |
-| Reference projection | `reference::project_type_with_metadata` applies a separate `object_rooted` test that accepts a planned class directly under Object or one planned class between it and Object. Leaf in the target chain is `NotObjectDerived`. | Reuse the unit's validated ancestry proof; do not create a string- or name-driven second ancestor registry. |
+| Unit hierarchy | `identity::unit_hierarchy` verifies canonical one-parent `ClassInfo`, planned/public parent, cycles, `final`, constructor access, and the bounded three-class source chain. | Keep the proof keyed by canonical symbols and bounded; validate every edge independently. |
+| Reference projection | Unit-aware `reference::project_type_with_metadata` consumes the validated hierarchy proof. Standalone projection still rejects class references it cannot prove locally. | Reuse the unit's ancestry proof; do not create a string- or name-driven second ancestor registry. |
 | Assignability | `reference::is_direct_subtype` accepts equality or one direct parent edge only. | Query the same explicit validated proof transitively for arguments, returns, fields, and receivers, retaining exact source `SymbolId` identity at the adapter boundary. |
 | Typed joins | `join_expression_types` returns Middle for Middle/Leaf in either order. Unrelated sibling classes become `Type::Or`; `Or` remains a semantic union and is not silently projected as one JVM class. | Keep nominal join policy explicit: support only the planned ancestor relation; reject unrelated/sibling `Or` values unless a separate issue defines a safe policy. |
 | If lowering | `merge_if_flows` requires equal branch flows. Different reference classes produce `ReferenceTypeMismatch`; it does not widen to Object or a guessed ancestor. | Add a commutative, deterministic reference stack join using only a supplied validated hierarchy proof. Preserve primitive and uninitialized-state errors. |
-| Override and dispatch | Existing metadata computes effective dispatch by walking superclass metadata. Per-child override checks compare declared methods on the direct parent. Final-method collision checks inspect the direct parent and its planned/unplanned declarations, not a validated transitive ancestor proof. | For multilevel graphs, validate each override against the right inherited declaration and check `final` declarations at every ancestor. Do not synthesize missing methods or infer by name alone. |
-| Direct `super` calls | The real typed source selection is bound to the direct parent's method symbol. Existing two-class behavior lowers explicit direct-super calls with special invocation; the target unit itself never reaches lowering because unit validation rejects Leaf first. | Preserve direct-parent lookup and special invocation for each edge: Middle calls Base.value; Leaf calls Middle.value. |
-| Ordinary virtual calls | `Base.doubled` selects Base.value twice. `chosenValue` selects Middle.value from its typed receiver. Once emitted, ordinary virtual invocation remains owned by the statically selected class and uses the runtime receiver, so a Leaf receiver dispatches to Leaf.value. | Preserve the canonical method owner in the constant-pool reference and verify runtime dispatch in the end-to-end test. |
+| Override and dispatch | Effective metadata walks the validated ancestry. Override checks resolve the nearest inherited declaration, and final-method checks cover every ancestor, including unplanned final declarations. | Preserve canonical method identities and verify missing-override and final-ancestor errors without partial output. |
+| Direct `super` calls | Typer lookup starts at the immediate parent and can select a declaration inherited through it. Lowering retains the selected symbol but emits `invokespecial` with the immediate parent as the symbolic owner. | Preserve direct-parent selection start and verify the JVMS `ACC_SUPER` behavior. |
+| Ordinary virtual calls | `Base.doubled` selects Base.value twice. `Leaf` can select `Base.doubled` or another inherited method while keeping Base as the `Methodref` owner. The JVM receiver dispatches to the nearest override. | Preserve the canonical declaring owner in constant-pool references and verify runtime dispatch. |
 | Parameterized constructor chain | The source adapter retains each constructor's canonical formal symbols and the typed parent-constructor application. The intended calls are `Leaf.<init>(I)V -> Middle.<init>(I)V -> Base.<init>(I)V -> Object.<init>()V`. | Validate and emit one direct-super constructor call per class, in order, with each call's exact parent owner, descriptor, access, and initialized/uninitialized state. No `this` escape or branch through constructor initialization. |
 
 ### Class-file hierarchy versus CFG join
@@ -155,15 +142,15 @@ follow-up tests, not newly claimed test results.
 | Case | Audit boundary |
 | --- | --- |
 | Cycles | Reject during canonical hierarchy graph validation. |
-| `final Middle` or another final ancestor | Reject a child edge; inherited final methods must also be checked transitively before enabling a chain. |
+| `final Middle` or another final ancestor | Reject a child edge; inherited final methods are checked transitively before emission. |
 | Unplanned or nonpublic parent | Reject before emission; no name-based fallback or partial output. |
 | A fourth hierarchy level | Keep outside this bounded implementation; enforce the selected explicit depth bound. |
 | Traits/interfaces or multiple parents | Keep separate from single-superclass metadata and dispatch. |
 | Generic, abstract, or external parent | Reject until erasure, abstract dispatch, or validated external hierarchy metadata is explicitly supported. |
-| Grandparent final override | Reject after walking validated ancestors, even when the direct parent does not redeclare the method. |
+| Grandparent final override | `FinalJvmMethodOverride` after walking validated ancestors, even when the direct parent does not redeclare the method. |
 | Unrelated `Counter` vs `Middle`, and same-base siblings | Preserve semantic `Or` where typer creates it, but do not reinterpret it as an arbitrary JVM class join. |
 | `null` and arrays | Remain outside this reference projection and join increment. |
-| Invalid `super` owner | Reject unless the canonical owner is the direct parent and the selected method is validated there. |
+| Invalid `super` owner | Reject unless the selected declaration is canonical and effective on the validated direct parent; the emitted `invokespecial` owner remains that direct parent. |
 | Uninitialized references and constructor branches | Never widen at joins; branched constructor initialization remains unsupported. |
 
 ## Follow-up ownership and validation

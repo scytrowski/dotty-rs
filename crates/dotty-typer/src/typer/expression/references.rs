@@ -834,7 +834,7 @@ impl SourceTyper<'_> {
             }
         };
         let Some(Type::TypeRef {
-            target: TypeRefTarget::Symbol(parent),
+            target: TypeRefTarget::Symbol(_),
             ..
         }) = self.store.types.try_get(parent_type)
         else {
@@ -844,12 +844,10 @@ impl SourceTyper<'_> {
                 reason: "direct superclass is not a plain class type",
             });
         };
-        let parent = *parent;
-        let info = self
-            .class_info(parent, info_journal)
+        let candidates = self
+            .lookup_members_journaled(parent_type, name, info_journal)
             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-        let candidates = self.store.scopes.get(info.declarations).lookup_all(&name);
-        let [symbol] = candidates else {
+        let [candidate] = candidates.as_slice() else {
             if candidates.is_empty() {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
@@ -864,7 +862,8 @@ impl SourceTyper<'_> {
                 name,
             });
         };
-        let symbol = *symbol;
+        let symbol = candidate.symbol;
+        let declaring_class = candidate.declaring_class;
         if !self.store.symbols.contains(symbol) {
             return Err(TyperError::UnknownSymbol { symbol });
         }
@@ -874,7 +873,7 @@ impl SourceTyper<'_> {
             SymbolFlags::STATIC,
             SymbolFlags::EXTENSION,
         ];
-        if declaration.owner != Some(parent)
+        if declaration.owner != Some(declaring_class)
             || declaration.kind != SymbolKind::Method
             || forbidden_flags
                 .iter()

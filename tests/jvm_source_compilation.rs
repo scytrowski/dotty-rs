@@ -6540,6 +6540,229 @@ fn inherited_virtual_calls_keep_the_declaring_methodref_and_dispatch_dynamically
 }
 
 #[test]
+fn transitive_inherited_calls_keep_declaring_methodrefs_and_dispatch_dynamically() {
+    let output = TestOutputDirectory::new("transitive-inherited-virtual-calls");
+    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2; def baseOnly(): Int = 7 }\nclass Middle extends Base { override def value(): Int = 20 }\nclass Leaf extends Middle { override def value(): Int = 21; def parentValue(): Int = super.value() }\nclass Runner { def throughBase(base: Base): Int = base.doubled(); def viaLeaf(leaf: Leaf): Int = leaf.baseOnly(); def viaLeafDoubled(leaf: Leaf): Int = leaf.doubled() }\n";
+    let mut observed_metadata = None;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        observed_metadata = Some(
+            unit.metadata(definitions)
+                .expect("validated transitive dispatch metadata"),
+        );
+    };
+    let artifacts = compile_source_batch_observed(
+        source,
+        "TransitiveInheritedCalls.scala",
+        output.path(),
+        SourceId::from_index(1403),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut observe),
+    )
+    .expect("transitive inherited calls retain canonical declarations");
+
+    let decode_class = |name: &str| {
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("{name} class is emitted"));
+        decode_emitted_class(artifact)
+    };
+    let base = decode_class("Base");
+    let middle = decode_class("Middle");
+    let leaf = decode_class("Leaf");
+    let runner = decode_class("Runner");
+    let metadata = observed_metadata.expect("observer captures validated class metadata");
+    let base_metadata = metadata
+        .iter()
+        .find(|class| class.identity().internal_name() == "Base")
+        .expect("Base metadata");
+    let leaf_metadata = metadata
+        .iter()
+        .find(|class| class.identity().internal_name() == "Leaf")
+        .expect("Leaf metadata");
+    let base_doubled = base_metadata
+        .methods()
+        .iter()
+        .find(|method| method.name() == "doubled")
+        .expect("Base declares doubled");
+    let base_only = base_metadata
+        .methods()
+        .iter()
+        .find(|method| method.name() == "baseOnly")
+        .expect("Base declares baseOnly");
+    let leaf_value = leaf_metadata
+        .methods()
+        .iter()
+        .find(|method| method.name() == "value")
+        .expect("Leaf declares its override");
+    let inherited_doubled = leaf_metadata
+        .dispatch_methods()
+        .iter()
+        .find(|method| method.name() == "doubled")
+        .expect("Base.doubled is effective on Leaf");
+    assert_eq!(inherited_doubled.method(), base_doubled.symbol());
+    assert_eq!(
+        inherited_doubled.declaring_class(),
+        base_metadata.identity().symbol()
+    );
+    assert_eq!(
+        inherited_doubled.receiver_class(),
+        leaf_metadata.identity().symbol()
+    );
+    let inherited_base_only = leaf_metadata
+        .dispatch_methods()
+        .iter()
+        .find(|method| method.name() == "baseOnly")
+        .expect("Base.baseOnly is effective on Leaf");
+    assert_eq!(inherited_base_only.method(), base_only.symbol());
+    let effective_value = leaf_metadata
+        .dispatch_methods()
+        .iter()
+        .find(|method| method.name() == "value")
+        .expect("Leaf.value is the effective override");
+    assert_eq!(effective_value.method(), leaf_value.symbol());
+    assert_eq!(
+        effective_value.declaring_class(),
+        leaf_metadata.identity().symbol()
+    );
+
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "throughBase"),
+        &[(0xb6, "Base", "doubled", "()I")],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "viaLeaf"),
+        &[(0xb6, "Base", "baseOnly", "()I")],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "viaLeafDoubled"),
+        &[(0xb6, "Base", "doubled", "()I")],
+    );
+    assert_invocation_sequence(
+        &leaf,
+        emitted_method_code(&leaf, "parentValue"),
+        &[(0xb7, "Middle", "value", "()I")],
+    );
+    for class in [&middle, &leaf] {
+        assert!(
+            class.methods.iter().all(|method| !matches!(
+                class.constant_pool.utf8(method.name_index),
+                Ok("doubled" | "baseOnly")
+            )),
+            "inherited Base methods are not copied into {}",
+            class.constant_pool.class_name(class.this_class).unwrap()
+        );
+    }
+    assert!(
+        base.methods
+            .iter()
+            .any(|method| { base.constant_pool.utf8(method.name_index) == Ok("doubled") })
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("TransitiveInheritedCallsHarness.java");
+        fs::write(
+            &harness,
+            "public final class TransitiveInheritedCallsHarness { public static void main(String[] args) { Runner runner = new Runner(); Base base = new Base(); Leaf leaf = new Leaf(); if (runner.throughBase(base) != 20 || runner.throughBase(leaf) != 42 || runner.viaLeaf(leaf) != 7 || runner.viaLeafDoubled(leaf) != 42 || leaf.parentValue() != 20) throw new AssertionError(); System.out.println(\"transitive inherited dispatch verified\"); } }\n",
+        )
+        .expect("write transitive-call harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected transitive-call harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "TransitiveInheritedCallsHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected transitive-inheritance classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "transitive inherited dispatch verified"
+        );
+    }
+}
+
+#[test]
+fn super_call_through_empty_intermediate_class_uses_direct_parent_methodref() {
+    let output = TestOutputDirectory::new("inherited-super-methodref");
+    let source = "class Base { def value(): Int = 10 }\nclass Middle extends Base {}\nclass Leaf extends Middle { override def value(): Int = 20; def parentValue(): Int = super.value() }\n";
+    let artifacts = compile_source_classes(source, "InheritedSuper.scala", output.path())
+        .expect("super can select a method inherited through the immediate parent");
+    let leaf_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Leaf")
+        .expect("Leaf class is emitted");
+    let leaf = decode_emitted_class(leaf_artifact);
+
+    assert_invocation_sequence(
+        &leaf,
+        emitted_method_code(&leaf, "parentValue"),
+        &[(0xb7, "Middle", "value", "()I")],
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("InheritedSuperHarness.java");
+        fs::write(
+            &harness,
+            "public final class InheritedSuperHarness { public static void main(String[] args) { if (new Leaf().parentValue() != 10) throw new AssertionError(); System.out.println(\"inherited super call verified\"); } }\n",
+        )
+        .expect("write inherited-super harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected inherited-super harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "InheritedSuperHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected inherited-super classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "inherited super call verified"
+        );
+    }
+}
+
+#[test]
 fn scala_single_inheritance_and_virtual_dispatch_pass_the_end_to_end_jdk_gate() {
     let first_output = TestOutputDirectory::new("inheritance-first-build");
     let second_output = TestOutputDirectory::new("inheritance-second-build");
@@ -9900,10 +10123,6 @@ class Runner {
         (
             "root-class-super",
             "class Base { def read(): Int = super.value() }\n",
-        ),
-        (
-            "grandparent-only-super-method",
-            "class Grand { def value(): Int = 1 }\nclass Base extends Grand {}\nclass Derived extends Base { def read(): Int = super.value() }\n",
         ),
     ] {
         let output = TestOutputDirectory::new(label);
