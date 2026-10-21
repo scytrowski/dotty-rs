@@ -1137,18 +1137,10 @@ impl Validator<'_, '_> {
 
         let branch_join = match self.ty(typed.ty)? {
             Type::Constant(Constant::Int(value)) => {
-                let then_join = self.int_branch_constant(
-                    source_if.then_branch,
-                    typed_if.then_branch,
-                    then_type,
-                    method,
-                )?;
-                let else_join = self.int_branch_constant(
-                    source_if.else_branch,
-                    typed_if.else_branch,
-                    else_type,
-                    method,
-                )?;
+                let then_join =
+                    self.int_branch_constant(typed_if.then_branch, then_type, method)?;
+                let else_join =
+                    self.int_branch_constant(typed_if.else_branch, else_type, method)?;
                 if then_join != Some(*value) || else_join != Some(*value) {
                     return Err(PickleError::BodyType {
                         tree: typed_id,
@@ -1166,18 +1158,8 @@ impl Validator<'_, '_> {
             }
         };
         if branch_join == self.plan.definitions.int {
-            self.int_branch_constant(
-                source_if.then_branch,
-                typed_if.then_branch,
-                then_type,
-                method,
-            )?;
-            self.int_branch_constant(
-                source_if.else_branch,
-                typed_if.else_branch,
-                else_type,
-                method,
-            )?;
+            self.int_branch_constant(typed_if.then_branch, then_type, method)?;
+            self.int_branch_constant(typed_if.else_branch, else_type, method)?;
         }
         Ok(branch_join)
     }
@@ -1186,7 +1168,6 @@ impl Validator<'_, '_> {
     /// (including a previously validated Int formal or parameterless method reference).
     fn int_branch_constant(
         &mut self,
-        source_tree: TreeId<Untyped>,
         tree: TreeId<Typed>,
         ty: TypeId,
         method: &MethodPicklePlan,
@@ -1202,8 +1183,11 @@ impl Validator<'_, '_> {
             } if self.plan.store.symbols.contains(*symbol)
                 && self.plan.store.symbols.get(*symbol).kind == SymbolKind::Field =>
             {
-                let source_name =
-                    self.int_field_branch_source_name(source_tree, tree, ty, method)?;
+                // The branch has already been recursively checked. Its source
+                // may be a block or a parenthesized expression, so use the
+                // validated field target rather than reinterpreting the outer
+                // source shape during the Int join.
+                let source_name = self.symbol(*symbol)?.name;
                 self.same_class_field_target(
                     *symbol,
                     source_name,
@@ -1229,58 +1213,6 @@ impl Validator<'_, '_> {
                 Ok(None)
             }
             _ => Err(PickleError::BodyType { tree, ty }),
-        }
-    }
-
-    fn int_field_branch_source_name(
-        &self,
-        mut source_tree: TreeId<Untyped>,
-        typed_tree: TreeId<Typed>,
-        ty: TypeId,
-        method: &MethodPicklePlan,
-    ) -> Result<dotty_core::Name, PickleError> {
-        loop {
-            let source = self.source_tree(source_tree)?;
-            match &source.kind {
-                TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
-                    source_tree = parens.inner;
-                }
-                TreeKind::Ident(ident) => {
-                    if self.unqualified_name_is_shadowed(ident.name, method) {
-                        let Type::TermRef {
-                            target: TermRefTarget::Symbol(symbol),
-                            ..
-                        } = self.ty(ty)?
-                        else {
-                            return Err(PickleError::BodyType {
-                                tree: typed_tree,
-                                ty,
-                            });
-                        };
-                        return Err(PickleError::Reference {
-                            symbol: *symbol,
-                            reason: crate::ReferenceError::NotRegistered,
-                        });
-                    }
-                    return Ok(ident.name);
-                }
-                TreeKind::Select(selection) => {
-                    let qualifier = self.source_tree(selection.qualifier)?;
-                    if matches!(qualifier.kind, TreeKind::This(this) if this.qual.is_none()) {
-                        return Ok(selection.name);
-                    }
-                    return Err(PickleError::BodyType {
-                        tree: typed_tree,
-                        ty,
-                    });
-                }
-                _ => {
-                    return Err(PickleError::BodyType {
-                        tree: typed_tree,
-                        ty,
-                    });
-                }
-            }
         }
     }
 
