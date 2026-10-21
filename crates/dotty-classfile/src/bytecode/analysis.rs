@@ -5974,22 +5974,27 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_reference_locals_degrade_to_top_and_cannot_be_loaded() {
+    fn conflicting_sibling_reference_locals_degrade_to_top_and_cannot_be_loaded() {
         let mut existing = BlockEntryState {
-            locals: vec![FlowLocalState::Object(class_identity("example/A"))],
+            locals: vec![FlowLocalState::Object(class_identity("example/Left"))],
             operand_stack: vec![],
         };
         let incoming = BlockEntryState {
-            locals: vec![FlowLocalState::Object(class_identity("example/B"))],
+            locals: vec![FlowLocalState::Object(class_identity("example/Right"))],
             operand_stack: vec![],
         };
+        let hierarchy = ClassHierarchy::from_edges([
+            ("example/Left".to_owned(), "example/Base".to_owned()),
+            ("example/Right".to_owned(), "example/Base".to_owned()),
+        ])
+        .unwrap();
         let mut evidence = stack_join_evidence(&existing);
         assert!(
             merge_flow_states(
                 &mut existing,
                 &incoming,
                 test_block_id(),
-                &ClassHierarchy::default(),
+                &hierarchy,
                 &mut evidence,
             )
             .unwrap()
