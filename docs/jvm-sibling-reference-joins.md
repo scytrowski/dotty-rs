@@ -30,8 +30,6 @@ class Runner:
     if flag then new Left(seed) else new Right(seed)
   def chooseReverse(flag: Boolean, seed: Int): Base =
     if flag then new Right(seed) else new Left(seed)
-  def chooseInferred(flag: Boolean, seed: Int) =
-    if flag then new Left(seed) else new Right(seed)
   def run(flag: Boolean, seed: Int): Int =
     choose(flag, seed).doubled()
   def accept(value: Base): Int = value.doubled()
@@ -51,9 +49,6 @@ allocation-order-dependent numeric IDs:
 - In both branch orders, the typed `If` result remains `Type::Or` over the
   exact `Left` and `Right` symbols. The nested source form also reaches a
   typed `If` and retains those two union arms.
-- Without an explicit result type, `chooseInferred` has a `Type::Or` method
-  result and its typed `If` also remains `Type::Or`; the audit does not invent
-  a Base target for that inferred union.
 - The real typed call in `run` selects `Runner.choose` and `Base.doubled`.
   `viaArgument` selects `Runner.choose` and `Runner.accept`, whose parameter
   type is the canonical `Base` type.
@@ -78,6 +73,59 @@ unannotated `choose` method keeps `Type::Or` in both the typed `If` and method
 signature. Its first backend rejection is
 `UnsupportedJvmType { kind: Union }` while projecting that inferred signature.
 This is a different failure path from the explicitly Base-typed source above.
+
+## Pinned Scala 3.9.0 comparison
+
+The inferred-result source shape was also run against the pinned Scala
+compiler:
+
+```scala
+class Base(seed: Int):
+  private var current: Int = seed
+  def value(): Int = current
+  def doubled(): Int = value() + value()
+
+class Left(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 1
+
+class Right(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 2
+
+class Runner:
+  def chooseInferred(flag: Boolean, seed: Int) =
+    if flag then new Left(seed) else new Right(seed)
+```
+
+To reproduce with JDK 21 and Coursier, save that block as
+`SiblingReferenceJoinAudit.scala`, then run:
+
+```sh
+SCALA_CP="$(cs fetch --classpath org.scala-lang:scala3-compiler_3:3.9.0)"
+COMPILER_JAR="$(printf '%s' "$SCALA_CP" | tr ':' '\n' | grep '/scala3-compiler_3-3.9.0.jar$')"
+unzip -p "$COMPILER_JAR" compiler.properties | grep -Fx 'version.number=3.9.0'
+unzip -p "$COMPILER_JAR" compiler.properties | grep -Fx 'git.hash=777528f'
+mkdir -p out
+java -cp "$SCALA_CP" dotty.tools.dotc.Main \
+  -classpath "$SCALA_CP" -d out -Xprint:typer SiblingReferenceJoinAudit.scala
+javap -classpath out -s Runner
+```
+
+The pinned artifact reports `version.number=3.9.0` and `git.hash=777528f`,
+matching issue #1433's Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`. The Scala 3.9.0 typer output
+reports `chooseInferred(flag: Boolean, seed: Int): Base`; `javap -s Runner`
+reports descriptor `(ZI)LBase;`.
+
+This is a typer result followed by its emitted JVM descriptor. It does not
+show Scala retaining a union and erasing that union to Base later. In this
+case Scala 3.9.0 infers Base as the method result; dotty-rs currently retains
+`Type::Or` for the analogous inferred method and rejects the union during JVM
+signature projection. That is a source-typing/inference difference, distinct
+from the explicitly Base-typed sibling `If` that reaches dotty-rs's
+`ReferenceTypeMismatch` lowering check. The pinned comparison is recorded
+from the PR review's independent compiler run; this work environment still
+cannot execute Scala or JDK commands itself. The audit does not change typer
+behavior or claim the two paths are the same.
 
 The typer's `Type::Or` is source semantic information. It must not be replaced
 with `Base` merely because `Base` is a known JVM ancestor. Source conformance,
