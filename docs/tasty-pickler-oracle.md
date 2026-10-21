@@ -35,9 +35,15 @@ Fixtures are under [`tests/fixtures/tasty_pickler/`](../tests/fixtures/tasty_pic
 | `ParameterDecl.scala` / `example/ParameterDecl.tasty` | `constant(first: Int, second: Int): Int = 42` has two ordered `PARAM` declarations owned by `constant`, each with an Int type tree, and an independent literal RHS |
 | `Algorithms.scala` / `example/Algorithms.tasty` | Combined Rust producer fixture for `Int.+`, `Int.>`, `Boolean.&&`, short-circuit guards, and mutable `sumTo` loop; see the Sprint 4 report in [the interoperability gate](tasty-pickler-interoperability.md) |
 | `AlgorithmsReference.scala` / `example/AlgorithmsReference.tasty` | Broader source-only audit for primitive operator signatures, short-circuit/eager Boolean runtime distinction, immutable/mutable locals, direct references, ordered assignments and `WHILE` topology; see [the focused audit](tasty-pickler-primitive-control-flow.md) |
+| `PrivateValues.scala` / `example/PrivateValues.tasty` | Private primitive `val` declarations remain class-owned `VALDEF`s at the pickling phase, with `PRIVATE` and `LOCAL` modifiers and literal RHSs |
+| `MutableField.scala` / `example/MutableField.tasty` | Private mutable Int source field, named `SELECT` reads/writes, `ASSIGN`, explicit Unit result, and source method order |
+| `Box.scala` / `example/Box.tasty` | Plain Int constructor parameter is represented by separate template-owned and constructor-owned `PARAM` definitions; no source field/accessor is emitted |
+| `Counter.scala` / `example/Counter.tasty` | Combined plain parameter, private mutable field initializer, getter, setter, increment; initializer `TERMREFsymbol` targets the template parameter while methods use named `SELECT`s |
 | `CustomOperators.scala` / `example/CustomOperators.tasty` | Same-spelled user `+` declaration and application with `THIS` receiver and direct argument; source typer confirms its `SymbolId` is owned by `CustomOperators` |
 
-Each source produces exactly one top-level `.tasty`. Adjacent `.class` files are
+The class-state fixtures and their identity/phase boundary are specified in the
+[class-state contract](tasty-pickler-class-state-contract.md). Each source
+produces exactly one top-level `.tasty`. Adjacent `.class` files are
 generated in temporary compiler output but are not checked in or supplied to the
 standalone reader. The fixture set records both supported producer cases and
 broader grammar/reference observations; each implementation increment defines
