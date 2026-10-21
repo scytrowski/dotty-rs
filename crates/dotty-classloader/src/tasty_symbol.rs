@@ -2264,10 +2264,7 @@ fn resolve_reference_name_at_depth(
             let Some(member) = render_member_name(file, selection.name) else {
                 return ReferenceResolution::Unresolved;
             };
-            if !member
-                .chars()
-                .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
-            {
+            if !member.chars().all(is_binary_name_character) {
                 return ReferenceResolution::Unresolved;
             }
             if let ReferenceResolution::Resolved(name) = resolve_reference_name_at_depth(
@@ -2503,11 +2500,7 @@ fn resolve_parent_name_in_package_with_bare(
         resolve_bare,
         0,
     )
-    .filter(|name| {
-        name.simple_name()
-            .chars()
-            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
-    })
+    .filter(|name| name.simple_name().chars().all(is_binary_name_character))
 }
 
 fn resolve_parent_name_in_package_with_bare_at_depth(
@@ -2533,10 +2526,7 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
         // Operator names require Scala's name mangling before they can be
         // used as JVM binary names. Keep them unresolved until that encoding
         // is available instead of treating source spelling as a path.
-        if !selected_member
-            .chars()
-            .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
-        {
+        if !selected_member.chars().all(is_binary_name_character) {
             return None;
         }
         // A nested AST owner needs a verified JVM nested name. Otherwise a
@@ -2575,11 +2565,7 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
     };
     match reference {
         ReferenceResolution::Resolved(resolved) => {
-            if !resolved
-                .simple_name()
-                .chars()
-                .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$' | '<' | '>'))
-            {
+            if !resolved.simple_name().chars().all(is_binary_name_character) {
                 return None;
             }
             if matches!(
@@ -2617,11 +2603,8 @@ fn resolve_parent_name_in_package_with_bare_at_depth(
         .collect();
 
     if names.iter().any(|name| {
-        name.split('/').any(|segment| {
-            !segment
-                .chars()
-                .all(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '$'))
-        })
+        name.split('/')
+            .any(|segment| !segment.chars().all(is_binary_name_character))
     }) {
         return None;
     }
@@ -2705,6 +2688,10 @@ fn find_select_in_reference<'a>(tree: &RawTree<'a>, depth: usize) -> Option<RawT
         }
         _ => None,
     }
+}
+
+fn is_binary_name_character(character: char) -> bool {
+    unicode_ident::is_xid_continue(character) || matches!(character, '$' | '<' | '>')
 }
 
 fn contains_nested_ast_child(tree: &RawTree<'_>, depth: usize) -> bool {
@@ -3926,6 +3913,16 @@ mod tests {
         )
         .expect("valid Unicode superclass names must remain resolvable");
         assert_eq!(decoded.super_class.as_internal(), "review/Żółw");
+
+        let combining_child = fixture_bytes("scala3-parent-unicode/review/CafeChild.tasty");
+        let decoded = decode_with_resolvers(
+            &combining_child,
+            &BinaryName::from_internal("review/CafeChild"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("valid Unicode combining marks must remain resolvable");
+        assert_eq!(decoded.super_class.as_internal(), "review/Café");
 
         let recheck = fixture_bytes("scala3-compiler/dotty/tools/dotc/transform/Recheck.tasty");
         let error = decode_with_resolvers(

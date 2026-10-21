@@ -48,6 +48,7 @@ dependencies = [
  "dotty-tasty",
  "dotty-tasty-unpickler",
  "flate2",
+ "unicode-ident",
 ]
 
 [[package]]
