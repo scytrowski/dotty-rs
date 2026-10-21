@@ -285,3 +285,43 @@ and Scala.
 This result establishes interoperability for this fixture and these exact
 source forms. It does not establish eager Boolean operator emission or general
 Scala source compatibility.
+
+## Sprint 5: private primitive class fields
+
+Issue #1391 extends the additive class-state plan into a TASTy producer for a
+default-constructed class with source-ordered private primitive fields and
+ordinary methods. Its fixture contains private `seed: Int = 42`,
+`enabled: Boolean = true`, mutable `counter: Int = 0`, and
+`constant(): Int = 1`. The serializer emits class-owned `VALDEF` declarations
+with the Scala 3.9 `PRIVATE, LOCAL` tags and `MUTABLE` on `counter`, followed by
+the method body. It preserves initializer values and source member order.
+
+The focused test checks structural tags, ownership, canonical declaration
+order, method preservation, output path, and deterministic bytes across two
+fresh frontend sessions. With the pinned Scala 3.9.0 compiler, the decompiler
+retained all three field declarations and `-from-tasty` emitted a fresh class
+from the TASTy file alone. A Java harness loaded that class and confirmed
+`constant()` returns `1`. Scala's lowered class omits backing storage for these
+unreferenced fields, so this result does not claim JVM field layout or field
+read/write behavior.
+
+The exact oracle command is:
+
+```sh
+RUN_SCALA_ORACLE=1 \
+SCALA39_ROOT=/home/vdrake6/dotty-rs/.worktrees/scala39-source \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+COURSIER_MAVEN_ROOT=/home/vdrake6/dotty-rs/target-fs2/coursier/https/repo1.maven.org/maven2 \
+CARGO_BUILD_JOBS=1 \
+CARGO_TARGET_DIR=/path/to/repository/target \
+cargo test -p dotty-tasty-pickler --test class_state_plan \
+  validated_private_fields_emit_source_ordered_valdefs_and_preserve_methods \
+  --locked -- --nocapture
+```
+
+The run used Scala 3.9.0 at source revision
+`777528f19a58e794c9954a42f433373472ec57f8`; the emitted candidate SHA-256 was
+`06c2ac6f9dbc1f2ed5e0384f387c7b127e71c93a684563e5f7ed59cccbffa1f0`. The
+oracle also passed Rust wire validation, Scala decompilation, fresh
+`-from-tasty` compilation, `javap`, runtime profile `standard`, and Rust/Scala
+rejection of corrupt and truncated candidates.
