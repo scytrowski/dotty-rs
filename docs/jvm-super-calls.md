@@ -8,7 +8,8 @@ contracts for a narrow parent application. Issue #1371 adds bounded JVM
 constructor lowering. Issue #1372 adds Typer support for an unqualified
 `super` selection targeting one public, concrete, monomorphic method declared
 directly by the current source class's sole non-Object class parent. JVM
-emission of that typed shape remains a separate follow-up.
+emission of that typed shape is covered by subsequent bounded backend steps,
+including the combined three-level constructor and direct-super regression.
 
 ## Reproduce the current behavior
 
@@ -232,6 +233,18 @@ Ordinary calls continue to use `invokevirtual` and the declaring method's
 super-constructor chains and ordinary virtual calls are the compatibility
 baseline for all follow-up work.
 
+The source fixture `ThreeLevelConstructorSuper.scala` exercises the combined
+two-edge shape. `ChainMiddle(seed)` forwards its own constructor parameter to
+`ChainBase(seed)`, and `ChainLeaf(seed)` independently forwards its parameter
+to `ChainMiddle(seed)`. Each constructor performs one call to its immediate
+parent before its own initializers. `ChainMiddle.value` calls
+`ChainBase.value` with `invokespecial`; `ChainLeaf.value` and
+`ChainLeaf.parentValue` call `ChainMiddle.value` with `invokespecial`. The
+inherited `ChainBase.doubled` method retains `invokevirtual ChainBase.value`,
+so a `ChainLeaf` receiver dispatches to `ChainLeaf.value`. The JDK-gated test
+checks owners with `javap -c -v` and executes the chain under
+`java -Xverify:all`, including a negative seed.
+
 ## Characterization matrix and follow-up ownership
 
 | Source shape | Current observed result | Required boundary / next owner |
@@ -239,15 +252,16 @@ baseline for all follow-up work.
 | `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then source-ordered arguments, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
 | `super.value()` targeting a method inherited through the direct parent | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical declaring symbol; `dotty-jvm` verifies the ancestor path and emits `invokespecial` with the immediate parent as symbolic owner; JDK21 CI verifies execution | Preserve canonical symbol and verifier proofs in the combined source-to-JVM integration from [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `super.add(n)`, Boolean/reference results, or a branched super call | The planned direct-parent method, exact descriptor, argument order, and result are checked; branches receive classfile stack-map frames and the mandatory JDK gate verifies execution | Preserve the approved direct-parent public instance-method subset; broader signatures and call shapes need a scoped issue |
-| Parameterized parent plus explicit direct-super calls in one source-to-JVM run | `SuperCalls.scala` compiles unchanged through one frontend session per build; decoded classfiles and JDK 21 execution verify the combined constructor and dispatch paths | Two fresh sessions emit identical Base/Derived/Runner bytes in source order; mandatory JDK CI runs the numeric and verifier checks — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
+| Parameterized parent plus explicit direct-super calls in one source-to-JVM run | `SuperCalls.scala` covers the two-class combination; `ThreeLevelConstructorSuper.scala` verifies Base/Middle/Leaf constructor forwarding, both immediate-parent super owners, and inherited virtual dispatch in the full three-class chain | Preserve canonical per-edge and per-method identities; the JDK 21+ gate inspects `javap -c -v` and runs `java -Xverify:all` — [#1407](https://github.com/scytrowski/dotty-rs/issues/1407) |
 | `extends Base` with accessible `Base.<init>()V` | Supported and verified by existing source-backed regression | Preserve direct-parent ownership and post-super analysis in `dotty-jvm` and `dotty-classfile` |
 | `base.value()` or inherited `derived.value()` | Supported virtual calls use the selected declaration's owner and `invokevirtual` | Preserve current dynamic-dispatch and `Methodref` behavior |
 | Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Rejected in typer or the JVM adapter with typed shape, owner, or metadata errors; no class artifact is published | Keep these shapes rejected in the bounded slice — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
 
 Source typing proof, verifier support, and bounded lowering remain separate
-contracts at their owning boundaries. The integration fixture exercises the
-implemented parameterized-constructor slice end to end; unsupported forms stay
-explicitly rejected until a scoped follow-up adds them.
+contracts at their owning boundaries. The integration fixtures exercise the
+two- and three-class parameterized-constructor/super-call combinations end to
+end; unsupported forms stay explicitly rejected until a scoped follow-up adds
+them.
 
 ## Combined parameterized construction and super dispatch
 

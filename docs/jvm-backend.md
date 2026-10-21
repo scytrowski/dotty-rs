@@ -108,6 +108,13 @@ metadata carries the matching direct-parent proof. Whole-class emission uses it 
 root and a maximum three-class same-unit chain of public ordinary classes with
 public, non-final parents. A fourth user class, external chains, unavailable
 constructors, and other unsupported shapes fail before bytes are returned.
+The source-backed `ThreeLevelConstructorSuper.scala` regression composes this
+proof with parameterized constructor forwarding and direct-super calls:
+`ChainBase -> Object`, `ChainMiddle -> ChainBase`, and
+`ChainLeaf -> ChainMiddle`. Each constructor invokes its immediate parent
+once before its own initializers; `super.value()` uses the immediate parent as
+its `invokespecial` owner. Inherited `ChainBase.doubled()` remains one method
+body and uses `invokevirtual` for dynamic dispatch on a `ChainLeaf`.
 Exact planned class references in unit-aware method, constructor, and field
 metadata require the complete unit hierarchy proof; standalone projections
 remain restricted to metadata they can validate locally. The projection also
