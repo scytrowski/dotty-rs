@@ -630,7 +630,7 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 signatures = (r"public example\.Box\(int\)", r"public int answer\(\)")
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Box class has unexpected signatures: {javap}")
-                if re.search(r"public (?:final )?int start\\(\\)", javap):
+                if re.search(r"public (?:final )?int start\(\)", javap):
                     raise RuntimeError(f"plain constructor input became a public accessor: {javap}")
             if relative.as_posix() == "example/Conditionals.tasty":
                 signatures = (
