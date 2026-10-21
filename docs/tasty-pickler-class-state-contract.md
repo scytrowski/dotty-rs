@@ -75,10 +75,37 @@ primitive literals or a direct reference to one of those constructor-owned
 parameters. Field-to-field reads are rejected because successful typing alone
 does not establish safe initialization order.
 
-This plan has no TASTy serializer entry point. Existing `PicklePlan` validation
-and emitted files remain unchanged; #1390 does not claim field or constructor
-encoding support. Validation borrows the compilation session and cannot publish
-bytes or mutate its semantic store. Unsupported or inconsistent inputs return
-typed errors, including stale typed roots, source-order mismatches, unsafe
-initializer edges, unsupported visibility/modifiers, and bounded item/owner
-chain violations.
+Validation borrows the compilation session and cannot publish bytes or mutate
+its semantic store. Unsupported or inconsistent inputs return typed errors,
+including stale typed roots, source-order mismatches, unsafe initializer edges,
+unsupported visibility/modifiers, and bounded item/owner chain violations.
+
+## Source-ordered field emission (#1391)
+
+`ValidatedClassStatePlan::pickle` now emits a complete Scala 3.9 TASTy file for
+the validated class-state slice with the ordinary no-argument primary
+constructor. It writes the parent application and constructor first, then
+preserves `Template.body` order: each private primitive field is a class-owned
+`VALDEF` with its declared primitive type, exact typed initializer, and the
+observed `PRIVATE, LOCAL` modifier tail (`MUTABLE` for a `var`); ordinary methods
+remain in their source positions with their exact typed body roots. The output
+includes the source-file annotation and canonical declaration addresses. The
+serializer applies the configured projection and whole-file limits. Constructor
+inputs remain accepted by the plan contract but are rejected by this emitted
+class-state form.
+
+The regression fixture emits `seed: Int = 42`, `enabled: Boolean = true`,
+`counter: Int = 0`, and `constant(): Int = 1`. It checks source order, declaration
+ownership, modifier tags, method preservation, and byte-identical output from
+two independently built frontend sessions. The pinned Scala 3.9.0 decompiler
+shows all three source field declarations, and `-from-tasty` compiles the file
+without adjacent source or class files. The fresh class runs `constant()` and
+returns `1`. Scala may omit unreferenced backing storage in its lowered JVM
+class; this gate establishes TASTy declaration preservation and reader
+interoperability, not final JVM field layout or read/write behavior. The
+`PrivateFields` runtime case and checks live in
+[`tools/tasty-pickler-oracle/run.py`](../tools/tasty-pickler-oracle/run.py).
+
+This increment does not add constructor parameters, constructor accessors,
+field reads/writes, or backing-storage ABI guarantees. Existing
+`ValidatedPicklePlan` output forms remain unchanged.

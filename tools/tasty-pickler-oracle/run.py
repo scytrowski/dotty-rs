@@ -203,6 +203,15 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
     decompiled = toolchain.compiler([staged], decompile=True)
     if not decompiled.strip():
         raise RuntimeError("independent decompiler returned no tree")
+    if relative.as_posix() == "example/PrivateFields.tasty":
+        expected_members = (
+            "private[this] val seed: scala.Int = 42",
+            "private[this] val enabled: scala.Boolean = true",
+            "private[this] var counter: scala.Int = 0",
+            "def constant(): scala.Int = 1",
+        )
+        if not all(member in decompiled for member in expected_members):
+            raise RuntimeError(f"fresh PrivateFields TASTy lost a field or method: {decompiled}")
     toolchain.compiler(["-from-tasty", "-d", compiled, staged])
     emitted = compiled / relative.with_suffix(".class")
     if not emitted.is_file() or emitted.stat().st_size == 0:
@@ -294,6 +303,20 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
   }
 }
 """, "Answer.value() = 42", 42,
+            ),
+            "example/PrivateFields.tasty": (
+                "example.PrivateFields", r"public int constant\(\)",
+                "PrivateFieldsRuntime.java",
+                """public final class PrivateFieldsRuntime {
+  public static void main(String[] args) throws Exception {
+    example.PrivateFields values = new example.PrivateFields();
+    int result = values.constant();
+    if (result != 1)
+      throw new AssertionError("PrivateFields.constant() = " + result);
+    System.out.println("PrivateFields.constant() = " + result);
+  }
+}
+""", "PrivateFields.constant() = 1", 1,
             ),
             "example/Parameters.tasty": (
                 "example.Parameters", r"public int pick\(int, int\)", "ParametersRuntime.java",

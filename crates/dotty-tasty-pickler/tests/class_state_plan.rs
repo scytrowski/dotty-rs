@@ -1,19 +1,29 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::process::Command;
 
 use dotty_core::ast::*;
 use dotty_core::*;
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
 use dotty_parser::parse_compilation_unit;
+use dotty_tasty::tasty::*;
 use dotty_tasty_pickler::*;
 use dotty_typer::SourceTyper;
 
 #[derive(Clone, Default)]
-struct Bindings(HashMap<(SourceId, TreeId<Untyped>), TreeId<Typed>>);
+struct Bindings(
+    HashMap<(SourceId, TreeId<Untyped>), TreeId<Typed>>,
+    HashMap<(SourceId, SymbolId), Vec<LocalValueBinding>>,
+);
 
 impl SourceTypedBindings for Bindings {
     fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>> {
         self.0.get(&(source, tree)).copied()
+    }
+
+    fn local_value_bindings(&self, source: SourceId, method: SymbolId) -> Vec<LocalValueBinding> {
+        self.1.get(&(source, method)).cloned().unwrap_or_default()
     }
 }
 
@@ -109,6 +119,14 @@ fn clone_typed_ast(ast: &AstArena<Typed>) -> AstArena<Typed> {
         cloned.alloc(tree.clone());
     }
     cloned
+}
+
+fn raw_tree_tag(tree: &RawTree<'_>) -> u8 {
+    match tree {
+        RawTree::Leaf(term) => term.tag,
+        RawTree::Ast { tag, .. } | RawTree::NatAst { tag, .. } => *tag,
+        RawTree::LengthNode(node) => node.tag,
+    }
 }
 
 fn class_state_plan<'a>(
@@ -411,7 +429,357 @@ fn source_typer_counter_and_private_values_satisfy_the_read_only_plan() {
         }
         .validate()
         .unwrap();
-    });
+    })
+}
+
+fn private_fields_output() -> (PickledTasty, SymbolId, Vec<SymbolId>, TreeId<Typed>) {
+    let source_text = "package example\nclass PrivateFields:\n  private val seed: Int = 42\n  private val enabled: Boolean = true\n  private var counter: Int = 0\n  def constant(): Int = 1\n";
+    with_frontend(source_text, |ast, source, index, definitions, typer| {
+        let (class, members, constructor, mut bindings) = class_state_plan(
+            ast,
+            source,
+            index,
+            definitions,
+            typer,
+            "PrivateFields",
+            "PrivateFields.scala",
+        );
+        let ClassMemberPicklePlan::Method {
+            symbol: method,
+            source_tree: method_tree,
+        } = members[3]
+        else {
+            unreachable!()
+        };
+        let TreeKind::DefDef(method_definition) = &ast.get(method_tree).kind else {
+            unreachable!()
+        };
+        let method_rhs = method_definition.rhs.unwrap();
+        let method_context = typer.expression_context_for(method).unwrap();
+        let typed_method_rhs = typer
+            .type_expression_expected(method_rhs, method_context, definitions.int)
+            .unwrap();
+        bindings.0.insert((source, method_rhs), typed_method_rhs);
+        let class_tree = class_tree_for(ast, source, index, class);
+        let output = ClassStatePicklePlan {
+            store: typer.store(),
+            definitions,
+            source_ast: ast,
+            typed_ast: typer.typed_ast(),
+            source_index: index,
+            typed_bindings: &bindings,
+            source: SourceMetadata {
+                id: source,
+                name: "PrivateFields.scala".into(),
+            },
+            class,
+            class_tree,
+            constructor,
+            members: &members,
+        }
+        .validate()
+        .unwrap()
+        .pickle()
+        .unwrap();
+
+        let method_source_tree = match members[3] {
+            ClassMemberPicklePlan::Method { source_tree, .. } => source_tree,
+            _ => unreachable!(),
+        };
+        let method_body = match &ast.get(method_source_tree).kind {
+            TreeKind::DefDef(definition) => definition.rhs.unwrap(),
+            _ => unreachable!(),
+        };
+        let method_body = bindings.typed_at(source, method_body).unwrap();
+        (
+            output,
+            class,
+            members
+                .iter()
+                .map(|member| match member {
+                    ClassMemberPicklePlan::Field(field) => field.symbol,
+                    ClassMemberPicklePlan::Method { symbol, .. } => *symbol,
+                })
+                .collect(),
+            method_body,
+        )
+    })
+}
+
+fn emit_class_state_source(
+    source_text: &str,
+    class_name: &str,
+    source_name: &str,
+    corrupt_method_body: Option<&str>,
+) -> Result<PickledTasty, PickleError> {
+    with_frontend(source_text, |ast, source, index, definitions, typer| {
+        let (class, members, constructor, mut bindings) = class_state_plan(
+            ast,
+            source,
+            index,
+            definitions,
+            typer,
+            class_name,
+            source_name,
+        );
+        for member in &members {
+            let ClassMemberPicklePlan::Method {
+                symbol,
+                source_tree,
+            } = member
+            else {
+                continue;
+            };
+            let TreeKind::DefDef(definition) = &ast.get(*source_tree).kind else {
+                unreachable!()
+            };
+            let rhs = definition.rhs.expect("test methods have bodies");
+            let context = typer.expression_context_for(*symbol).unwrap();
+            let typed = typer
+                .type_expression_expected(rhs, context, definitions.int)
+                .unwrap();
+            bindings.0.insert((source, rhs), typed);
+            let locals =
+                ast.iter()
+                    .filter_map(|(source_tree, tree)| {
+                        matches!(tree.kind, TreeKind::ValDef(_))
+                            .then(|| {
+                                typer
+                                    .typed_local_binding_at(source, source_tree)
+                                    .map(|binding| (source_tree, binding))
+                            })
+                            .flatten()
+                    })
+                    .filter_map(|(source_tree, binding)| {
+                        (typer.store().symbols.get(binding.symbol()).owner == Some(*symbol))
+                            .then_some(LocalValueBinding {
+                                source_tree,
+                                symbol: binding.symbol(),
+                                typed_declaration: binding.declaration(),
+                                scope: binding.scope(),
+                            })
+                    })
+                    .collect();
+            bindings.1.insert((source, *symbol), locals);
+        }
+        for (source_tree, _) in ast.iter() {
+            if let Some(typed) = typer.source_typed_index().get(source, source_tree) {
+                bindings.0.insert((source, source_tree), typed);
+            }
+        }
+
+        let mut typed_ast = clone_typed_ast(typer.typed_ast());
+        if let Some(name) = corrupt_method_body {
+            let method = members.iter().find_map(|member| {
+                let ClassMemberPicklePlan::Method {
+                    symbol,
+                    source_tree,
+                } = member
+                else {
+                    return None;
+                };
+                (name_of(ast, *source_tree, typer) == name).then_some(*symbol)
+            });
+            let method = method.expect("corruption target exists");
+            let ClassMemberPicklePlan::Method { source_tree, .. } = members
+                .iter()
+                .find(|member| matches!(member, ClassMemberPicklePlan::Method { symbol, .. } if *symbol == method))
+                .copied()
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            let TreeKind::DefDef(definition) = &ast.get(source_tree).kind else {
+                unreachable!()
+            };
+            let rhs = definition.rhs.unwrap();
+            let typed_root = bindings.typed_at(source, rhs).unwrap();
+            let forged = typed_ast.get_mut(typed_root);
+            let TreeKind::Literal(literal) = &mut forged.kind else {
+                panic!("test corruption expects a literal body")
+            };
+            literal.value = Constant::Int(42);
+        }
+
+        let class_tree = class_tree_for(ast, source, index, class);
+        ClassStatePicklePlan {
+            store: typer.store(),
+            definitions,
+            source_ast: ast,
+            typed_ast: &typed_ast,
+            source_index: index,
+            typed_bindings: &bindings,
+            source: SourceMetadata {
+                id: source,
+                name: source_name.into(),
+            },
+            class,
+            class_tree,
+            constructor,
+            members: &members,
+        }
+        .validate()?
+        .pickle()
+    })
+}
+
+#[test]
+fn validated_private_fields_emit_source_ordered_valdefs_and_preserve_methods() {
+    let (output, class, members, method_body) = private_fields_output();
+    let (other_session, _, _, _) = private_fields_output();
+    assert_eq!(output.bytes(), other_session.bytes());
+    assert_eq!(output.intended_tasty_path(), "example/PrivateFields.tasty");
+    assert_eq!(output.declarations().len(), 6);
+    assert_eq!(
+        output.body(output.declarations()[5].symbol),
+        Some(method_body)
+    );
+    assert_eq!(
+        output.declarations()[2..]
+            .iter()
+            .map(|declaration| declaration.symbol)
+            .collect::<Vec<_>>(),
+        members
+    );
+
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let fields = output.declarations()[2..5]
+        .iter()
+        .map(|declaration| {
+            assert_eq!(declaration.owner, class);
+            index
+                .get(declaration.address)
+                .unwrap()
+                .decode_definition_body()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let expected = [
+        (
+            "seed",
+            IDENTTPT_TAG,
+            INTCONST_TAG,
+            vec![PRIVATE_TAG, LOCAL_TAG],
+        ),
+        (
+            "enabled",
+            IDENTTPT_TAG,
+            TRUECONST_TAG,
+            vec![PRIVATE_TAG, LOCAL_TAG],
+        ),
+        (
+            "counter",
+            IDENTTPT_TAG,
+            INTCONST_TAG,
+            vec![PRIVATE_TAG, LOCAL_TAG, MUTABLE_TAG],
+        ),
+    ];
+    for (field, (name, type_tag, rhs_tag, modifiers)) in fields.iter().zip(expected) {
+        let DefinitionBody::ValDef {
+            name: name_ref,
+            type_tree,
+            rhs,
+            tail,
+        } = field
+        else {
+            panic!("class field is a VALDEF")
+        };
+        assert_eq!(file.render_name(*name_ref).unwrap(), name);
+        assert_eq!(raw_tree_tag(type_tree), type_tag);
+        assert_eq!(raw_tree_tag(rhs.as_ref().unwrap()), rhs_tag);
+        assert_eq!(
+            tail.iter()
+                .map(|modifier| match modifier {
+                    DefinitionTail::Modifier(tag) => *tag,
+                    _ => panic!("field has only plain modifiers"),
+                })
+                .collect::<Vec<_>>(),
+            modifiers
+        );
+    }
+    let method = output.declarations()[5];
+    let method = index
+        .get(method.address)
+        .unwrap()
+        .decode_defdef_body()
+        .unwrap();
+    assert_eq!(file.render_name(method.name).unwrap(), "constant");
+    assert_eq!(method.clauses, [EMPTYCLAUSE_TAG]);
+    assert_eq!(raw_tree_tag(&method.rhs.unwrap()), INTCONST_TAG);
+
+    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1391/generated/example/PrivateFields.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1391/tmp"))
+            .status()
+            .expect("start the pinned Scala 3.9 -from-tasty gate");
+        assert!(result.success(), "PrivateFields -from-tasty gate failed");
+    }
+}
+
+#[test]
+fn class_state_reuses_canonical_parameter_and_forward_method_validation() {
+    let parameterized = "package example\nclass Parameterized:\n  private val seed: Int = 1\n  def identity(value: Int): Int = value\n";
+    let output =
+        emit_class_state_source(parameterized, "Parameterized", "Parameterized.scala", None)
+            .unwrap();
+    assert_eq!(output.intended_tasty_path(), "example/Parameterized.tasty");
+    assert_eq!(output.declarations().len(), 5);
+
+    let references = "package example\nclass References:\n  private val seed: Int = 1\n  def first: Int = second\n  def second: Int = 2\n";
+    let output =
+        emit_class_state_source(references, "References", "References.scala", None).unwrap();
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let methods = output.declarations()[3..]
+        .iter()
+        .map(|declaration| {
+            file.ast_address_index()
+                .unwrap()
+                .get(declaration.address)
+                .unwrap()
+                .decode_defdef_body()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 2);
+    assert_eq!(raw_tree_tag(methods[0].rhs.as_ref().unwrap()), SELECT_TAG);
+}
+
+#[test]
+fn class_state_registers_local_values_and_rejects_forged_method_bodies() {
+    let source = "package example\nclass LocalState:\n  private val seed: Int = 1\n  def run(): Int = { val saved: Int = 1; saved + 1 }\n  def sumTo(limit: Int): Int = { var total: Int = 0; var index: Int = 0; while index < limit do { total = total + index; index = index + 1 }; total }\n";
+    let output = emit_class_state_source(source, "LocalState", "LocalState.scala", None).unwrap();
+    assert_eq!(output.declarations().len(), 9);
+
+    let corrupt = "package example\nclass CorruptBody:\n  private val seed: Int = 1\n  def constant(): Int = 1\n";
+    assert!(
+        emit_class_state_source(
+            corrupt,
+            "CorruptBody",
+            "CorruptBody.scala",
+            Some("constant"),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn class_state_artifact_path_keeps_nested_package_owner_components() {
+    let source = "package example.nested\nclass NestedFields:\n  private val seed: Int = 1\n  def constant: Int = 1\n";
+    let output =
+        emit_class_state_source(source, "NestedFields", "NestedFields.scala", None).unwrap();
+    assert_eq!(
+        output.intended_tasty_path(),
+        "example/nested/NestedFields.tasty"
+    );
 }
 
 #[test]
@@ -494,7 +862,7 @@ fn unsupported_visibility_order_and_missing_bindings_are_rejected() {
             ty: definitions.int,
         });
         stale_bindings.insert((source, source_rhs), stale_tree);
-        let stale_bindings = Bindings(stale_bindings);
+        let stale_bindings = Bindings(stale_bindings, HashMap::new());
         let mut stale_members = members.clone();
         let ClassMemberPicklePlan::Field(field) = &mut stale_members[0] else {
             unreachable!()

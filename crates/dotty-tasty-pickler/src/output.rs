@@ -56,6 +56,16 @@ impl PickledTasty {
             .find(|(id, _)| *id == method)
             .map(|(_, root)| *root)
     }
+
+    pub(crate) fn from_assembly(output: crate::skeleton::Assembly) -> Self {
+        Self {
+            bytes: output.bytes,
+            source: output.source,
+            intended_tasty_path: output.intended_tasty_path,
+            declarations: output.declarations,
+            bodies: output.bodies,
+        }
+    }
 }
 
 impl ValidatedPicklePlan<'_, '_> {

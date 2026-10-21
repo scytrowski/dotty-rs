@@ -18,11 +18,15 @@
 //! ID or a dishonest source-to-typed binding provider. Callers must preserve that
 //! session invariant. Validation only borrows semantic data and publishes no files.
 //!
-//! [`ClassStatePicklePlan`] is a separate plan-only contract for source-ordered
-//! private primitive fields and bounded primary-constructor inputs. It does not
-//! extend the current serializer's emitted forms.
+//! [`ClassStatePicklePlan`] validates source-ordered private primitive fields,
+//! their typed initializers, bounded primary-constructor inputs and ordinary
+//! methods. [`ValidatedClassStatePlan::pickle`] emits the supported default-
+//! constructor class state, including private `val`/`var` declarations and
+//! their exact initializer trees. The class-state serializer currently accepts
+//! only a no-argument primary constructor; constructor inputs remain plan-only.
 
 mod artifact_name;
+mod class_state_output;
 mod error;
 mod expression;
 mod output;
