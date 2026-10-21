@@ -19,6 +19,13 @@ identities and body roots; do not add a shared `TypedCompilationUnit` or make
 Typer depend on a serializer. Full compiler interoperability remains the
 [#1195](https://github.com/scytrowski/dotty-rs/issues/1195) gate.
 
+The additive `ClassStatePicklePlan` now validates source-ordered private
+primitive fields, exact typed initializer bindings, and the bounded primary
+constructor input contract described in the
+[class-state contract](tasty-pickler-class-state-contract.md). It is a
+read-only planning API only; the existing `PicklePlan` serializer still emits
+the previously supported forms.
+
 ## 1. Ownership and dependency boundary
 
 Arrows below mean input/dependency flow, not new dependencies in the frontend:
