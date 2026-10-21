@@ -2854,6 +2854,9 @@ mod tests {
     use dotty_tasty::tasty::{AstChildNode, SimpleTerm};
 
     fn tsv_cell(value: &str) -> String {
+        if value.is_empty() {
+            return "-".to_owned();
+        }
         value
             .replace('\\', "\\\\")
             .replace('\t', "\\t")
@@ -2861,9 +2864,10 @@ mod tests {
             .replace('\n', "\\n")
     }
 
-    /// Opt-in, standalone profile of the frozen #1342 roots. This reads only
-    /// the pinned TASTy resources named by the root TSV; it never runs source
-    /// corpus typing and does not change the semantic report used by CI.
+    /// Opt-in profile of the frozen #1342 roots. This reads only the pinned
+    /// TASTy resources named by the root TSV and loads those roots and their
+    /// dependencies; it never runs source corpus typing and does not change
+    /// the semantic report used by CI.
     #[test]
     #[ignore = "run with pinned Scala 3.9 JAR paths and SCALA39_PARENT_PROFILE_OUTPUT"]
     fn profile_frozen_unresolved_supertype_parent_roots() {
@@ -2889,13 +2893,27 @@ mod tests {
             Box::new(JarClassPath::new(&compiler_jar, 21).expect("open compiler JAR")),
             Box::new(JarClassPath::new(&library_jar, 21).expect("open Scala library JAR")),
             Box::new(JarClassPath::new(&scala3_library_jar, 21).expect("open Scala 3 library JAR")),
-            Box::new(JdkClassPath::new(jdk_jmods).expect("open JDK 21 jmods")),
+            Box::new(JdkClassPath::new(jdk_jmods.clone()).expect("open JDK 21 jmods")),
         ]);
+        let load_class_path = CompositeClassPath::new(vec![
+            Box::new(JarClassPath::new(&compiler_jar, 21).expect("open compiler JAR for loading")),
+            Box::new(
+                JarClassPath::new(&library_jar, 21).expect("open Scala library JAR for loading"),
+            ),
+            Box::new(
+                JarClassPath::new(&scala3_library_jar, 21)
+                    .expect("open Scala 3 library JAR for loading"),
+            ),
+            Box::new(JdkClassPath::new(jdk_jmods).expect("open JDK 21 jmods for loading")),
+        ]);
+        let mut semantic_store = dotty_core::SemanticStore::new();
+        let mut class_loader =
+            crate::loader::ClassLoader::new(load_class_path, &mut semantic_store);
         let roots = include_str!(
             "../../../docs/typer-classpath-corpus-audit-post-compiler-modules-3.9.0-tasty-supertype-roots.tsv"
         );
         let mut rows = String::from(
-            "requested_class_root\tweighted_observations\tresource_path\tartifact\tartifact_version\tartifact_sha256\ttemplate_wire_address\tparent_index\tshape\tresolution_stage\tresolved_binary_name\treference_tag\treference_name\treference_prefix\talias_owner\talias_name\thas_semantic_reference\thas_reference_prefix\tvisible_names\traw_tree\tprofile_first_unresolved_parent_index\treproduced_unresolved_parent_index\tdeepest_typed_cause\n",
+            "requested_class_root\trequested_identity\tweighted_observations\tresource_path\tartifact\tartifact_version\tartifact_sha256\ttemplate_wire_address\tparent_index\tshape\tresolution_stage\tresolved_binary_name\treference_tag\treference_name\treference_prefix\talias_owner\talias_name\thas_semantic_reference\thas_reference_prefix\tvisible_names\traw_tree\tprofile_first_unresolved_parent_index\tstandalone_decode_parent_index\tstandalone_decode_cause\tdeepest_typed_cause\tfailing_binary_name\tfailure_parent_index\tfailure_parent_template_wire_address\tfailure_parent_shape\tfailure_reference_tag\tfailure_reference_name\tfailure_reference_prefix\tdependency_chain\tdeepest_resource_origin\n",
         );
         let mut root_count = 0usize;
         let mut total_weight = 0u64;
@@ -2903,6 +2921,7 @@ mod tests {
         let mut compiler_weight = 0u64;
         let mut library_count = 0usize;
         let mut library_weight = 0u64;
+        let mut load_causes = std::collections::BTreeMap::new();
 
         for line in roots.lines().skip(1).filter(|line| !line.trim().is_empty()) {
             let fields = line.split('\t').collect::<Vec<_>>();
@@ -2994,7 +3013,7 @@ mod tests {
                     },
                 )
             };
-            let (reproduced_parent_index, deepest_typed_cause) = match decode_result {
+            let (standalone_parent_index, standalone_decode_cause) = match decode_result {
                 Err(error) => {
                     let parent_index = match &error {
                         TastyDecodeError::UnresolvedSupertype(parent) => Some(parent.parent_index),
@@ -3008,11 +3027,92 @@ mod tests {
                 }
                 Ok(_) => (None, "none"),
             };
+            let (load_cause, failing_binary_name, failure_parent, dependency_chain, failure_origin) =
+                match class_loader.load_class_detailed(&requested) {
+                    Ok(_) => ("none", String::new(), None, String::new(), String::new()),
+                    Err(failure) => {
+                        let mut chain = Vec::new();
+                        let mut deepest = &failure.error;
+                        while let crate::error::ClassLoadError::DependencyFailure {
+                            owner,
+                            dependency,
+                            source,
+                        } = deepest
+                        {
+                            chain.push(format!(
+                                "{}=>{}",
+                                owner.as_internal(),
+                                dependency.as_internal()
+                            ));
+                            deepest = source.as_ref();
+                        }
+                        let (failing_name, parent) = match deepest {
+                            crate::error::ClassLoadError::InvalidTastyFile(
+                                name,
+                                TastyDecodeError::UnresolvedSupertype(parent),
+                            ) => (name.as_internal().to_owned(), Some(parent.as_ref().clone())),
+                            _ => match deepest {
+                                crate::error::ClassLoadError::NotFound(name)
+                                | crate::error::ClassLoadError::Io(name, _)
+                                | crate::error::ClassLoadError::InvalidClassFile(name, _)
+                                | crate::error::ClassLoadError::UnsupportedClassVersion(name, _)
+                                | crate::error::ClassLoadError::MalformedReference(name, _)
+                                | crate::error::ClassLoadError::MalformedDescriptor(name, _)
+                                | crate::error::ClassLoadError::MalformedSignature(name, _)
+                                | crate::error::ClassLoadError::InvalidTastyFile(name, _)
+                                | crate::error::ClassLoadError::CircularInheritance(name)
+                                | crate::error::ClassLoadError::InheritanceDepthExceeded(name) => {
+                                    (name.as_internal().to_owned(), None)
+                                }
+                                crate::error::ClassLoadError::NameMismatch {
+                                    requested, ..
+                                } => (requested.as_internal().to_owned(), None),
+                                crate::error::ClassLoadError::IdentityConflict { name, .. } => {
+                                    (name.as_internal().to_owned(), None)
+                                }
+                                crate::error::ClassLoadError::UnresolvedTypeVariable(name, _) => {
+                                    (name.as_internal().to_owned(), None)
+                                }
+                                crate::error::ClassLoadError::DependencyFailure { .. } => {
+                                    unreachable!("dependency wrapper was unwrapped above")
+                                }
+                            },
+                        };
+                        let origin = match failure.origin.as_ref() {
+                            Some(crate::class_path::ClassOrigin::Jar(path)) => format!(
+                                "jar:{}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                            Some(crate::class_path::ClassOrigin::Directory(path)) => format!(
+                                "directory:{}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                            Some(crate::class_path::ClassOrigin::Jmod(path)) => format!(
+                                "jmod:{}",
+                                path.file_name().unwrap_or_default().to_string_lossy()
+                            ),
+                            None => String::new(),
+                        };
+                        (
+                            failure.root_cause_code(),
+                            failing_name,
+                            parent,
+                            chain.join("|"),
+                            origin,
+                        )
+                    }
+                };
+            load_causes.insert(requested_root.to_owned(), load_cause);
 
             for profile in profiles {
                 let reference = profile.reference;
                 let cells = [
                     requested_root.to_owned(),
+                    if requested_root.ends_with('$') {
+                        "ModuleClass".to_owned()
+                    } else {
+                        "Class".to_owned()
+                    },
                     weighted_observations.to_string(),
                     resource_path.to_owned(),
                     artifact.to_owned(),
@@ -3035,10 +3135,38 @@ mod tests {
                     first_unresolved_parent
                         .map(|index| index.to_string())
                         .unwrap_or_default(),
-                    reproduced_parent_index
+                    standalone_parent_index
                         .map(|index| index.to_string())
                         .unwrap_or_default(),
-                    deepest_typed_cause.to_owned(),
+                    standalone_decode_cause.to_owned(),
+                    load_cause.to_owned(),
+                    failing_binary_name.clone(),
+                    failure_parent
+                        .as_ref()
+                        .map(|parent| parent.parent_index.to_string())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .map(|parent| parent.template_wire_address.to_string())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .map(|parent| parent.shape.clone())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .and_then(|parent| parent.reference_tag.clone())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .and_then(|parent| parent.reference_name.clone())
+                        .unwrap_or_default(),
+                    failure_parent
+                        .as_ref()
+                        .and_then(|parent| parent.reference_prefix.clone())
+                        .unwrap_or_default(),
+                    dependency_chain.clone(),
+                    failure_origin.clone(),
                 ];
                 for (index, cell) in cells.iter().enumerate() {
                     if index > 0 {
@@ -3062,6 +3190,19 @@ mod tests {
         assert_eq!((root_count, total_weight), (50, 8_949));
         assert_eq!((compiler_count, compiler_weight), (18, 8_590));
         assert_eq!((library_count, library_weight), (32, 359));
+        let load_cause_counts = load_causes.values().fold(
+            std::collections::BTreeMap::<&str, usize>::new(),
+            |mut counts, cause| {
+                *counts.entry(cause).or_default() += 1;
+                counts
+            },
+        );
+        assert_eq!(
+            load_cause_counts.get("tasty.unresolved_supertype"),
+            Some(&41)
+        );
+        assert_eq!(load_cause_counts.get("tasty.missing_type_def"), Some(&6));
+        assert_eq!(load_cause_counts.get("none"), Some(&3));
         std::fs::write(&output_path, rows).expect("write parent profile TSV");
         eprintln!(
             "wrote {root_count} roots ({total_weight} weighted observations) to {}",
