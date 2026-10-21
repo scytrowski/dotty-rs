@@ -114,7 +114,9 @@ At each reachable block:
    before widening and inputs arriving on backedges. This join is commutative
    and idempotent; bounded chains converge independently of predecessor order,
    and a widened state requeues dependent blocks. Missing paths, an `Object`-
-   only intersection, and interfaces do not provide a join proof.
+   only intersection without an actual `Object` input, and interfaces do not
+   provide a join proof. An actual `Object` input may join at `Object` only
+   when every other input has an explicit checked path to it.
    Initialized/uninitialized mismatches,
    different allocation sites, primitive/reference mismatches, and different
    stack heights return typed analysis errors. Never infer a shared ancestor
@@ -268,7 +270,7 @@ straight-line builder methods.
 | `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner; virtual calls also check supported exact object arguments and results | Covered by classfile analyzer tests and JDK verifier gate |
 | Ancestor-related initialized classes at a stack join | Widen to the already-present ancestor and emit its `Object` frame entry | Classfile analyzer and builder regressions; JDK gate |
 | Real `Middle`/`Leaf` source branches returning `Middle` | Keep the canonical source result and encode `Object(Middle)` at both branch-order joins | `MultilevelInheritance.scala`, decoded `StackMapTable`, and mandatory JDK 21+ source gate |
-| Sibling initialized classes at a stack join | Join only at the nearest checked non-`Object` superclass; reject missing paths and an `Object`-only intersection | Classfile analyzer and encoded-frame regressions |
+| Sibling initialized classes at a stack join | Join only at the nearest checked non-`Object` superclass; reject missing paths and an inferred `Object`-only intersection | Classfile analyzer and encoded-frame regressions |
 | Unrelated initialized classes at a stack join | Typed incompatible-stack reference error; do not infer a common class | Classfile analyzer regression tests |
 | Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
 | Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |

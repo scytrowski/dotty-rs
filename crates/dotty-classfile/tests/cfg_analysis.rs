@@ -1571,6 +1571,59 @@ fn identical_object_stack_values_join_without_a_hierarchy_proof() {
 }
 
 #[test]
+fn explicit_base_object_ancestor_joins_work_in_both_operand_orders() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy =
+        ClassHierarchy::from_edges([("example/Base".to_owned(), "java/lang/Object".to_owned())])
+            .unwrap();
+
+    for base_on_fallthrough in [true, false] {
+        let mut sequence = CodeSequence::new();
+        let otherwise = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(local(1)))
+            .branch(BranchInstruction::IfEq(otherwise.clone()))
+            .instruction(Instruction::ALoad(local(if base_on_fallthrough {
+                2
+            } else {
+                3
+            })))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(otherwise)
+            .unwrap()
+            .instruction(Instruction::ALoad(local(if base_on_fallthrough {
+                3
+            } else {
+                2
+            })))
+            .bind(join)
+            .unwrap()
+            .instruction(Instruction::AReturn);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "chooseBaseOrObject",
+            "(ZLexample/Base;Ljava/lang/Object;)Ljava/lang/Object;",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .unwrap();
+        assert!(matches!(
+            flow.entry_state(graph.blocks().last().unwrap().id)
+                .unwrap()
+                .operand_stack
+                .as_slice(),
+            [FlowValue::Object(class)] if class.internal_name() == "java/lang/Object"
+        ));
+    }
+}
+
+#[test]
 fn parameter_slot_limit_matches_the_linear_analyzer() {
     let descriptor = format!("({})V", "I".repeat(256));
     let mut sequence = CodeSequence::new();

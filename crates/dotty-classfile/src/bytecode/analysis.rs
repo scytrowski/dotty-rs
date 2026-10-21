@@ -161,18 +161,19 @@ impl ClassHierarchy {
         false
     }
 
-    /// Returns the nearest shared, explicitly proven superclass other than
-    /// `java/lang/Object` for all supplied classes.
-    fn nearest_common_non_object_ancestor<'a>(
+    /// Returns the nearest shared, explicitly proven superclass for all
+    /// supplied classes, optionally allowing `java/lang/Object` itself.
+    fn nearest_common_ancestor<'a>(
         &self,
         classes: impl IntoIterator<Item = &'a ClassIdentity>,
+        allow_object: bool,
     ) -> Option<ClassIdentity> {
         let mut classes = classes.into_iter();
         let first = classes.next()?;
         let remaining = classes.collect::<Vec<_>>();
         let mut candidate = first.clone();
         for _ in 0..=MAX_HIERARCHY_DEPTH {
-            if candidate.internal_name() != "java/lang/Object"
+            if (allow_object || candidate.internal_name() != "java/lang/Object")
                 && remaining.iter().all(|class| {
                     self.is_assignable(class.internal_name(), candidate.internal_name())
                 })
@@ -4085,8 +4086,12 @@ fn join_flow_values_with_evidence(
         }
         (FlowValue::Object(_), FlowValue::Object(incoming)) => {
             let mut classes = evidence.iter().collect::<Vec<_>>();
+            let allow_object = incoming.internal_name() == "java/lang/Object"
+                || classes
+                    .iter()
+                    .any(|class| class.internal_name() == "java/lang/Object");
             classes.push(incoming);
-            let Some(joined) = hierarchy.nearest_common_non_object_ancestor(classes) else {
+            let Some(joined) = hierarchy.nearest_common_ancestor(classes, allow_object) else {
                 return Err((left.clone(), right.clone()));
             };
             evidence.insert(incoming.clone());
@@ -4117,7 +4122,7 @@ fn join_flow_values(
             Some(FlowValue::Object(left.clone()))
         }
         (FlowValue::Object(left), FlowValue::Object(right)) => hierarchy
-            .nearest_common_non_object_ancestor([left, right])
+            .nearest_common_ancestor([left, right], false)
             .map(FlowValue::Object),
         _ => None,
     }
