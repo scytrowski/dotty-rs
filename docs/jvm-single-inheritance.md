@@ -48,8 +48,10 @@ change JVM `invokevirtual` selection.
 
 The JVM adapter accepts a canonical Object root and one same-unit edge from a
 public ordinary class to a public, non-final ordinary parent whose own parent
-is Object. Its checked hierarchy proof requires a public accessible no-arg
-parent constructor and rejects cycles, deeper chains, external or missing
+is Object. Its checked hierarchy proof requires a public accessible parent
+constructor with a supported descriptor. Parameterized calls additionally require
+the canonical source/typed parent-argument proof; accepted arguments are bounded
+literals or exact child constructor parameters. It rejects cycles, deeper chains, external or missing
 parents, and unsupported class shapes before output. Emission uses the proven
 parent's canonical symbol and checked internal name. Instance-call resolution
 accepts the receiver's exact planned class or its validated direct parent as
@@ -78,7 +80,9 @@ Keep the source and class-file identities distinct:
 
 The implemented emission slice is a public, concrete, non-generic `Base
 extends Object` and `Derived extends Base`, emitted together in one
-compilation unit, with an accessible public no-argument `Base` constructor.
+compilation unit, with an accessible public `Base` constructor and a checked
+argument list. The no-argument case uses `()V`; parameterized construction uses
+the actual parent descriptor, including `(I)V` in `SuperCalls.scala`.
 The `Derived` proof requires its own parent to be `Object`, so a third class
 cannot extend it in the same unit. Keep traits, multiple or deeper
 inheritance, generic and external parents, inaccessible constructors, bridges,
@@ -89,7 +93,8 @@ and other forms rejected until separately specified and tested.
 The JVM class file's `super_class` denotes the direct parent. For the bounded
 slice above, `Derived.class` must name `Base` there, while `Base.class` names
 `java/lang/Object`. Constructor initialization must call the direct parent's
-accessible `<init>()V` using `invokespecial`. The verifier begins a constructor
+accessible `<init>` using `invokespecial` with its exact descriptor and ordered
+arguments. The verifier begins a constructor
 with `UninitializedThis`; normal completion of that legal superclass call
 transitions it to initialized `this`. No constructor branch may cross this
 transition unless the analyzer explicitly models it. See [JVMS 21 §4.1 and
