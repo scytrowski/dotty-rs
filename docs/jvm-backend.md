@@ -888,3 +888,26 @@ instructions. `emit_class` emits `aload_0; invokespecial
 <direct-parent>.<init>()V` before the plan and appends `return` afterward. It
 also installs the validated private field_info entries and uses the exact
 constructor descriptor and access flags from metadata.
+
+### Combined super-call fixture
+
+`SuperCalls.scala` covers parameterized Base/Derived constructors together with
+explicit super method calls in one real frontend batch. The source integration
+test decodes every class, checks exact constructor and method references,
+stack/local bounds, absence of phantom no-arg constructors, and two independent
+byte-identical builds in Base/Derived/Runner order. A Java 21 harness verifies
+constructor forwarding, special parent implementations, mutation, ordinary
+virtual override dispatch, and zero/negative inputs with `-Xverify:all`.
+The mandatory `jvm_source_compilation` CI suite includes this test; a missing
+JDK fails when `DOTTY_CLASSFILE_REQUIRE_JDK=1`.
+
+`super_calls_keep_canonical_targets_and_exact_frames_in_ordinary_branches`
+uses the same fixture with an additional ordinary branching client. It checks
+selected method symbols against their direct-parent owners and verifies exact
+Derived reference frames and branch target PCs before JDK execution.
+The source/classfile negative tests retain typed rejection and empty source
+output batches; the existing publisher still stages only fully encoded batches.
+No production lowering or publication behavior changes are needed for this
+integration increment. Nested allocation arguments, arbitrary effectful
+pre-super evaluation, branched constructors, qualified/trait super, grandparent
+methods, multilevel inheritance, and Scala ABI/TASTy emission remain deferred.

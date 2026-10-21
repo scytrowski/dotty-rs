@@ -2702,3 +2702,125 @@ fn reuses_constant_pool_entries_for_repeated_symbols() {
             .is_some_and(|entry| matches!(entry, ConstantPoolEntry::Utf8(value) if value == "I"))
     );
 }
+
+#[test]
+fn rejects_invalid_parameterized_super_prologues_before_encoding() {
+    use dotty_classfile::bytecode::AnalysisError;
+    for shape in [
+        "this-argument",
+        "new-argument",
+        "effectful-argument",
+        "wrong-owner",
+        "virtual-constructor",
+    ] {
+        let mut builder = ClassFileBuilder::new(
+            "example/Derived",
+            ClassFileVersion {
+                major: 65,
+                minor: 0,
+            },
+        )
+        .unwrap();
+        builder.set_super_class(Some("example/Base")).unwrap();
+        let addition = builder.add_instance_method("<init>", "(I)V", |code| {
+            code.aload(0)?;
+            match shape {
+                "this-argument" => {
+                    code.aload(0)?;
+                }
+                "new-argument" => {
+                    code.new_object("example/Arg")?;
+                }
+                "effectful-argument" => {
+                    code.invokestatic("example/Factory", "seed", "()I")?;
+                }
+                _ => {
+                    code.iload(1)?;
+                }
+            }
+            match shape {
+                "wrong-owner" => {
+                    code.invokespecial("example/Other", "<init>", "(I)V")?;
+                }
+                "virtual-constructor" => {
+                    code.invokevirtual("example/Base", "<init>", "(I)V")?;
+                }
+                _ => {
+                    code.invokespecial("example/Base", "<init>", "(I)V")?;
+                }
+            }
+            code.return_void()?;
+            Ok(())
+        });
+        if shape == "virtual-constructor" {
+            assert!(matches!(
+                addition,
+                Err(ClassFileBuildError::CodeBuilder(
+                    CodeBuilderError::InvalidName
+                ))
+            ));
+            continue;
+        }
+        addition.unwrap();
+        let expected_instruction = if shape == "wrong-owner" { 2 } else { 1 };
+        assert!(
+            matches!(builder.encode(), Err(ClassFileBuildError::Analysis(AnalysisError::InvalidConstructorSuperCall { instruction })) if instruction == expected_instruction),
+            "{shape}"
+        );
+    }
+}
+
+#[test]
+fn rejects_branched_super_constructor_and_non_direct_special_method() {
+    use dotty_classfile::bytecode::AnalysisError;
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut branched = ClassFileBuilder::new("example/Derived", version).unwrap();
+    branched.set_super_class(Some("example/Base")).unwrap();
+    branched
+        .add_instance_method("<init>", "(I)V", |code| {
+            let target = code.new_label()?;
+            code.iload(1)?;
+            code.ifeq(target.clone())?;
+            code.mark(target)?;
+            code.aload(0)?;
+            code.iload(1)?;
+            code.invokespecial("example/Base", "<init>", "(I)V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(matches!(
+        branched.encode(),
+        Err(ClassFileBuildError::StackMapFrames(
+            dotty_classfile::bytecode::StackMapFrameGenerationError::UnsupportedFlow {
+                state: dotty_classfile::bytecode::UnsupportedStackMapState::InstanceReceiver,
+                ..
+            }
+        ))
+    ));
+    let mut wrong_owner = ClassFileBuilder::new("example/Derived", version).unwrap();
+    wrong_owner.set_super_class(Some("example/Base")).unwrap();
+    wrong_owner
+        .add_instance_method("value", "()I", |code| {
+            code.aload(0)?;
+            code.invokespecial("example/Other", "value", "()I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    match wrong_owner.encode() {
+        Err(ClassFileBuildError::Analysis(AnalysisError::DirectSuperMethodOwnerMismatch {
+            instruction,
+            expected,
+            actual,
+        })) => {
+            assert_eq!(instruction, 1);
+            assert_eq!(expected.internal_name(), "example/Base");
+            assert_eq!(actual.internal_name(), "example/Other");
+        }
+        other => panic!("non-direct method owner must fail: {other:?}"),
+    }
+}
