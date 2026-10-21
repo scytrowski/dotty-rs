@@ -274,3 +274,27 @@ constructor-safety, hierarchy-join, and descriptor boundaries.
   exception-flow joins, and arbitrary uninitialized values remain out of
   scope. The source adapter currently proves only one direct same-unit
   `Derived -> Base` edge.
+
+## Combined constructor and dispatch evidence
+
+The unchanged `SuperCalls.scala` source fixture exercises parameterized
+`Derived.<init>(I)V -> Base.<init>(I)V` and initialized direct-super method
+calls in the same frontend/emission batch. Decoded classfiles check exact
+Methodref owners/descriptors and max_stack/max_locals; JDK 21 verifies all
+classes with `-Xverify:all`. These branchless methods carry no StackMapTable.
+The additional Branching client checks exact Derived reference entries and
+requires frames at decoded branch target PCs, then executes both branches.
+Frame generation still belongs to dotty-classfile; the test does not construct
+or patch frames or their bytecode offsets.
+
+Focused builder tests reject an extra `aload_0`, allocation, or effectful call
+before superclass initialization, incorrect parent owners, and branched
+constructors. The CodeBuilder rejects `invokevirtual <init>` before encoding;
+the class-aware method path continues to reject constructor calls on already
+initialized receivers. Source integration tests assert their actual frontend
+or JVM adapter errors and an empty published batch.
+
+This evidence does not broaden the verifier/source contract: nested allocation
+arguments, arbitrary effectful pre-super evaluation, branched constructors,
+qualified/trait super, grandparent methods, multilevel inheritance, and Scala
+ABI/TASTy emission remain deferred.

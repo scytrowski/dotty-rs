@@ -234,7 +234,7 @@ baseline for all follow-up work.
 | `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then source-ordered arguments, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
 | `super.value()` targeting direct `Base.value` | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical Base symbol; `dotty-jvm` verifies the exact direct-parent proof and emits `invokespecial`; JDK21 CI verifies execution | Preserve canonical symbol and verifier proofs while extending the bounded source-to-JVM integration in [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `super.add(n)`, Boolean/reference results, or a branched super call | The planned direct-parent method, exact descriptor, argument order, and result are checked; branches receive classfile stack-map frames and the mandatory JDK gate verifies execution | Preserve the approved direct-parent public instance-method subset; broader signatures and call shapes need a scoped issue |
-| Parameterized parent plus explicit direct-super calls in one source-to-JVM run | Constructor argument lowering and the direct-super method path are implemented separately; combined end-to-end runtime coverage remains open | Combine canonical constructor and special-call proofs through the full pipeline — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
+| Parameterized parent plus explicit direct-super calls in one source-to-JVM run | `SuperCalls.scala` compiles unchanged through one frontend session per build; decoded classfiles and JDK 21 execution verify the combined constructor and dispatch paths | Two fresh sessions emit identical Base/Derived/Runner bytes in source order; mandatory JDK CI runs the numeric and verifier checks — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `extends Base` with accessible `Base.<init>()V` | Supported and verified by existing source-backed regression | Preserve direct-parent ownership and post-super analysis in `dotty-jvm` and `dotty-classfile` |
 | `base.value()` or inherited `derived.value()` | Supported virtual calls use the selected declaration's owner and `invokevirtual` | Preserve current dynamic-dispatch and `Methodref` behavior |
 | Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Rejected in typer or the JVM adapter with typed shape, owner, or metadata errors; no class artifact is published | Keep these shapes rejected in the initial slice — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
@@ -243,3 +243,36 @@ Source typing proof, verifier support, and bounded lowering remain separate
 contracts at their owning boundaries. The integration fixture exercises the
 implemented parameterized-constructor slice end to end; unsupported forms stay
 explicitly rejected until a scoped follow-up adds them.
+
+## Combined parameterized construction and super dispatch
+
+`SuperCalls.scala` keeps `Derived(start: Int) extends Base(start)` and the real
+`Super` selections in the same source batch. The source integration test
+`super_calls_fixture_combines_parameterized_construction_and_special_dispatch`
+checks major version 65, exact parent/field metadata, a single `(I)V`
+constructor on Base and Derived, no phantom `()V` constructors, and constructor
+stack/local bounds. `Derived.<init>` forwards local 1 to `Base.<init>(I)V`;
+`Base.<init>` initializes private mutable `current:I` after Object initialization.
+
+Decoded Methodrefs and separate `javap` class disassemblies distinguish
+`invokespecial Base.value/increment` from ordinary `invokevirtual` calls in
+Base.doubled and Runner.evaluate. The JDK harness checks 20, 22, 10, 11, 12,
+zero, and signed negative inputs with `java -Xverify:all`. A separate source
+extension checks canonical selected method SymbolIds and exact reference frames
+at ordinary branch target PCs. The unchanged fixture itself is branchless and
+requires no StackMapTable. Both full fixture builds use independent frontend
+sessions and output directories and must produce identical ordered bytes.
+
+Negative integration cases assert exact errors and an empty output batch for
+private/wrong-arity/wrong-type parent calls, pre-super `this`, branch/new/effectful
+parent arguments, and unsupported or inaccessible super selections. The existing
+`parameterized_parent_constructor_arguments_keep_their_source_mappings` test
+also rejects borrowing a typed parent application/argument from another class.
+Focused classfile tests reject wrong constructor/method owners, pre-super
+allocation or effects, an initialized receiver reused as a constructor target,
+virtual constructor invocation, and branched constructors at their actual
+validation layers. These checks preserve the bounded initialization contract.
+
+Nested allocation arguments, arbitrary effectful pre-super evaluation, branched
+constructors, qualified/trait super, grandparent methods, multilevel inheritance,
+and Scala ABI/TASTy emission remain deferred.

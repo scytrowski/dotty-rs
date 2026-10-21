@@ -140,11 +140,34 @@ publish partial output.
 | Trait parent or multiple parents | The hierarchy validator rejects traits and unsupported parent-list shapes before output | JVM has one direct `super_class`; interfaces require distinct metadata and dispatch rules | Explicitly reject traits/multiple parents in `dotty-jvm`; later interface support is separate |
 | Generic or external parent | The hierarchy validator rejects unsupported class shapes and unplanned/external parents | Erased descriptor and external hierarchy facts are unavailable to this adapter | `dotty-jvm` projection/classpath boundary; keep unsupported until erasure and validated external metadata exist |
 | Missing or inaccessible parent `()V` constructor | `JvmSuperclassIssue::ParentConstructorUnavailable` | No constructor invocation or class output is emitted | Constructor metadata/access validation in `dotty-jvm`; constructor transfer in `dotty-classfile` |
-| `def read(): Int = super.value()` | Real source fails earlier at `PipelineFailure::Typer(TyperError::UnsupportedExpression { expression_kind: "expression or declaration tree", .. })`; method bodies are typed before JVM emission | No class file is produced, so no invocation instruction or constant-pool owner is emitted | See the [super-call audit](jvm-super-calls.md) and follow-ups #1372–#1375 for canonical target typing, verifier handling, checked lowering, and JVM execution |
+| `def read(): Int = super.value()` | Supported for an explicit unqualified Super(This) selecting a planned public concrete method declared by the direct parent | Emits checked `invokespecial Base.value:()I`; ordinary calls keep `invokevirtual` | See [super-call contract](jvm-super-calls.md) and `SuperCalls.scala` for combined parameterized construction and runtime verification |
 
 The end-to-end tests guarantee the supported direct-parent constructor chain,
-runtime dispatch, subtype argument/return paths, and the earlier typer
-rejection for `super.method()`. Rejected hierarchy rows must remain typed
+runtime dispatch, subtype argument/return paths, and explicit direct-parent
+`super.method()` dispatch. Rejected hierarchy rows must remain typed
 failures without partial output. Rows that describe other future behavior are
 design constraints for follow-up increments and need focused exact-diagnostic
 regression coverage when implemented.
+
+## Parameterized constructor and explicit super integration
+
+`SuperCalls.scala` combines `Base(seed: Int)`, `Derived(start: Int) extends
+Base(start)`, and Runner in a single canonical frontend batch. Base and Derived
+have only `(I)V` constructors. Derived forwards `start` before any child
+initialization; its explicit calls name Base's canonical methods and emit
+`invokespecial`. Base.doubled and Runner.evaluate retain `invokevirtual`, so
+Derived's override remains active for ordinary dynamic dispatch.
+
+The test decodes every class and compares ordered bytes from two fresh sessions.
+The JDK 21 harness checks constructor initialization and mutation plus the exact
+20/22/10/11/12 results, zero, and negative seeds with `java -Xverify:all`.
+An additional branching client validates exact frame reference identities and
+branch target PCs. Existing Inheritance, ReferenceHolder, and ReferenceObjectApis
+fixtures and their deterministic/bytecode/runtime checks remain unchanged.
+
+The supported hierarchy is still one planned class-parent hop. Nested allocation
+arguments, arbitrary effectful pre-super evaluation, branched constructors,
+qualified/trait super, grandparent methods, multilevel inheritance, and Scala
+ABI/TASTy emission remain deferred. Invalid source/plan/verification inputs fail
+before the source batch publishes classfiles; later OS failures retain the
+existing best-effort rollback contract.
