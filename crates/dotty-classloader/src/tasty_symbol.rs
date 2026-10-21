@@ -2944,9 +2944,12 @@ mod tests {
         {
             let fields = line.split('\t').collect::<Vec<_>>();
             assert_eq!(fields.len(), 3, "invalid source-provenance row: {line}");
-            let (_, requested_root) = fields[0]
-                .rsplit_once("::root=")
-                .expect("source-provenance key includes requested root");
+            let (_, requested_and_root) = fields[0]
+                .split_once("::requested=")
+                .expect("source-provenance key includes requested identity");
+            let (requested_root, _) = requested_and_root
+                .split_once("::root=")
+                .expect("source-provenance key includes deepest root");
             let observations = fields[2]
                 .parse::<u64>()
                 .expect("source-provenance observations are numeric");
@@ -2956,7 +2959,18 @@ mod tests {
             *total += observations;
             files.insert(fields[1].to_owned());
         }
-        assert_eq!(source_audit_metrics.len(), 45);
+        let frozen_requested_roots = roots
+            .lines()
+            .skip(1)
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| line.split('\t').next().expect("root row has identity"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let observed_requested_roots = source_audit_metrics
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(frozen_requested_roots.len(), 50);
+        assert_eq!(observed_requested_roots, frozen_requested_roots);
         assert_eq!(
             source_audit_metrics
                 .values()
@@ -2973,6 +2987,7 @@ mod tests {
             279
         );
 
+        let mut joined_source_observations = 0u64;
         for line in roots.lines().skip(1).filter(|line| !line.trim().is_empty()) {
             let fields = line.split('\t').collect::<Vec<_>>();
             assert_eq!(fields.len(), 6, "invalid frozen-root row: {line}");
@@ -3234,6 +3249,10 @@ mod tests {
                 }
                 rows.push('\n');
             }
+            joined_source_observations += source_audit_metrics
+                .get(requested_root)
+                .expect("every frozen root has source-audit observations")
+                .0;
             root_count += 1;
             total_weight += weighted_observations;
             if artifact.starts_with("scala3-compiler_") {
@@ -3246,6 +3265,7 @@ mod tests {
         }
 
         assert_eq!((root_count, total_weight), (50, 8_949));
+        assert_eq!(joined_source_observations, 8_948);
         assert_eq!((compiler_count, compiler_weight), (18, 8_590));
         assert_eq!((library_count, library_weight), (32, 359));
         let load_cause_counts = load_causes.values().fold(

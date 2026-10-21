@@ -93,12 +93,13 @@ All 163 parent rows are available in
 [`classloader-unresolved-tasty-parent-profile-3.9.0.tsv`](classloader-unresolved-tasty-parent-profile-3.9.0.tsv), and the source-level root map is in
 [`classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv`](classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv).
 The profile test joins source-audit observations and unique source-file counts
-from the retained provenance TSV by requested root as it writes the final
-36-column profile. Roots absent from the source map receive `0` observations
-and `0` files. This makes the checked-in profile directly reproducible without
-rerunning the source corpus audit. Two focused profile runs produced
-byte-identical final output (SHA-256
-`7157dbe16e1aa8286381276500afafed7c27e52147d69be97a59359cf52a27ac`). Empty
+from the retained provenance TSV by the `::requested=` identity (not the
+deepest dependency in `::root=`) as it writes the final 36-column profile. It
+asserts exact coverage of all 50 frozen roots and that the joined observations
+sum to 8,948 across 279 source files. This makes the checked-in profile
+directly reproducible without rerunning the source corpus audit. Two focused
+profile runs produced byte-identical final output (SHA-256
+`287942c01a548f3ec0325bec12b2d40a23da32ab209df75c1d9430c33661d78f`). Empty
 TSV cells use `-`. No semantic corpus baseline or production behavior was
 changed.
 
