@@ -92,13 +92,42 @@ wire shape and resolution boundary retained:
 All 163 parent rows are available in
 [`classloader-unresolved-tasty-parent-profile-3.9.0.tsv`](classloader-unresolved-tasty-parent-profile-3.9.0.tsv), and the source-level root map is in
 [`classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv`](classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv).
-The two focused runs produced byte-identical output (SHA-256
-`a9b0a37b57fd9dd91dc5f6c08ae09088a34d7cf77ff16e63aa7e59934c8a326c`). Empty
+The profile test joins source-audit observations and unique source-file counts
+from the retained provenance TSV by requested root as it writes the final
+36-column profile. Roots absent from the source map receive `0` observations
+and `0` files. This makes the checked-in profile directly reproducible without
+rerunning the source corpus audit. Two focused profile runs produced
+byte-identical final output (SHA-256
+`7157dbe16e1aa8286381276500afafed7c27e52147d69be97a59359cf52a27ac`). Empty
 TSV cells use `-`. No semantic corpus baseline or production behavior was
 changed.
 
 ## Reproduction
 
-Run the ignored test with `SCALA39_COMPILER_JAR`, `SCALA39_LIBRARY_JAR`,
-`SCALA39_LIBRARY3_JAR`, `JAVA_HOME`, and `SCALA39_PARENT_PROFILE_OUTPUT` set to
-the pinned artifacts/JDK. Use `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1`.
+Run the ignored test twice with `SCALA39_COMPILER_JAR`,
+`SCALA39_LIBRARY_JAR`, `SCALA39_LIBRARY3_JAR`, and `JAVA_HOME` set to the
+pinned Scala 3.9.0 artifacts and Temurin 21.0.8. Set the output path separately
+for each run; the test joins the retained source-provenance TSV itself:
+
+```sh
+export SCALA39_COMPILER_JAR=/path/to/scala3-compiler_3-3.9.0.jar
+export SCALA39_LIBRARY_JAR=/path/to/scala-library-3.9.0.jar
+export SCALA39_LIBRARY3_JAR=/path/to/scala3-library_3-3.9.0.jar
+export JAVA_HOME=/path/to/temurin-21.0.8+9
+
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+SCALA39_PARENT_PROFILE_OUTPUT=/tmp/parent-profile-a.tsv \
+cargo test -p dotty-classloader --lib --locked \
+  profile_frozen_unresolved_supertype_parent_roots -- --ignored --nocapture
+
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+SCALA39_PARENT_PROFILE_OUTPUT=/tmp/parent-profile-b.tsv \
+cargo test -p dotty-classloader --lib --locked \
+  profile_frozen_unresolved_supertype_parent_roots -- --ignored --nocapture
+
+cmp /tmp/parent-profile-a.tsv /tmp/parent-profile-b.tsv
+sha256sum /tmp/parent-profile-a.tsv /tmp/parent-profile-b.tsv
+```
+
+Both files should hash to
+`7157dbe16e1aa8286381276500afafed7c27e52147d69be97a59359cf52a27ac`.

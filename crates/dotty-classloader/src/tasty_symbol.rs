@@ -109,6 +109,7 @@ pub struct UnresolvedParentReference {
 /// the current structural and classpath fallback resolvers found a binary
 /// identity; it does not attempt to load that parent's dependencies.
 #[cfg(test)]
+#[derive(Debug)]
 pub(crate) struct ParentReferenceProfile {
     pub reference: UnresolvedParentReference,
     pub resolved_binary_name: Option<String>,
@@ -540,6 +541,11 @@ pub(crate) fn profile_parent_references(
     let StructuredNode::Template(template) = template_node.decode_structured()? else {
         return Err(TastyDecodeError::NoTemplateBody);
     };
+    let template_wire_address = index
+        .children_of(node.offset as u32)
+        .find(|child| child.tag == TEMPLATE_TAG)
+        .map(|child| child.offset)
+        .ok_or(TastyDecodeError::NoTemplateBody)?;
 
     template
         .parents
@@ -597,7 +603,7 @@ pub(crate) fn profile_parent_references(
                     parent,
                     parent_index,
                     package,
-                    template_node.offset,
+                    template_wire_address,
                 ),
                 resolved_binary_name: resolved.map(|name| name.as_internal().to_owned()),
                 resolution_stage,
@@ -918,6 +924,11 @@ fn decode_impl(
     let StructuredNode::Template(template) = template_node.decode_structured()? else {
         return Err(TastyDecodeError::NoTemplateBody);
     };
+    let template_wire_address = index
+        .children_of(node.offset as u32)
+        .find(|child| child.tag == TEMPLATE_TAG)
+        .map(|child| child.offset)
+        .ok_or(TastyDecodeError::NoTemplateBody)?;
 
     let mut parents = template.parents.iter().enumerate();
     let super_class = match parents.next() {
@@ -939,7 +950,7 @@ fn decode_impl(
                             parent,
                             parent_index,
                             package,
-                            template_node.offset,
+                            template_wire_address,
                         ),
                     )));
                 }
@@ -964,7 +975,7 @@ fn decode_impl(
                 parent,
                 parent_index,
                 package,
-                template_node.offset,
+                template_wire_address,
             )))
         })?);
     }
@@ -2913,7 +2924,7 @@ mod tests {
             "../../../docs/typer-classpath-corpus-audit-post-compiler-modules-3.9.0-tasty-supertype-roots.tsv"
         );
         let mut rows = String::from(
-            "requested_class_root\trequested_identity\tweighted_observations\tresource_path\tartifact\tartifact_version\tartifact_sha256\ttemplate_wire_address\tparent_index\tshape\tresolution_stage\tresolved_binary_name\treference_tag\treference_name\treference_prefix\talias_owner\talias_name\thas_semantic_reference\thas_reference_prefix\tvisible_names\traw_tree\tprofile_first_unresolved_parent_index\tstandalone_decode_parent_index\tstandalone_decode_cause\tdeepest_typed_cause\tfailing_binary_name\tfailure_parent_index\tfailure_parent_template_wire_address\tfailure_parent_shape\tfailure_reference_tag\tfailure_reference_name\tfailure_reference_prefix\tdependency_chain\tdeepest_resource_origin\n",
+            "requested_class_root\trequested_identity\tweighted_observations\tresource_path\tartifact\tartifact_version\tartifact_sha256\ttemplate_wire_address\tparent_index\tshape\tresolution_stage\tresolved_binary_name\treference_tag\treference_name\treference_prefix\talias_owner\talias_name\thas_semantic_reference\thas_reference_prefix\tvisible_names\traw_tree\tprofile_first_unresolved_parent_index\tstandalone_decode_parent_index\tstandalone_decode_cause\tdeepest_typed_cause\tfailing_binary_name\tfailure_parent_index\tfailure_parent_template_wire_address\tfailure_parent_shape\tfailure_reference_tag\tfailure_reference_name\tfailure_reference_prefix\tdependency_chain\tdeepest_resource_origin\tsource_audit_observations\tsource_audit_files\n",
         );
         let mut root_count = 0usize;
         let mut total_weight = 0u64;
@@ -2922,6 +2933,45 @@ mod tests {
         let mut library_count = 0usize;
         let mut library_weight = 0u64;
         let mut load_causes = std::collections::BTreeMap::new();
+        let mut source_audit_metrics =
+            std::collections::BTreeMap::<String, (u64, std::collections::BTreeSet<String>)>::new();
+        for line in include_str!(
+            "../../../docs/classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv"
+        )
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            assert_eq!(fields.len(), 3, "invalid source-provenance row: {line}");
+            let (_, requested_root) = fields[0]
+                .rsplit_once("::root=")
+                .expect("source-provenance key includes requested root");
+            let observations = fields[2]
+                .parse::<u64>()
+                .expect("source-provenance observations are numeric");
+            let (total, files) = source_audit_metrics
+                .entry(requested_root.to_owned())
+                .or_default();
+            *total += observations;
+            files.insert(fields[1].to_owned());
+        }
+        assert_eq!(source_audit_metrics.len(), 45);
+        assert_eq!(
+            source_audit_metrics
+                .values()
+                .map(|(observations, _)| observations)
+                .sum::<u64>(),
+            8_948
+        );
+        assert_eq!(
+            source_audit_metrics
+                .values()
+                .flat_map(|(_, files)| files.iter())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            279
+        );
 
         for line in roots.lines().skip(1).filter(|line| !line.trim().is_empty()) {
             let fields = line.split('\t').collect::<Vec<_>>();
@@ -3167,6 +3217,14 @@ mod tests {
                         .unwrap_or_default(),
                     dependency_chain.clone(),
                     failure_origin.clone(),
+                    source_audit_metrics
+                        .get(requested_root)
+                        .map(|(observations, _)| observations.to_string())
+                        .unwrap_or_else(|| "0".to_owned()),
+                    source_audit_metrics
+                        .get(requested_root)
+                        .map(|(_, files)| files.len().to_string())
+                        .unwrap_or_else(|| "0".to_owned()),
                 ];
                 for (index, cell) in cells.iter().enumerate() {
                     if index > 0 {
@@ -3449,6 +3507,60 @@ mod tests {
             decoded.super_class,
             BinaryName::from_internal("java/lang/Object")
         );
+    }
+
+    #[test]
+    fn parent_profiles_report_absolute_template_addresses_from_the_ast_index() {
+        for (fixture, requested, expected_address) in [
+            (
+                "scala3-compiler/dotty/tools/dotc/core/Types.tasty",
+                "dotty/tools/dotc/core/Types$",
+                410usize,
+            ),
+            (
+                "scala3-compiler/dotty/tools/dotc/core/Symbols.tasty",
+                "dotty/tools/dotc/core/Symbols$",
+                308usize,
+            ),
+        ] {
+            let bytes = fixture_bytes(fixture);
+            let file = parse_classloader_tasty(&bytes).unwrap();
+            let index = file.ast_address_index().unwrap();
+            let profiles = profile_parent_references(
+                &bytes,
+                &BinaryName::from_internal(requested),
+                true,
+                |_, _| None,
+                |_, _| None,
+            )
+            .unwrap();
+
+            assert!(!profiles.is_empty(), "{requested}");
+            assert!(
+                profiles.iter().all(|profile| {
+                    profile.reference.template_wire_address == expected_address
+                        && index
+                            .get_node(expected_address as u32)
+                            .is_some_and(|node| node.tag == TEMPLATE_TAG)
+                }),
+                "{requested}: {profiles:#?}"
+            );
+
+            let error = decode_module_class_with_resolvers(
+                &bytes,
+                &BinaryName::from_internal(requested),
+                |_, _| None,
+                |_, _| None,
+            )
+            .expect_err("the pinned module parent should remain unresolved without fallbacks");
+            let TastyDecodeError::UnresolvedSupertype(parent) = error else {
+                panic!("expected unresolved module parent for {requested}: {error:?}");
+            };
+            assert_eq!(
+                parent.template_wire_address, expected_address,
+                "{requested}"
+            );
+        }
     }
 
     #[test]
