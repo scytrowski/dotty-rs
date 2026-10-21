@@ -70,10 +70,15 @@ source order; each must match `derived_symbol_at`, remain distinct from the
 class-owned canonical parameter ID, and agree with the completed `Type::Method`
 signature. The source parameter metadata must identify the parser's plain
 `ParamAccessor + PrivateLocal` form; explicit `val`/`var` accessor forms remain
-rejected. Field initializers in this increment are limited to matching
-primitive literals or a direct reference to one of those constructor-owned
-parameters. Field-to-field reads are rejected because successful typing alone
-does not establish safe initialization order.
+rejected. Field initializers are limited to matching primitive literals or a
+direct reference to one of those exact constructor-owned parameters.
+Field-to-field reads are rejected because successful typing alone does not
+establish safe initialization order.
+The constructor-owned scope must resolve each parameter uniquely, both
+parameter identities must retain source-local provenance, and any completed
+class-owned template parameter type must agree with the constructor's `Int`
+signature. Missing or deferred template parameter types remain valid because
+the typer does not complete every accessor identity eagerly.
 
 Validation borrows the compilation session and cannot publish bytes or mutate
 its semantic store. Unsupported or inconsistent inputs return typed errors,
@@ -82,17 +87,18 @@ unsupported visibility/modifiers, and bounded item/owner chain violations.
 
 ## Source-ordered field emission (#1391)
 
-`ValidatedClassStatePlan::pickle` now emits a complete Scala 3.9 TASTy file for
-the validated class-state slice with the ordinary no-argument primary
-constructor. It writes the parent application and constructor first, then
+`ValidatedClassStatePlan::pickle` emits a complete Scala 3.9 TASTy file for the
+validated class-state slice with either the ordinary no-argument primary
+constructor or one plain `Int` parameter clause. It emits distinct class-owned
+template `PARAM` and constructor-owned signature `PARAM` declarations, then
 preserves `Template.body` order: each private primitive field is a class-owned
 `VALDEF` with its declared primitive type, exact typed initializer, and the
 observed `PRIVATE, LOCAL` modifier tail (`MUTABLE` for a `var`); ordinary methods
-remain in their source positions with their exact typed body roots. The output
-includes the source-file annotation and canonical declaration addresses. The
-serializer applies the configured projection and whole-file limits. Constructor
-inputs remain accepted by the plan contract but are rejected by this emitted
-class-state form.
+remain in their source positions with their exact typed body roots. A direct
+field initializer reference is emitted only for the exact constructor-owned
+parameter identity in the validated plan. The output includes the source-file
+annotation and canonical declaration addresses. The serializer applies the
+configured projection and whole-file limits.
 
 The regression fixture emits `seed: Int = 42`, `enabled: Boolean = true`,
 `counter: Int = 0`, and `constant(): Int = 1`. It checks source order, declaration
@@ -124,6 +130,27 @@ receiver correctness are checked before the name-bearing wire form is emitted.
 The fresh Rust-produced `PrivateFields.tasty` passes Scala decompilation,
 `-from-tasty`, and runtime checks for both receiver forms, an `Int` field, a
 `Boolean` field, and a same-named local variable.
+
+## Constructor parameter field initializers (#1395)
+
+The checked-in `Counter.scala` now exercises the join between the plain primary
+constructor and mutable private-field lanes. Source typing supplies the exact
+typed initializer root, and validation requires its `TermRef` to identify the
+constructor-owned `start` parameter with the expected owner, kind, type, prefix,
+and source binding. The class-owned template parameter and constructor-owned
+signature parameter remain distinct declarations; `current` remains a separate
+class-owned field. The emitted initializer refers directly to the constructor
+parameter label, while unsafe field reads and a same-spelled class-owned
+parameter target are rejected.
+
+The regression builds two independent frontend sessions and requires identical
+bytes. Its structural assertions check declaration ownership and the field
+initializer's exact `TERMREFdirect` address. The pinned Scala 3.9.0 oracle
+decompiles the Rust output, compiles it with `-from-tasty` into an empty output
+directory, and runs two instances initialized with different constructor
+arguments. The runtime verifies independent initial values and subsequent
+`get`, `set`, and `increment` behavior. This establishes this TASTy semantic
+slice and runtime behavior, not a JVM field-layout or general constructor ABI.
 
 This increment does not add constructor parameters, constructor accessors, or
 backing-storage ABI guarantees. Existing `ValidatedPicklePlan` output forms
