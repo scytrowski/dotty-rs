@@ -28,10 +28,11 @@ JVMS permits assignment-compatible subtyping in several operations. The
 class-file analyzers accept subtype assignments only when the caller supplies
 an explicit, validated `ClassHierarchy`; their default remains exact and
 never guesses an ancestor, interface, `java/lang/Object`, or common
-superclass. The Scala adapter supplies the single direct `Derived -> Base`
-edge that its emission-unit validator proved. This bounded proof enables
-method arguments, reference field writes, constructor arguments, and returns;
-it does not enable hierarchy-based control-flow joins.
+superclass. The Scala adapter supplies only edges that its emission-unit
+validator proved. This bounded proof enables method arguments, reference field
+writes, constructor arguments, returns, and ancestor-only initialized
+reference joins on the operand stack. It does not infer the nearest shared
+ancestor of unrelated classes.
 
 ## Analysis boundaries
 
@@ -45,9 +46,10 @@ safety.
 
 `CfgCodeAnalyzer` tracks `Top`, integer, initialized class references,
 allocation-site-specific uninitialized references, and a bounded explicit
-class hierarchy for assignability checks. The operand stack requires exact
-compatible states at joins; locals with different incoming states degrade to
-`Top`. Ordinary instance methods seed local 0 with the exact emitting class,
+class hierarchy for assignability checks and operand-stack joins. Stack joins
+may widen an initialized reference to the other incoming class only when the
+explicit hierarchy proves that it is an ancestor. Locals with different
+incoming states degrade to `Top`. Ordinary instance methods seed local 0 with the exact emitting class,
 while branched constructors remain unsupported. The
 `StackMapFrameGenerator` maps every initialized class through a validated
 `CONSTANT_Class` index and emits `Object(index)` entries.
@@ -103,27 +105,35 @@ initialized `this`. Branched constructor flow remains unsupported.
 
 At each reachable block:
 
-1. Operand-stack heights must match. Every corresponding stack value must be
-   exactly equal (`Integer` with `Integer`, or `Initialized(C)` with the same
-   `Initialized(C)`). A different class, initialized/uninitialized mismatch,
-   different allocation site, or different stack height returns a typed
-   analysis error. Never insert `java/lang/Object` or another guessed parent.
+1. Operand-stack heights must match. `Integer` joins only with `Integer`.
+   Equal initialized classes remain unchanged. For two different initialized
+   classes, the join is the already-present ancestor when the explicit
+   hierarchy proves one incoming class assignable to the other. This join is
+   commutative and idempotent; bounded ancestor chains converge independently
+   of predecessor order, and a widened state requeues dependent blocks.
+   Siblings, unrelated classes, initialized/uninitialized mismatches,
+   different allocation sites, primitive/reference mismatches, and different
+   stack heights return typed analysis errors. Never infer a shared ancestor
+   such as `java/lang/Object` from missing edges.
 2. A local slot whose incoming states are identical keeps that state. Any
    disagreement degrades the local to `Top`. A later read of `Top` fails as
    uninitialized/unusable; this is the definite-assignment guard that makes
    local degradation safe. No instruction may load an uninitialized or `Top`
    local.
 3. `Top` is absorbing for locals. Each local can therefore degrade at most
-   once; stack disagreement fails immediately. For `B` blocks and `L` local
-   slots, state propagation has a finite bound proportional to
-   `B * (L + 1)`. Traverse blocks, successors, and local slots in stable
-   source/index order so results do not depend on hash-map order.
+   once. Stack values can widen only along the validated, eight-edge-bounded
+   superclass chain. The worklist reprocesses a block whenever either its
+   locals or stack state changes and has a defensive work limit derived from
+   the observed stack width and hierarchy depth. Traverse blocks, successors,
+   and local slots in stable source/index order so results do not depend on
+   hash-map order.
 
 These rules are intentionally narrower than JVMS assignment compatibility.
-Reference stack joins with distinct classes are rejected even if those classes
-would share a JVM superclass. Distinct local references can become `Top` only
-when later bytecode does not read that slot; there is no implicit common-type
-merge.
+Reference stack joins require one incoming class to be the other class's
+verified ancestor; siblings remain rejected even if they share a JVM
+superclass. Distinct local references become `Top` even when one is an ancestor
+of the other, so there is no hierarchy-based local promotion. A later read of
+that slot fails as uninitialized/unusable.
 
 ## Transfer and constant-pool checks
 
@@ -246,7 +256,8 @@ straight-line builder methods.
 | Reference local initialized only in one branch or loop body | Do not mark it definitely initialized after the join or zero-iteration exit; reject a later read | Typed-body `dotty-jvm` regression and class-aware local-state analysis |
 | Reference-bearing conditional and current `this` | Seed local 0 as emitting class; preserve exact receiver state at branch target | Covered by field/call branch and loop cases under JDK verifier |
 | `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner; virtual calls also check supported exact object arguments and results | Covered by classfile analyzer tests and JDK verifier gate |
-| Different initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to `Object` | Classfile analyzer regression tests |
+| Ancestor-related initialized classes at a stack join | Widen to the already-present ancestor and emit its `Object` frame entry | Classfile analyzer and builder regressions; JDK gate |
+| Sibling or unrelated initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to their common ancestor or `Object` | Classfile analyzer regression tests |
 | Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
 | Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |
 | Uninitialized local read or uninitialized object escape | Typed uninitialized-use error; never emit the class | Classfile analyzer allocation regressions |

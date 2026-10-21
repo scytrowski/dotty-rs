@@ -712,6 +712,180 @@ fn stack_map_frames_preserve_exact_objects_in_locals_and_operand_stack() {
 }
 
 #[test]
+fn ancestor_stack_joins_encode_the_verified_middle_class() {
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Leaf".to_owned(), "example/Middle".to_owned()),
+        ("example/Middle".to_owned(), "example/Base".to_owned()),
+    ])
+    .unwrap();
+    let mut builder = ClassFileBuilder::new(
+        "example/AncestorJoins",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder.set_verification_hierarchy(hierarchy);
+    for (name, middle_on_fallthrough) in [("chooseMiddleLeaf", true), ("chooseLeafMiddle", false)] {
+        builder
+            .add_static_method(
+                name,
+                "(ZLexample/Middle;Lexample/Leaf;)Lexample/Base;",
+                move |code| {
+                    let otherwise = code.new_label()?;
+                    let join = code.new_label()?;
+                    code.iload(0)?;
+                    code.ifeq(otherwise.clone())?;
+                    code.aload(if middle_on_fallthrough { 1 } else { 2 })?;
+                    code.goto(join.clone())?;
+                    code.mark(otherwise)?;
+                    code.aload(if middle_on_fallthrough { 2 } else { 1 })?;
+                    code.mark(join)?;
+                    code.areturn()?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    builder
+        .add_static_method(
+            "chooseBaseMiddleLeaf",
+            "(ZZLexample/Base;Lexample/Middle;Lexample/Leaf;)Lexample/Base;",
+            |code| {
+                let second = code.new_label()?;
+                let leaf = code.new_label()?;
+                let join = code.new_label()?;
+                code.iload(0)?;
+                code.ifeq(second.clone())?;
+                code.aload(2)?;
+                code.goto(join.clone())?;
+                code.mark(second)?;
+                code.iload(1)?;
+                code.ifeq(leaf.clone())?;
+                code.aload(3)?;
+                code.goto(join.clone())?;
+                code.mark(leaf)?;
+                code.aload(4)?;
+                code.mark(join)?;
+                code.areturn()?;
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    for name in ["chooseMiddleLeaf", "chooseLeafMiddle"] {
+        let method = method_named(&class_file, name);
+        let code = code_attribute(method);
+        assert_eq!((code.max_stack, code.max_locals), (1, 3));
+        let [Attribute::Other(stack_map)] = code.attributes.as_slice() else {
+            panic!("{name} should have one StackMapTable");
+        };
+        let payload = stack_map.bytes;
+        let mut cursor = 0;
+        let frame_count = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]);
+        cursor += 2;
+        let mut previous_pc = None;
+        let mut saw_middle_join = false;
+        for _ in 0..frame_count {
+            assert_eq!(payload[cursor], 255, "expected a full_frame");
+            cursor += 1;
+            let offset_delta = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+            cursor += 2;
+            let pc = previous_pc.map_or(offset_delta, |previous| previous + offset_delta + 1);
+            previous_pc = Some(pc);
+            let locals = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+            cursor += 2;
+            for _ in 0..locals {
+                match payload[cursor] {
+                    1 => cursor += 1,
+                    7 => cursor += 3,
+                    other => panic!("unexpected local verification tag {other}"),
+                }
+            }
+            let stack = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+            cursor += 2;
+            let mut stack_classes = Vec::new();
+            for _ in 0..stack {
+                assert_eq!(payload[cursor], 7, "join stack contains an object");
+                let index =
+                    dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                        payload[cursor + 1],
+                        payload[cursor + 2],
+                    ]));
+                stack_classes.push(class_file.constant_pool.class_name(index).unwrap());
+                cursor += 3;
+            }
+            if stack_classes == ["example/Middle"] {
+                assert_eq!(pc, code.code.len() - 1, "frame points at the join target");
+                saw_middle_join = true;
+            }
+        }
+        assert_eq!(cursor, payload.len());
+        assert!(saw_middle_join, "{name} frame must encode Object(Middle)");
+    }
+
+    let three_way = code_attribute(method_named(&class_file, "chooseBaseMiddleLeaf"));
+    assert_eq!((three_way.max_stack, three_way.max_locals), (1, 5));
+    let [Attribute::Other(stack_map)] = three_way.attributes.as_slice() else {
+        panic!("three-way join should have a StackMapTable");
+    };
+    let payload = stack_map.bytes;
+    let mut cursor = 0;
+    let frame_count = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]);
+    cursor += 2;
+    let mut previous_pc = None;
+    let mut saw_base_join = false;
+    for _ in 0..frame_count {
+        assert_eq!(payload[cursor], 255, "expected a full_frame");
+        cursor += 1;
+        let offset_delta = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+        cursor += 2;
+        let pc = previous_pc.map_or(offset_delta, |previous| previous + offset_delta + 1);
+        previous_pc = Some(pc);
+        let locals = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+        cursor += 2;
+        for _ in 0..locals {
+            match payload[cursor] {
+                0 | 1 => cursor += 1,
+                7 => cursor += 3,
+                other => panic!("unexpected local verification tag {other}"),
+            }
+        }
+        let stack = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+        cursor += 2;
+        let mut stack_classes = Vec::new();
+        for _ in 0..stack {
+            assert_eq!(
+                payload[cursor], 7,
+                "three-way join stack contains an object"
+            );
+            let index = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                payload[cursor + 1],
+                payload[cursor + 2],
+            ]));
+            stack_classes.push(class_file.constant_pool.class_name(index).unwrap());
+            cursor += 3;
+        }
+        if stack_classes == ["example/Base"] {
+            assert_eq!(
+                pc,
+                three_way.code.len() - 1,
+                "frame points at the join target"
+            );
+            saw_base_join = true;
+        }
+    }
+    assert_eq!(cursor, payload.len());
+    assert!(
+        saw_base_join,
+        "three-way join frame must encode Object(Base)"
+    );
+}
+
+#[test]
 fn exact_reference_method_parameters_seed_linear_and_cfg_frames() {
     let mut builder = ClassFileBuilder::new(
         "example/ReferenceMethods",
