@@ -1036,6 +1036,12 @@ impl Validator<'_, '_> {
             .typed_ast
             .try_get(typed_id)
             .ok_or(PickleError::InvalidTypedTree { tree: typed_id })?;
+        if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) = &source.kind {
+            self.source_typed_binding(source_id, typed_id)?;
+            self.span(source.position)?;
+            self.charge(1)?;
+            return self.validate_if_branch(parens.inner, typed_id, method, depth + 1, visited);
+        }
         if matches!(source.kind, TreeKind::If(_)) || matches!(typed.kind, TreeKind::If(_)) {
             return self.validate_if_expression(source_id, typed_id, method, depth + 1, visited);
         }
@@ -1196,19 +1202,11 @@ impl Validator<'_, '_> {
             } if self.plan.store.symbols.contains(*symbol)
                 && self.plan.store.symbols.get(*symbol).kind == SymbolKind::Field =>
             {
-                let source = self.source_tree(source_tree)?;
-                let TreeKind::Ident(ident) = source.kind else {
-                    return Err(PickleError::BodyType { tree, ty });
-                };
-                if self.unqualified_name_is_shadowed(ident.name, method) {
-                    return Err(PickleError::Reference {
-                        symbol: *symbol,
-                        reason: crate::ReferenceError::NotRegistered,
-                    });
-                }
+                let source_name =
+                    self.int_field_branch_source_name(source_tree, tree, ty, method)?;
                 self.same_class_field_target(
                     *symbol,
-                    ident.name,
+                    source_name,
                     *prefix,
                     tree,
                     self.plan.definitions.int,
@@ -1231,6 +1229,58 @@ impl Validator<'_, '_> {
                 Ok(None)
             }
             _ => Err(PickleError::BodyType { tree, ty }),
+        }
+    }
+
+    fn int_field_branch_source_name(
+        &self,
+        mut source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
+        ty: TypeId,
+        method: &MethodPicklePlan,
+    ) -> Result<dotty_core::Name, PickleError> {
+        loop {
+            let source = self.source_tree(source_tree)?;
+            match &source.kind {
+                TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) => {
+                    source_tree = parens.inner;
+                }
+                TreeKind::Ident(ident) => {
+                    if self.unqualified_name_is_shadowed(ident.name, method) {
+                        let Type::TermRef {
+                            target: TermRefTarget::Symbol(symbol),
+                            ..
+                        } = self.ty(ty)?
+                        else {
+                            return Err(PickleError::BodyType {
+                                tree: typed_tree,
+                                ty,
+                            });
+                        };
+                        return Err(PickleError::Reference {
+                            symbol: *symbol,
+                            reason: crate::ReferenceError::NotRegistered,
+                        });
+                    }
+                    return Ok(ident.name);
+                }
+                TreeKind::Select(selection) => {
+                    let qualifier = self.source_tree(selection.qualifier)?;
+                    if matches!(qualifier.kind, TreeKind::This(this) if this.qual.is_none()) {
+                        return Ok(selection.name);
+                    }
+                    return Err(PickleError::BodyType {
+                        tree: typed_tree,
+                        ty,
+                    });
+                }
+                _ => {
+                    return Err(PickleError::BodyType {
+                        tree: typed_tree,
+                        ty,
+                    });
+                }
+            }
         }
     }
 
