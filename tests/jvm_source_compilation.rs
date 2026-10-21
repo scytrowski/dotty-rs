@@ -8058,10 +8058,15 @@ fn assert_javap_instruction_sequence(output: &str, method_header: &str, expected
         .find(method_header)
         .unwrap_or_else(|| panic!("javap output omitted method {method_header:?}:\n{output}"));
     let method = &output[method_start..];
-    let method_end = method[1..]
-        .find("\n  public ")
-        .or_else(|| method[1..].find("\n  private "))
-        .map_or(method.len(), |offset| offset + 1);
+    let method_end = [
+        method[1..].find("\n  public "),
+        method[1..].find("\n  private "),
+        method[1..].find("\n}"),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .map_or(method.len(), |offset| offset + 1);
     let method = &method[..method_end];
     let code = method
         .split_once("Code:")
@@ -8077,6 +8082,27 @@ fn assert_javap_instruction_sequence(output: &str, method_header: &str, expected
     assert_eq!(
         instructions, expected,
         "unexpected javap instructions for {method_header}:\n{method}"
+    );
+}
+
+#[test]
+fn javap_instruction_extraction_stops_at_the_enclosing_class_boundary() {
+    let output = r#"
+  public int doubled();
+    descriptor: ()I
+    Code:
+       0: aload_0
+       1: invokevirtual #7                  // Method value:()I
+       4: ireturn
+}
+Classfile /tmp/Derived.class
+  major version: 65
+  flags: (0x0021) ACC_PUBLIC, ACC_SUPER
+"#;
+    assert_javap_instruction_sequence(
+        output,
+        "public int doubled();",
+        &["aload_0", "invokevirtual", "ireturn"],
     );
 }
 
@@ -9283,25 +9309,160 @@ fn final_parent_method_name_collision_fails_closed_when_parent_method_is_unplann
 }
 
 #[test]
-fn typed_super_method_source_remains_rejected_before_jvm_emission() {
-    let output = TestOutputDirectory::new("super-method-unsupported");
-    let source = "class Base { def value(): Int = 10 }; class Derived extends Base { def read(): Int = super.value() }";
-    let error = compile_source_classes(source, "SuperMethod.scala", output.path())
-        .expect_err("super.method() must remain unsupported by JVM emission");
-    assert!(
-        matches!(
-            error,
-            PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmCallShape { .. })
-        ),
-        "typed super.method() failed at an unexpected pipeline stage: {error:?}"
+fn typed_super_method_calls_lower_to_checked_invokespecial() {
+    let source = r#"
+class Base {
+  private var current: Int = 0
+  def value(): Int = current
+  def increment(): Int = { current = current + 1; current }
+  def add(amount: Int): Int = { current = current + amount; current }
+  def difference(left: Int, right: Int): Int = left - right
+  def enabled(flag: Boolean): Boolean = flag
+  def identity(): Base = this
+  def reset(): Unit = { current = 0 }
+  def doubled(): Int = value() + value()
+}
+class Derived extends Base {
+  override def value(): Int = super.value() + 1
+  def original(): Int = super.value()
+  def advance(): Int = super.increment()
+  def addDirect(amount: Int): Int = super.add(amount)
+  def differenceDirect(left: Int, right: Int): Int = super.difference(left, right)
+  def orderedArguments(): Int = super.difference(super.increment(), super.increment())
+  def enabledDirect(flag: Boolean): Boolean = super.enabled(flag)
+  def originalBase(): Base = super.identity()
+  def resetDirect(): Unit = super.reset()
+  def conditional(flag: Boolean): Int = if flag then super.add(2) else super.value()
+}
+class Runner {
+  def evaluate(base: Base): Int = base.doubled()
+}
+"#;
+    let first_output = TestOutputDirectory::new("super-methods-first");
+    let second_output = TestOutputDirectory::new("super-methods-second");
+    let first = compile_source_classes(source, "SuperMethod.scala", first_output.path()).unwrap();
+    let second = compile_source_classes(source, "SuperMethod.scala", second_output.path()).unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Derived", "Runner"]
     );
-    assert!(output.class_files().is_empty());
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.bytes())
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| artifact.class.bytes())
+            .collect::<Vec<_>>(),
+        "separate frontend sessions must emit deterministic class bytes and order"
+    );
+
+    let base = decode_emitted_class(
+        first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Base")
+            .unwrap(),
+    );
+    let derived = decode_emitted_class(
+        first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Derived")
+            .unwrap(),
+    );
+    let runner = decode_emitted_class(
+        first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Runner")
+            .unwrap(),
+    );
+
+    assert_eq!(
+        derived
+            .constant_pool
+            .class_name(derived.super_class.expect("Derived has a direct parent")),
+        Ok("Base")
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "value"),
+        &[(0xb7, "Base", "value", "()I")],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "original"),
+        &[(0xb7, "Base", "value", "()I")],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "advance"),
+        &[(0xb7, "Base", "increment", "()I")],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "addDirect"),
+        &[(0xb7, "Base", "add", "(I)I")],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "differenceDirect"),
+        &[(0xb7, "Base", "difference", "(II)I")],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "orderedArguments"),
+        &[
+            (0xb7, "Base", "increment", "()I"),
+            (0xb7, "Base", "increment", "()I"),
+            (0xb7, "Base", "difference", "(II)I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "enabledDirect"),
+        &[(0xb7, "Base", "enabled", "(Z)Z")],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "originalBase"),
+        &[(0xb7, "Base", "identity", "()LBase;")],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "resetDirect"),
+        &[(0xb7, "Base", "reset", "()V")],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "conditional"),
+        &[
+            (0xb7, "Base", "add", "(I)I"),
+            (0xb7, "Base", "value", "()I"),
+        ],
+    );
+    assert!(has_stack_map_table(&derived, "conditional"));
+    assert_invocation_sequence(
+        &base,
+        emitted_method_code(&base, "doubled"),
+        &[
+            (0xb6, "Base", "value", "()I"),
+            (0xb6, "Base", "value", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "evaluate"),
+        &[(0xb6, "Base", "doubled", "()I")],
+    );
+
+    if require_jdk_or_skip() {
+        verify_super_calls_with_jdk(first_output.path());
+    }
 
     for (label, source) in [
-        (
-            "super-increment",
-            "class Base { def value(): Int = 10; def increment(): Int = 11 }\nclass Derived extends Base { def read(): Int = super.increment() }\n",
-        ),
         (
             "mixin-qualified-super",
             "class Base { def value(): Int = 10 }\nclass Derived extends Base { def read(): Int = super[Base].value() }\n",
@@ -9314,29 +9475,235 @@ fn typed_super_method_source_remains_rejected_before_jvm_emission() {
             "root-class-super",
             "class Base { def read(): Int = super.value() }\n",
         ),
+        (
+            "grandparent-only-super-method",
+            "class Grand { def value(): Int = 1 }\nclass Base extends Grand {}\nclass Derived extends Base { def read(): Int = super.value() }\n",
+        ),
     ] {
         let output = TestOutputDirectory::new(label);
         let error = compile_source_classes(source, "SuperAudit.scala", output.path())
-            .expect_err("super calls must remain unsupported in this backend increment");
-        if label == "super-increment" {
-            assert!(
-                matches!(
-                    error,
-                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmCallShape { .. })
-                ),
-                "{label} failed at an unexpected pipeline stage: {error:?}"
-            );
-        } else {
-            assert!(
-                matches!(
-                    error,
-                    PipelineFailure::Typer(TyperError::UnsupportedSuper { .. })
-                ),
-                "{label} failed at an unexpected pipeline stage: {error:?}"
-            );
-        }
+            .expect_err("unsupported super qualifier or owner must fail before publication");
+        assert!(
+            matches!(error, PipelineFailure::Typer(_)),
+            "{label} must be rejected by the typer, not lowered through a fallback: {error:?}"
+        );
         assert!(output.class_files().is_empty());
     }
+
+    let output = TestOutputDirectory::new("unplanned-super-method");
+    let source = "class Base { def value(): Int = 10 }\nclass Derived extends Base { def read(): Int = super.value() }\n";
+    let mut omit_parent_methods = |unit: &mut JvmCompilationUnit<'_>,
+                                   _definitions: &Definitions| {
+        let base = unit
+            .classes
+            .iter()
+            .find(|plan| {
+                let symbol = unit.store.symbols.get(plan.class);
+                unit.store.names.try_resolve(symbol.name.text()) == Some("Base")
+            })
+            .map(|plan| plan.class)
+            .expect("source batch contains Base");
+        unit.classes
+            .iter_mut()
+            .find(|plan| plan.class == base)
+            .expect("Base plan")
+            .methods
+            .clear();
+    };
+    let error = compile_source_batch_observed(
+        source,
+        "UnplannedSuperMethod.scala",
+        output.path(),
+        SourceId::from_index(1374),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut omit_parent_methods),
+    )
+    .expect_err("a selected direct-parent method must be in the emission plan");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(
+                JvmCodegenError::MethodNotInJvmPlan { .. }
+                    | JvmCodegenError::MethodNotInJvmPlanForBody { .. }
+            )
+        ),
+        "an unplanned super target must fail instead of falling back to virtual dispatch: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+fn verify_super_calls_with_jdk(output_directory: &Path) {
+    let output_path = output_directory.to_str().expect("UTF-8 output path");
+    let javap = Command::new("javap")
+        .args([
+            "-p",
+            "-c",
+            "-v",
+            "-classpath",
+            output_path,
+            "Base",
+            "Derived",
+            "Runner",
+        ])
+        .output()
+        .expect("start javap for direct-super classes");
+    assert!(
+        javap.status.success(),
+        "javap rejected direct-super classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    for evidence in [
+        "major version: 65",
+        "descriptor: ()I",
+        "descriptor: (I)I",
+        "descriptor: (II)I",
+        "descriptor: (Z)Z",
+        "descriptor: ()LBase;",
+        "StackMapTable",
+    ] {
+        assert!(
+            javap.contains(evidence),
+            "javap omitted {evidence:?}:\n{javap}"
+        );
+    }
+    let derived_javap = Command::new("javap")
+        .args(["-p", "-c", "-classpath", output_path, "Derived"])
+        .output()
+        .expect("start javap for Derived direct-super methods");
+    assert!(
+        derived_javap.status.success(),
+        "javap rejected Derived direct-super methods\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&derived_javap.stdout),
+        String::from_utf8_lossy(&derived_javap.stderr)
+    );
+    let derived_javap = String::from_utf8_lossy(&derived_javap.stdout);
+    assert_javap_instruction_sequence(
+        &derived_javap,
+        "public int value();",
+        &["aload_0", "invokespecial", "iconst_1", "iadd", "ireturn"],
+    );
+    assert_javap_instruction_sequence(
+        &javap,
+        "public int original();",
+        &["aload_0", "invokespecial", "ireturn"],
+    );
+    assert_javap_instruction_sequence(
+        &javap,
+        "public int advance();",
+        &["aload_0", "invokespecial", "ireturn"],
+    );
+    assert_javap_instruction_sequence(
+        &javap,
+        "public int addDirect(int);",
+        &["aload_0", "iload_1", "invokespecial", "ireturn"],
+    );
+    assert_javap_instruction_sequence(
+        &javap,
+        "public int differenceDirect(int, int);",
+        &["aload_0", "iload_1", "iload_2", "invokespecial", "ireturn"],
+    );
+    assert_javap_instruction_sequence(
+        &javap,
+        "public int orderedArguments();",
+        &[
+            "aload_0",
+            "aload_0",
+            "invokespecial",
+            "aload_0",
+            "invokespecial",
+            "invokespecial",
+            "ireturn",
+        ],
+    );
+    assert_javap_instruction_sequence(&javap, "public Base identity();", &["aload_0", "areturn"]);
+    assert_javap_instruction_sequence(
+        &javap,
+        "public void resetDirect();",
+        &["aload_0", "invokespecial", "return"],
+    );
+    assert_javap_instruction_sequence(
+        &javap,
+        "public int doubled();",
+        &[
+            "aload_0",
+            "invokevirtual",
+            "aload_0",
+            "invokevirtual",
+            "iadd",
+            "ireturn",
+        ],
+    );
+    assert_javap_instruction_sequence(
+        &javap,
+        "public int evaluate(Base);",
+        &["aload_1", "invokevirtual", "ireturn"],
+    );
+
+    let harness = output_directory.join("SuperCallsHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class SuperCallsHarness {
+  public static void main(String[] args) {
+    Derived value = new Derived();
+    Runner runner = new Runner();
+    if (value.value() != 1) throw new AssertionError("override with super.value");
+    if (value.original() != 0) throw new AssertionError("direct parent result");
+    if (value.originalBase() != value) throw new AssertionError("direct parent reference result");
+    if (!value.enabledDirect(true) || value.enabledDirect(false)) throw new AssertionError("boolean result");
+    value.resetDirect();
+    if (value.original() != 0) throw new AssertionError("Unit result");
+    if (value.advance() != 1 || value.value() != 2) throw new AssertionError("direct parent mutation");
+    if (value.addDirect(5) != 6) throw new AssertionError("ordered Int argument");
+    if (value.differenceDirect(9, 4) != 5) throw new AssertionError("source argument order");
+    if (value.orderedArguments() != -1 || value.original() != 8) throw new AssertionError("ordered, exactly-once arguments");
+    if (value.conditional(true) != 10 || value.conditional(false) != 10) throw new AssertionError("branched super calls");
+    if (runner.evaluate(value) != 22) throw new AssertionError("ordinary virtual dispatch from Base");
+    if (runner.evaluate(new Base()) != 0) throw new AssertionError("base virtual dispatch");
+    System.out.println("direct super calls verified");
+  }
+}
+"#,
+    )
+    .expect("write direct-super Java harness");
+    let javac = Command::new("javac")
+        .args([
+            "--release",
+            "21",
+            "-classpath",
+            output_path,
+            "-d",
+            output_path,
+        ])
+        .arg(&harness)
+        .output()
+        .expect("start javac for direct-super harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected direct-super harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "SuperCallsHarness",
+        ])
+        .output()
+        .expect("start JVM verifier for direct-super classes");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected direct-super calls\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "direct super calls verified"
+    );
 }
 
 #[test]

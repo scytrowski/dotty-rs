@@ -65,6 +65,41 @@ pub(super) fn resolve_instance_call(
     call: TreeId<Typed>,
     definitions: &Definitions,
 ) -> Result<JvmCallTarget, JvmCodegenError> {
+    resolve_instance_call_with_kind(
+        unit,
+        caller_class,
+        caller_method,
+        call,
+        definitions,
+        JvmInvocationKind::Virtual,
+    )
+}
+
+pub(super) fn resolve_direct_super_call(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    caller_method: SymbolId,
+    call: TreeId<Typed>,
+    definitions: &Definitions,
+) -> Result<JvmCallTarget, JvmCodegenError> {
+    resolve_instance_call_with_kind(
+        unit,
+        caller_class,
+        caller_method,
+        call,
+        definitions,
+        JvmInvocationKind::SpecialSuper,
+    )
+}
+
+fn resolve_instance_call_with_kind(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    caller_method: SymbolId,
+    call: TreeId<Typed>,
+    definitions: &Definitions,
+    invocation: JvmInvocationKind,
+) -> Result<JvmCallTarget, JvmCodegenError> {
     let mut context = CallResolutionContext::default();
     resolve_instance_call_recursive(
         unit,
@@ -73,6 +108,7 @@ pub(super) fn resolve_instance_call(
         call,
         definitions,
         &mut context,
+        invocation,
     )
 }
 
@@ -89,6 +125,7 @@ fn resolve_instance_call_recursive(
     call: TreeId<Typed>,
     definitions: &Definitions,
     context: &mut CallResolutionContext,
+    invocation: JvmInvocationKind,
 ) -> Result<JvmCallTarget, JvmCodegenError> {
     let call_tree = tree(unit.store, unit.typed_ast, call)?;
     if context.depth >= crate::JVM_EXPRESSION_DEPTH_LIMIT {
@@ -112,6 +149,7 @@ fn resolve_instance_call_recursive(
         call,
         definitions,
         context,
+        invocation,
     );
     context.depth -= 1;
     context.active_calls.remove(&call);
@@ -125,6 +163,7 @@ fn resolve_instance_call_body(
     call: TreeId<Typed>,
     definitions: &Definitions,
     context: &mut CallResolutionContext,
+    invocation: JvmInvocationKind,
 ) -> Result<JvmCallTarget, JvmCodegenError> {
     let class_plan = unit
         .classes
@@ -166,8 +205,15 @@ fn resolve_instance_call_body(
     }
 
     let function_tree = tree(unit.store, unit.typed_ast, function_id)?;
-    let (receiver_tree, receiver_class) = match &function_tree.kind {
-        TreeKind::Ident(_) => (None, caller_class),
+    let (receiver_tree, receiver_class, direct_super_parent) = match &function_tree.kind {
+        TreeKind::Ident(_) if invocation == JvmInvocationKind::Virtual => {
+            (None, caller_class, None)
+        }
+        TreeKind::Select(select) if invocation == JvmInvocationKind::SpecialSuper => {
+            let receiver = select.qualifier;
+            let parent = validate_direct_super_receiver(unit, caller_class, receiver, definitions)?;
+            (Some(receiver), caller_class, Some(parent))
+        }
         TreeKind::Select(select) => {
             let receiver = select.qualifier;
             let receiver_class = resolve_receiver_class(
@@ -179,7 +225,7 @@ fn resolve_instance_call_body(
                 definitions,
                 context,
             )?;
-            (Some(receiver), receiver_class)
+            (Some(receiver), receiver_class, None)
         }
         TreeKind::TypeApply(_) => {
             return Err(unsupported_call(
@@ -229,21 +275,25 @@ fn resolve_instance_call_body(
         expected: receiver_class,
         actual: None,
     })?;
-    let supported_prefix = match (receiver, unit.store.types.try_get(prefix)) {
-        (None, Some(Type::NoPrefix)) => true,
-        (None, Some(Type::ThisType { class })) => *class == caller_class,
-        (Some(_receiver), Some(Type::ThisType { class })) => {
-            *class == caller_class && receiver_class == caller_class
+    let supported_prefix = if invocation == JvmInvocationKind::SpecialSuper {
+        receiver.is_some_and(|receiver| prefix == receiver.ty)
+    } else {
+        match (receiver, unit.store.types.try_get(prefix)) {
+            (None, Some(Type::NoPrefix)) => true,
+            (None, Some(Type::ThisType { class })) => *class == caller_class,
+            (Some(_receiver), Some(Type::ThisType { class })) => {
+                *class == caller_class && receiver_class == caller_class
+            }
+            (Some(receiver), _) => prefix_matches_receiver(
+                unit,
+                prefix,
+                receiver.ty,
+                receiver_class,
+                method_owner,
+                definitions,
+            ),
+            _ => false,
         }
-        (Some(receiver), _) => prefix_matches_receiver(
-            unit,
-            prefix,
-            receiver.ty,
-            receiver_class,
-            method_owner,
-            definitions,
-        ),
-        _ => false,
     };
     if !supported_prefix {
         return Err(unsupported_call(
@@ -251,7 +301,15 @@ fn resolve_instance_call_body(
             UnsupportedJvmCallShapeKind::UnsupportedReceiverPrefix,
         ));
     }
-    if method_owner != receiver_class
+    if let Some(expected_parent) = direct_super_parent {
+        if method_owner != expected_parent {
+            return Err(JvmCodegenError::WrongOwner {
+                symbol: method,
+                expected: expected_parent,
+                actual: Some(method_owner),
+            });
+        }
+    } else if method_owner != receiver_class
         && !unit
             .class_hierarchy(definitions)?
             .superclasses()
@@ -335,7 +393,7 @@ fn resolve_instance_call_body(
             class: method_owner,
             method,
         })?;
-    if method_owner != receiver_class {
+    if method_owner != receiver_class && direct_super_parent.is_none() {
         let is_direct_parent = receiver_metadata
             .superclass()
             .is_some_and(|superclass| superclass.parent() == method_owner);
@@ -371,11 +429,80 @@ fn resolve_instance_call_body(
         method_name: method_metadata.name().to_owned(),
         descriptor: method_metadata.descriptor().clone(),
         method,
-        invocation: JvmInvocationKind::Virtual,
+        invocation,
         result: expected,
         receiver_tree,
         receiver_class,
     })
+}
+
+fn validate_direct_super_receiver(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    receiver_id: TreeId<Typed>,
+    definitions: &Definitions,
+) -> Result<SymbolId, JvmCodegenError> {
+    let receiver = tree(unit.store, unit.typed_ast, receiver_id)?;
+    let TreeKind::Super(super_tree) = &receiver.kind else {
+        return Err(unsupported_call(
+            receiver_id,
+            UnsupportedJvmCallShapeKind::UnsupportedSuperQualifier,
+        ));
+    };
+    if super_tree.mix.is_some() {
+        return Err(unsupported_call(
+            receiver_id,
+            UnsupportedJvmCallShapeKind::UnsupportedSuperQualifier,
+        ));
+    }
+    let qualifier = tree(unit.store, unit.typed_ast, super_tree.qual)?;
+    if !matches!(
+        qualifier.kind,
+        TreeKind::This(dotty_core::ast::This { qual: None })
+    ) || !matches!(
+        unit.store.types.try_get(qualifier.ty),
+        Some(Type::ThisType { class }) if *class == caller_class
+    ) {
+        return Err(unsupported_call(
+            receiver_id,
+            UnsupportedJvmCallShapeKind::UnsupportedSuperQualifier,
+        ));
+    }
+
+    let metadata = unit.metadata(definitions)?;
+    let class = metadata
+        .iter()
+        .find(|class| class.identity().symbol() == caller_class)
+        .ok_or(JvmCodegenError::MissingClassPlan {
+            class: caller_class,
+        })?;
+    let parent = class
+        .superclass()
+        .filter(|superclass| superclass.class() == caller_class)
+        .map(|superclass| superclass.parent())
+        .ok_or(JvmCodegenError::UnsupportedJvmSuperclass {
+            class: caller_class,
+            parent: None,
+        })?;
+
+    let type_matches = matches!(
+        unit.store.types.try_get(receiver.ty),
+        Some(Type::SuperType { this_type, super_type })
+            if matches!(
+                unit.store.types.try_get(*this_type),
+                Some(Type::ThisType { class }) if *class == caller_class
+            ) && matches!(
+                unit.store.types.try_get(*super_type),
+                Some(Type::TypeRef { target: TypeRefTarget::Symbol(class), .. }) if *class == parent
+            )
+    );
+    if !type_matches {
+        return Err(unsupported_call(
+            receiver_id,
+            UnsupportedJvmCallShapeKind::SuperTypeDoesNotMatchHierarchy,
+        ));
+    }
+    Ok(parent)
 }
 
 fn resolve_receiver_class(
@@ -584,6 +711,7 @@ fn resolve_receiver_class(
                 receiver_id,
                 definitions,
                 context,
+                JvmInvocationKind::Virtual,
             )?;
             match target.result() {
                 JvmReturnType::Value(JvmType::Reference(class)) => Ok(class),
