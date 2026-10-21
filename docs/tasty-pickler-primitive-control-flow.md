@@ -3,13 +3,14 @@
 This audit records the Scala 3.9.0 source, typed-source and TASTy wire
 observations for primitive operators, mutable locals, assignment and `while`.
 The semantic pickler supports canonical `Int` arithmetic and relational
-comparisons; other operators and mutable control flow remain audit-only. The
-source compiler is pinned to `777528f19a58e794c9954a42f433373472ec57f8`; the
-emitted format is TASTy 28.9.0. Exact source and artifact hashes are in
+comparisons, Boolean `!`, `&&`, and `||`, mutable Int locals and assignments,
+and `while` expressions. Eager Boolean operators remain audit-only. The source
+compiler is pinned to `777528f19a58e794c9954a42f433373472ec57f8`; the emitted
+format is TASTy 28.9.0. Exact source and artifact hashes are in
 [`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json).
 
 The independently compiled inputs are
-[`Algorithms.scala`](../tests/fixtures/tasty_pickler/Algorithms.scala) and
+[`AlgorithmsReference.scala`](../tests/fixtures/tasty_pickler/AlgorithmsReference.scala) and
 [`CustomOperators.scala`](../tests/fixtures/tasty_pickler/CustomOperators.scala).
 Their normalized Scala compiler output is checked in beside the `.tasty`
 files. `cargo test -p tasty-pickler-oracle --test fixtures` asserts selected
