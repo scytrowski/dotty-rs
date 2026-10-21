@@ -1509,6 +1509,126 @@ fn parameterized_direct_super_constructor_prologue_verifies_with_jdk() {
 }
 
 #[test]
+fn ancestor_reference_stack_join_frames_verify_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    fs::create_dir_all(directory.path().join("example")).unwrap();
+
+    for (class_name, parent) in [
+        ("Base", "java/lang/Object"),
+        ("Middle", "example/Base"),
+        ("Leaf", "example/Middle"),
+    ] {
+        let internal_name = format!("example/{class_name}");
+        let mut class = ClassFileBuilder::new(&internal_name, version).unwrap();
+        class
+            .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+            .unwrap();
+        class.set_super_class(Some(parent)).unwrap();
+        class
+            .add_instance_method("<init>", "()V", move |code| {
+                code.aload(0)?;
+                code.invokespecial(parent, "<init>", "()V")?;
+                code.return_void()?;
+                Ok(())
+            })
+            .unwrap();
+        fs::write(
+            directory.path().join(format!("example/{class_name}.class")),
+            class.encode().unwrap(),
+        )
+        .unwrap();
+    }
+
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Leaf".to_owned(), "example/Middle".to_owned()),
+        ("example/Middle".to_owned(), "example/Base".to_owned()),
+    ])
+    .unwrap();
+    let mut joins = ClassFileBuilder::new("example/AncestorJoin", version).unwrap();
+    joins
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    joins.set_super_class(Some("java/lang/Object")).unwrap();
+    joins.set_verification_hierarchy(hierarchy);
+    for (name, middle_on_fallthrough) in [("choose", true), ("chooseReversed", false)] {
+        joins
+            .add_static_method(
+                name,
+                "(ZLexample/Middle;Lexample/Leaf;)Lexample/Base;",
+                move |code| {
+                    let otherwise = code.new_label()?;
+                    let join = code.new_label()?;
+                    code.iload(0)?;
+                    code.ifeq(otherwise.clone())?;
+                    code.aload(if middle_on_fallthrough { 1 } else { 2 })?;
+                    code.goto(join.clone())?;
+                    code.mark(otherwise)?;
+                    code.aload(if middle_on_fallthrough { 2 } else { 1 })?;
+                    code.mark(join)?;
+                    code.areturn()?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+    fs::write(
+        directory.path().join("example/AncestorJoin.class"),
+        joins.encode().unwrap(),
+    )
+    .unwrap();
+
+    let harness = directory.path().join("AncestorJoinHarness.java");
+    fs::write(
+        &harness,
+        "import example.*; public class AncestorJoinHarness { public static void main(String[] args) { Middle middle = new Middle(); Leaf leaf = new Leaf(); if (AncestorJoin.choose(true, middle, leaf) != middle || AncestorJoin.choose(false, middle, leaf) != leaf) throw new AssertionError(\"choose identity\"); if (AncestorJoin.chooseReversed(true, middle, leaf) != leaf || AncestorJoin.chooseReversed(false, middle, leaf) != middle) throw new AssertionError(\"reversed identity\"); System.out.println(\"ancestor-stack-join=ok\"); } }\n",
+    )
+    .unwrap();
+    let directory_arg = directory.path().to_str().unwrap();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            directory_arg,
+            "-d",
+            directory_arg,
+            harness.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for ancestor-join harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            directory_arg,
+            "AncestorJoinHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected ancestor stack-join frames\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "ancestor-stack-join=ok"
+    );
+}
+
+#[test]
 fn integer_arithmetic_instructions_execute_with_jvm_signed_semantics() {
     let directory = TempDir::new();
     let version = ClassFileVersion {

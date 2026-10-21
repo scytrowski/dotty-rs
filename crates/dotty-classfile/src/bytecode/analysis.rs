@@ -1,10 +1,11 @@
 //! Descriptor-aware analysis for straight-line code and typed CFGs.
 //!
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
-//! [`CfgCodeAnalyzer`] propagates integer and exact initialized-class
-//! references across symbolic branches, including bounded field transfers,
-//! constructor arguments, primitive virtual calls, and in-block object
-//! initialization. Neither analyzer is a full JVM
+//! [`CfgCodeAnalyzer`] propagates integer and initialized-class references
+//! across symbolic branches, including ancestor-only operand-stack joins when
+//! given an explicit hierarchy, bounded field transfers, constructor
+//! arguments, primitive virtual calls, and in-block object initialization.
+//! Neither analyzer is a full JVM
 //! verifier, and neither produces stack-map frames.
 
 use super::{
@@ -19,6 +20,7 @@ use std::fmt;
 use std::sync::Arc;
 
 const MAX_FLOW_STATE_SLOTS: usize = 8 * 1024 * 1024;
+const MAX_HIERARCHY_DEPTH: usize = 8;
 
 /// JVM value categories used by the bytecode analyzers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,7 +149,7 @@ impl ClassHierarchy {
             return true;
         }
         let mut current = ClassIdentity(Arc::from(actual));
-        for _ in 0..8 {
+        for _ in 0..MAX_HIERARCHY_DEPTH {
             let Some(parent) = self.superclasses.get(&current) else {
                 return false;
             };
@@ -199,7 +201,7 @@ impl ClassHierarchy {
                     });
                 }
                 depth += 1;
-                if depth > 8 {
+                if depth > MAX_HIERARCHY_DEPTH {
                     return Err(ClassHierarchyError::DepthExceeded {
                         class: start.internal_name().to_owned(),
                         depth,
@@ -1685,6 +1687,7 @@ enum LocalSlot {
 struct Frame {
     stack: Vec<ValueKind>,
     stack_classes: Vec<Option<ClassIdentity>>,
+    stack_join_evidence: Vec<std::collections::BTreeSet<ClassIdentity>>,
     stack_allocation_sites: Vec<Option<usize>>,
     stack_slots: usize,
     pending_allocation: Option<UninitializedAllocation>,
@@ -1742,6 +1745,7 @@ impl Frame {
         Ok(Self {
             stack: Vec::new(),
             stack_classes: Vec::new(),
+            stack_join_evidence: Vec::new(),
             stack_allocation_sites: Vec::new(),
             stack_slots: 0,
             pending_allocation: None,
@@ -1818,7 +1822,14 @@ impl Frame {
                 }
                 let class = self.stack_classes.last().cloned().flatten();
                 let allocation_site = self.stack_allocation_sites.last().copied().flatten();
+                let evidence = self.stack_join_evidence.last().cloned();
                 self.push_typed(instruction_index, top, class)?;
+                if let Some(evidence) = evidence {
+                    *self
+                        .stack_join_evidence
+                        .last_mut()
+                        .expect("push adds a stack slot") = evidence;
+                }
                 *self
                     .stack_allocation_sites
                     .last_mut()
@@ -1843,6 +1854,7 @@ impl Frame {
                 }
                 self.stack.pop();
                 self.stack_classes.pop();
+                self.stack_join_evidence.pop();
                 self.stack_allocation_sites.pop();
                 self.stack_slots -= 1;
             }
@@ -2061,6 +2073,14 @@ impl Frame {
         }
         self.stack.push(value);
         self.stack_classes.push(class);
+        self.stack_join_evidence.push(
+            self.stack_classes
+                .last()
+                .and_then(Option::as_ref)
+                .cloned()
+                .into_iter()
+                .collect(),
+        );
         self.stack_allocation_sites.push(None);
         self.stack_slots = slots;
         self.max_stack = self.max_stack.max(slots);
@@ -2093,6 +2113,7 @@ impl Frame {
             available,
         })?;
         let class = self.stack_classes.pop().flatten();
+        self.stack_join_evidence.pop();
         self.stack_allocation_sites.pop();
         self.stack_slots -= actual.slots();
         if actual != expected {
@@ -2714,6 +2735,7 @@ impl Frame {
 
         self.stack.pop();
         self.stack_classes.pop();
+        self.stack_join_evidence.pop();
         self.stack_allocation_sites.pop();
         self.stack_slots -= 1;
         self.pending_allocation = None;
@@ -3154,9 +3176,9 @@ impl FlowAnalysis {
     }
 }
 
-/// Fixed-point stack and local analysis for CFGs with exact initialized
-/// references, bounded field transfers and constructor arguments, primitive
-/// virtual calls, and in-block allocation-site initialization.
+/// Fixed-point stack and local analysis for CFGs with initialized references,
+/// bounded field transfers and constructor arguments, primitive virtual
+/// calls, and in-block allocation-site initialization.
 pub struct CfgCodeAnalyzer;
 
 impl CfgCodeAnalyzer {
@@ -3193,11 +3215,14 @@ impl CfgCodeAnalyzer {
     /// instance method is retained as an opaque compatibility placeholder.
     /// `if*` branches consume their comparison operands, `goto` preserves the
     /// stack, and predecessor states are merged until stable. Locals merge to
-    /// `Top`; operand-stack heights and exact value types must agree.
+    /// `Top`; operand-stack heights and exact value types must agree without a
+    /// supplied hierarchy.
     /// Unreachable blocks are retained by the CFG but have no entry state.
-    /// Each local can only move from `Integer` to `Top`, so the worklist has a
-    /// finite bound based on the graph size and local-state width. An
-    /// incompatible stack state fails explicitly instead of growing a cycle.
+    /// Locals only degrade to `Top`, while a hierarchy-aware stack value can
+    /// widen at most once per edge in the bounded superclass chain. The
+    /// worklist has a defensive finite bound based on graph size, local-state
+    /// width, observed stack width, and hierarchy depth. An incompatible stack
+    /// state fails explicitly instead of growing a cycle.
     ///
     /// This compatibility entry point supports integer constants, integer
     /// local loads/stores, `dup`, integer arithmetic/comparisons, gotos, and
@@ -3266,6 +3291,10 @@ impl CfgCodeAnalyzer {
 
     /// Analyzes reference transfers using an explicit, bounded superclass
     /// proof graph in addition to the exact initialized current-class type.
+    /// Initialized operand-stack values at a join may merge only when one
+    /// class is a proven ancestor of the other; locals still degrade to `Top`
+    /// on any disagreement. Sibling classes are never merged to a shared
+    /// ancestor.
     pub fn analyze_with_hierarchy(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -3423,15 +3452,20 @@ impl CfgCodeAnalyzer {
                 limit: MAX_FLOW_STATE_SLOTS,
             });
         }
-        let max_steps = block_count
+        // Locals can degrade once to Top. Each operand-stack value can widen
+        // at most once per edge in the bounded superclass chain. The bound is
+        // increased as the observed stack maximum grows.
+        let mut max_steps = block_count
             .saturating_mul(local_count.saturating_add(1))
             .max(1);
         let mut block_entries = vec![None; block_count];
+        let mut block_stack_join_evidence = vec![None; block_count];
         let entry = graph.entry_block();
         let Some(entry_state) = block_entries.get_mut(entry.index()) else {
             return Err(AnalysisError::InvalidControlFlowGraph { block: entry });
         };
         *entry_state = Some(initial_state.clone());
+        block_stack_join_evidence[entry.index()] = Some(stack_join_evidence(&initial_state));
         let mut retained_state_slots = initial_state_slots;
 
         let mut pending = std::collections::VecDeque::from([entry]);
@@ -3458,6 +3492,9 @@ impl CfgCodeAnalyzer {
                 .ok_or(AnalysisError::InvalidControlFlowGraph { block: block_id })?
                 .clone();
             let mut frame = frame_from_state(&state);
+            frame.stack_join_evidence = block_stack_join_evidence[block_id.index()]
+                .clone()
+                .ok_or(AnalysisError::InvalidControlFlowGraph { block: block_id })?;
             frame.hierarchy = hierarchy.clone();
 
             for (offset, element) in block.instructions.iter().enumerate() {
@@ -3485,14 +3522,39 @@ impl CfgCodeAnalyzer {
             }
             frame.ensure_no_pending_allocation(block.instruction_range.end.saturating_sub(1))?;
             max_stack = max_stack.max(frame.max_stack);
+            max_steps = max_steps.max(
+                block_count.saturating_mul(
+                    local_count
+                        .saturating_add(max_stack.saturating_mul(MAX_HIERARCHY_DEPTH))
+                        .saturating_add(1),
+                ),
+            );
             let outgoing = state_from_frame(&frame)?;
 
             for successor in &block.successors {
                 let Some(slot) = block_entries.get_mut(successor.index()) else {
                     return Err(AnalysisError::InvalidControlFlowGraph { block: *successor });
                 };
+                let Some(evidence_slot) = block_stack_join_evidence.get_mut(successor.index())
+                else {
+                    return Err(AnalysisError::InvalidControlFlowGraph { block: *successor });
+                };
                 let changed = match slot {
-                    Some(existing) => merge_flow_states(existing, &outgoing, *successor)?,
+                    Some(existing) => match evidence_slot {
+                        Some(evidence) => merge_flow_states_with_evidence(
+                            existing,
+                            &outgoing,
+                            &frame.stack_join_evidence,
+                            *successor,
+                            hierarchy,
+                            evidence,
+                        )?,
+                        None => {
+                            return Err(AnalysisError::InvalidControlFlowGraph {
+                                block: *successor,
+                            });
+                        }
+                    },
                     None => {
                         let additional_slots = outgoing
                             .locals
@@ -3507,6 +3569,7 @@ impl CfgCodeAnalyzer {
                         }
                         retained_state_slots = required_slots;
                         *slot = Some(outgoing.clone());
+                        *evidence_slot = Some(frame.stack_join_evidence.clone());
                         true
                     }
                 };
@@ -3831,6 +3894,14 @@ fn frame_from_state(state: &BlockEntryState) -> Frame {
     Frame {
         stack,
         stack_classes,
+        stack_join_evidence: state
+            .operand_stack
+            .iter()
+            .map(|value| match value {
+                FlowValue::Integer => std::collections::BTreeSet::new(),
+                FlowValue::Object(class) => std::collections::BTreeSet::from([class.clone()]),
+            })
+            .collect(),
         stack_allocation_sites: vec![None; stack_slots],
         stack_slots,
         pending_allocation: None,
@@ -3840,10 +3911,32 @@ fn frame_from_state(state: &BlockEntryState) -> Frame {
     }
 }
 
+#[cfg(test)]
 fn merge_flow_states(
     existing: &mut BlockEntryState,
     incoming: &BlockEntryState,
     block: BasicBlockId,
+    hierarchy: &ClassHierarchy,
+    evidence: &mut [std::collections::BTreeSet<ClassIdentity>],
+) -> Result<bool, AnalysisError> {
+    let incoming_evidence = stack_join_evidence(incoming);
+    merge_flow_states_with_evidence(
+        existing,
+        incoming,
+        &incoming_evidence,
+        block,
+        hierarchy,
+        evidence,
+    )
+}
+
+fn merge_flow_states_with_evidence(
+    existing: &mut BlockEntryState,
+    incoming: &BlockEntryState,
+    incoming_evidence: &[std::collections::BTreeSet<ClassIdentity>],
+    block: BasicBlockId,
+    hierarchy: &ClassHierarchy,
+    evidence: &mut [std::collections::BTreeSet<ClassIdentity>],
 ) -> Result<bool, AnalysisError> {
     if existing.operand_stack.len() != incoming.operand_stack.len() {
         return Err(AnalysisError::IncompatibleStackMerge {
@@ -3852,22 +3945,55 @@ fn merge_flow_states(
             incoming_values: incoming.operand_stack.len(),
         });
     }
+    if evidence.len() != existing.operand_stack.len()
+        || incoming_evidence.len() != incoming.operand_stack.len()
+    {
+        return Err(AnalysisError::InvalidControlFlowGraph { block });
+    }
+    let mut changed = false;
     for (value, (expected, incoming)) in existing
         .operand_stack
-        .iter()
+        .iter_mut()
         .zip(&incoming.operand_stack)
         .enumerate()
     {
-        if expected != incoming {
-            return Err(AnalysisError::IncompatibleStackValue {
+        let incoming_classes = &incoming_evidence[value];
+        let previous_evidence_len = evidence[value].len();
+        for incoming_class in incoming_classes {
+            let joined = join_flow_values_with_evidence(
+                expected,
+                &FlowValue::Object(incoming_class.clone()),
+                hierarchy,
+                &mut evidence[value],
+            )
+            .map_err(
+                |(expected, incoming)| AnalysisError::IncompatibleStackValue {
+                    block,
+                    value,
+                    expected,
+                    incoming,
+                },
+            )?;
+            if *expected != joined {
+                *expected = joined;
+                changed = true;
+            }
+        }
+        let joined = join_flow_values(expected, incoming, hierarchy).ok_or_else(|| {
+            AnalysisError::IncompatibleStackValue {
                 block,
                 value,
                 expected: expected.clone(),
                 incoming: incoming.clone(),
-            });
+            }
+        })?;
+        if *expected != joined {
+            *expected = joined;
+            changed = true;
         }
+        evidence[value].extend(incoming_classes.iter().cloned());
+        changed |= evidence[value].len() != previous_evidence_len;
     }
-    let mut changed = false;
     for (existing, incoming) in existing.locals.iter_mut().zip(&incoming.locals) {
         if *existing != *incoming && *existing != FlowLocalState::Top {
             *existing = FlowLocalState::Top;
@@ -3875,6 +4001,68 @@ fn merge_flow_states(
         }
     }
     Ok(changed)
+}
+
+fn stack_join_evidence(state: &BlockEntryState) -> Vec<std::collections::BTreeSet<ClassIdentity>> {
+    state
+        .operand_stack
+        .iter()
+        .map(|value| match value {
+            FlowValue::Integer => std::collections::BTreeSet::new(),
+            FlowValue::Object(class) => std::collections::BTreeSet::from([class.clone()]),
+        })
+        .collect()
+}
+
+fn join_flow_values_with_evidence(
+    left: &FlowValue,
+    right: &FlowValue,
+    hierarchy: &ClassHierarchy,
+    evidence: &mut std::collections::BTreeSet<ClassIdentity>,
+) -> Result<FlowValue, (FlowValue, FlowValue)> {
+    match (left, right) {
+        (FlowValue::Object(_), FlowValue::Object(incoming)) => {
+            if let Some(conflicting) = evidence.iter().find(|existing| {
+                !(hierarchy.is_assignable(existing.internal_name(), incoming.internal_name())
+                    || hierarchy.is_assignable(incoming.internal_name(), existing.internal_name()))
+            }) {
+                return Err((
+                    FlowValue::Object(conflicting.clone()),
+                    FlowValue::Object(incoming.clone()),
+                ));
+            }
+            let Some(joined) = join_flow_values(left, right, hierarchy) else {
+                return Err((left.clone(), right.clone()));
+            };
+            evidence.insert(incoming.clone());
+            Ok(joined)
+        }
+        _ => join_flow_values(left, right, hierarchy).ok_or_else(|| (left.clone(), right.clone())),
+    }
+}
+
+fn join_flow_values(
+    left: &FlowValue,
+    right: &FlowValue,
+    hierarchy: &ClassHierarchy,
+) -> Option<FlowValue> {
+    match (left, right) {
+        (FlowValue::Integer, FlowValue::Integer) => Some(FlowValue::Integer),
+        (FlowValue::Object(left), FlowValue::Object(right)) if left == right => {
+            Some(FlowValue::Object(left.clone()))
+        }
+        (FlowValue::Object(left), FlowValue::Object(right))
+            if hierarchy.is_assignable(left.internal_name(), right.internal_name()) =>
+        {
+            Some(FlowValue::Object(right.clone()))
+        }
+        (FlowValue::Object(left), FlowValue::Object(right))
+            if hierarchy.is_assignable(right.internal_name(), left.internal_name()) =>
+        {
+            Some(FlowValue::Object(left.clone()))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -5597,8 +5785,15 @@ mod tests {
             locals: vec![],
             operand_stack: vec![FlowValue::Object(class_identity("example/B"))],
         };
+        let mut evidence = stack_join_evidence(&existing);
         assert!(matches!(
-            merge_flow_states(&mut existing, &incoming_reference, block),
+            merge_flow_states(
+                &mut existing,
+                &incoming_reference,
+                block,
+                &ClassHierarchy::default(),
+                &mut evidence,
+            ),
             Err(AnalysisError::IncompatibleStackValue { block: actual, value: 0, .. }) if actual == block
         ));
 
@@ -5607,9 +5802,128 @@ mod tests {
             operand_stack: vec![FlowValue::Integer],
         };
         assert!(matches!(
-            merge_flow_states(&mut existing, &incoming_integer, block),
+            merge_flow_states(
+                &mut existing,
+                &incoming_integer,
+                block,
+                &ClassHierarchy::default(),
+                &mut evidence,
+            ),
             Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
         ));
+    }
+
+    #[test]
+    fn initialized_reference_stack_join_is_ancestor_only_and_order_independent() {
+        let hierarchy = ClassHierarchy::from_edges([
+            ("example/Leaf".to_owned(), "example/Middle".to_owned()),
+            ("example/Middle".to_owned(), "example/Base".to_owned()),
+            ("example/Sibling".to_owned(), "example/Base".to_owned()),
+        ])
+        .unwrap();
+        let leaf = FlowValue::Object(class_identity("example/Leaf"));
+        let middle = FlowValue::Object(class_identity("example/Middle"));
+        let base = FlowValue::Object(class_identity("example/Base"));
+        let sibling = FlowValue::Object(class_identity("example/Sibling"));
+
+        assert_eq!(
+            join_flow_values(&leaf, &middle, &hierarchy),
+            Some(middle.clone())
+        );
+        assert_eq!(
+            join_flow_values(&middle, &leaf, &hierarchy),
+            Some(middle.clone())
+        );
+        assert_eq!(
+            join_flow_values(&middle, &middle, &hierarchy),
+            Some(middle.clone())
+        );
+
+        let mut leaf_first = BlockEntryState {
+            locals: vec![],
+            operand_stack: vec![leaf.clone()],
+        };
+        let mut base_first = BlockEntryState {
+            locals: vec![],
+            operand_stack: vec![base.clone()],
+        };
+        let mut leaf_first_evidence = stack_join_evidence(&leaf_first);
+        let mut base_first_evidence = stack_join_evidence(&base_first);
+        let block = test_block_id();
+        for value in [&base, &middle, &leaf] {
+            merge_flow_states(
+                &mut leaf_first,
+                &BlockEntryState {
+                    locals: vec![],
+                    operand_stack: vec![value.clone()],
+                },
+                block,
+                &hierarchy,
+                &mut leaf_first_evidence,
+            )
+            .unwrap();
+        }
+        for value in [&leaf, &middle, &base] {
+            merge_flow_states(
+                &mut base_first,
+                &BlockEntryState {
+                    locals: vec![],
+                    operand_stack: vec![value.clone()],
+                },
+                block,
+                &hierarchy,
+                &mut base_first_evidence,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            leaf_first.operand_stack.as_slice(),
+            std::slice::from_ref(&base)
+        );
+        assert_eq!(
+            base_first.operand_stack.as_slice(),
+            std::slice::from_ref(&base)
+        );
+
+        for order in [
+            [&base, &leaf, &sibling],
+            [&leaf, &sibling, &base],
+            [&sibling, &base, &leaf],
+        ] {
+            let mut joined = BlockEntryState {
+                locals: vec![],
+                operand_stack: vec![order[0].clone()],
+            };
+            let mut evidence = stack_join_evidence(&joined);
+            let result = order[1..].iter().try_for_each(|value| {
+                merge_flow_states(
+                    &mut joined,
+                    &BlockEntryState {
+                        locals: vec![],
+                        operand_stack: vec![(*value).clone()],
+                    },
+                    block,
+                    &hierarchy,
+                    &mut evidence,
+                )
+                .map(|_| ())
+            });
+            assert!(matches!(
+                result,
+                Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
+            ));
+        }
+
+        assert_eq!(join_flow_values(&sibling, &middle, &hierarchy), None);
+        assert_eq!(join_flow_values(&leaf, &sibling, &hierarchy), None);
+        assert_eq!(
+            join_flow_values(&leaf, &middle, &ClassHierarchy::default()),
+            None
+        );
+        assert_eq!(
+            join_flow_values(&FlowValue::Integer, &leaf, &hierarchy),
+            None
+        );
     }
 
     #[test]
@@ -5622,7 +5936,17 @@ mod tests {
             locals: vec![FlowLocalState::Object(class_identity("example/B"))],
             operand_stack: vec![],
         };
-        assert!(merge_flow_states(&mut existing, &incoming, test_block_id()).unwrap());
+        let mut evidence = stack_join_evidence(&existing);
+        assert!(
+            merge_flow_states(
+                &mut existing,
+                &incoming,
+                test_block_id(),
+                &ClassHierarchy::default(),
+                &mut evidence,
+            )
+            .unwrap()
+        );
         assert_eq!(existing.locals, [FlowLocalState::Top]);
 
         let mut frame = frame_from_state(&existing);
