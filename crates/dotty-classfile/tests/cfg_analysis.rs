@@ -325,7 +325,7 @@ fn hierarchy_graph_rejects_duplicates_conflicts_cycles_and_excessive_depth() {
 }
 
 #[test]
-fn sibling_references_do_not_join_to_their_shared_ancestor() {
+fn sibling_references_join_to_their_checked_shared_ancestor() {
     let mut pool_builder = ConstantPoolBuilder::new();
     let owner = pool_builder.class("example/Client").unwrap();
     let pool = pool_builder.finish().unwrap();
@@ -349,18 +349,66 @@ fn sibling_references_do_not_join_to_their_shared_ancestor() {
         .unwrap()
         .instruction(Instruction::AReturn);
     let graph = ControlFlowGraph::build(&sequence).unwrap();
-    assert!(matches!(
-        CfgCodeAnalyzer::analyze_with_hierarchy(
+    let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
             &graph,
-            "noInferredJoin",
+            "checkedSiblingJoin",
             "(ILexample/Derived;Lexample/Other;)Lexample/Base;",
             false,
             &pool,
             owner,
             &hierarchy,
-        ),
-        Err(AnalysisError::IncompatibleStackValue { .. })
+        )
+        .unwrap();
+    let join = graph.blocks().last().unwrap().id;
+    assert!(matches!(
+        flow.entry_state(join).unwrap().operand_stack.as_slice(),
+        [FlowValue::Object(class)] if class.internal_name() == "example/Base"
     ));
+}
+
+#[test]
+fn sibling_join_requires_a_checked_non_object_path_from_both_inputs() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let mut sequence = CodeSequence::new();
+    let otherwise = sequence.new_label().unwrap();
+    let join = sequence.new_label().unwrap();
+    sequence
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(otherwise.clone()))
+        .instruction(Instruction::ALoad(local(2)))
+        .branch(BranchInstruction::Goto(join.clone()))
+        .bind(otherwise)
+        .unwrap()
+        .instruction(Instruction::ALoad(local(3)))
+        .bind(join)
+        .unwrap()
+        .instruction(Instruction::AReturn);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+
+    for hierarchy in [
+        ClassHierarchy::from_edges([("example/Left".to_owned(), "example/Base".to_owned())])
+            .unwrap(),
+        ClassHierarchy::from_edges([
+            ("example/Left".to_owned(), "java/lang/Object".to_owned()),
+            ("example/Right".to_owned(), "java/lang/Object".to_owned()),
+        ])
+        .unwrap(),
+    ] {
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_hierarchy(
+                &graph,
+                "rejectUnprovenSiblingJoin",
+                "(ZLexample/Left;Lexample/Right;)Lexample/Base;",
+                false,
+                &pool,
+                owner,
+                &hierarchy,
+            ),
+            Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
+        ));
+    }
 }
 
 #[test]
@@ -459,7 +507,7 @@ fn ancestor_reference_stack_joins_converge_for_reversed_edges_and_backedges() {
 }
 
 #[test]
-fn sibling_inputs_to_a_multiway_join_are_rejected_in_every_branch_order() {
+fn sibling_and_base_inputs_to_a_multiway_join_use_the_same_base_in_every_order() {
     let mut pool_builder = ConstantPoolBuilder::new();
     let owner = pool_builder.class("example/Client").unwrap();
     let pool = pool_builder.finish().unwrap();
@@ -469,7 +517,9 @@ fn sibling_inputs_to_a_multiway_join_are_rejected_in_every_branch_order() {
     ])
     .unwrap();
 
-    for order in [[3, 4, 5], [4, 5, 3], [5, 3, 4]] {
+    for order in [
+        [3, 4, 5], [3, 5, 4], [4, 3, 5], [4, 5, 3], [5, 3, 4], [5, 4, 3],
+    ] {
         let mut sequence = CodeSequence::new();
         let second = sequence.new_label().unwrap();
         let third = sequence.new_label().unwrap();
@@ -492,7 +542,7 @@ fn sibling_inputs_to_a_multiway_join_are_rejected_in_every_branch_order() {
             .unwrap()
             .instruction(Instruction::AReturn);
         let graph = ControlFlowGraph::build(&sequence).unwrap();
-        let error = CfgCodeAnalyzer::analyze_with_hierarchy(
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
             &graph,
             "chooseSiblingInputs",
             "(ZZLexample/Base;Lexample/Left;Lexample/Right;)Lexample/Base;",
@@ -501,27 +551,12 @@ fn sibling_inputs_to_a_multiway_join_are_rejected_in_every_branch_order() {
             owner,
             &hierarchy,
         )
-        .unwrap_err();
+        .unwrap();
+        let join_state = flow.entry_state(graph.blocks().last().unwrap().id).unwrap();
         assert!(matches!(
-            &error,
-            AnalysisError::IncompatibleStackValue { value: 0, .. }
+            join_state.operand_stack.as_slice(),
+            [FlowValue::Object(class)] if class.internal_name() == "example/Base"
         ));
-        if order == [3, 4, 5] {
-            assert!(
-                matches!(
-                    &error,
-                    AnalysisError::IncompatibleStackValue {
-                        expected: FlowValue::Object(expected),
-                        incoming: FlowValue::Object(incoming),
-                        ..
-                } if (expected.internal_name() == "example/Left"
-                    && incoming.internal_name() == "example/Right")
-                    || (expected.internal_name() == "example/Right"
-                        && incoming.internal_name() == "example/Left")
-                ),
-                "unexpected sibling join diagnostic: {error:?}"
-            );
-        }
     }
 }
 
@@ -579,7 +614,7 @@ fn connected_joins_keep_incoming_type_evidence_across_empty_blocks() {
             .instruction(Instruction::AReturn);
 
         let graph = ControlFlowGraph::build(&sequence).unwrap();
-        let error = CfgCodeAnalyzer::analyze_with_hierarchy(
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
             &graph,
             "connectedJoins",
             "(ZZLexample/Base;Lexample/Left;Lexample/Right;)Lexample/Base;",
@@ -588,16 +623,16 @@ fn connected_joins_keep_incoming_type_evidence_across_empty_blocks() {
             owner,
             &hierarchy,
         )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            AnalysisError::IncompatibleStackValue { .. }
-        ));
+        .unwrap();
+        assert!(flow.block_entries().iter().flatten().any(|state| matches!(
+            state.operand_stack.as_slice(),
+            [FlowValue::Object(class)] if class.internal_name() == "example/Base"
+        )));
     }
 }
 
 #[test]
-fn sibling_input_on_a_backedge_is_compared_with_earlier_join_evidence() {
+fn sibling_input_on_a_backedge_converges_to_the_shared_ancestor() {
     let mut pool_builder = ConstantPoolBuilder::new();
     let owner = pool_builder.class("example/Client").unwrap();
     let pool = pool_builder.finish().unwrap();
@@ -630,8 +665,7 @@ fn sibling_input_on_a_backedge_is_compared_with_earlier_join_evidence() {
         .unwrap()
         .instruction(Instruction::AReturn);
     let graph = ControlFlowGraph::build(&sequence).unwrap();
-    assert!(matches!(
-        CfgCodeAnalyzer::analyze_with_hierarchy(
+    let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
             &graph,
             "loopSiblingJoin",
             "(ZLexample/Base;Lexample/Left;Lexample/Right;)Lexample/Base;",
@@ -639,8 +673,12 @@ fn sibling_input_on_a_backedge_is_compared_with_earlier_join_evidence() {
             &pool,
             owner,
             &hierarchy,
-        ),
-        Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
+        )
+        .unwrap();
+    let head_state = flow.entry_state(graph.block_for_label(&head).unwrap()).unwrap();
+    assert!(matches!(
+        head_state.operand_stack.as_slice(),
+        [FlowValue::Object(class)] if class.internal_name() == "example/Base"
     ));
 }
 

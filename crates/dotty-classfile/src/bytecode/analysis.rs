@@ -2,8 +2,8 @@
 //!
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
 //! [`CfgCodeAnalyzer`] propagates integer and initialized-class references
-//! across symbolic branches, including ancestor-only operand-stack joins when
-//! given an explicit hierarchy, bounded field transfers, constructor
+//! across symbolic branches, including proven common-superclass operand-stack
+//! joins when given an explicit hierarchy, bounded field transfers, constructor
 //! arguments, primitive virtual calls, and in-block object initialization.
 //! Neither analyzer is a full JVM
 //! verifier, and neither produces stack-map frames.
@@ -159,6 +159,32 @@ impl ClassHierarchy {
             current = parent.clone();
         }
         false
+    }
+
+    /// Returns the nearest shared, explicitly proven superclass other than
+    /// `java/lang/Object` for all supplied classes.
+    fn nearest_common_non_object_ancestor<'a>(
+        &self,
+        classes: impl IntoIterator<Item = &'a ClassIdentity>,
+    ) -> Option<ClassIdentity> {
+        let mut classes = classes.into_iter();
+        let first = classes.next()?;
+        let remaining = classes.collect::<Vec<_>>();
+        let mut candidate = first.clone();
+        for _ in 0..=MAX_HIERARCHY_DEPTH {
+            if candidate.internal_name() != "java/lang/Object"
+                && remaining.iter().all(|class| {
+                    self.is_assignable(class.internal_name(), candidate.internal_name())
+                })
+            {
+                return Some(candidate);
+            }
+            let Some(parent) = self.direct_superclass(&candidate) else {
+                return None;
+            };
+            candidate = parent.clone();
+        }
+        None
     }
 
     pub(crate) fn direct_superclass(&self, class: &ClassIdentity) -> Option<&ClassIdentity> {
@@ -3291,10 +3317,9 @@ impl CfgCodeAnalyzer {
 
     /// Analyzes reference transfers using an explicit, bounded superclass
     /// proof graph in addition to the exact initialized current-class type.
-    /// Initialized operand-stack values at a join may merge only when one
-    /// class is a proven ancestor of the other; locals still degrade to `Top`
-    /// on any disagreement. Sibling classes are never merged to a shared
-    /// ancestor.
+    /// Initialized operand-stack values at a join may merge to their nearest
+    /// explicitly proven shared non-Object superclass; locals still degrade
+    /// to `Top` on any disagreement.
     pub fn analyze_with_hierarchy(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -4022,20 +4047,13 @@ fn join_flow_values_with_evidence(
 ) -> Result<FlowValue, (FlowValue, FlowValue)> {
     match (left, right) {
         (FlowValue::Object(_), FlowValue::Object(incoming)) => {
-            if let Some(conflicting) = evidence.iter().find(|existing| {
-                !(hierarchy.is_assignable(existing.internal_name(), incoming.internal_name())
-                    || hierarchy.is_assignable(incoming.internal_name(), existing.internal_name()))
-            }) {
-                return Err((
-                    FlowValue::Object(conflicting.clone()),
-                    FlowValue::Object(incoming.clone()),
-                ));
-            }
-            let Some(joined) = join_flow_values(left, right, hierarchy) else {
+            let mut classes = evidence.iter().collect::<Vec<_>>();
+            classes.push(incoming);
+            let Some(joined) = hierarchy.nearest_common_non_object_ancestor(classes) else {
                 return Err((left.clone(), right.clone()));
             };
             evidence.insert(incoming.clone());
-            Ok(joined)
+            Ok(FlowValue::Object(joined))
         }
         _ => join_flow_values(left, right, hierarchy).ok_or_else(|| (left.clone(), right.clone())),
     }
@@ -4061,6 +4079,9 @@ fn join_flow_values(
         {
             Some(FlowValue::Object(left.clone()))
         }
+        (FlowValue::Object(left), FlowValue::Object(right)) => hierarchy
+            .nearest_common_non_object_ancestor([left, right])
+            .map(FlowValue::Object),
         _ => None,
     }
 }
@@ -5814,7 +5835,7 @@ mod tests {
     }
 
     #[test]
-    fn initialized_reference_stack_join_is_ancestor_only_and_order_independent() {
+    fn initialized_reference_stack_join_uses_nearest_proven_common_superclass() {
         let hierarchy = ClassHierarchy::from_edges([
             ("example/Leaf".to_owned(), "example/Middle".to_owned()),
             ("example/Middle".to_owned(), "example/Base".to_owned()),
@@ -5837,6 +5858,14 @@ mod tests {
         assert_eq!(
             join_flow_values(&middle, &middle, &hierarchy),
             Some(middle.clone())
+        );
+        assert_eq!(
+            join_flow_values(&leaf, &sibling, &hierarchy),
+            Some(base.clone())
+        );
+        assert_eq!(
+            join_flow_values(&sibling, &leaf, &hierarchy),
+            Some(base.clone())
         );
 
         let mut leaf_first = BlockEntryState {
@@ -5887,8 +5916,11 @@ mod tests {
 
         for order in [
             [&base, &leaf, &sibling],
+            [&base, &sibling, &leaf],
+            [&leaf, &base, &sibling],
             [&leaf, &sibling, &base],
             [&sibling, &base, &leaf],
+            [&sibling, &leaf, &base],
         ] {
             let mut joined = BlockEntryState {
                 locals: vec![],
@@ -5908,14 +5940,14 @@ mod tests {
                 )
                 .map(|_| ())
             });
-            assert!(matches!(
-                result,
-                Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
-            ));
+            result.unwrap();
+            assert_eq!(joined.operand_stack, [base.clone()]);
         }
 
-        assert_eq!(join_flow_values(&sibling, &middle, &hierarchy), None);
-        assert_eq!(join_flow_values(&leaf, &sibling, &hierarchy), None);
+        assert_eq!(
+            join_flow_values(&sibling, &middle, &hierarchy),
+            Some(base.clone())
+        );
         assert_eq!(
             join_flow_values(&leaf, &middle, &ClassHierarchy::default()),
             None
@@ -5923,6 +5955,21 @@ mod tests {
         assert_eq!(
             join_flow_values(&FlowValue::Integer, &leaf, &hierarchy),
             None
+        );
+
+        let object_only = ClassHierarchy::from_edges([
+            ("example/Left".to_owned(), "java/lang/Object".to_owned()),
+            ("example/Right".to_owned(), "java/lang/Object".to_owned()),
+        ])
+        .unwrap();
+        assert_eq!(
+            join_flow_values(
+                &FlowValue::Object(class_identity("example/Left")),
+                &FlowValue::Object(class_identity("example/Right")),
+                &object_only,
+            ),
+            None,
+            "Object-only commonality is not an approved fallback"
         );
     }
 
