@@ -157,6 +157,42 @@ impl<'a> EncodingContext<'a> {
         let mut context = Self::new(p.store, p.definitions, p.source_index, p.source.id, limits)?;
         context.reserve_declaration(p.class)?;
         context.reserve_declaration(p.constructor.symbol)?;
+        let constructor_tree = p.source_ast.try_get(p.constructor.source_tree).ok_or(
+            PickleError::InvalidSourceTree {
+                tree: p.constructor.source_tree,
+            },
+        )?;
+        let dotty_core::ast::TreeKind::DefDef(constructor_definition) = &constructor_tree.kind
+        else {
+            return Err(PickleError::SourceShape {
+                tree: p.constructor.source_tree,
+                expected: crate::SourceRole::Constructor,
+            });
+        };
+        for (source_clause, symbols) in constructor_definition
+            .value_param_clauses
+            .iter()
+            .zip(&p.constructor.parameter_clauses)
+        {
+            for (&tree, &parameter) in source_clause.iter().zip(symbols) {
+                let template_parameter = p
+                    .source_index
+                    .symbol_at(p.source.id, tree)
+                    .ok_or(PickleError::SourceDefinition { symbol: parameter })?;
+                context.reserve_template_parameter(
+                    template_parameter,
+                    p.class,
+                    p.source.id,
+                    tree,
+                )?;
+                context.reserve_primary_constructor_parameter(
+                    parameter,
+                    p.constructor.symbol,
+                    p.source.id,
+                    tree,
+                )?;
+            }
+        }
         for method in p.methods {
             context.reserve_declaration(method.symbol)?;
             for parameter in method.parameter_clauses.iter().flatten() {
@@ -604,6 +640,80 @@ impl<'a> EncodingContext<'a> {
             }
             let label = c.wire.reserve().map_err(construction)?;
             c.declarations.insert(symbol, label);
+            Ok(label)
+        })
+    }
+
+    /// Reserves the private class-owned PARAM used by Scala's template header
+    /// for a plain primary-constructor parameter. Its public constructor-owned
+    /// derived identity is serialized separately inside `<init>`.
+    pub(crate) fn reserve_template_parameter(
+        &mut self,
+        symbol: SymbolId,
+        class: SymbolId,
+        source: SourceId,
+        tree: dotty_core::TreeId<dotty_core::Untyped>,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            context.charge(1)?;
+            let record = context.symbol(symbol)?;
+            if context.source != source
+                || context.source_index.symbol_at(source, tree) != Some(symbol)
+                || record.kind != SymbolKind::Parameter
+                || record.origin != SymbolOrigin::Source(source)
+                || record.owner != Some(class)
+                || record.visibility != Visibility::Private
+                || !record.flags.is_empty()
+                || !record.annotations.is_empty()
+            {
+                return Err(reference(symbol, ReferenceError::Metadata));
+            }
+            context.namespace(symbol, false)?;
+            context.text(record.name.text())?;
+            if context.declarations.contains_key(&symbol) {
+                return Err(PickleError::DuplicateDeclaration { symbol });
+            }
+            let label = context.wire.reserve().map_err(construction)?;
+            context.declarations.insert(symbol, label);
+            Ok(label)
+        })
+    }
+
+    /// Reserves the exact constructor-owned derived PARAM paired with one
+    /// source parameter tree, without treating the template's class-owned
+    /// identity as the constructor signature binder.
+    pub(crate) fn reserve_primary_constructor_parameter(
+        &mut self,
+        symbol: SymbolId,
+        constructor: SymbolId,
+        source: SourceId,
+        tree: dotty_core::TreeId<dotty_core::Untyped>,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            context.charge(1)?;
+            let record = context.symbol(symbol)?;
+            if context.source != source
+                || context
+                    .source_index
+                    .derived_symbol_at(constructor, source, tree)
+                    != Some(symbol)
+                || record.kind != SymbolKind::Parameter
+                || record.origin != SymbolOrigin::Source(source)
+                || record.owner != Some(constructor)
+                || record.visibility != Visibility::Public
+                || !record.flags.is_empty()
+                || !record.annotations.is_empty()
+            {
+                return Err(reference(symbol, ReferenceError::Metadata));
+            }
+            context.namespace(symbol, false)?;
+            context.text(record.name.text())?;
+            context.complete(symbol)?;
+            if context.declarations.contains_key(&symbol) {
+                return Err(PickleError::DuplicateDeclaration { symbol });
+            }
+            let label = context.wire.reserve().map_err(construction)?;
+            context.declarations.insert(symbol, label);
             Ok(label)
         })
     }
