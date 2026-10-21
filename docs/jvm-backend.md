@@ -115,7 +115,8 @@ rejects a child method with the same JVM name and descriptor as a projected
 non-private final method in any validated ancestor. If an ancestor method is
 not planned, the backend conservatively rejects a child method with the same
 name. Override conformance and inherited dispatch are checked across this
-bounded chain; hierarchy-aware reference joins remain outside this contract.
+bounded chain; source-typed ancestor reference `If` joins use that same
+validated proof.
 
 ## Method descriptor projection
 
@@ -225,11 +226,14 @@ the `new`/`dup`/arguments/`invokespecial` sequence.
 Mutable reference locals, fields, nested allocations, method-call results, and
 branching expressions remain unsupported as constructor arguments. The
 uninitialized object and argument evaluation must complete in one basic block.
-Exact initialized references may stay
-live through `if` joins and `while` headers/back-edges. A reference stack join
-must have the same planned class on every incoming edge; different classes do
-not merge to `Object`. A local that is not initialized on every path becomes
-unusable, and a later read fails.
+Exact initialized references may stay live through `if` joins and `while`
+headers/back-edges. A source-typed reference `if` may join two different
+initialized classes only when the validated unit hierarchy proves that one is
+an ancestor of the other and both are assignable to the `If` tree's canonical
+result class. The result stays that source-selected class, with no cast or
+guessed common parent. Sibling and unrelated classes, including `Type::Or`
+results, remain rejected. A local that is not initialized on every path
+becomes unusable, and a later read fails.
 
 Allocation may occur in a branch or loop body only as one complete
 `new`/`dup`/supported-argument/`invokespecial` sequence inside a basic block.
@@ -248,7 +252,8 @@ unsupported states remain typed build errors.
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
 | Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified ancestry relation of up to two edges; full allocation sequence remains in one basic block |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
-| Different reference classes at a stack join | No classfile emitted | Typed exact-class merge error; no inferred `Object`/common parent |
+| Ancestor-related initialized references at a typed `If` join | Keep the canonical source result class | Both branch classes must be ancestor-related and assignable to that result; classfile frames verify the join |
+| Sibling, unrelated, or non-canonical reference types at a join | No classfile emitted | Typed reference/branch error; no sibling LUB, `Object`, or `Type::Or` projection |
 
 Object-construction typing, canonical constructor and receiver identity,
 uninitialized-reference verifier constraints, and the multi-class planning
@@ -298,9 +303,11 @@ and `independent() == 31` under `java -Xverify:all`.
 The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
 `DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the source integration test on JDK 21.
 Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
-arbitrary classpath classes, mutable reference locals, class-hierarchy joins,
-arrays, null, and branching constructor bodies unsupported. Reference
-operations remain restricted to exact planned classes and verified calls.
+arbitrary classpath classes, mutable reference locals, sibling/unrelated
+reference joins, arrays, null, and branching constructor bodies unsupported.
+Reference operations remain restricted to exact planned classes and verified
+calls; ancestor joins are limited to the source-typed `If` result and validated
+same-unit hierarchy.
 
 ## Canonical `Int` arithmetic
 
@@ -750,8 +757,10 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation --locked
 
 Without the JDK it still runs structural and negative checks and explicitly
 skips Java verification. Reference method results outside the exact current
-source class subset, reference call arguments, class-hierarchy joins, arrays,
-null, mutable reference locals, and branched constructors remain deferred.
+source class subset, reference call arguments, sibling/unrelated class joins,
+arrays, null, mutable reference locals, and branched constructors remain
+deferred. Ancestor-related source-typed `If` results are supported only within
+the validated same-unit hierarchy and still require JVM frame verification.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
@@ -915,7 +924,7 @@ The source/classfile negative tests retain typed rejection and empty source
 output batches; the existing publisher still stages only fully encoded batches.
 This increment extends hierarchy validation, transitive inherited method
 lookup, direct-parent `super` selection, and two-edge reference assignability
-through the bounded chain. Hierarchy-aware reference joins, nested allocation
+through the bounded chain. Sibling/unrelated reference joins, nested allocation
 arguments, arbitrary effectful pre-super evaluation,
 branched constructors, qualified/trait super, and Scala ABI/TASTy emission also
 remain deferred.
