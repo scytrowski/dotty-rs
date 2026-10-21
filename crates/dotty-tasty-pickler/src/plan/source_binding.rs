@@ -22,7 +22,17 @@ impl Validator<'_, '_> {
         typed: TreeId<Typed>,
     ) -> Result<(), PickleError> {
         let source_id = self.plan.source.id;
-        let actual = self.plan.typed_bindings.typed_at(source_id, source);
+        let actual = self
+            .plan
+            .typed_bindings
+            .typed_at(source_id, source)
+            .or_else(|| {
+                self.plan
+                    .local_values
+                    .iter()
+                    .find(|binding| binding.source_tree == source)
+                    .map(|binding| binding.typed_declaration)
+            });
         if actual != Some(typed) {
             return Err(PickleError::BodyBinding {
                 source: source_id,
