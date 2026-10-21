@@ -113,6 +113,18 @@ fn plain_int_primary_constructor_preserves_both_parameter_identities_and_wire_sh
     let template_parameter_node = addresses.get(template_parameter.address).unwrap();
     assert_eq!(template_parameter_node.tag, PARAM_TAG);
     assert_eq!(
+        template_parameter_node
+            .decode_parameter()
+            .unwrap()
+            .decode_body()
+            .unwrap()
+            .tail,
+        [
+            DefinitionTail::Modifier(PRIVATE_TAG),
+            DefinitionTail::Modifier(LOCAL_TAG),
+        ]
+    );
+    assert_eq!(
         file.render_name(template_parameter_node.decode_parameter().unwrap().name())
             .unwrap(),
         "start"
