@@ -59,6 +59,7 @@ struct ResolverMetrics {
     member_error_wrappers: BTreeMap<String, usize>,
     member_error_distinct_targets: BTreeMap<String, BTreeSet<String>>,
     member_error_files: BTreeMap<String, BTreeSet<String>>,
+    member_error_source_origins: BTreeMap<String, BTreeMap<String, usize>>,
     member_request_shapes: BTreeMap<String, usize>,
     member_request_unknown_identity_shapes: BTreeMap<String, usize>,
     member_request_targets: BTreeMap<String, RequestTargetMetrics>,
@@ -1416,6 +1417,14 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     ))
                     .or_default() += 1;
                 if category == "InvalidTastyFile::UnresolvedSupertype" {
+                    *metrics
+                        .member_error_source_origins
+                        .entry(format!(
+                            "root_cause={category}::requested={requested}::root={root_cause}"
+                        ))
+                        .or_default()
+                        .entry(current_file.clone())
+                        .or_default() += 1;
                     let package = requested
                         .rsplit_once('/')
                         .map_or("<default-package>", |(package, _)| package);
@@ -6296,6 +6305,49 @@ fn pinned_scala39_local_definition_audit() {
         ));
         audit_merge_time +=
             source_processing_and_merge_started.map_or(Duration::ZERO, |started| started.elapsed());
+    }
+
+    if let Some(output_path) = std::env::var_os("DOTTY_AUDIT_TASTY_PARENT_PROVENANCE_OUTPUT") {
+        let metrics = resolver_metrics.borrow();
+        let mut report = String::from("root_cause_key\tsource_file\tobservations\n");
+        for (root, files) in &metrics.member_error_source_origins {
+            for (file, observations) in files {
+                report.push_str(&format!(
+                    "{}\t{}\t{}\n",
+                    tsv_or_dash(root),
+                    tsv_or_dash(file),
+                    observations
+                ));
+            }
+        }
+        fs::write(output_path, report).expect("write TASTy parent source provenance TSV");
+        let observations = metrics
+            .member_error_source_origins
+            .values()
+            .flat_map(BTreeMap::values)
+            .sum::<usize>();
+        let source_files = metrics
+            .member_error_source_origins
+            .values()
+            .flat_map(BTreeMap::keys)
+            .collect::<BTreeSet<_>>()
+            .len();
+        assert_eq!(
+            (
+                metrics.member_error_source_origins.len(),
+                observations,
+                source_files
+            ),
+            (50, 8_948, 279),
+            "pinned source provenance should reconcile all TASTy parent roots"
+        );
+        eprintln!(
+            "TASTY_PARENT_PROVENANCE roots={} observations={} source_files={}",
+            metrics.member_error_source_origins.len(),
+            observations,
+            source_files
+        );
+        return;
     }
 
     if let Some(focused_files) = focused_files {

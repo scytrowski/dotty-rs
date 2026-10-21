@@ -42,14 +42,17 @@ includes stable wire addresses and bounded raw shapes; it does not use arena
 IDs or debug formatting. The pinned profile asserts the 41/6/3 full-load
 classification as well as the 50-root weighted accounting.
 
-The saved #1342 audit report confirms 8,949 observations over 50 root targets
-and 279 affected source files. Its normalized summary does not preserve a
-complete source-file-to-root relation. The focused profile preserves exact
-root artifact provenance and actual classloader dependency origins, but cannot
-assign all 279 source files or independent source request origins to roots.
-The 279-file aggregate reconciles to the frozen baseline; per-root source
-attribution is an explicit remaining limit of the saved evidence, not a claim
-that the missing relation was reconstructed.
+A single instrumented source audit pass now records the source-file-to-root
+relation for all 50 frozen roots. It found 8,948 unresolved-supertype
+observations across the same 279 source files. The 347-row provenance TSV
+contains the root cause key, requested root, source path, and observation
+count; the profile TSV adds per-root observation and unique-file counts to
+every parent row. This reconciles the root and file populations while exposing
+a one-observation total drift from the frozen 8,949 baseline. Six roots have
+changed weights: `Symbols$` 3,652→3,673, `Types$` 2,545→2,539, `tpd$`
+1,715→1,719, `Tokens$` 391→375, `retainsCap` 115→114, and `ListBuffer`
+21→18. We retain the original baseline and report the measured current pass
+separately; no expected data was regenerated.
 
 ## Failure families and follow-up ranking
 
@@ -87,7 +90,8 @@ wire shape and resolution boundary retained:
    actual alias was identified.
 
 All 163 parent rows are available in
-[`classloader-unresolved-tasty-parent-profile-3.9.0.tsv`](classloader-unresolved-tasty-parent-profile-3.9.0.tsv).
+[`classloader-unresolved-tasty-parent-profile-3.9.0.tsv`](classloader-unresolved-tasty-parent-profile-3.9.0.tsv), and the source-level root map is in
+[`classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv`](classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv).
 The two focused runs produced byte-identical output (SHA-256
 `a9b0a37b57fd9dd91dc5f6c08ae09088a34d7cf77ff16e63aa7e59934c8a326c`). Empty
 TSV cells use `-`. No semantic corpus baseline or production behavior was
