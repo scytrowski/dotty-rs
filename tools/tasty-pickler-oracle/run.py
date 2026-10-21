@@ -224,6 +224,18 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         )
         if not all(member in decompiled for member in expected_members):
             raise RuntimeError(f"fresh PrivateFields TASTy lost a field or method: {decompiled}")
+    if relative.as_posix() == "example/MutableFieldWrites.tasty":
+        expected_members = (
+            "private[this] var current: scala.Int = 0",
+            "private[this] var enabled: scala.Boolean = false",
+            "def get(): scala.Int =",
+            "def set(value: scala.Int): scala.Unit =",
+            "def isEnabled(): scala.Boolean =",
+            "def setEnabled(",
+            "def increment(): scala.Int =",
+        )
+        if not all(member in decompiled for member in expected_members):
+            raise RuntimeError(f"fresh Mutable TASTy lost a field or method: {decompiled}")
     toolchain.compiler(["-from-tasty", "-d", compiled, staged])
     emitted = compiled / relative.with_suffix(".class")
     if not emitted.is_file() or emitted.stat().st_size == 0:
@@ -335,6 +347,27 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
   }
 }
 """, "PrivateFields field reads and shadowing passed", 1,
+            ),
+            "example/MutableFieldWrites.tasty": (
+                "example.MutableFieldWrites", r"public int get\(\)",
+                "MutableRuntime.java",
+                """public final class MutableRuntime {
+  public static void main(String[] args) {
+    example.MutableFieldWrites first = new example.MutableFieldWrites();
+    example.MutableFieldWrites second = new example.MutableFieldWrites();
+    if (first.get() != 0 || second.get() != 0 || first.isEnabled() || second.isEnabled())
+      throw new AssertionError("Mutable initial field state changed");
+    first.set(8);
+    first.setEnabled(true);
+    if (first.get() != 8 || second.get() != 0 || !first.isEnabled() || second.isEnabled())
+      throw new AssertionError("Mutable.set changed the wrong instance");
+    if (first.increment() != 9 || first.get() != 9 || second.get() != 0
+        || !first.isEnabled() || second.isEnabled())
+      throw new AssertionError("Mutable.increment changed the wrong instance");
+    System.out.println("Mutable set/get/increment and instance state passed");
+  }
+}
+""", "Mutable set/get/increment and instance state passed", 1,
             ),
             "example/Parameters.tasty": (
                 "example.Parameters", r"public int pick\(int, int\)", "ParametersRuntime.java",
