@@ -2,8 +2,10 @@
 
 This is a characterization of the Scala 3.9.0 source pipeline and Java SE 21
 class-file rules. The current JVM backend accepts the bounded three-class
-`Base → Middle → Leaf` chain and transitive inherited method dispatch; it does
-not enable arbitrary-depth inheritance or reference class joins. The source
+`Base → Middle → Leaf` chain and transitive inherited method dispatch. It
+also lowers a source-typed `If` that joins initialized references along this
+validated ancestry; it does not enable arbitrary-depth inheritance or general
+reference LUBs. The source
 test `multilevel_source_audit_validates_the_three_level_hierarchy_proofs`
 drives the real lexer, parser, namer, typer, and JVM adapter from one source
 unit and checks canonical symbols and per-edge proofs. Separate source-to-JVM
@@ -43,8 +45,11 @@ Scala-independent class-file graph also accepts the explicit edges
 `Leaf -> Middle -> Base -> java/lang/Object` and reports Leaf assignable to
 both Middle and Base.
 
-The first rejection of the complete four-class source unit is during JVM
-The three-class source program passes JVM codegen validation. Its exact
+The three-class source program passes JVM codegen validation, including both
+`choose` branch orders. Their generated StackMapTable joins resolve to
+`Object(Middle)` through the actual constant pool, and the JDK gate verifies
+the classes with `java -Xverify:all`. The focused integration test also uses
+the returned value as a method argument and virtual-call receiver. Its exact
 ancestor method symbols remain distinct from each class's declared methods;
 effective dispatch metadata points to the nearest override without copying
 method bodies. Ordinary calls use the canonical declaring class as the
@@ -55,11 +60,10 @@ source-to-JVM regression runs the emitted classes under `java -Xverify:all`.
 The source test separately uses `Root`, `Left extends Root`, and
 `Right extends Root`. The typed `If` result is `Type::Or` whose arms refer to
 the exact Left and Right symbols. Its declared result is Root, but lowering
-currently stops with `JvmCodegenError::ReferenceTypeMismatch` because
-`merge_if_flows` requires equal `JvmType::Reference` values. This is a backend
-policy boundary, not a claim that the JVM has no common supertype. The same
-exact-class check applies to the issue's Middle/Leaf branch after a valid unit
-hierarchy could be supplied.
+still stops with `JvmCodegenError::ReferenceTypeMismatch`: both branches must
+be ancestor-related to each other as well as assignable to the canonical
+source result. The JVM backend does not infer a sibling LUB or project
+`Type::Or` to Root.
 
 ## Projection and dispatch boundaries
 
@@ -67,9 +71,9 @@ hierarchy could be supplied.
 | --- | --- | --- |
 | Unit hierarchy | `identity::unit_hierarchy` verifies canonical one-parent `ClassInfo`, planned/public parent, cycles, `final`, constructor access, and the bounded three-class source chain. | Keep the proof keyed by canonical symbols and bounded; validate every edge independently. |
 | Reference projection | Unit-aware `reference::project_type_with_metadata` consumes the validated hierarchy proof. Standalone projection still rejects class references it cannot prove locally. | Reuse the unit's ancestry proof; do not create a string- or name-driven second ancestor registry. |
-| Assignability | `reference::is_validated_subtype` accepts equality and up to two canonical parent edges from the validated unit graph. Method/constructor arguments, results, immutable locals, and approved field values retain their declared JVM descriptors without casts. | Preserve the two-edge bound and exact `SymbolId` identity; do not widen this relation into a branch join or external/classpath proof. |
+| Assignability | `reference::is_validated_subtype` accepts equality and up to two canonical parent edges from the validated unit graph. Method/constructor arguments, results, immutable locals, and approved field values retain their declared JVM descriptors without casts. | Preserve the two-edge bound and exact `SymbolId` identity; reference `If` joins also require an ancestor relationship and the actual typed result class. |
 | Typed joins | `join_expression_types` returns Middle for Middle/Leaf in either order. Unrelated sibling classes become `Type::Or`; `Or` remains a semantic union and is not silently projected as one JVM class. | Keep nominal join policy explicit: support only the planned ancestor relation; reject unrelated/sibling `Or` values unless a separate issue defines a safe policy. |
-| If lowering | `merge_if_flows` requires equal branch flows. Different reference classes produce `ReferenceTypeMismatch`; it does not widen to Object or a guessed ancestor. | Add a commutative, deterministic reference stack join using only a supplied validated hierarchy proof. Preserve primitive and uninitialized-state errors. |
+| If lowering | `merge_if_flows` returns the canonical typed result class only when two initialized branch references are ancestor-related and both assignable to that result. It adds no cast or inferred class. | Keep sibling, unrelated, union, unplanned, and uninitialized values rejected; preserve primitive, Unit, divergence, and conservative local rules. |
 | Override and dispatch | Effective metadata walks the validated ancestry. Override checks resolve the nearest inherited declaration, and final-method checks cover every ancestor, including unplanned final declarations. | Preserve canonical method identities and verify missing-override and final-ancestor errors without partial output. |
 | Direct `super` calls | Typer lookup starts at the immediate parent and can select a declaration inherited through it. Lowering retains the selected symbol but emits `invokespecial` with the immediate parent as the symbolic owner. | Preserve direct-parent selection start and verify the JVMS `ACC_SUPER` behavior. |
 | Ordinary virtual calls | `Base.doubled` selects Base.value twice. `Leaf` can select `Base.doubled` or another inherited method while keeping Base as the `Methodref` owner. The JVM receiver dispatches to the nearest override. | Preserve the canonical declaring owner in constant-pool references and verify runtime dispatch. |
@@ -86,14 +90,13 @@ to extend and share with CFG analysis; `dotty-jvm` should first validate
 canonical source symbols and then project those exact edges to JVM names.
 
 The class-file CFG analyzer uses the hierarchy for typed transfers, including
-method arguments, fields, and returns. Its block merge is a different rule:
-operand stacks must have the same height and exactly equal values at every
-position. `Object(Left)` and `Object(Right)` fail with
-`AnalysisError::IncompatibleStackValue` even when both are assignable to Root.
-Conflicting locals degrade to `Top`, and a later load fails as an unusable
-local. Keep that conservative local rule in the first stack-join increment;
-never promote an uninitialized allocation or `uninitializedThis` to an
-initialized ancestor. Branching constructors remain unsupported.
+method arguments, fields, returns, and ancestor-related initialized stack
+joins. `Object(Middle)` and `Object(Leaf)` can meet at `Object(Middle)` when
+those exact edges are proven. `Object(Left)` and `Object(Right)` still fail
+with `AnalysisError::IncompatibleStackValue` even when both are assignable to
+Root. Conflicting locals degrade to `Top`, and a later load fails as an
+unusable local. Uninitialized allocation and `uninitializedThis` values never
+widen to initialized ancestors. Branching constructors remain unsupported.
 
 ## JVMS 21 contract
 
@@ -112,9 +115,10 @@ for inference. It must not be misread as the JVM choosing a source-level
 conditional type or rewriting bytecode. For this explicitly validated chain,
 `Object(Middle) ⊔ Object(Leaf) = Object(Middle)`. A classfile producer must
 emit a compatible stack-map type and verify all incoming values against it.
-The compiler's policy may continue to reject unrelated and same-base sibling
-joins even though the JVMS has a common supertype (at least Object); that is a
-deliberate scope boundary, not a JVM limitation.
+The compiler rejects unrelated and same-base sibling joins even though the
+JVMS has a common supertype (at least Object); that is a deliberate scope
+boundary, not a JVM limitation. `dotty-jvm` only emits an ancestor join when
+the typed `If` result itself names the validated ancestor.
 
 At a conditional join, both paths must arrive with compatible stack heights
 and types for the emitted frame. No reference cast is needed for the
@@ -149,7 +153,7 @@ follow-up tests, not newly claimed test results.
 | Generic, abstract, or external parent | Reject until erasure, abstract dispatch, or validated external hierarchy metadata is explicitly supported. |
 | Grandparent final override | `FinalJvmMethodOverride` after walking validated ancestors, even when the direct parent does not redeclare the method. |
 | Unrelated `Counter` vs `Middle`, and same-base siblings | Preserve semantic `Or` where typer creates it, but do not reinterpret it as an arbitrary JVM class join. |
-| `null` and arrays | Remain outside this reference projection and join increment. |
+| `null` and arrays | Remain outside this planned-class reference projection and join policy. |
 | Invalid `super` owner | Reject unless the selected declaration is canonical and effective on the validated direct parent; the emitted `invokespecial` owner remains that direct parent. |
 | Uninitialized references and constructor branches | Never widen at joins; branched constructor initialization remains unsupported. |
 
@@ -173,9 +177,11 @@ Keep changes at the owning boundary:
    executable fixture must use Java 21+ `java -Xverify:all` and inspect
    `javap -c -v`; do not treat a successful Rust codegen test as JVM execution.
 
-The exact-source audit and current rejection are covered in
-`tests/jvm_source_compilation.rs`. Existing two-class inheritance, explicit
-super-call, reference-holder, and classfile CFG tests remain the regression
-baseline. See also [single inheritance](jvm-single-inheritance.md),
+The exact-source audit, ancestor-join positive path, and sibling rejection are
+covered in `tests/jvm_source_compilation.rs`. The positive path checks both
+branch orders, `Object(Middle)` frames, virtual receiver and argument uses, and
+JDK execution when the required gate is enabled. Existing two-class
+inheritance, explicit super-call, reference-holder, and classfile CFG tests
+remain the regression baseline. See also [single inheritance](jvm-single-inheritance.md),
 [super calls](jvm-super-calls.md), and the
 [reference CFG contract](jvm-reference-cfg-contract.md).
