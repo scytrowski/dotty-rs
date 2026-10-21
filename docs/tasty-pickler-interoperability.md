@@ -115,6 +115,13 @@ return reference without a classpath resolver and does not reconstruct typed
 method bodies. Classfile-side TASTy linkage and richer source forms remain
 separate follow-up work.
 
+The #1394 constructor-input gate also passes on a fresh Rust-produced
+`example/Box.tasty` for `class Box(start: Int): def answer(): Int = 42`.
+Pinned Scala 3.9 decompiles and compiles it with `-from-tasty`; `javap`
+confirms `Box(int)` (`(I)V`), and a separately compiled Java caller verifies
+`new Box(17).answer() == 42`. The TASTy keeps the class-owned template
+parameter and constructor-owned signature parameter as distinct identities.
+
 ## Sprint 2 multi-method gate (issue #1244)
 
 The checked-in [`Operations.scala`](../tests/fixtures/tasty_pickler/Operations.scala)
