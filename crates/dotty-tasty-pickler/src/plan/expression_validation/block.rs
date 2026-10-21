@@ -183,6 +183,20 @@ impl Validator<'_, '_> {
                 ty: typed.ty,
             });
         }
+        if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+            &self.source_tree(source_id)?.kind
+        {
+            self.source_typed_binding(source_id, typed_id)?;
+            self.span(self.source_tree(source_id)?.position)?;
+            self.charge(1)?;
+            return self.validate_unit_expression(
+                parens.inner,
+                typed_id,
+                method,
+                depth + 1,
+                visited,
+            );
+        }
         match (&self.source_tree(source_id)?.kind, &typed.kind) {
             (TreeKind::Assign(_), TreeKind::Assign(_)) => {
                 self.validate_assignment_statement(source_id, typed_id, method, depth, visited)
