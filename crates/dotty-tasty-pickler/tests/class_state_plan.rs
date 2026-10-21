@@ -39,6 +39,9 @@ enum TestCorruption {
         method: &'static str,
         field_reader: &'static str,
     },
+    ParenthesizedUnitCycle {
+        method: &'static str,
+    },
 }
 
 fn with_frontend<R>(
@@ -128,6 +131,14 @@ fn class_tree_for(
 }
 
 fn clone_typed_ast(ast: &AstArena<Typed>) -> AstArena<Typed> {
+    let mut cloned = AstArena::new();
+    for (_, tree) in ast.iter() {
+        cloned.alloc(tree.clone());
+    }
+    cloned
+}
+
+fn clone_untyped_ast(ast: &AstArena<Untyped>) -> AstArena<Untyped> {
     let mut cloned = AstArena::new();
     for (_, tree) in ast.iter() {
         cloned.alloc(tree.clone());
@@ -590,9 +601,11 @@ fn emit_class_state_source(
         }
 
         let mut typed_ast = clone_typed_ast(typer.typed_ast());
+        let mut source_ast = clone_untyped_ast(ast);
         if let Some(corruption) = corruption {
             let (name, field_type) = match corruption {
                 TestCorruption::LiteralMethod(name) => (name, None),
+                TestCorruption::ParenthesizedUnitCycle { method } => (method, None),
                 TestCorruption::ShadowedFieldTarget {
                     method,
                     field_reader,
@@ -681,6 +694,14 @@ fn emit_class_state_source(
                     let lhs = assignment.lhs;
                     typed_ast.get_mut(lhs).ty = field_type.unwrap();
                 }
+                TestCorruption::ParenthesizedUnitCycle { .. } => {
+                    let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+                        &mut source_ast.get_mut(rhs).kind
+                    else {
+                        panic!("cycle corruption target must be parenthesized")
+                    };
+                    parens.inner = rhs;
+                }
             }
         }
 
@@ -688,7 +709,7 @@ fn emit_class_state_source(
         ClassStatePicklePlan {
             store: typer.store(),
             definitions,
-            source_ast: ast,
+            source_ast: &source_ast,
             typed_ast: &typed_ast,
             source_index: index,
             typed_bindings: &bindings,
@@ -1014,6 +1035,23 @@ fn class_state_rejects_assignment_retargeted_to_readonly_field() {
         result,
         Err(PickleError::Reference {
             reason: ReferenceError::Metadata,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn class_state_rejects_cyclic_unit_parentheses_with_depth_error() {
+    let source = "package example\nclass CyclicUnitParentheses:\n  private var current: Int = 0\n  def set(value: Int): Unit = (current = value)\n";
+    assert!(matches!(
+        emit_class_state_source(
+            source,
+            "CyclicUnitParentheses",
+            "CyclicUnitParentheses.scala",
+            Some(TestCorruption::ParenthesizedUnitCycle { method: "set" }),
+        ),
+        Err(PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
             ..
         })
     ));
