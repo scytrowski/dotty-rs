@@ -40,6 +40,10 @@ fn independent_fixtures_match_normalized_snapshots() {
         "example/Conditionals",
         "example/Algorithms",
         "example/AlgorithmsReference",
+        "example/PrivateValues",
+        "example/MutableField",
+        "example/Box",
+        "example/Counter",
         "example/CustomOperators",
     ] {
         let expected: Value = serde_json::from_slice(
@@ -54,6 +58,220 @@ fn independent_fixtures_match_normalized_snapshots() {
         .unwrap();
         assert_eq!(inspect(&fixture(name), false).unwrap(), expected, "{name}");
     }
+}
+
+#[test]
+fn scala_39_private_primitive_members_remain_source_valdefs_at_pickle_time() {
+    let snapshot = inspect(&fixture("example/PrivateValues"), false).unwrap();
+    let nodes = nodes(&snapshot);
+    let class = named(&snapshot, "PrivateValues");
+    let vals = ["seed", "enabled"].map(|name| named(&snapshot, name));
+    assert_eq!(class["tag"], "TYPEDEF");
+    let constructor = nodes
+        .iter()
+        .find(|node| node["tag"] == "DEFDEF" && node["name"] == json!({"utf8":"<init>"}))
+        .unwrap();
+    assert_eq!(constructor["role"], "compiler-default-constructor");
+    assert_eq!(constructor["header"], json!([{"clause":"EMPTYCLAUSE"}]));
+    assert_eq!(constructor["has_rhs"], false);
+    assert_eq!(constructor["modifiers"], json!([]));
+    assert_eq!(
+        vals.map(|value| value["tag"].as_str().unwrap()),
+        ["VALDEF", "VALDEF"]
+    );
+    for value in vals {
+        assert_eq!(value["parent"], class["children"][0]);
+        assert_eq!(value["owner"], class["id"]);
+        assert_eq!(value["modifiers"], json!(["tag-6", "tag-22"]));
+    }
+    let template = nodes
+        .iter()
+        .find(|node| node["id"] == class["children"][0])
+        .unwrap();
+    assert_eq!(template["children"][2], vals[0]["id"]);
+    assert_eq!(template["children"][3], vals[1]["id"]);
+    assert_eq!(
+        named(&snapshot, "seed")["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        nodes
+            .iter()
+            .filter(|node| node["name"] == json!({"utf8":"seed"}))
+            .count(),
+        1
+    );
+    assert!(nodes.iter().any(|node| node["tag"] == "INTconst"));
+    assert!(nodes.iter().any(|node| node["tag"] == "TRUEconst"));
+    assert!(!nodes.iter().any(|node| node["tag"] == "DEFDEF"
+        && matches!(node["name"]["utf8"].as_str(), Some("seed" | "enabled"))));
+}
+
+#[test]
+fn scala_39_plain_constructor_parameter_has_template_and_constructor_param_nodes() {
+    let snapshot = inspect(&fixture("example/Box"), false).unwrap();
+    let nodes = nodes(&snapshot);
+    let class = named(&snapshot, "Box");
+    let template = nodes
+        .iter()
+        .find(|node| node["tag"] == "TEMPLATE" && node["parent"] == class["id"])
+        .unwrap();
+    let template_parameter = nodes
+        .iter()
+        .find(|node| {
+            node["tag"] == "PARAM"
+                && node["name"] == json!({"utf8":"start"})
+                && node["parent"] == template["id"]
+        })
+        .unwrap();
+    let constructor = nodes
+        .iter()
+        .find(|node| {
+            node["tag"] == "DEFDEF"
+                && node["name"] == json!({"utf8":"<init>"})
+                && node["parent"] == template["id"]
+        })
+        .unwrap();
+    let constructor_parameter = nodes
+        .iter()
+        .find(|node| {
+            node["tag"] == "PARAM"
+                && node["name"] == json!({"utf8":"start"})
+                && node["parent"] == constructor["id"]
+        })
+        .unwrap();
+    assert_ne!(template_parameter["id"], constructor_parameter["id"]);
+    assert_eq!(template_parameter["owner"], class["id"]);
+    assert_eq!(constructor_parameter["owner"], constructor["id"]);
+    assert_eq!(constructor["modifiers"], json!(["STABLE"]));
+    assert_eq!(
+        constructor["header"],
+        json!([{"parameter":{"utf8":"start"}}])
+    );
+    assert_eq!(template["children"][0], template_parameter["id"]);
+    let parent_call = nodes
+        .iter()
+        .find(|node| node["id"] == template["children"][1])
+        .unwrap();
+    assert_eq!(parent_call["tag"], "APPLY");
+    assert_eq!(template["children"][2], constructor["id"]);
+    assert!(
+        !nodes
+            .iter()
+            .any(|node| node["tag"] == "VALDEF" && node["name"] == json!({"utf8":"start"}))
+    );
+}
+
+#[test]
+fn scala_39_counter_tasty_keeps_initializer_owner_and_source_field_edges() {
+    let snapshot = inspect(&fixture("example/Counter"), false).unwrap();
+    let nodes = nodes(&snapshot);
+    let class = named(&snapshot, "Counter");
+    let template = nodes
+        .iter()
+        .find(|node| node["tag"] == "TEMPLATE" && node["parent"] == class["id"])
+        .unwrap();
+    let template_parameter = nodes
+        .iter()
+        .find(|node| {
+            node["tag"] == "PARAM"
+                && node["name"] == json!({"utf8":"start"})
+                && node["parent"] == template["id"]
+        })
+        .unwrap();
+    let constructor = nodes
+        .iter()
+        .find(|node| {
+            node["tag"] == "DEFDEF"
+                && node["name"] == json!({"utf8":"<init>"})
+                && node["parent"] == template["id"]
+        })
+        .unwrap();
+    let constructor_parameter = nodes
+        .iter()
+        .find(|node| {
+            node["tag"] == "PARAM"
+                && node["name"] == json!({"utf8":"start"})
+                && node["parent"] == constructor["id"]
+        })
+        .unwrap();
+    assert_ne!(template_parameter["id"], constructor_parameter["id"]);
+    assert_eq!(
+        constructor["header"],
+        json!([{"parameter":{"utf8":"start"}}])
+    );
+    assert_eq!(constructor["modifiers"], json!([]));
+    assert_eq!(template["children"][0], template_parameter["id"]);
+    assert_eq!(template["children"][2], constructor["id"]);
+
+    let current = named(&snapshot, "current");
+    assert_eq!(current["tag"], "VALDEF");
+    assert_eq!(current["owner"], class["id"]);
+    assert_eq!(current["modifiers"], json!(["tag-6", "tag-22", "MUTABLE"]));
+    assert_eq!(template["children"][3], current["id"]);
+    let member_order = template["children"].as_array().unwrap()[3..]
+        .iter()
+        .map(|id| {
+            let node = nodes.iter().find(|node| node["id"] == *id).unwrap();
+            (node["tag"].as_str().unwrap(), node["name"]["utf8"].as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        member_order,
+        [
+            ("VALDEF", Some("current")),
+            ("DEFDEF", Some("get")),
+            ("DEFDEF", Some("set")),
+            ("DEFDEF", Some("increment")),
+        ]
+    );
+    let initializer = current["children"][1].as_str().unwrap();
+    let reference = nodes.iter().find(|node| node["id"] == initializer).unwrap();
+    assert_eq!(reference["tag"], "TERMREFsymbol");
+    assert_eq!(reference["reference"]["target"], template_parameter["id"]);
+    assert_ne!(
+        reference["reference"]["target"],
+        constructor_parameter["id"]
+    );
+
+    let get = named(&snapshot, "get");
+    let get_rhs = nodes
+        .iter()
+        .find(|node| {
+            node["parent"] == get["id"]
+                && node["tag"] == "SELECT"
+                && node["name"] == json!({"utf8":"current"})
+        })
+        .unwrap();
+    assert_eq!(
+        nodes
+            .iter()
+            .find(|node| node["id"] == get_rhs["children"][0])
+            .unwrap()["tag"],
+        "QUALTHIS"
+    );
+    let set = named(&snapshot, "set");
+    let assign = nodes
+        .iter()
+        .find(|node| node["parent"] == set["id"] && node["tag"] == "ASSIGN")
+        .unwrap();
+    let target = nodes
+        .iter()
+        .find(|node| node["id"] == assign["children"][0])
+        .unwrap();
+    assert_eq!(target["tag"], "SELECT");
+    assert_eq!(target["name"], json!({"utf8":"current"}));
+    let value = nodes
+        .iter()
+        .find(|node| node["id"] == assign["children"][1])
+        .unwrap();
+    assert_eq!(value["tag"], "TERMREFdirect");
+
+    assert!(!nodes.iter().any(|node| node["tag"] == "DEFDEF"
+        && matches!(node["name"]["utf8"].as_str(), Some("current" | "current_="))));
 }
 
 #[test]

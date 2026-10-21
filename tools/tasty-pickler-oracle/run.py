@@ -476,6 +476,23 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Algorithms = arithmetic, booleans, short-circuit, sumTo(5)=10", 10,
             ),
+            "example/Counter.tasty": (
+                "example.Counter", r"public int increment\(\)", "CounterRuntime.java",
+                """public final class CounterRuntime {
+  public static void main(String[] args) {
+    example.Counter counter = new example.Counter(5);
+    if (counter.get() != 5) throw new AssertionError("constructor field initializer");
+    counter.set(8);
+    if (counter.increment() != 9 || counter.get() != 9)
+      throw new AssertionError("mutating getter/setter/increment");
+    counter.set(-2);
+    if (counter.increment() != -1 || counter.get() != -1)
+      throw new AssertionError("negative mutable field state");
+    System.out.println("Counter = 5, 9, -1");
+  }
+}
+""", "Counter = 5, 9, -1", 9,
+            ),
             "example/Loop.tasty": (
                 "example.Loop", r"public int sumTo\(int\)", "LoopRuntime.java",
                 """public final class LoopRuntime {
@@ -580,6 +597,14 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Algorithms class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Counter.tasty":
+                signatures = (
+                    r"public example\.Counter\(int\)",
+                    r"public int get\(\)", r"public void set\(int\)",
+                    r"public int increment\(\)",
+                )
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Counter class has unexpected signatures: {javap}")
             if relative.as_posix() == "example/Arithmetic.tasty":
                 signatures = (
                     r"public int add\(int, int\)", r"public int subtract\(int, int\)",
@@ -671,12 +696,36 @@ def expect_failure(action, label: str) -> None:
     raise RuntimeError(f"negative control unexpectedly succeeded: {label}")
 
 
+def reject_source(toolchain: Toolchain, directory: Path, name: str,
+                  source: str, diagnostic: str) -> None:
+    case = directory / "source-negative" / name
+    case.mkdir(parents=True)
+    source_file = case / f"{name}.scala"
+    source_file.write_text(source)
+    output = case / "classes"
+    output.mkdir()
+    try:
+        toolchain.compiler(["-d", output, source_file])
+    except CommandFailure as error:
+        if not re.search(diagnostic, str(error), re.IGNORECASE):
+            raise RuntimeError(f"{name} failed for an unexpected reason: {error}") from error
+        return
+    raise RuntimeError(f"negative source unexpectedly compiled: {name}")
+
+
 def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[dict]:
     verify_provenance()
     generated = directory / "regenerated"
     generated.mkdir()
     generate(toolchain, binary, generated, check=True)
     results = []
+    for name, source, diagnostic in [
+        ("DuplicateField", "class DuplicateField { private val item: Int = 1; private val item: Int = 2 }", "already defined|duplicate"),
+        ("MissingInitializer", "class MissingInitializer { private val item: Int }", "not defined|abstract"),
+        ("WrongInitializer", "class WrongInitializer { private val item: Int = true }", "Found:|Required:|type mismatch"),
+    ]:
+        reject_source(toolchain, directory, name, source, diagnostic)
+        results.append({"negative_source": name, "scala_compile_rejected": True})
     algorithm_classes = directory / "algorithm-source-reference"
     algorithm_classes.mkdir()
     toolchain.compiler(["-d", algorithm_classes, FIXTURES / "AlgorithmsReference.scala"])
@@ -744,7 +793,7 @@ def check_oracle(toolchain: Toolchain, binary: Path, directory: Path) -> list[di
     for candidate in sorted((FIXTURES / "tasty").rglob("*.tasty")):
         results.append(verify_candidate(toolchain, binary, candidate,
                                         directory / f"verify-{candidate.stem}",
-                                        runtime=candidate.name == "Algorithms.tasty"))
+                                        runtime=candidate.name in {"Algorithms.tasty", "Counter.tasty"}))
     answer = FIXTURES / "tasty/example/Answer.tasty"
     reduced = directory / "Reduced.tasty"
     execute([binary, "reduce-answer", answer, reduced])
