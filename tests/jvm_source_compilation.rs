@@ -8558,7 +8558,6 @@ fn verify_counter_objects_with_jdk(output_directory: &Path) {
         "public int independent();",
         "descriptor: (I)V",
         "descriptor: (I)I",
-        "descriptor: (II)I",
     ] {
         assert!(
             javap_output.contains(expected),
@@ -9533,6 +9532,7 @@ fn verify_super_calls_with_jdk(output_directory: &Path) {
         "major version: 65",
         "descriptor: ()I",
         "descriptor: (I)I",
+        "descriptor: (II)I",
         "descriptor: (Z)Z",
         "descriptor: ()LBase;",
         "StackMapTable",
@@ -9542,8 +9542,19 @@ fn verify_super_calls_with_jdk(output_directory: &Path) {
             "javap omitted {evidence:?}:\n{javap}"
         );
     }
+    let derived_javap = Command::new("javap")
+        .args(["-p", "-c", "-classpath", output_path, "Derived"])
+        .output()
+        .expect("start javap for Derived direct-super methods");
+    assert!(
+        derived_javap.status.success(),
+        "javap rejected Derived direct-super methods\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&derived_javap.stdout),
+        String::from_utf8_lossy(&derived_javap.stderr)
+    );
+    let derived_javap = String::from_utf8_lossy(&derived_javap.stdout);
     assert_javap_instruction_sequence(
-        &javap,
+        &derived_javap,
         "public int value();",
         &["aload_0", "invokespecial", "iconst_1", "iadd", "ireturn"],
     );
