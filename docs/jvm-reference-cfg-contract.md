@@ -138,6 +138,12 @@ superclass. Distinct local references become `Top` even when one is an ancestor
 of the other, so there is no hierarchy-based local promotion. A later read of
 that slot fails as uninitialized/unusable.
 
+The source-level `Base`-declared sibling case and its separate typer, method
+descriptor, and verifier questions are characterized in the [sibling
+reference joins audit](jvm-sibling-reference-joins.md). The audit keeps the
+current rejection and does not infer a source result from the verifier's
+ability to accept an explicit `Object(Base)` frame.
+
 ## Transfer and constant-pool checks
 
 Transfer functions check exact class and initialization state instead of
