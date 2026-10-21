@@ -84,7 +84,7 @@ jobs:
 
       - name: Record Rust version for cache key
         id: rust-version
-        run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+        run: echo "version=$(rustc +stable --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 
       - name: Cache JVM gate build artifacts
         uses: actions/cache@v4
