@@ -462,11 +462,19 @@ generics, annotations).
 Parent-name recovery follows the compiled TASTy reference tree. Qualified,
 root-qualified, applied, shared, and direct symbol references retain the
 package or owner encoded by that tree; an applied parent's binary identity is
-read from its type constructor. AST-child and identifier wrappers around
-semantic references are traversed with the same depth bound, and a repeated
-`SelectIn` name is not appended when its AST-child qualifier already proves
-that exact final segment. Shared references are followed through their TASTy
-address with the same depth bound as other reference chains. Known
+read from its type constructor. For a TASTy type selection whose qualifier is
+an AST reference to an owner, the selected nested type keeps that owner as
+part of its binary identity. Constructor `SelectIn` wrappers then resolve to
+the selected type itself, rather than adding a constructor name. Signed
+selection names use their source-level original spelling; signature data is
+not treated as a class name. This resolves the pinned compiler
+`Trees.Instance[Type]` parent used by both `tpd$` and `untpd$` as
+`Trees$Instance`, while keeping type arguments outside this hierarchy
+projection. AST-child and identifier wrappers around semantic references are
+traversed with the same depth bound, and a repeated `SelectIn` name is not
+appended when its AST-child qualifier already proves that exact final
+segment. Shared references are followed through their TASTy address with the
+same depth bound as other reference chains. Known
 Scala aliases such as `scala.AnyRef` still normalize to their canonical JVM
 identity. A semantic reference with an unreadable prefix remains
 `UnresolvedSupertype`, except for the separately validated Scala package-object
@@ -475,6 +483,19 @@ classpath check considers the current package, `scala`, and `java.lang`, and
 accepts a result only when exactly one classpath resource matches. The pinned
 Scala 3.9.0 audit records each residual parent's reference flags, visible names,
 and compact raw-tree tag shape.
+
+The applied nested constructor change is grounded in the frozen #1412 roots:
+
+| Requested root | Frozen unresolved-parent observations | Parent index | Pinned TASTy result |
+| --- | ---: | ---: | --- |
+| `dotty/tools/dotc/ast/tpd$` | 1,715 | 0 | `dotty/tools/dotc/ast/Trees$Instance` |
+| `dotty/tools/dotc/ast/untpd$` | 141 | 0 | `dotty/tools/dotc/ast/Trees$Instance` |
+
+The focused tests verify those names from the real compiler `tpd.tasty` and
+`untpd.tasty` trees and independently reconstruct the nested `Instance`
+owner chain from `Trees.tasty`. These counts identify the affected frozen
+roots; they do not claim that all weighted observations now complete
+successfully through class loading.
 
 ## 5. Loading algorithm (enter before complete)
 
