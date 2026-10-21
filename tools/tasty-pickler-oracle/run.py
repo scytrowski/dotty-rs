@@ -219,6 +219,8 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
             "def seedBranch(flag: scala.Boolean): scala.Int =",
             "def seedViaThisBranch(",
             "def seedParenBranch(",
+            "def seedBlockBranch(",
+            "def seedBlockAfterLocal(",
         )
         if not all(member in decompiled for member in expected_members):
             raise RuntimeError(f"fresh PrivateFields TASTy lost a field or method: {decompiled}")
@@ -325,7 +327,9 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         values.enabledBranch() != 1 || !values.enabledViaThis() || values.disabled() ||
         values.seedBranch(true) != 42 || values.seedBranch(false) != 0 ||
         values.seedViaThisBranch(true) != 42 || values.seedViaThisBranch(false) != 0 ||
-        values.seedParenBranch(true) != 42 || values.seedParenBranch(false) != 0)
+        values.seedParenBranch(true) != 42 || values.seedParenBranch(false) != 0 ||
+        values.seedBlockBranch(true) != 42 || values.seedBlockBranch(false) != 0 ||
+        values.seedBlockAfterLocal(true) != 42 || values.seedBlockAfterLocal(false) != 0)
       throw new AssertionError("PrivateFields field reads or shadowing changed");
     System.out.println("PrivateFields field reads and shadowing passed");
   }
