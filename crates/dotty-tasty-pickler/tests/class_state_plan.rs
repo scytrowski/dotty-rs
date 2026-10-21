@@ -535,8 +535,15 @@ fn emit_class_state_source(
             };
             let rhs = definition.rhs.expect("test methods have bodies");
             let context = typer.expression_context_for(*symbol).unwrap();
+            let SymbolInfo::Complete(signature) = typer.store().symbols.get(*symbol).info else {
+                panic!("test method has a complete signature")
+            };
+            let result_type = match typer.store().types.try_get(signature) {
+                Some(Type::Method(signature)) => signature.result,
+                _ => signature,
+            };
             let typed = typer
-                .type_expression_expected(rhs, context, definitions.int)
+                .type_expression_expected(rhs, context, result_type)
                 .unwrap();
             bindings.0.insert((source, rhs), typed);
             let locals =
@@ -707,22 +714,6 @@ fn validated_private_fields_emit_source_ordered_valdefs_and_preserve_methods() {
     assert_eq!(file.render_name(method.name).unwrap(), "constant");
     assert_eq!(method.clauses, [EMPTYCLAUSE_TAG]);
     assert_eq!(raw_tree_tag(&method.rhs.unwrap()), INTCONST_TAG);
-
-    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let candidate = root.join("target/issue-1391/generated/example/PrivateFields.tasty");
-        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
-        std::fs::write(&candidate, output.bytes()).unwrap();
-        let result = Command::new("python3")
-            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
-            .arg("verify")
-            .arg(&candidate)
-            .arg("--runtime")
-            .env("TMPDIR", root.join("target/issue-1391/tmp"))
-            .status()
-            .expect("start the pinned Scala 3.9 -from-tasty gate");
-        assert!(result.success(), "PrivateFields -from-tasty gate failed");
-    }
 }
 
 #[test]
@@ -751,6 +742,55 @@ fn class_state_reuses_canonical_parameter_and_forward_method_validation() {
         .collect::<Vec<_>>();
     assert_eq!(methods.len(), 2);
     assert_eq!(raw_tree_tag(methods[0].rhs.as_ref().unwrap()), SELECT_TAG);
+}
+
+#[test]
+fn class_state_lowers_implicit_and_explicit_private_primitive_field_reads() {
+    let source = "package example\nclass PrivateFields:\n  private val seed: Int = 42\n  private val enabled: Boolean = true\n  private var counter: Int = 0\n  def seedValue(): Int = seed\n  def seedViaThis(): Int = this.seed\n  def enabledValue(): Boolean = enabled\n";
+    let source = source.replace(
+        "  def enabledValue(): Boolean = enabled\n",
+        "  def enabledValue(): Boolean = enabled\n  def shadowedSeed(): Int = { val seed: Int = 7; seed }\n  def constant(): Int = 1\n",
+    );
+    let output = emit_class_state_source(&source, "PrivateFields", "PrivateFields.scala", None)
+        .expect("canonical private field reads and local shadowing should serialize");
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let methods = &output.declarations()[5..8];
+    let bodies = methods
+        .iter()
+        .map(|declaration| {
+            index
+                .get(declaration.address)
+                .unwrap()
+                .decode_defdef_body()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bodies.len(), 3);
+    assert!(bodies.iter().all(|body| {
+        let rhs = body.rhs.as_ref().unwrap();
+        raw_tree_tag(rhs) == SELECT_TAG
+    }));
+    assert_eq!(file.render_name(bodies[0].name).unwrap(), "seedValue");
+    assert_eq!(file.render_name(bodies[1].name).unwrap(), "seedViaThis");
+    assert_eq!(file.render_name(bodies[2].name).unwrap(), "enabledValue");
+    assert!(output.body(output.declarations()[8].symbol).is_some());
+
+    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1392/generated/example/PrivateFields.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1392/tmp"))
+            .status()
+            .expect("start the pinned Scala 3.9 -from-tasty gate");
+        assert!(result.success(), "PrivateFields -from-tasty gate failed");
+    }
 }
 
 #[test]
