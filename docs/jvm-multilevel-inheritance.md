@@ -16,6 +16,16 @@ test verifies the combined constructor and direct-super path, including
 per-class constructor parameter identity, exact immediate-parent references,
 virtual dispatch through an inherited base body, and positive and negative
 runtime values under the JDK 21+ verifier gate.
+The final `MultilevelInheritance.scala` fixture exercises the complete
+Base/Middle/Leaf/Runner pipeline in two independent frontend sessions. Its
+structural assertions cover all four class headers and descriptors, the
+single direct-parent constructor calls, Base-owned field initialization,
+both `invokespecial` owners, the two `invokevirtual Base.value` calls in
+`Base.doubled`, Base-typed arguments and results, and decoded branch-target
+frames whose stack entry resolves through the constant pool to
+`Object(Middle)`. The mandatory JDK gate checks the same classes with
+`javap -c -v` and runs the positive, zero, and negative runtime cases under
+`java -Xverify:all`.
 
 ## Source evidence and current result
 

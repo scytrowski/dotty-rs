@@ -7448,6 +7448,35 @@ fn full_multilevel_inheritance_fixture_verifies_construction_dispatch_and_joins(
 }
 
 #[test]
+fn fourth_source_inheritance_level_fails_before_batch_publication() {
+    let source = "class DepthBase\nclass DepthMiddle extends DepthBase\nclass DepthLeaf extends DepthMiddle\nclass DepthFourth extends DepthLeaf\n";
+    let output = TestOutputDirectory::new("fourth-source-inheritance-level");
+    let result = compile_source_batch(
+        source,
+        "FourthInheritanceLevel.scala",
+        output.path(),
+        SourceId::from_index(1408),
+        SourceUnitCardinality::AtLeastTwo,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::InvalidJvmSuperclass {
+                    issue: dotty_jvm::JvmSuperclassIssue::InheritanceTooDeep,
+                    ..
+                }
+            ))
+        ),
+        "the source pipeline rejects a fourth user class with the typed hierarchy error: {result:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "the rejected hierarchy publishes no partial class batch"
+    );
+}
+
+#[test]
 fn scala_single_inheritance_and_virtual_dispatch_pass_the_end_to_end_jdk_gate() {
     let first_output = TestOutputDirectory::new("inheritance-first-build");
     let second_output = TestOutputDirectory::new("inheritance-second-build");
