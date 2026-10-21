@@ -1586,6 +1586,50 @@ impl JvmClassHierarchy {
         &self.superclasses
     }
 
+    /// Returns the nearest common planned ancestor of two planned classes.
+    ///
+    /// The validated hierarchy has one superclass per class, so the nearest
+    /// common ancestor is unique. The built-in `java/lang/Object` root is not
+    /// returned: if it is the only common class, or either input is not part
+    /// of this hierarchy snapshot, this returns `None`. The query uses only
+    /// canonical [`SymbolId`] edges; it does not compare printed names or
+    /// modify the hierarchy.
+    pub fn nearest_common_non_object_ancestor(
+        &self,
+        left: SymbolId,
+        right: SymbolId,
+    ) -> Option<SymbolId> {
+        let left_ancestors = self.planned_ancestors(left)?;
+        let right_ancestors = self.planned_ancestors(right)?;
+        left_ancestors
+            .into_iter()
+            .find(|candidate| right_ancestors.contains(candidate))
+    }
+
+    fn planned_ancestors(&self, class: SymbolId) -> Option<Vec<SymbolId>> {
+        let mut ancestors = Vec::new();
+        let mut current = class;
+        loop {
+            if ancestors.contains(&current) {
+                return None;
+            }
+            let edge = self
+                .superclasses
+                .iter()
+                .find(|edge| edge.class == current)?;
+            ancestors.push(current);
+            if !self
+                .superclasses
+                .iter()
+                .any(|candidate| candidate.class == edge.parent)
+            {
+                break;
+            }
+            current = edge.parent;
+        }
+        Some(ancestors)
+    }
+
     /// Returns the Scala-independent hierarchy edges for class-file consumers.
     pub fn internal_name_edges(&self) -> Vec<JvmInternalNameHierarchyEdge> {
         self.superclasses
