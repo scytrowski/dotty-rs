@@ -106,6 +106,25 @@ interoperability, not final JVM field layout or read/write behavior. The
 `PrivateFields` runtime case and checks live in
 [`tools/tasty-pickler-oracle/run.py`](../tools/tasty-pickler-oracle/run.py).
 
+## Canonical private-field reads (#1392)
+
+Class-state method bodies may read a planned private `Int` or `Boolean` field
+through the canonical `SymbolKind::Field` target. The validator requires the
+target to be one of the class plan's source members, with the source-indexed
+declaration, exact owner, visibility, flags, and completed type. It validates
+the receiver as the current class `ThisType`; a local variable with the same
+spelling remains a separate local binding.
+
+The pinned Scala 3.9 shape is name-bearing `SELECT`, not a direct TASTy
+reference to the field declaration label. An unqualified source identifier
+lowers to `SELECT(QUALTHIS(IDENTtpt(Class)), fieldName)`; `this.field` lowers to
+`SELECT(THIS(TYPEREF(Class)), fieldName)`. The canonical field declaration
+label is still reserved in the pickler context, while target identity and
+receiver correctness are checked before the name-bearing wire form is emitted.
+The fresh Rust-produced `PrivateFields.tasty` passes Scala decompilation,
+`-from-tasty`, and runtime checks for both receiver forms, an `Int` field, a
+`Boolean` field, and a same-named local variable.
+
 This increment does not add constructor parameters, constructor accessors,
-field reads/writes, or backing-storage ABI guarantees. Existing
+mutable field writes, or backing-storage ABI guarantees. Existing
 `ValidatedPicklePlan` output forms remain unchanged.
