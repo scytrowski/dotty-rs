@@ -3439,11 +3439,13 @@ impl CfgCodeAnalyzer {
             .saturating_mul(local_count.saturating_add(1))
             .max(1);
         let mut block_entries = vec![None; block_count];
+        let mut block_stack_join_evidence = vec![None; block_count];
         let entry = graph.entry_block();
         let Some(entry_state) = block_entries.get_mut(entry.index()) else {
             return Err(AnalysisError::InvalidControlFlowGraph { block: entry });
         };
         *entry_state = Some(initial_state.clone());
+        block_stack_join_evidence[entry.index()] = Some(stack_join_evidence(&initial_state));
         let mut retained_state_slots = initial_state_slots;
 
         let mut pending = std::collections::VecDeque::from([entry]);
@@ -3510,10 +3512,21 @@ impl CfgCodeAnalyzer {
                 let Some(slot) = block_entries.get_mut(successor.index()) else {
                     return Err(AnalysisError::InvalidControlFlowGraph { block: *successor });
                 };
+                let Some(evidence_slot) = block_stack_join_evidence.get_mut(successor.index())
+                else {
+                    return Err(AnalysisError::InvalidControlFlowGraph { block: *successor });
+                };
                 let changed = match slot {
-                    Some(existing) => {
-                        merge_flow_states(existing, &outgoing, *successor, hierarchy)?
-                    }
+                    Some(existing) => match evidence_slot {
+                        Some(evidence) => {
+                            merge_flow_states(existing, &outgoing, *successor, hierarchy, evidence)?
+                        }
+                        None => {
+                            return Err(AnalysisError::InvalidControlFlowGraph {
+                                block: *successor,
+                            });
+                        }
+                    },
                     None => {
                         let additional_slots = outgoing
                             .locals
@@ -3528,6 +3541,7 @@ impl CfgCodeAnalyzer {
                         }
                         retained_state_slots = required_slots;
                         *slot = Some(outgoing.clone());
+                        *evidence_slot = Some(stack_join_evidence(&outgoing));
                         true
                     }
                 };
@@ -3866,6 +3880,7 @@ fn merge_flow_states(
     incoming: &BlockEntryState,
     block: BasicBlockId,
     hierarchy: &ClassHierarchy,
+    evidence: &mut [std::collections::BTreeSet<ClassIdentity>],
 ) -> Result<bool, AnalysisError> {
     if existing.operand_stack.len() != incoming.operand_stack.len() {
         return Err(AnalysisError::IncompatibleStackMerge {
@@ -3874,6 +3889,9 @@ fn merge_flow_states(
             incoming_values: incoming.operand_stack.len(),
         });
     }
+    if evidence.len() != existing.operand_stack.len() {
+        return Err(AnalysisError::InvalidControlFlowGraph { block });
+    }
     let mut changed = false;
     for (value, (expected, incoming)) in existing
         .operand_stack
@@ -3881,14 +3899,16 @@ fn merge_flow_states(
         .zip(&incoming.operand_stack)
         .enumerate()
     {
-        let joined = join_flow_values(expected, incoming, hierarchy).ok_or_else(|| {
-            AnalysisError::IncompatibleStackValue {
-                block,
-                value,
-                expected: expected.clone(),
-                incoming: incoming.clone(),
-            }
-        })?;
+        let joined =
+            join_flow_values_with_evidence(expected, incoming, hierarchy, &mut evidence[value])
+                .map_err(
+                    |(expected, incoming)| AnalysisError::IncompatibleStackValue {
+                        block,
+                        value,
+                        expected,
+                        incoming,
+                    },
+                )?;
         if *expected != joined {
             *expected = joined;
             changed = true;
@@ -3901,6 +3921,44 @@ fn merge_flow_states(
         }
     }
     Ok(changed)
+}
+
+fn stack_join_evidence(state: &BlockEntryState) -> Vec<std::collections::BTreeSet<ClassIdentity>> {
+    state
+        .operand_stack
+        .iter()
+        .map(|value| match value {
+            FlowValue::Integer => std::collections::BTreeSet::new(),
+            FlowValue::Object(class) => std::collections::BTreeSet::from([class.clone()]),
+        })
+        .collect()
+}
+
+fn join_flow_values_with_evidence(
+    left: &FlowValue,
+    right: &FlowValue,
+    hierarchy: &ClassHierarchy,
+    evidence: &mut std::collections::BTreeSet<ClassIdentity>,
+) -> Result<FlowValue, (FlowValue, FlowValue)> {
+    match (left, right) {
+        (FlowValue::Object(_), FlowValue::Object(incoming)) => {
+            if let Some(conflicting) = evidence.iter().find(|existing| {
+                !(hierarchy.is_assignable(existing.internal_name(), incoming.internal_name())
+                    || hierarchy.is_assignable(incoming.internal_name(), existing.internal_name()))
+            }) {
+                return Err((
+                    FlowValue::Object(conflicting.clone()),
+                    FlowValue::Object(incoming.clone()),
+                ));
+            }
+            let Some(joined) = join_flow_values(left, right, hierarchy) else {
+                return Err((left.clone(), right.clone()));
+            };
+            evidence.insert(incoming.clone());
+            Ok(joined)
+        }
+        _ => join_flow_values(left, right, hierarchy).ok_or_else(|| (left.clone(), right.clone())),
+    }
 }
 
 fn join_flow_values(
@@ -5647,12 +5705,14 @@ mod tests {
             locals: vec![],
             operand_stack: vec![FlowValue::Object(class_identity("example/B"))],
         };
+        let mut evidence = stack_join_evidence(&existing);
         assert!(matches!(
             merge_flow_states(
                 &mut existing,
                 &incoming_reference,
                 block,
                 &ClassHierarchy::default(),
+                &mut evidence,
             ),
             Err(AnalysisError::IncompatibleStackValue { block: actual, value: 0, .. }) if actual == block
         ));
@@ -5667,6 +5727,7 @@ mod tests {
                 &incoming_integer,
                 block,
                 &ClassHierarchy::default(),
+                &mut evidence,
             ),
             Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
         ));
@@ -5706,6 +5767,8 @@ mod tests {
             locals: vec![],
             operand_stack: vec![base.clone()],
         };
+        let mut leaf_first_evidence = stack_join_evidence(&leaf_first);
+        let mut base_first_evidence = stack_join_evidence(&base_first);
         let block = test_block_id();
         for value in [&base, &middle, &leaf] {
             merge_flow_states(
@@ -5716,6 +5779,7 @@ mod tests {
                 },
                 block,
                 &hierarchy,
+                &mut leaf_first_evidence,
             )
             .unwrap();
         }
@@ -5728,6 +5792,7 @@ mod tests {
                 },
                 block,
                 &hierarchy,
+                &mut base_first_evidence,
             )
             .unwrap();
         }
@@ -5739,6 +5804,35 @@ mod tests {
             base_first.operand_stack.as_slice(),
             std::slice::from_ref(&base)
         );
+
+        for order in [
+            [&base, &leaf, &sibling],
+            [&leaf, &sibling, &base],
+            [&sibling, &base, &leaf],
+        ] {
+            let mut joined = BlockEntryState {
+                locals: vec![],
+                operand_stack: vec![order[0].clone()],
+            };
+            let mut evidence = stack_join_evidence(&joined);
+            let result = order[1..].iter().try_for_each(|value| {
+                merge_flow_states(
+                    &mut joined,
+                    &BlockEntryState {
+                        locals: vec![],
+                        operand_stack: vec![(*value).clone()],
+                    },
+                    block,
+                    &hierarchy,
+                    &mut evidence,
+                )
+                .map(|_| ())
+            });
+            assert!(matches!(
+                result,
+                Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
+            ));
+        }
 
         assert_eq!(join_flow_values(&sibling, &middle, &hierarchy), None);
         assert_eq!(join_flow_values(&leaf, &sibling, &hierarchy), None);
@@ -5762,12 +5856,14 @@ mod tests {
             locals: vec![FlowLocalState::Object(class_identity("example/B"))],
             operand_stack: vec![],
         };
+        let mut evidence = stack_join_evidence(&existing);
         assert!(
             merge_flow_states(
                 &mut existing,
                 &incoming,
                 test_block_id(),
                 &ClassHierarchy::default(),
+                &mut evidence,
             )
             .unwrap()
         );

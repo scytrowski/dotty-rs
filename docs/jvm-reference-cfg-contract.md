@@ -108,9 +108,12 @@ At each reachable block:
 1. Operand-stack heights must match. `Integer` joins only with `Integer`.
    Equal initialized classes remain unchanged. For two different initialized
    classes, the join is the already-present ancestor when the explicit
-   hierarchy proves one incoming class assignable to the other. This join is
-   commutative and idempotent; bounded ancestor chains converge independently
-   of predecessor order, and a widened state requeues dependent blocks.
+   hierarchy proves one incoming class assignable to the other. Every incoming
+   class at a multiway join must remain pairwise ancestor-comparable, including
+   inputs accumulated before a widening and inputs arriving on backedges. This
+   join is commutative and idempotent; bounded ancestor chains converge
+   independently of predecessor order, and a widened state requeues dependent
+   blocks.
    Siblings, unrelated classes, initialized/uninitialized mismatches,
    different allocation sites, primitive/reference mismatches, and different
    stack heights return typed analysis errors. Never infer a shared ancestor
