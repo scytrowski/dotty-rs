@@ -27,6 +27,16 @@ impl SourceTypedBindings for Bindings {
     }
 }
 
+#[derive(Clone, Copy)]
+enum TestCorruption {
+    LiteralMethod(&'static str),
+    ShadowedFieldTarget {
+        method: &'static str,
+        field_reader: &'static str,
+        identifier: &'static str,
+    },
+}
+
 fn with_frontend<R>(
     source_text: &str,
     f: impl FnOnce(
@@ -510,7 +520,7 @@ fn emit_class_state_source(
     source_text: &str,
     class_name: &str,
     source_name: &str,
-    corrupt_method_body: Option<&str>,
+    corruption: Option<TestCorruption>,
 ) -> Result<PickledTasty, PickleError> {
     with_frontend(source_text, |ast, source, index, definitions, typer| {
         let (class, members, constructor, mut bindings) = class_state_plan(
@@ -535,8 +545,15 @@ fn emit_class_state_source(
             };
             let rhs = definition.rhs.expect("test methods have bodies");
             let context = typer.expression_context_for(*symbol).unwrap();
+            let SymbolInfo::Complete(signature) = typer.store().symbols.get(*symbol).info else {
+                panic!("test method has a complete signature")
+            };
+            let result_type = match typer.store().types.try_get(signature) {
+                Some(Type::Method(signature)) => signature.result,
+                _ => signature,
+            };
             let typed = typer
-                .type_expression_expected(rhs, context, definitions.int)
+                .type_expression_expected(rhs, context, result_type)
                 .unwrap();
             bindings.0.insert((source, rhs), typed);
             let locals =
@@ -569,7 +586,36 @@ fn emit_class_state_source(
         }
 
         let mut typed_ast = clone_typed_ast(typer.typed_ast());
-        if let Some(name) = corrupt_method_body {
+        if let Some(corruption) = corruption {
+            let (name, field_type) = match corruption {
+                TestCorruption::LiteralMethod(name) => (name, None),
+                TestCorruption::ShadowedFieldTarget {
+                    method,
+                    field_reader,
+                    identifier: _,
+                } => {
+                    let reader = members
+                        .iter()
+                        .find_map(|member| {
+                            let ClassMemberPicklePlan::Method {
+                                symbol,
+                                source_tree,
+                            } = member
+                            else {
+                                return None;
+                            };
+                            (name_of(ast, *source_tree, typer) == field_reader)
+                                .then_some((*symbol, *source_tree))
+                        })
+                        .expect("field reader method exists");
+                    let TreeKind::DefDef(reader_def) = &ast.get(reader.1).kind else {
+                        unreachable!()
+                    };
+                    let reader_rhs = reader_def.rhs.expect("reader has a body");
+                    let reader_typed = bindings.typed_at(source, reader_rhs).unwrap();
+                    (method, Some(typer.typed_ast().get(reader_typed).ty))
+                }
+            };
             let method = members.iter().find_map(|member| {
                 let ClassMemberPicklePlan::Method {
                     symbol,
@@ -594,11 +640,33 @@ fn emit_class_state_source(
             };
             let rhs = definition.rhs.unwrap();
             let typed_root = bindings.typed_at(source, rhs).unwrap();
-            let forged = typed_ast.get_mut(typed_root);
-            let TreeKind::Literal(literal) = &mut forged.kind else {
-                panic!("test corruption expects a literal body")
-            };
-            literal.value = Constant::Int(42);
+            match corruption {
+                TestCorruption::LiteralMethod(_) => {
+                    let forged = typed_ast.get_mut(typed_root);
+                    let TreeKind::Literal(literal) = &mut forged.kind else {
+                        panic!("test corruption expects a literal body")
+                    };
+                    literal.value = Constant::Int(42);
+                }
+                TestCorruption::ShadowedFieldTarget { identifier, .. } => {
+                    let source_rhs = definition.rhs.unwrap();
+                    let local_or_parameter = match &ast.get(source_rhs).kind {
+                        TreeKind::Block(block) => {
+                            let TreeKind::Ident(ident) = ast.get(block.expr).kind else {
+                                panic!("shadowed local body ends in an identifier")
+                            };
+                            assert_eq!(typer.store().names.resolve(ident.name.text()), identifier);
+                            bindings.typed_at(source, block.expr).unwrap()
+                        }
+                        TreeKind::Ident(ident) => {
+                            assert_eq!(typer.store().names.resolve(ident.name.text()), identifier);
+                            typed_root
+                        }
+                        _ => panic!("shadowed method body has an identifier"),
+                    };
+                    typed_ast.get_mut(local_or_parameter).ty = field_type.unwrap();
+                }
+            }
         }
 
         let class_tree = class_tree_for(ast, source, index, class);
@@ -707,22 +775,6 @@ fn validated_private_fields_emit_source_ordered_valdefs_and_preserve_methods() {
     assert_eq!(file.render_name(method.name).unwrap(), "constant");
     assert_eq!(method.clauses, [EMPTYCLAUSE_TAG]);
     assert_eq!(raw_tree_tag(&method.rhs.unwrap()), INTCONST_TAG);
-
-    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let candidate = root.join("target/issue-1391/generated/example/PrivateFields.tasty");
-        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
-        std::fs::write(&candidate, output.bytes()).unwrap();
-        let result = Command::new("python3")
-            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
-            .arg("verify")
-            .arg(&candidate)
-            .arg("--runtime")
-            .env("TMPDIR", root.join("target/issue-1391/tmp"))
-            .status()
-            .expect("start the pinned Scala 3.9 -from-tasty gate");
-        assert!(result.success(), "PrivateFields -from-tasty gate failed");
-    }
 }
 
 #[test]
@@ -754,6 +806,55 @@ fn class_state_reuses_canonical_parameter_and_forward_method_validation() {
 }
 
 #[test]
+fn class_state_lowers_implicit_and_explicit_private_primitive_field_reads() {
+    let source = "package example\nclass PrivateFields:\n  private val seed: Int = 42\n  private val enabled: Boolean = true\n  private var counter: Int = 0\n  def seedValue(): Int = seed\n  def seedViaThis(): Int = this.seed\n  def enabledValue(): Boolean = enabled\n";
+    let source = source.replace(
+        "  def enabledValue(): Boolean = enabled\n",
+        "  def enabledValue(): Boolean = enabled\n  def shadowedSeed(): Int = { val seed: Int = 7; seed }\n  def constant(): Int = 1\n  def enabledBranch(): Int = if enabled then 1 else 0\n  def enabledViaThis(): Boolean = this.enabled\n  def disabled(): Boolean = !enabled\n  def seedBranch(flag: Boolean): Int = if flag then seed else 0\n  def seedViaThisBranch(flag: Boolean): Int = if flag then this.seed else 0\n  def seedParenBranch(flag: Boolean): Int = if flag then (seed) else 0\n  def seedBlockBranch(flag: Boolean): Int = if flag then { seed } else 0\n  def seedBlockAfterLocal(flag: Boolean): Int = if flag then { val saved: Int = 1; this.seed } else 0\n",
+    );
+    let output = emit_class_state_source(&source, "PrivateFields", "PrivateFields.scala", None)
+        .expect("canonical private field reads and local shadowing should serialize");
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let index = file.ast_address_index().unwrap();
+    let methods = &output.declarations()[5..8];
+    let bodies = methods
+        .iter()
+        .map(|declaration| {
+            index
+                .get(declaration.address)
+                .unwrap()
+                .decode_defdef_body()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bodies.len(), 3);
+    assert!(bodies.iter().all(|body| {
+        let rhs = body.rhs.as_ref().unwrap();
+        raw_tree_tag(rhs) == SELECT_TAG
+    }));
+    assert_eq!(file.render_name(bodies[0].name).unwrap(), "seedValue");
+    assert_eq!(file.render_name(bodies[1].name).unwrap(), "seedViaThis");
+    assert_eq!(file.render_name(bodies[2].name).unwrap(), "enabledValue");
+    assert!(output.body(output.declarations()[8].symbol).is_some());
+
+    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1392/generated/example/PrivateFields.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1392/tmp"))
+            .status()
+            .expect("start the pinned Scala 3.9 -from-tasty gate");
+        assert!(result.success(), "PrivateFields -from-tasty gate failed");
+    }
+}
+
+#[test]
 fn class_state_registers_local_values_and_rejects_forged_method_bodies() {
     let source = "package example\nclass LocalState:\n  private val seed: Int = 1\n  def run(): Int = { val saved: Int = 1; saved + 1 }\n  def sumTo(limit: Int): Int = { var total: Int = 0; var index: Int = 0; while index < limit do { total = total + index; index = index + 1 }; total }\n";
     let output = emit_class_state_source(source, "LocalState", "LocalState.scala", None).unwrap();
@@ -765,10 +866,28 @@ fn class_state_registers_local_values_and_rejects_forged_method_bodies() {
             corrupt,
             "CorruptBody",
             "CorruptBody.scala",
-            Some("constant"),
+            Some(TestCorruption::LiteralMethod("constant")),
         )
         .is_err()
     );
+}
+
+#[test]
+fn class_state_rejects_shadowed_names_retargeted_to_fields() {
+    let source = "package example\nclass ShadowedFields:\n  private val seed: Int = 42\n  def seedValue(): Int = seed\n  def take(seed: Int): Int = seed\n  def local(): Int = { val seed: Int = 7; seed }\n";
+    for method in ["take", "local"] {
+        let result = emit_class_state_source(
+            source,
+            "ShadowedFields",
+            "ShadowedFields.scala",
+            Some(TestCorruption::ShadowedFieldTarget {
+                method,
+                field_reader: "seedValue",
+                identifier: "seed",
+            }),
+        );
+        assert!(result.is_err(), "forged field target accepted in {method}");
+    }
 }
 
 #[test]

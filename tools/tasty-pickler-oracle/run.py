@@ -209,6 +209,18 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
             "private[this] val enabled: scala.Boolean = true",
             "private[this] var counter: scala.Int = 0",
             "def constant(): scala.Int = 1",
+            "def seedValue(): scala.Int = PrivateFields.this.seed",
+            "def seedViaThis(): scala.Int = this.seed",
+            "def enabledValue(): scala.Boolean = PrivateFields.this.enabled",
+            "def shadowedSeed(): scala.Int =",
+            "def enabledBranch(): scala.Int =",
+            "def enabledViaThis(): scala.Boolean = this.enabled",
+            "def disabled(): scala.Boolean =",
+            "def seedBranch(flag: scala.Boolean): scala.Int =",
+            "def seedViaThisBranch(",
+            "def seedParenBranch(",
+            "def seedBlockBranch(",
+            "def seedBlockAfterLocal(",
         )
         if not all(member in decompiled for member in expected_members):
             raise RuntimeError(f"fresh PrivateFields TASTy lost a field or method: {decompiled}")
@@ -305,18 +317,24 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 """, "Answer.value() = 42", 42,
             ),
             "example/PrivateFields.tasty": (
-                "example.PrivateFields", r"public int constant\(\)",
+                "example.PrivateFields", r"public int seedValue\(\)",
                 "PrivateFieldsRuntime.java",
                 """public final class PrivateFieldsRuntime {
   public static void main(String[] args) throws Exception {
     example.PrivateFields values = new example.PrivateFields();
-    int result = values.constant();
-    if (result != 1)
-      throw new AssertionError("PrivateFields.constant() = " + result);
-    System.out.println("PrivateFields.constant() = " + result);
+    if (values.seedValue() != 42 || values.seedViaThis() != 42 ||
+        !values.enabledValue() || values.shadowedSeed() != 7 || values.constant() != 1 ||
+        values.enabledBranch() != 1 || !values.enabledViaThis() || values.disabled() ||
+        values.seedBranch(true) != 42 || values.seedBranch(false) != 0 ||
+        values.seedViaThisBranch(true) != 42 || values.seedViaThisBranch(false) != 0 ||
+        values.seedParenBranch(true) != 42 || values.seedParenBranch(false) != 0 ||
+        values.seedBlockBranch(true) != 42 || values.seedBlockBranch(false) != 0 ||
+        values.seedBlockAfterLocal(true) != 42 || values.seedBlockAfterLocal(false) != 0)
+      throw new AssertionError("PrivateFields field reads or shadowing changed");
+    System.out.println("PrivateFields field reads and shadowing passed");
   }
 }
-""", "PrivateFields.constant() = 1", 1,
+""", "PrivateFields field reads and shadowing passed", 1,
             ),
             "example/Parameters.tasty": (
                 "example.Parameters", r"public int pick\(int, int\)", "ParametersRuntime.java",
