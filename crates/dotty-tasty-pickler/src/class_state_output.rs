@@ -1,13 +1,13 @@
 //! TASTy emission for the validated private primitive class-state slice.
 
 use dotty_core::ast::{DefParamClauseOrder, TreeKind};
-use dotty_core::{Constant, MethodKind, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Type};
+use dotty_core::{MethodKind, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, Type};
 use dotty_tasty::tasty::*;
 
 use crate::skeleton::Assembly;
 use crate::{
-    ClassMemberPicklePlan, EncodingContext, LimitKind, PickleError, PickleLimits, PickledTasty,
-    SkeletonDeclaration, TypeRole, UnsupportedFeature, ValidatedClassStatePlan,
+    ClassMemberPicklePlan, EncodingContext, LimitKind, MethodPicklePlan, PickleError, PickleLimits,
+    PickledTasty, SkeletonDeclaration, TypeRole, UnsupportedFeature, ValidatedClassStatePlan,
 };
 
 fn encoding(error: impl Into<TastyFileError>) -> PickleError {
@@ -35,6 +35,116 @@ fn complete_type(
     }
 }
 
+fn package_path(
+    store: &dotty_core::SemanticStore,
+    package: SymbolId,
+    max_depth: usize,
+) -> Result<String, PickleError> {
+    let mut components = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut at = Some(package);
+    while let Some(symbol) = at {
+        if components.len() >= max_depth {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::OwnerDepth,
+                limit: max_depth,
+            });
+        }
+        if !seen.insert(symbol) {
+            return Err(PickleError::OwnerCycle { symbol });
+        }
+        if !store.symbols.contains(symbol) {
+            return Err(PickleError::InvalidSymbol { symbol });
+        }
+        let record = store.symbols.get(symbol);
+        if record.kind != SymbolKind::Package || !record.name.is_term() {
+            return Err(PickleError::Owner {
+                symbol,
+                expected: None,
+                actual: record.owner,
+            });
+        }
+        let text = store
+            .names
+            .try_resolve(record.name.text())
+            .ok_or(PickleError::InvalidName {
+                name: record.name.text(),
+            })?;
+        match record.owner {
+            Some(_) => {
+                if text.is_empty() || text.contains(['.', '/', '\\', '\0']) {
+                    return Err(PickleError::Unsupported {
+                        feature: UnsupportedFeature::Name,
+                        symbol: Some(symbol),
+                    });
+                }
+                components.push(crate::artifact_name::encode_component(text));
+            }
+            None if text.is_empty() && !components.is_empty() => break,
+            None => {
+                return Err(PickleError::Owner {
+                    symbol,
+                    expected: None,
+                    actual: None,
+                });
+            }
+        }
+        at = record.owner;
+    }
+    components.reverse();
+    Ok(components.join("/"))
+}
+
+fn method_input(
+    p: &crate::ClassStatePicklePlan<'_>,
+    symbol: SymbolId,
+    source_tree: dotty_core::TreeId<dotty_core::Untyped>,
+) -> Result<(MethodPicklePlan, Vec<crate::LocalValueBinding>), PickleError> {
+    let TreeKind::DefDef(definition) = &p
+        .source_ast
+        .try_get(source_tree)
+        .ok_or(PickleError::InvalidSourceTree { tree: source_tree })?
+        .kind
+    else {
+        return Err(PickleError::SourceShape {
+            tree: source_tree,
+            expected: crate::SourceRole::Method,
+        });
+    };
+    let parameter_clauses = definition
+        .value_param_clauses
+        .iter()
+        .map(|clause| {
+            clause
+                .iter()
+                .map(|&tree| {
+                    let param = p
+                        .source_index
+                        .symbol_at(p.source.id, tree)
+                        .ok_or(PickleError::SourceDefinition { symbol })?;
+                    Ok(param)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let body = definition
+        .rhs
+        .map(|rhs| {
+            p.typed_bindings
+                .typed_at(p.source.id, rhs)
+                .ok_or(PickleError::MissingBody { method: symbol })
+        })
+        .transpose()?;
+    let method = MethodPicklePlan {
+        symbol,
+        source_tree,
+        parameter_clauses,
+        body,
+    };
+    let local_values = p.typed_bindings.local_value_bindings(p.source.id, symbol);
+    Ok((method, local_values))
+}
+
 impl ValidatedClassStatePlan<'_, '_> {
     /// Emit complete Scala 3.9 TASTy for the validated private primitive fields.
     pub fn pickle(&self) -> Result<PickledTasty, PickleError> {
@@ -60,6 +170,26 @@ impl ValidatedClassStatePlan<'_, '_> {
             });
         }
 
+        let mut method_inputs = Vec::new();
+        for member in p.members {
+            if let ClassMemberPicklePlan::Method {
+                symbol,
+                source_tree,
+            } = *member
+            {
+                method_inputs.push(method_input(p, symbol, source_tree)?);
+            }
+        }
+        let methods = method_inputs
+            .iter()
+            .map(|(method, _)| method.clone())
+            .collect::<Vec<_>>();
+        let local_values = method_inputs
+            .iter()
+            .flat_map(|(_, locals)| locals.iter().copied())
+            .collect::<Vec<_>>();
+        crate::plan::validate_class_state_method(p, &methods, &local_values)?;
+
         let mut context = EncodingContext::new(
             p.store,
             p.definitions,
@@ -70,6 +200,7 @@ impl ValidatedClassStatePlan<'_, '_> {
         context.reserve_declaration(p.class)?;
         context.reserve_declaration(p.constructor.symbol)?;
         let mut method_parameters = Vec::new();
+        let mut method_local_symbols = Vec::new();
         for member in p.members {
             match member {
                 ClassMemberPicklePlan::Field(field) => {
@@ -77,24 +208,20 @@ impl ValidatedClassStatePlan<'_, '_> {
                 }
                 ClassMemberPicklePlan::Method {
                     symbol,
-                    source_tree,
+                    source_tree: _,
                 } => {
                     context.reserve_declaration(*symbol)?;
-                    let TreeKind::DefDef(definition) = &p.source_ast.get(*source_tree).kind else {
-                        return Err(PickleError::SourceShape {
-                            tree: *source_tree,
-                            expected: crate::SourceRole::Method,
-                        });
-                    };
-                    for clause in &definition.value_param_clauses {
-                        for &tree in clause {
-                            let parameter = p
-                                .source_index
-                                .derived_symbol_at(*symbol, p.source.id, tree)
-                                .ok_or(PickleError::SourceDefinition { symbol: *symbol })?;
-                            context.reserve_declaration(parameter)?;
-                            method_parameters.push(parameter);
-                        }
+                    let (method, locals) = method_inputs
+                        .iter()
+                        .find(|(method, _)| method.symbol == *symbol)
+                        .ok_or(PickleError::SourceDefinition { symbol: *symbol })?;
+                    for parameter in method.parameter_clauses.iter().flatten().copied() {
+                        context.reserve_declaration(parameter)?;
+                        method_parameters.push(parameter);
+                    }
+                    for local in locals {
+                        context.reserve_local_binding(*local)?;
+                        method_local_symbols.push(local.symbol);
                     }
                 }
             }
@@ -109,7 +236,7 @@ impl ValidatedClassStatePlan<'_, '_> {
             expected: None,
             actual: None,
         })?;
-        let package_path = context.package_reference(package)?;
+        let package_reference = context.package_reference(package)?;
         let class_ty = complete_type(p.store, p.class)?;
         let Some(Type::ClassInfo(class_info)) = p.store.types.try_get(class_ty) else {
             return Err(PickleError::MalformedType {
@@ -298,13 +425,11 @@ impl ValidatedClassStatePlan<'_, '_> {
                             };
                             let parameter_symbol = p
                                 .source_index
-                                .derived_symbol_at(symbol, p.source.id, parameter_tree)
+                                .symbol_at(p.source.id, parameter_tree)
                                 .ok_or(PickleError::SourceDefinition { symbol })?;
                             let parameter_ty = complete_type(p.store, parameter_symbol)?;
                             let expected = parameter_types[signature_index].ty;
                             let parameter_record = p.store.symbols.get(parameter_symbol);
-                            let canonical_parameter =
-                                p.source_index.symbol_at(p.source.id, parameter_tree);
                             let TreeKind::Ident(parameter_type) =
                                 &p.source_ast.get(parameter.tpt).kind
                             else {
@@ -325,11 +450,8 @@ impl ValidatedClassStatePlan<'_, '_> {
                                 || parameter_record.visibility != dotty_core::Visibility::Public
                                 || !parameter_record.flags.is_empty()
                                 || !parameter_record.annotations.is_empty()
-                                || canonical_parameter.is_none_or(|canonical| {
-                                    canonical == parameter_symbol
-                                        || p.store.symbols.get(canonical).name
-                                            != *parameter.name.as_name()
-                                })
+                                || p.source_index.symbol_at(p.source.id, parameter_tree)
+                                    != Some(parameter_symbol)
                                 || parameter_types[signature_index].name.as_name()
                                     != parameter.name.as_name()
                                 || parameter_types[signature_index].erased
@@ -375,55 +497,9 @@ impl ValidatedClassStatePlan<'_, '_> {
                     let actual_body = p.typed_bindings.typed_at(p.source.id, source_rhs);
                     let body_root =
                         actual_body.ok_or(PickleError::MissingBody { method: symbol })?;
-                    let typed_body = p
-                        .typed_ast
-                        .try_get(body_root)
-                        .ok_or(PickleError::InvalidTypedTree { tree: body_root })?;
-                    let body_type_matches = typed_body.ty == result_ty
-                        || match p.store.types.try_get(typed_body.ty) {
-                            Some(Type::Constant(value)) => {
-                                let expected = match value {
-                                    Constant::Int(_) => p.definitions.int,
-                                    Constant::Boolean(_) => p.definitions.boolean,
-                                    Constant::Unit => p.definitions.unit,
-                                    _ => {
-                                        return Err(PickleError::BodyType {
-                                            tree: body_root,
-                                            ty: typed_body.ty,
-                                        });
-                                    }
-                                };
-                                result_ty == expected
-                                    && matches!(
-                                        (&typed_body.kind, value),
-                                        (TreeKind::Literal(literal), value)
-                                            if &literal.value == value
-                                    )
-                            }
-                            _ => false,
-                        };
-                    if !body_type_matches {
-                        return Err(PickleError::BodyType {
-                            tree: body_root,
-                            ty: typed_body.ty,
-                        });
-                    }
-                    let source_position = p
-                        .source_ast
-                        .try_get(source_rhs)
-                        .ok_or(PickleError::InvalidSourceTree { tree: source_rhs })?
-                        .position;
-                    let typed_position = p
-                        .typed_ast
-                        .try_get(body_root)
-                        .ok_or(PickleError::InvalidTypedTree { tree: body_root })?
-                        .position;
-                    if source_position.is_none()
-                        || source_position != typed_position
-                        || source_position.is_some_and(|position| position.source() != p.source.id)
-                    {
-                        return Err(PickleError::BodySpan { tree: body_root });
-                    }
+                    // `method_input` ran the shared recursive source/typed
+                    // validator before any body is lowered, including nested
+                    // bindings, literal payloads, spans, and local identities.
                     let body = crate::expression::lower_expression(
                         p.store,
                         p.typed_ast,
@@ -472,7 +548,10 @@ impl ValidatedClassStatePlan<'_, '_> {
             })?;
         let package_tree = context.wire_node(AstNode::Length {
             tag: PACKAGE_TAG,
-            fields: vec![AstField::Tree(package_path), AstField::Tree(class_label)],
+            fields: vec![
+                AstField::Tree(package_reference),
+                AstField::Tree(class_label),
+            ],
         })?;
         let asts_name = context.intern_wire_text("ASTs")?;
         let attributes_name = context.intern_wire_text("Attributes")?;
@@ -486,6 +565,7 @@ impl ValidatedClassStatePlan<'_, '_> {
                 ClassMemberPicklePlan::Method { symbol, .. } => *symbol,
             }))
             .chain(method_parameters.iter().copied())
+            .chain(method_local_symbols.iter().copied())
         {
             let label = context
                 .declaration_label(id)
@@ -536,13 +616,7 @@ impl ValidatedClassStatePlan<'_, '_> {
                 limit: limits.max_file_bytes,
             });
         }
-        let package_text = p
-            .store
-            .names
-            .try_resolve(p.store.symbols.get(package).name.text())
-            .ok_or(PickleError::InvalidName {
-                name: p.store.symbols.get(package).name.text(),
-            })?;
+        let package_text = package_path(p.store, package, limits.projection.max_owner_depth)?;
         let class_text = p.store.names.try_resolve(class_record.name.text()).ok_or(
             PickleError::InvalidName {
                 name: class_record.name.text(),
@@ -550,7 +624,7 @@ impl ValidatedClassStatePlan<'_, '_> {
         )?;
         let intended_tasty_path = format!(
             "{}/{}.tasty",
-            crate::artifact_name::encode_component(package_text),
+            package_text,
             crate::artifact_name::encode_component(class_text)
         );
         Ok(Assembly {
