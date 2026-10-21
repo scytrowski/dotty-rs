@@ -17,6 +17,10 @@
 //! and inconsistent relationships, but cannot authenticate a foreign same-slot
 //! ID or a dishonest source-to-typed binding provider. Callers must preserve that
 //! session invariant. Validation only borrows semantic data and publishes no files.
+//!
+//! [`ClassStatePicklePlan`] is a separate plan-only contract for source-ordered
+//! private primitive fields and bounded primary-constructor inputs. It does not
+//! extend the current serializer's emitted forms.
 
 mod artifact_name;
 mod error;
@@ -41,8 +45,9 @@ pub use error::{
     Builtin, LimitKind, PickleError, ReferenceError, SourceRole, TypeRole, UnsupportedFeature,
 };
 pub use plan::{
-    DefaultConstructorPlan, LocalValueBinding, MethodPicklePlan, PicklePlan, SourceMetadata,
-    SourceTypedBindings, ValidatedPicklePlan, ValidationLimits,
+    ClassFieldPicklePlan, ClassMemberPicklePlan, ClassStatePicklePlan, DefaultConstructorPlan,
+    LocalValueBinding, MethodPicklePlan, PicklePlan, PrimaryConstructorInputPlan, SourceMetadata,
+    SourceTypedBindings, ValidatedClassStatePlan, ValidatedPicklePlan, ValidationLimits,
 };
 pub use projection::{EncodingContext, ProjectedFragment, ProjectionLimits};
 pub use skeleton::{DeclarationSkeleton, OmittedMethodBody, SkeletonDeclaration};
