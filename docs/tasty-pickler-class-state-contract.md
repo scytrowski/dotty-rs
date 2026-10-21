@@ -51,3 +51,34 @@ The producer target here includes only private primitive `val`/`var`, the defaul
 | Counter runtime harness | The fresh class produced from Scala-generated TASTy preserves this fixture's constructor initialization and method behavior. | Rust JVM field layout, access flags, slots, `Fieldref`s, or Rust-generated class behavior. |
 
 Follow-up pickler work must use canonical class/field/constructor/parameter IDs and the observed owner-specific parameter adaptation. It must state a bounded field/accessor representation and reject unsupported visibility, initialization, or constructor forms with explicit typed errors. Neither symbol lookup nor wire-edge synthesis may rely on names alone, and no JVM storage or ABI rule follows solely from these Scala TASTy snapshots.
+
+## Plan validation boundary (#1390)
+
+`ClassStatePicklePlan` is an additive, read-only input contract for the next
+pickler increments. Its `members` slice preserves `Template.body` order as
+explicit `Field` and `Method` entries. Validation checks every source tree and
+canonical symbol against the source index, owner, `ClassInfo.declarations`,
+class scope, completed type, visibility, flags, and field source modifiers.
+The caller supplies the exact typed initializer `TreeId<Typed>` and a
+`SourceTypedBindings` view; validation requires the index mapping and matching
+source/typed spans. No AST or semantic record is cloned into another field
+model.
+
+The constructor contract permits the ordinary default form or one plain clause
+of `Int` parameters. Parameter entries are the constructor-owned derived IDs in
+source order; each must match `derived_symbol_at`, remain distinct from the
+class-owned canonical parameter ID, and agree with the completed `Type::Method`
+signature. The source parameter metadata must identify the parser's plain
+`ParamAccessor + PrivateLocal` form; explicit `val`/`var` accessor forms remain
+rejected. Field initializers in this increment are limited to matching
+primitive literals or a direct reference to one of those constructor-owned
+parameters. Field-to-field reads are rejected because successful typing alone
+does not establish safe initialization order.
+
+This plan has no TASTy serializer entry point. Existing `PicklePlan` validation
+and emitted files remain unchanged; #1390 does not claim field or constructor
+encoding support. Validation borrows the compilation session and cannot publish
+bytes or mutate its semantic store. Unsupported or inconsistent inputs return
+typed errors, including stale typed roots, source-order mismatches, unsafe
+initializer edges, unsupported visibility/modifiers, and bounded item/owner
+chain violations.

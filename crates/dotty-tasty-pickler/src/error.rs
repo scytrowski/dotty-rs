@@ -37,6 +37,7 @@ pub enum SourceRole {
     Class,
     Template,
     Constructor,
+    Field,
     Method,
     Parameter,
     TypeSyntax,
@@ -75,6 +76,9 @@ pub enum UnsupportedFeature {
     PrimitiveOperator,
     ResultTypeSyntax,
     Name,
+    ClassField,
+    PrimaryConstructorInput,
+    UnsafeFieldInitializer,
 }
 
 /// Bounded validation and semantic projection work.
@@ -242,6 +246,21 @@ pub enum PickleError {
     },
     BodySpan {
         tree: TreeId<Typed>,
+    },
+    FieldType {
+        symbol: SymbolId,
+        expected: TypeId,
+        actual: TypeId,
+    },
+    FieldInitializerBinding {
+        source: SourceId,
+        source_tree: TreeId<Untyped>,
+        expected: TreeId<Typed>,
+        actual: Option<TreeId<Typed>>,
+    },
+    FieldInitializerSpan {
+        source_tree: TreeId<Untyped>,
+        typed_tree: TreeId<Typed>,
     },
     LimitExceeded {
         kind: LimitKind,
