@@ -36,10 +36,13 @@ Recommend exactly one next slice: **TASTy unresolved-supertype root resolution a
 
 ## #1342 closeout status
 
-The local serial audit and current outputs are recorded above. Final focused
-behavior/rollback parity checks, the eight rollback/atomicity cases, retained
-cohort references, and required workspace CI results are mapped in “Final
-closeout evidence” below.
+The full-corpus audit and focused rollback evidence are recorded above. The
+#1128 and qualified historical cohorts now have retained current row-level
+comparisons, but the final closeout is still unverified: this focused profile
+was run once (without determinism comparison), and the #1046/#1051 cohorts
+remain at their latest recorded full-audit checkpoint rather than a refreshed
+post-sprint row-level comparison. Keep issue #1342 open until that remaining
+evidence and its required checks are explicitly accepted.
 
 ## Final closeout evidence
 
@@ -60,14 +63,29 @@ does not infer semantic success from work later rolled back.
 | Ambiguous/duplicate or failed member operation follows partial classpath work | `missing_ambiguous_and_failed_members_are_atomic_and_retryable` checks no partial state survives missing, ambiguous, or failed member requests and that retry works. |
 | Same resolver session retries to one canonical pair and a real member | `audit_and_classpath_resolvers_match_for_module_rollbacks_and_retry` compares wrapper and production resolver behavior across rollback/retry; `audit_and_classpath_resolvers_match_for_real_scala_source_module` checks canonical module identity and actual member lookup. |
 
-### Preserved cohort evidence
+### Historical cohort comparisons and remaining closeout gate
 
-| Cohort | Current evidence retained |
-| --- | --- |
-| Post-#1180 import-prefix observations | All 1,063 rows / 31 target keys in [`1180-current-reconciliation.tsv`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0-1180-current-reconciliation.tsv); the #1180 frozen baseline itself remains intact. |
-| #1128 import cohort | All 2,394 rows joined in [`the #1132 reconciliation`](typer-classpath-import-prefix-profile-1132-3.9.0-reconciliation.tsv). |
-| #1046 and #1051 module cohorts | The 369-row #1046 and 576-row #1051 checkpoints and their outcome profiles remain in [`the append-only corpus audit`](typer-classpath-corpus-audit-3.9.0.md); the post-module Object/ModuleClass reprofile is retained in [`the 576-row sidecar`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0-object-module-reprofile.tsv). |
-| Earlier semantic feature cohorts | Their frozen baselines and subsequent checkpoint outcomes remain in [`the append-only corpus audit`](typer-classpath-corpus-audit-3.9.0.md) and [`the deferred-classpath hardening log`](typer-deferred-classpath-hardening-3.9.0.md); this closeout does not rewrite those snapshots. |
+| Cohort | Latest row-level evidence | Status |
+| --- | --- | --- |
+| #1128 import-prefix cohort | All 2,394 frozen rows joined to retained current probe outcomes in [`current reconciliation`](typer-classpath-import-prefix-profile-1342-current-reconciliation.tsv); summary and method notes in [`profile report`](typer-classpath-import-prefix-profile-1342-current.md). Historical #1132 and #1180 snapshots are preserved. | Current row-level comparison recorded; one profile pass, determinism not checked. |
+| Post-#1180 qualified import cohort | All 1,063 rows joined in [`current reconciliation`](typer-classpath-import-prefix-profile-1342-1180-current-reconciliation.tsv), with summary in [`summary`](typer-classpath-import-prefix-profile-1342-1180-current-summary.txt). | Current row-level comparison recorded; no method is fully typed. |
+| #1128 source-qualified candidate cohort | All 1,615 rows joined in [`qualified cohort comparison`](typer-classpath-import-prefix-profile-1342-qualified-cohort-current.tsv), with target totals in [`summary`](typer-classpath-import-prefix-profile-1342-qualified-cohort-current-summary.txt). | Current row-level comparison recorded; no method is fully typed. |
+| #1046 and #1051 module cohorts | Their 369-row and 576-row current outcomes remain in the append-only [full audit report](typer-classpath-corpus-audit-3.9.0.md) and [post-module 576-row reprofile](typer-classpath-corpus-audit-post-compiler-modules-3.9.0-object-module-reprofile.tsv). | Latest available comparison is the post-module audit checkpoint; no newer row-level comparison is included in the retained #1342 profile outputs. |
+| Earlier semantic feature cohorts | Frozen baselines and their last recorded outcomes remain in the [full audit report](typer-classpath-corpus-audit-3.9.0.md) and [deferred-classpath hardening log](typer-deferred-classpath-hardening-3.9.0.md). | Historical snapshots preserved; current row-level comparison remains unverified. |
+
+The new #1128 sidecar contains every frozen identity and distinguishes an
+observed current blocker from missing evidence; it does not infer typing
+success from a moved import blocker. For example,
+`ClassPathFactory.scala|261|327|9` now records the `FileUtils` Object and
+`TypeNameNotFound`, rather than the stale #1132 `ImportQualifierNotFound`.
+The source-qualified cohort comparison similarly keeps package resolution,
+member selection, and full-method typing separate.
+
+Issue #1342 remains open. Its remaining closeout gate is a determinism-checked
+current profile and explicit post-sprint comparisons for the #1046/#1051 and
+earlier semantic cohorts, using retained outputs where available. Do not close
+the issue based only on the older #1180 checkpoint. No full-corpus audit was
+rerun for this documentation update.
 
 The final blocker ranking and exactly one next-sprint recommendation are the
 post-module results above: investigate TASTy unresolved-supertype roots,
@@ -81,6 +99,6 @@ CI run #39514452922 passed both `Rust checks` (format, frontend boundaries,
 Clippy, rustdoc, workspace tests, and diff check) and `Classfile JVM encoder
 gate`. The PR also records 38 serial focused `audit_` tests, a producer test,
 65 audit-tool tests, and a successful producer-to-consumer reconciliation of
-all 1,063 #1180 rows. No hosted full-corpus workflow was dispatched. The full
+all 1,063 #1180 rows. The retained #1342 probe additionally reconciles all 2,394 #1128 rows and the 1,615-row qualified cohort; its one-run status is explicit above. No hosted full-corpus workflow was dispatched. The full
 corpus evidence above comes from the two serial local runs; peak RSS was not
 captured.
