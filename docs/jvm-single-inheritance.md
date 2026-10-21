@@ -140,11 +140,11 @@ publish partial output.
 | Trait parent or multiple parents | The hierarchy validator rejects traits and unsupported parent-list shapes before output | JVM has one direct `super_class`; interfaces require distinct metadata and dispatch rules | Explicitly reject traits/multiple parents in `dotty-jvm`; later interface support is separate |
 | Generic or external parent | The hierarchy validator rejects unsupported class shapes and unplanned/external parents | Erased descriptor and external hierarchy facts are unavailable to this adapter | `dotty-jvm` projection/classpath boundary; keep unsupported until erasure and validated external metadata exist |
 | Missing or inaccessible parent `()V` constructor | `JvmSuperclassIssue::ParentConstructorUnavailable` | No constructor invocation or class output is emitted | Constructor metadata/access validation in `dotty-jvm`; constructor transfer in `dotty-classfile` |
-| `def read(): Int = super.value()` | Real source fails earlier at `PipelineFailure::Typer(TyperError::UnsupportedExpression { expression_kind: "expression or declaration tree", .. })`; method bodies are typed before JVM emission | No class file is produced, so no invocation instruction or constant-pool owner is emitted | See the [super-call audit](jvm-super-calls.md) and follow-ups #1372–#1375 for canonical target typing, verifier handling, checked lowering, and JVM execution |
+| `def read(): Int = super.value()` in a direct child | The two-class source path now types the direct-parent selection and emits the explicit special call; `super` does not mean a transitive ancestor | The owner is the canonical direct parent, and the call uses direct-super invocation semantics | See the [super-call audit](jvm-super-calls.md); the multilevel extension is characterized separately in [the multilevel inheritance audit](jvm-multilevel-inheritance.md) |
 
 The end-to-end tests guarantee the supported direct-parent constructor chain,
-runtime dispatch, subtype argument/return paths, and the earlier typer
-rejection for `super.method()`. Rejected hierarchy rows must remain typed
+runtime dispatch, subtype argument/return paths, and direct-parent
+`super.method()` lowering. Rejected hierarchy rows must remain typed
 failures without partial output. Rows that describe other future behavior are
 design constraints for follow-up increments and need focused exact-diagnostic
 regression coverage when implemented.
