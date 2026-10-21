@@ -103,6 +103,14 @@ fn class_tree_for(
         .expect("class source tree")
 }
 
+fn clone_typed_ast(ast: &AstArena<Typed>) -> AstArena<Typed> {
+    let mut cloned = AstArena::new();
+    for (_, tree) in ast.iter() {
+        cloned.alloc(tree.clone());
+    }
+    cloned
+}
+
 fn class_state_plan<'a>(
     ast: &'a AstArena<Untyped>,
     source: SourceId,
@@ -265,10 +273,7 @@ fn with_mutable_frontend<R>(
             class_name,
             source_name,
         );
-        let mut typed_ast = AstArena::new();
-        for (_, tree) in typer.typed_ast().iter() {
-            typed_ast.alloc(tree.clone());
-        }
+        let typed_ast = clone_typed_ast(typer.typed_ast());
         (class, members, constructor, bindings, typed_ast)
     };
     f(
@@ -791,6 +796,84 @@ fn corrupted_initializer_types_and_constructor_records_are_rejected() {
                 .validate(),
                 Err(PickleError::SourceDefinition { symbol }) if symbol == parameter
             ));
+        },
+    );
+}
+
+#[test]
+fn constructor_parameter_initializer_references_match_source_name_target_and_prefix() {
+    let source_text = "package example\nclass Counter(start: Int, other: Int):\n  private val seed: Int = start\n";
+    with_mutable_frontend(
+        source_text,
+        "Counter",
+        "Counter.scala",
+        |store,
+         ast,
+         source,
+         index,
+         definitions,
+         typed_ast,
+         class,
+         members,
+         constructor,
+         bindings| {
+            let class_tree = class_tree_for(ast, source, index, class);
+            let ClassMemberPicklePlan::Field(field) = members[0] else {
+                unreachable!()
+            };
+            let TreeKind::ValDef(definition) = &ast.get(field.source_tree).kind else {
+                unreachable!()
+            };
+            let source_rhs = definition.rhs.unwrap();
+            let parameter = constructor.parameter_clauses[0][0];
+            let other = constructor.parameter_clauses[0][1];
+            let mut changed_bindings = bindings.clone();
+
+            for (prefix, target) in [
+                (definitions.no_prefix, other),
+                (definitions.object_type, parameter),
+            ] {
+                let bad_type = store.types.alloc(Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(target),
+                });
+                let mut changed_typed_ast = clone_typed_ast(typed_ast);
+                let mut changed_initializer =
+                    changed_typed_ast.get(field.typed_initializer).clone();
+                changed_initializer.ty = bad_type;
+                let changed_initializer = changed_typed_ast.alloc(changed_initializer);
+                let mut changed_members = members.clone();
+                let ClassMemberPicklePlan::Field(field) = &mut changed_members[0] else {
+                    unreachable!()
+                };
+                field.typed_initializer = changed_initializer;
+                changed_bindings
+                    .0
+                    .insert((source, source_rhs), changed_initializer);
+                assert!(matches!(
+                    ClassStatePicklePlan {
+                        store,
+                        definitions,
+                        source_ast: ast,
+                        typed_ast: &changed_typed_ast,
+                        source_index: index,
+                        typed_bindings: &changed_bindings,
+                        source: SourceMetadata {
+                            id: source,
+                            name: "Counter.scala".into(),
+                        },
+                        class,
+                        class_tree,
+                        constructor: constructor.clone(),
+                        members: &changed_members,
+                    }
+                    .validate(),
+                    Err(PickleError::Unsupported {
+                        feature: UnsupportedFeature::UnsafeFieldInitializer,
+                        ..
+                    })
+                ));
+            }
         },
     );
 }
