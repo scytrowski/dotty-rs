@@ -35,6 +35,10 @@ enum TestCorruption {
         field_reader: &'static str,
         identifier: &'static str,
     },
+    ImmutableFieldAssignmentTarget {
+        method: &'static str,
+        field_reader: &'static str,
+    },
 }
 
 fn with_frontend<R>(
@@ -593,6 +597,10 @@ fn emit_class_state_source(
                     method,
                     field_reader,
                     identifier: _,
+                }
+                | TestCorruption::ImmutableFieldAssignmentTarget {
+                    method,
+                    field_reader,
                 } => {
                     let reader = members
                         .iter()
@@ -665,6 +673,13 @@ fn emit_class_state_source(
                         _ => panic!("shadowed method body has an identifier"),
                     };
                     typed_ast.get_mut(local_or_parameter).ty = field_type.unwrap();
+                }
+                TestCorruption::ImmutableFieldAssignmentTarget { .. } => {
+                    let TreeKind::Assign(assignment) = &typed_ast.get(typed_root).kind else {
+                        panic!("assignment corruption target must be an Assign")
+                    };
+                    let lhs = assignment.lhs;
+                    typed_ast.get_mut(lhs).ty = field_type.unwrap();
                 }
             }
         }
@@ -856,7 +871,7 @@ fn class_state_lowers_implicit_and_explicit_private_primitive_field_reads() {
 
 #[test]
 fn class_state_serializes_private_mutable_field_assignments() {
-    let source = "package example\nclass MutableFieldWrites:\n  private var current: Int = 0\n  private var enabled: Boolean = false\n  def get(): Int = current\n  def set(value: Int): Unit = current = value\n  def isEnabled(): Boolean = enabled\n  def setEnabled(value: Boolean): Unit = enabled = value\n  def increment(): Int =\n    current = current + 1\n    current\n";
+    let source = "package example\nclass MutableFieldWrites:\n  private var current: Int = 0\n  private var enabled: Boolean = false\n  def get(): Int = current\n  def set(value: Int): Unit = (current = value)\n  def isEnabled(): Boolean = enabled\n  def setEnabled(value: Boolean): Unit = enabled = value\n  def increment(): Int =\n    current = current + 1\n    current\n";
     let output = emit_class_state_source(
         source,
         "MutableFieldWrites",
@@ -935,7 +950,7 @@ fn class_state_serializes_private_mutable_field_assignments() {
 }
 
 #[test]
-fn class_state_rejects_assignments_to_fields_without_mutable_flag() {
+fn class_state_rejects_inconsistent_mutability_metadata() {
     let source = "package example\nclass ImmutableTarget:\n  private var current: Int = 0\n  def set(value: Int): Unit = current = value\n";
     with_mutable_frontend(
         source,
@@ -981,6 +996,27 @@ fn class_state_rejects_assignments_to_fields_without_mutable_flag() {
             assert!(rejected, "immutable assignment target accepted");
         },
     );
+}
+
+#[test]
+fn class_state_rejects_assignment_retargeted_to_readonly_field() {
+    let source = "package example\nclass ReadonlyAssignmentTarget:\n  private val immutable: Int = 1\n  private var current: Int = 0\n  def immutableValue(): Int = immutable\n  def set(value: Int): Unit = current = value\n";
+    let result = emit_class_state_source(
+        source,
+        "ReadonlyAssignmentTarget",
+        "ReadonlyAssignmentTarget.scala",
+        Some(TestCorruption::ImmutableFieldAssignmentTarget {
+            method: "set",
+            field_reader: "immutableValue",
+        }),
+    );
+    assert!(matches!(
+        result,
+        Err(PickleError::Reference {
+            reason: ReferenceError::Metadata,
+            ..
+        })
+    ));
 }
 
 #[test]
