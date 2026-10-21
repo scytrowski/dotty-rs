@@ -526,6 +526,77 @@ fn sibling_inputs_to_a_multiway_join_are_rejected_in_every_branch_order() {
 }
 
 #[test]
+fn connected_joins_keep_incoming_type_evidence_across_empty_blocks() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Left".to_owned(), "example/Base".to_owned()),
+        ("example/Right".to_owned(), "example/Base".to_owned()),
+    ])
+    .unwrap();
+
+    for insert_empty_blocks in [false, true] {
+        let mut sequence = CodeSequence::new();
+        let left = sequence.new_label().unwrap();
+        let right = sequence.new_label().unwrap();
+        let upstream = sequence.new_label().unwrap();
+        let downstream = sequence.new_label().unwrap();
+        let empty_one = sequence.new_label().unwrap();
+        let empty_two = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(local(1)))
+            .branch(BranchInstruction::IfEq(left.clone()))
+            .instruction(Instruction::ALoad(local(3)))
+            .branch(BranchInstruction::Goto(upstream.clone()))
+            .bind(left)
+            .unwrap()
+            .instruction(Instruction::ALoad(local(4)))
+            .bind(upstream)
+            .unwrap()
+            .instruction(Instruction::ILoad(local(2)))
+            .branch(BranchInstruction::IfEq(right.clone()));
+        if insert_empty_blocks {
+            sequence
+                .branch(BranchInstruction::Goto(empty_one.clone()))
+                .bind(empty_one)
+                .unwrap()
+                .branch(BranchInstruction::Goto(empty_two.clone()))
+                .bind(empty_two)
+                .unwrap()
+                .branch(BranchInstruction::Goto(downstream.clone()));
+        } else {
+            sequence.branch(BranchInstruction::Goto(downstream.clone()));
+        }
+        sequence
+            .bind(right)
+            .unwrap()
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::ALoad(local(5)))
+            .branch(BranchInstruction::Goto(downstream.clone()))
+            .bind(downstream)
+            .unwrap()
+            .instruction(Instruction::AReturn);
+
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let error = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "connectedJoins",
+            "(ZZLexample/Base;Lexample/Left;Lexample/Right;)Lexample/Base;",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            AnalysisError::IncompatibleStackValue { .. }
+        ));
+    }
+}
+
+#[test]
 fn sibling_input_on_a_backedge_is_compared_with_earlier_join_evidence() {
     let mut pool_builder = ConstantPoolBuilder::new();
     let owner = pool_builder.class("example/Client").unwrap();

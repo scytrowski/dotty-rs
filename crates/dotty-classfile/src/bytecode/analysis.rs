@@ -1687,6 +1687,7 @@ enum LocalSlot {
 struct Frame {
     stack: Vec<ValueKind>,
     stack_classes: Vec<Option<ClassIdentity>>,
+    stack_join_evidence: Vec<std::collections::BTreeSet<ClassIdentity>>,
     stack_allocation_sites: Vec<Option<usize>>,
     stack_slots: usize,
     pending_allocation: Option<UninitializedAllocation>,
@@ -1744,6 +1745,7 @@ impl Frame {
         Ok(Self {
             stack: Vec::new(),
             stack_classes: Vec::new(),
+            stack_join_evidence: Vec::new(),
             stack_allocation_sites: Vec::new(),
             stack_slots: 0,
             pending_allocation: None,
@@ -1820,7 +1822,14 @@ impl Frame {
                 }
                 let class = self.stack_classes.last().cloned().flatten();
                 let allocation_site = self.stack_allocation_sites.last().copied().flatten();
+                let evidence = self.stack_join_evidence.last().cloned();
                 self.push_typed(instruction_index, top, class)?;
+                if let Some(evidence) = evidence {
+                    *self
+                        .stack_join_evidence
+                        .last_mut()
+                        .expect("push adds a stack slot") = evidence;
+                }
                 *self
                     .stack_allocation_sites
                     .last_mut()
@@ -1845,6 +1854,7 @@ impl Frame {
                 }
                 self.stack.pop();
                 self.stack_classes.pop();
+                self.stack_join_evidence.pop();
                 self.stack_allocation_sites.pop();
                 self.stack_slots -= 1;
             }
@@ -2063,6 +2073,14 @@ impl Frame {
         }
         self.stack.push(value);
         self.stack_classes.push(class);
+        self.stack_join_evidence.push(
+            self.stack_classes
+                .last()
+                .and_then(Option::as_ref)
+                .cloned()
+                .into_iter()
+                .collect(),
+        );
         self.stack_allocation_sites.push(None);
         self.stack_slots = slots;
         self.max_stack = self.max_stack.max(slots);
@@ -2095,6 +2113,7 @@ impl Frame {
             available,
         })?;
         let class = self.stack_classes.pop().flatten();
+        self.stack_join_evidence.pop();
         self.stack_allocation_sites.pop();
         self.stack_slots -= actual.slots();
         if actual != expected {
@@ -2716,6 +2735,7 @@ impl Frame {
 
         self.stack.pop();
         self.stack_classes.pop();
+        self.stack_join_evidence.pop();
         self.stack_allocation_sites.pop();
         self.stack_slots -= 1;
         self.pending_allocation = None;
@@ -3472,6 +3492,9 @@ impl CfgCodeAnalyzer {
                 .ok_or(AnalysisError::InvalidControlFlowGraph { block: block_id })?
                 .clone();
             let mut frame = frame_from_state(&state);
+            frame.stack_join_evidence = block_stack_join_evidence[block_id.index()]
+                .clone()
+                .ok_or(AnalysisError::InvalidControlFlowGraph { block: block_id })?;
             frame.hierarchy = hierarchy.clone();
 
             for (offset, element) in block.instructions.iter().enumerate() {
@@ -3518,9 +3541,14 @@ impl CfgCodeAnalyzer {
                 };
                 let changed = match slot {
                     Some(existing) => match evidence_slot {
-                        Some(evidence) => {
-                            merge_flow_states(existing, &outgoing, *successor, hierarchy, evidence)?
-                        }
+                        Some(evidence) => merge_flow_states_with_evidence(
+                            existing,
+                            &outgoing,
+                            &frame.stack_join_evidence,
+                            *successor,
+                            hierarchy,
+                            evidence,
+                        )?,
                         None => {
                             return Err(AnalysisError::InvalidControlFlowGraph {
                                 block: *successor,
@@ -3541,7 +3569,7 @@ impl CfgCodeAnalyzer {
                         }
                         retained_state_slots = required_slots;
                         *slot = Some(outgoing.clone());
-                        *evidence_slot = Some(stack_join_evidence(&outgoing));
+                        *evidence_slot = Some(frame.stack_join_evidence.clone());
                         true
                     }
                 };
@@ -3866,6 +3894,14 @@ fn frame_from_state(state: &BlockEntryState) -> Frame {
     Frame {
         stack,
         stack_classes,
+        stack_join_evidence: state
+            .operand_stack
+            .iter()
+            .map(|value| match value {
+                FlowValue::Integer => std::collections::BTreeSet::new(),
+                FlowValue::Object(class) => std::collections::BTreeSet::from([class.clone()]),
+            })
+            .collect(),
         stack_allocation_sites: vec![None; stack_slots],
         stack_slots,
         pending_allocation: None,
@@ -3875,9 +3911,29 @@ fn frame_from_state(state: &BlockEntryState) -> Frame {
     }
 }
 
+#[cfg(test)]
 fn merge_flow_states(
     existing: &mut BlockEntryState,
     incoming: &BlockEntryState,
+    block: BasicBlockId,
+    hierarchy: &ClassHierarchy,
+    evidence: &mut [std::collections::BTreeSet<ClassIdentity>],
+) -> Result<bool, AnalysisError> {
+    let incoming_evidence = stack_join_evidence(incoming);
+    merge_flow_states_with_evidence(
+        existing,
+        incoming,
+        &incoming_evidence,
+        block,
+        hierarchy,
+        evidence,
+    )
+}
+
+fn merge_flow_states_with_evidence(
+    existing: &mut BlockEntryState,
+    incoming: &BlockEntryState,
+    incoming_evidence: &[std::collections::BTreeSet<ClassIdentity>],
     block: BasicBlockId,
     hierarchy: &ClassHierarchy,
     evidence: &mut [std::collections::BTreeSet<ClassIdentity>],
@@ -3889,7 +3945,9 @@ fn merge_flow_states(
             incoming_values: incoming.operand_stack.len(),
         });
     }
-    if evidence.len() != existing.operand_stack.len() {
+    if evidence.len() != existing.operand_stack.len()
+        || incoming_evidence.len() != incoming.operand_stack.len()
+    {
         return Err(AnalysisError::InvalidControlFlowGraph { block });
     }
     let mut changed = false;
@@ -3899,20 +3957,42 @@ fn merge_flow_states(
         .zip(&incoming.operand_stack)
         .enumerate()
     {
-        let joined =
-            join_flow_values_with_evidence(expected, incoming, hierarchy, &mut evidence[value])
-                .map_err(
-                    |(expected, incoming)| AnalysisError::IncompatibleStackValue {
-                        block,
-                        value,
-                        expected,
-                        incoming,
-                    },
-                )?;
+        let incoming_classes = &incoming_evidence[value];
+        let previous_evidence_len = evidence[value].len();
+        for incoming_class in incoming_classes {
+            let joined = join_flow_values_with_evidence(
+                expected,
+                &FlowValue::Object(incoming_class.clone()),
+                hierarchy,
+                &mut evidence[value],
+            )
+            .map_err(
+                |(expected, incoming)| AnalysisError::IncompatibleStackValue {
+                    block,
+                    value,
+                    expected,
+                    incoming,
+                },
+            )?;
+            if *expected != joined {
+                *expected = joined;
+                changed = true;
+            }
+        }
+        let joined = join_flow_values(expected, incoming, hierarchy).ok_or_else(|| {
+            AnalysisError::IncompatibleStackValue {
+                block,
+                value,
+                expected: expected.clone(),
+                incoming: incoming.clone(),
+            }
+        })?;
         if *expected != joined {
             *expected = joined;
             changed = true;
         }
+        evidence[value].extend(incoming_classes.iter().cloned());
+        changed |= evidence[value].len() != previous_evidence_len;
     }
     for (existing, incoming) in existing.locals.iter_mut().zip(&incoming.locals) {
         if *existing != *incoming && *existing != FlowLocalState::Top {
