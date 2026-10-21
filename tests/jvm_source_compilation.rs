@@ -6884,6 +6884,188 @@ fn super_call_through_empty_intermediate_class_uses_direct_parent_methodref() {
 }
 
 #[test]
+fn three_level_parameterized_constructors_and_super_calls_compose() {
+    let output = TestOutputDirectory::new("three-level-constructor-super");
+    let second_output = TestOutputDirectory::new("three-level-constructor-super-second");
+    let artifacts = compile_fixture_classes("ThreeLevelConstructorSuper.scala", output.path())
+        .expect("the source-backed three-level constructor and super-call chain compiles");
+    let second = compile_fixture_classes("ThreeLevelConstructorSuper.scala", second_output.path())
+        .expect("a fresh frontend session emits the same three-level chain");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["ChainBase", "ChainMiddle", "ChainLeaf", "ChainRunner"]
+    );
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes(),))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes(),))
+            .collect::<Vec<_>>(),
+        "fresh frontend sessions preserve deterministic chain classfiles"
+    );
+
+    let classes = artifacts
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.class.internal_name(),
+                decode_emitted_class(artifact),
+            )
+        })
+        .collect::<Vec<_>>();
+    let class = |name: &str| {
+        &classes
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .unwrap_or_else(|| panic!("{name} class is emitted"))
+            .1
+    };
+    for (name, parent) in [
+        ("ChainBase", "java/lang/Object"),
+        ("ChainMiddle", "ChainBase"),
+        ("ChainLeaf", "ChainMiddle"),
+        ("ChainRunner", "java/lang/Object"),
+    ] {
+        let emitted = class(name);
+        assert_eq!(
+            emitted
+                .constant_pool
+                .class_name(emitted.super_class.unwrap()),
+            Ok(parent),
+            "{name} declares its immediate JVM parent"
+        );
+    }
+
+    for (name, parent, descriptor) in [
+        ("ChainBase", "java/lang/Object", "()V"),
+        ("ChainMiddle", "ChainBase", "(I)V"),
+        ("ChainLeaf", "ChainMiddle", "(I)V"),
+    ] {
+        let emitted = class(name);
+        let constructor = emitted_method_code(emitted, "<init>");
+        let calls = decode_subset_instructions(constructor)
+            .into_iter()
+            .filter_map(|(offset, opcode)| (opcode == 0xb7).then_some(offset))
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1, "{name} calls exactly one constructor");
+        assert_method_reference(emitted, constructor, 0xb7, parent, "<init>", descriptor);
+        if name == "ChainBase" {
+            let parent_call = calls[0];
+            let field_store = decode_subset_instructions(constructor)
+                .into_iter()
+                .find_map(|(offset, opcode)| (opcode == 0xb5).then_some(offset))
+                .expect("Base initializes its source field");
+            assert!(
+                parent_call < field_store,
+                "{name} initializes its own fields after its parent constructor"
+            );
+        }
+        if name != "ChainBase" {
+            assert_eq!(
+                decode_subset_instructions(constructor)
+                    .iter()
+                    .take(3)
+                    .map(|(_, opcode)| *opcode)
+                    .collect::<Vec<_>>(),
+                [0x2a, 0x1b, 0xb7],
+                "{name} forwards its own primary-constructor parameter"
+            );
+        }
+    }
+
+    assert_invocation_sequence(
+        class("ChainMiddle"),
+        emitted_method_code(class("ChainMiddle"), "value"),
+        &[(0xb7, "ChainBase", "value", "()I")],
+    );
+    assert_invocation_sequence(
+        class("ChainLeaf"),
+        emitted_method_code(class("ChainLeaf"), "value"),
+        &[(0xb7, "ChainMiddle", "value", "()I")],
+    );
+    assert_invocation_sequence(
+        class("ChainLeaf"),
+        emitted_method_code(class("ChainLeaf"), "parentValue"),
+        &[(0xb7, "ChainMiddle", "value", "()I")],
+    );
+    assert_invocation_sequence(
+        class("ChainBase"),
+        emitted_method_code(class("ChainBase"), "doubled"),
+        &[(0xb6, "ChainBase", "value", "()I")],
+    );
+    assert!(
+        class("ChainLeaf").methods.iter().all(|method| {
+            !matches!(
+                class("ChainLeaf").constant_pool.utf8(method.name_index),
+                Ok("doubled")
+            )
+        }),
+        "the inherited Base body is emitted only once"
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = output.path().to_str().expect("UTF-8 classpath");
+    let javap = Command::new("javap")
+        .args(["-c", "-v", "-classpath", classpath, "ChainLeaf"])
+        .output()
+        .expect("start javap for the leaf class");
+    assert!(
+        javap.status.success(),
+        "javap rejected ChainLeaf.class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap_output.contains("ChainMiddle.\"<init>\":(I)V"));
+    assert!(javap_output.contains("ChainMiddle.value:()I"));
+
+    let harness = output.path().join("ThreeLevelConstructorSuperHarness.java");
+    fs::write(
+        &harness,
+        "public final class ThreeLevelConstructorSuperHarness { public static void main(String[] args) { ChainLeaf positive = new ChainLeaf(10); ChainLeaf negative = new ChainLeaf(-3); if (positive.value() != 12 || positive.parentValue() != 11 || positive.doubled() != 24) throw new AssertionError(\"positive chain\"); if (negative.value() != -1 || negative.parentValue() != -2 || negative.doubled() != -2) throw new AssertionError(\"negative chain\"); ChainMiddle middle = new ChainMiddle(10); if (middle.value() != 11) throw new AssertionError(\"middle direct super\"); System.out.println(\"three-level constructor and super dispatch verified\"); } }\n",
+    )
+    .expect("write three-level constructor/super JVM harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for the chain harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the three-level chain harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "ThreeLevelConstructorSuperHarness",
+        ])
+        .output()
+        .expect("start java with full verification for the chain harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected the three-level chain\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "three-level constructor and super dispatch verified"
+    );
+}
+
+#[test]
 fn scala_single_inheritance_and_virtual_dispatch_pass_the_end_to_end_jdk_gate() {
     let first_output = TestOutputDirectory::new("inheritance-first-build");
     let second_output = TestOutputDirectory::new("inheritance-second-build");

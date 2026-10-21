@@ -11,6 +11,11 @@ drives the real lexer, parser, namer, typer, and JVM adapter from one source
 unit and checks canonical symbols and per-edge proofs. Separate source-to-JVM
 tests verify inherited calls and runtime dispatch. Another test records how a
 sibling join is typed and where the current JVM policy rejects it.
+The focused `three_level_parameterized_constructors_and_super_calls_compose`
+test verifies the combined constructor and direct-super path, including
+per-class constructor parameter identity, exact immediate-parent references,
+virtual dispatch through an inherited base body, and positive and negative
+runtime values under the JDK 21+ verifier gate.
 
 ## Source evidence and current result
 
