@@ -296,6 +296,25 @@ pub(super) fn unit_hierarchy(
     }
 
     for plan in &unit.classes {
+        let mut cursor = plan.class;
+        let mut planned_classes = 1;
+        while let Some(parent) = parents.get(&cursor).copied() {
+            if parent == definitions.object_class {
+                break;
+            }
+            planned_classes += 1;
+            if planned_classes > 3 {
+                return Err(JvmCodegenError::InvalidJvmSuperclass {
+                    class: plan.class,
+                    parent: parents.get(&plan.class).copied(),
+                    issue: crate::JvmSuperclassIssue::InheritanceTooDeep,
+                });
+            }
+            cursor = parent;
+        }
+    }
+
+    for plan in &unit.classes {
         let parent = parents[&plan.class];
         if parent == definitions.object_class {
             continue;
@@ -321,13 +340,6 @@ pub(super) fn unit_hierarchy(
                 class: plan.class,
                 parent: Some(parent),
                 issue: crate::JvmSuperclassIssue::ParentHasSelfType,
-            });
-        }
-        if parents.get(&parent) != Some(&definitions.object_class) {
-            return Err(JvmCodegenError::InvalidJvmSuperclass {
-                class: plan.class,
-                parent: Some(parent),
-                issue: crate::JvmSuperclassIssue::InheritanceTooDeep,
             });
         }
         let parent_plan = plans[&parent];
@@ -526,6 +538,7 @@ pub(super) fn class_metadata(
             plan.class,
             definitions,
             descriptor_context,
+            unit,
         )?;
         let key = (
             method.name().to_owned(),
@@ -546,12 +559,13 @@ pub(super) fn class_metadata(
     let constructor = match &plan.initialization {
         crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
             let class_identities = descriptor_context.map(|(_, identities)| identities);
-            Some(constructor.metadata(
+            Some(constructor.metadata_with_unit(
                 store,
                 definitions,
                 plan.class,
                 class_identities,
                 superclass,
+                unit,
             )?)
         }
         _ => None,
@@ -687,6 +701,7 @@ fn field_metadata(
         plan.field,
         field_type_id,
         class_identities,
+        unit,
     )?;
 
     let initializer_id = plan
@@ -707,6 +722,7 @@ fn field_metadata(
         initializer_id,
         initializer.ty,
         class_identities,
+        unit,
     )?;
     if matches!(initializer_type, crate::JvmType::Reference(_))
         && !matches!(&initializer.kind, dotty_core::ast::TreeKind::Ident(_))
@@ -771,6 +787,7 @@ pub(super) fn project_field_value_type(
     symbol: dotty_core::SymbolId,
     ty: dotty_core::TypeId,
     class_identities: Option<&[JvmClassIdentity]>,
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<crate::JvmType, JvmCodegenError> {
     match crate::descriptor::primitive_semantic_value_type(store, definitions, symbol, ty) {
         Err(error @ JvmCodegenError::UnsupportedJvmType { .. }) => match class_identities {
@@ -779,6 +796,7 @@ pub(super) fn project_field_value_type(
                 ty,
                 definitions,
                 class_identities,
+                unit,
             ),
             None => Err(error),
         },
@@ -819,6 +837,7 @@ pub(super) fn typed_expression_field_value_type(
     initializer: dotty_core::TreeId<dotty_core::ast::Typed>,
     ty: dotty_core::TypeId,
     class_identities: Option<&[JvmClassIdentity]>,
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<crate::JvmType, JvmCodegenError> {
     let target = match store.types.try_get(ty) {
         Some(Type::TermRef {
@@ -827,7 +846,7 @@ pub(super) fn typed_expression_field_value_type(
         }) => *target,
         _ => {
             let value_type =
-                project_field_value_type(store, definitions, symbol, ty, class_identities)?;
+                project_field_value_type(store, definitions, symbol, ty, class_identities, unit)?;
             if matches!(value_type, crate::JvmType::Reference(_)) {
                 return Err(JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
                     field: symbol,
@@ -853,8 +872,14 @@ pub(super) fn typed_expression_field_value_type(
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: target }),
         SymbolInfo::Complete(target_ty) => *target_ty,
     };
-    let value_type =
-        project_field_value_type(store, definitions, symbol, target_ty, class_identities)?;
+    let value_type = project_field_value_type(
+        store,
+        definitions,
+        symbol,
+        target_ty,
+        class_identities,
+        unit,
+    )?;
     let parameter_owner = referenced.owner.and_then(|owner| {
         store
             .symbols
@@ -996,32 +1021,51 @@ fn validate_and_build_method_dispatch(
     }
 
     for child in metadata.iter() {
-        let Some(superclass) = child.superclass() else {
+        let mut ancestors = Vec::new();
+        let mut next = child.superclass().map(|superclass| superclass.parent());
+        while let Some(parent) = next.and_then(|parent_symbol| {
+            metadata
+                .iter()
+                .find(|candidate| candidate.identity().symbol() == parent_symbol)
+        }) {
+            ancestors.push(parent);
+            next = parent.superclass().map(|superclass| superclass.parent());
+        }
+        let Some(nearest_ancestor) = ancestors.first().copied() else {
             continue;
         };
-        let Some(parent) = metadata
-            .iter()
-            .find(|candidate| candidate.identity().symbol() == superclass.parent())
-        else {
-            continue;
-        };
-        let parent_method_ids = declared_methods(unit, parent.identity().symbol())?;
 
         for child_method in child.methods() {
             let child_symbol = unit.store.symbols.get(child_method.symbol());
             let has_override_modifier = child_symbol.flags.contains(SymbolFlags::OVERRIDE);
-            let same_name_declarations = parent_method_ids
+            let same_name_declarations = ancestors
                 .iter()
-                .copied()
-                .filter(|symbol| unit.store.symbols.get(*symbol).name == child_symbol.name)
+                .map(|ancestor| {
+                    declared_methods(unit, ancestor.identity().symbol()).map(|methods| {
+                        methods
+                            .into_iter()
+                            .filter(|symbol| {
+                                unit.store.symbols.get(*symbol).name == child_symbol.name
+                            })
+                            .map(|symbol| (*ancestor, symbol))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
                 .collect::<Vec<_>>();
-            let exact_planned = parent.methods().iter().find(|parent_method| {
-                parent_method.name() == child_method.name()
-                    && parent_method.descriptor().as_str() == child_method.descriptor().as_str()
+            let exact_planned = ancestors.iter().find_map(|ancestor| {
+                ancestor.methods().iter().find_map(|parent_method| {
+                    (parent_method.name() == child_method.name()
+                        && parent_method.descriptor().as_str()
+                            == child_method.descriptor().as_str())
+                    .then_some((*ancestor, parent_method))
+                })
             });
             let mut same_parameter_parent = None;
             if !has_override_modifier {
-                for parent_symbol in &same_name_declarations {
+                for (ancestor, parent_symbol) in &same_name_declarations {
                     if unit.store.symbols.get(*parent_symbol).visibility != Visibility::Public {
                         continue;
                     }
@@ -1031,7 +1075,7 @@ fn validate_and_build_method_dispatch(
                         *parent_symbol,
                         definitions,
                     )? {
-                        same_parameter_parent = Some(*parent_symbol);
+                        same_parameter_parent = Some((*ancestor, *parent_symbol));
                         break;
                     }
                 }
@@ -1042,24 +1086,32 @@ fn validate_and_build_method_dispatch(
                     return Err(invalid_override(
                         child.identity().symbol(),
                         child_method.symbol(),
-                        parent.identity().symbol(),
+                        nearest_ancestor.identity().symbol(),
                         None,
                         JvmOverrideIssue::NoParentDeclaration,
                     ));
                 }
-                let Some(parent_method) = exact_planned else {
+                let Some((parent, parent_method)) = exact_planned else {
                     let matching_unplanned =
-                        same_name_declarations.iter().copied().find(|symbol| {
-                            !parent
-                                .methods()
-                                .iter()
-                                .any(|planned| planned.symbol() == *symbol)
+                        same_name_declarations
+                            .iter()
+                            .copied()
+                            .find(|(ancestor, symbol)| {
+                                !ancestor
+                                    .methods()
+                                    .iter()
+                                    .any(|planned| planned.symbol() == *symbol)
+                            });
+                    let (error_parent, error_method) = matching_unplanned
+                        .or_else(|| same_name_declarations.first().copied())
+                        .map_or((nearest_ancestor, None), |(ancestor, symbol)| {
+                            (ancestor, Some(symbol))
                         });
                     return Err(invalid_override(
                         child.identity().symbol(),
                         child_method.symbol(),
-                        parent.identity().symbol(),
-                        matching_unplanned.or_else(|| same_name_declarations.first().copied()),
+                        error_parent.identity().symbol(),
+                        error_method,
                         if matching_unplanned.is_some() {
                             JvmOverrideIssue::ParentMethodUnplanned
                         } else {
@@ -1101,21 +1153,21 @@ fn validate_and_build_method_dispatch(
                     ));
                 }
             } else if let Some(parent_method) = exact_planned
-                && unit.store.symbols.get(parent_method.symbol()).visibility == Visibility::Public
+                && unit.store.symbols.get(parent_method.1.symbol()).visibility == Visibility::Public
             {
                 return Err(invalid_override(
                     child.identity().symbol(),
                     child_method.symbol(),
-                    parent.identity().symbol(),
-                    Some(parent_method.symbol()),
+                    parent_method.0.identity().symbol(),
+                    Some(parent_method.1.symbol()),
                     if child_symbol.visibility == Visibility::Public {
                         JvmOverrideIssue::OverrideModifierRequired
                     } else {
                         JvmOverrideIssue::NarrowerVisibility
                     },
                 ));
-            } else if let Some(parent_symbol) = same_parameter_parent {
-                let parent_method = parent
+            } else if let Some((ancestor, parent_symbol)) = same_parameter_parent {
+                let parent_method = ancestor
                     .methods()
                     .iter()
                     .find(|planned| planned.symbol() == parent_symbol);
@@ -1139,7 +1191,7 @@ fn validate_and_build_method_dispatch(
                 return Err(invalid_override(
                     child.identity().symbol(),
                     child_method.symbol(),
-                    parent.identity().symbol(),
+                    ancestor.identity().symbol(),
                     Some(parent_symbol),
                     issue,
                 ));
@@ -1379,73 +1431,74 @@ fn validate_final_parent_method_collisions(
     metadata: &[JvmClassMetadata],
 ) -> Result<(), JvmCodegenError> {
     for child in metadata {
-        let Some(superclass) = child.superclass() else {
-            continue;
-        };
-        let Some(parent) = metadata
-            .iter()
-            .find(|candidate| candidate.identity().symbol() == superclass.parent())
-        else {
-            continue;
-        };
-        for child_method in child.methods() {
-            for parent_method in parent.methods() {
-                if parent_method.access_flags().is_final()
-                    && !parent_method.access_flags().is_private()
-                    && child_method.name() == parent_method.name()
-                    && child_method.descriptor().as_str() == parent_method.descriptor().as_str()
+        let mut ancestor = child.superclass().map(|superclass| superclass.parent());
+        while let Some(parent) = ancestor.and_then(|parent_symbol| {
+            metadata
+                .iter()
+                .find(|candidate| candidate.identity().symbol() == parent_symbol)
+        }) {
+            for child_method in child.methods() {
+                for parent_method in parent.methods() {
+                    if parent_method.access_flags().is_final()
+                        && !parent_method.access_flags().is_private()
+                        && child_method.name() == parent_method.name()
+                        && child_method.descriptor().as_str() == parent_method.descriptor().as_str()
+                    {
+                        return Err(JvmCodegenError::FinalJvmMethodOverride {
+                            class: child.identity().symbol(),
+                            method: child_method.symbol(),
+                            parent: parent.identity().symbol(),
+                            parent_method: parent_method.symbol(),
+                            name: child_method.name().to_owned(),
+                            descriptor: Some(child_method.descriptor().as_str().to_owned()),
+                        });
+                    }
+                }
+            }
+
+            let parent_info = class_info(unit.store, parent.identity().symbol())?;
+            for parent_method in unit
+                .store
+                .scopes
+                .get(parent_info.declarations)
+                .entered_symbols()
+                .filter(|symbol| {
+                    unit.store.symbols.contains(*symbol)
+                        && unit.store.symbols.get(*symbol).kind == SymbolKind::Method
+                        && unit
+                            .store
+                            .symbols
+                            .get(*symbol)
+                            .flags
+                            .contains(SymbolFlags::FINAL)
+                        && unit.store.symbols.get(*symbol).visibility != Visibility::Private
+                })
+                .filter(|symbol| {
+                    !parent
+                        .methods()
+                        .iter()
+                        .any(|planned| planned.symbol() == *symbol)
+                })
+            {
+                let parent_symbol = unit.store.symbols.get(parent_method);
+                let Some(name) = unit.store.names.try_resolve(parent_symbol.name.text()) else {
+                    continue;
+                };
+                if let Some(child_method) =
+                    child.methods().iter().find(|method| method.name() == name)
                 {
                     return Err(JvmCodegenError::FinalJvmMethodOverride {
                         class: child.identity().symbol(),
                         method: child_method.symbol(),
                         parent: parent.identity().symbol(),
-                        parent_method: parent_method.symbol(),
-                        name: child_method.name().to_owned(),
-                        descriptor: Some(child_method.descriptor().as_str().to_owned()),
+                        parent_method,
+                        name: name.to_owned(),
+                        descriptor: None,
                     });
                 }
             }
-        }
 
-        let parent_info = class_info(unit.store, parent.identity().symbol())?;
-        for parent_method in unit
-            .store
-            .scopes
-            .get(parent_info.declarations)
-            .entered_symbols()
-            .filter(|symbol| {
-                unit.store.symbols.contains(*symbol)
-                    && unit.store.symbols.get(*symbol).kind == SymbolKind::Method
-                    && unit
-                        .store
-                        .symbols
-                        .get(*symbol)
-                        .flags
-                        .contains(SymbolFlags::FINAL)
-                    && unit.store.symbols.get(*symbol).visibility != Visibility::Private
-            })
-            .filter(|symbol| {
-                !parent
-                    .methods()
-                    .iter()
-                    .any(|planned| planned.symbol() == *symbol)
-            })
-        {
-            let parent_symbol = unit.store.symbols.get(parent_method);
-            let Some(name) = unit.store.names.try_resolve(parent_symbol.name.text()) else {
-                continue;
-            };
-            if let Some(child_method) = child.methods().iter().find(|method| method.name() == name)
-            {
-                return Err(JvmCodegenError::FinalJvmMethodOverride {
-                    class: child.identity().symbol(),
-                    method: child_method.symbol(),
-                    parent: parent.identity().symbol(),
-                    parent_method,
-                    name: name.to_owned(),
-                    descriptor: None,
-                });
-            }
+            ancestor = parent.superclass().map(|superclass| superclass.parent());
         }
     }
     Ok(())
@@ -1457,6 +1510,7 @@ fn method_metadata(
     owner: dotty_core::SymbolId,
     definitions: &Definitions,
     descriptor_context: Option<(&SemanticStore, &[JvmClassIdentity])>,
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<JvmMethodMetadata, JvmCodegenError> {
     // Descriptor projection verifies canonical method/parameter ownership and
     // type correspondence before any output layout is constructed.
@@ -1468,6 +1522,7 @@ fn method_metadata(
                 owner,
                 definitions,
                 class_identities,
+                unit,
             )?
         }
         None => plan.descriptor(store, owner, definitions)?,

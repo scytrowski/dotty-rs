@@ -26,6 +26,7 @@ struct PrimitiveSymbols {
 struct ReferenceContext<'a> {
     store: &'a SemanticStore,
     class_identities: &'a [JvmClassIdentity],
+    unit: Option<&'a crate::JvmCompilationUnit<'a>>,
 }
 
 pub(super) fn method_descriptor(
@@ -43,6 +44,7 @@ pub(super) fn method_descriptor_with_class_identities(
     owner: SymbolId,
     definitions: &Definitions,
     class_identities: &[JvmClassIdentity],
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<JvmMethodDescriptor, JvmCodegenError> {
     descriptor_for_with_references(
         plan,
@@ -53,6 +55,7 @@ pub(super) fn method_descriptor_with_class_identities(
         Some(ReferenceContext {
             store,
             class_identities,
+            unit,
         }),
     )
 }
@@ -63,6 +66,7 @@ pub(super) fn constructor_descriptor_with_class_identities(
     owner: SymbolId,
     definitions: &Definitions,
     class_identities: &[JvmClassIdentity],
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<JvmMethodDescriptor, JvmCodegenError> {
     descriptor_for_with_references(
         plan,
@@ -73,6 +77,7 @@ pub(super) fn constructor_descriptor_with_class_identities(
         Some(ReferenceContext {
             store,
             class_identities,
+            unit,
         }),
     )
 }
@@ -446,6 +451,7 @@ fn primitive_value_type(
                 ty,
                 definitions,
                 context.class_identities,
+                context.unit,
             )
         }
         _ => Err(unsupported_type_error(store, symbol, ty)),

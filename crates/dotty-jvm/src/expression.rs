@@ -560,7 +560,7 @@ fn parameter_value_type(
     };
     let found = match parameter.ty() {
         JvmType::Reference(class) => {
-            let Some((_, _, metadata)) = context.call_context else {
+            let Some((unit, _, metadata)) = context.call_context else {
                 return Err(JvmCodegenError::ReferenceParameterRequiresPlan {
                     tree,
                     parameter: symbol,
@@ -576,6 +576,7 @@ fn parameter_value_type(
                 semantic_type,
                 context.definitions,
                 &class_identities,
+                Some(unit),
             )?
         }
         JvmType::Int | JvmType::Boolean => {

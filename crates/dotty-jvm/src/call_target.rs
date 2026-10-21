@@ -623,6 +623,7 @@ fn resolve_receiver_class(
                     local_type,
                     definitions,
                     &class_identities,
+                    Some(unit),
                 )?;
                 if found != parameter.ty() {
                     return Err(JvmCodegenError::ParameterReferenceTypeMismatch {

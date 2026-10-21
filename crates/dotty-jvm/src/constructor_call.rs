@@ -565,6 +565,7 @@ fn planned_term_value_type(
                 ty,
                 definitions,
                 class_identities,
+                Some(unit),
             )
             .ok()
         }
