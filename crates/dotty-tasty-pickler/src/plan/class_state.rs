@@ -79,6 +79,9 @@ impl ClassStateValidator<'_, '_> {
             return None;
         };
         let text = self.plan.store.names.try_resolve(literal.text)?;
+        if text.len() > self.limits.max_name_bytes {
+            return None;
+        }
         let digits = text.replace('_', "");
         let digits = match radix {
             2 => digits
