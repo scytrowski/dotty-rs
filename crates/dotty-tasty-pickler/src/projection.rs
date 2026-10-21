@@ -742,6 +742,95 @@ impl<'a> EncodingContext<'a> {
         self.run(|c| c.same_class_method_select_inner(class, method, true))
     }
 
+    /// Lowers a class-field read to the Scala 3.9 name-bearing SELECT form.
+    /// The canonical field label must already be reserved, but the wire tree
+    /// intentionally selects by name from the current class receiver.
+    pub(crate) fn same_class_field_select(
+        &mut self,
+        class: SymbolId,
+        field: SymbolId,
+        explicit_this: bool,
+    ) -> Result<AstLabel, PickleError> {
+        self.run(|context| {
+            let class_label = *context
+                .declarations
+                .get(&class)
+                .ok_or(reference(class, ReferenceError::NotRegistered))?;
+            if !context.declarations.contains_key(&field) {
+                return Err(reference(field, ReferenceError::NotRegistered));
+            }
+            let class_record = context.symbol(class)?;
+            let field_record = context.symbol(field)?;
+            if class_record.kind != SymbolKind::Class
+                || field_record.kind != SymbolKind::Field
+                || field_record.owner != Some(class)
+                || field_record.origin != SymbolOrigin::Source(context.source)
+                || field_record.visibility != Visibility::Private
+                || !(field_record.flags.is_empty() || field_record.flags == SymbolFlags::MUTABLE)
+                || !field_record.annotations.is_empty()
+                || !field_record.name.is_term()
+            {
+                return Err(reference(field, ReferenceError::Metadata));
+            }
+            let SymbolInfo::Complete(field_type) = field_record.info else {
+                return Err(PickleError::IncompleteSymbol {
+                    symbol: field,
+                    info: field_record.info,
+                });
+            };
+            if field_type != context.definitions.int && field_type != context.definitions.boolean {
+                return Err(PickleError::UnsupportedTypeReference { ty: field_type });
+            }
+            let package = class_record
+                .owner
+                .ok_or(reference(class, ReferenceError::Owner))?;
+            let package_ref = context.package_reference(package)?;
+            let class_name = context.utf8(context.text(class_record.name.text())?)?;
+            let type_ref = context
+                .wire
+                .push(AstNode::NatAst {
+                    tag: TYPEREFSYMBOL_TAG,
+                    value: AstOperand::Reference(class_label),
+                    child: package_ref,
+                })
+                .map_err(construction)?;
+            let receiver = if explicit_this {
+                context
+                    .wire
+                    .push(AstNode::Ast {
+                        tag: THIS_TAG,
+                        child: type_ref,
+                    })
+                    .map_err(construction)?
+            } else {
+                let class_syntax = context
+                    .wire
+                    .push(AstNode::NatAst {
+                        tag: IDENTTPT_TAG,
+                        value: AstOperand::Nat(class_name),
+                        child: type_ref,
+                    })
+                    .map_err(construction)?;
+                context
+                    .wire
+                    .push(AstNode::Ast {
+                        tag: QUALTHIS_TAG,
+                        child: class_syntax,
+                    })
+                    .map_err(construction)?
+            };
+            let field_name = context.utf8(context.text(field_record.name.text())?)?;
+            context
+                .wire
+                .push(AstNode::NatAst {
+                    tag: SELECT_TAG,
+                    value: AstOperand::Nat(field_name),
+                    child: receiver,
+                })
+                .map_err(construction)
+        })
+    }
+
     /// Lowers a verified plain Int method application target as SELECTin.
     pub(crate) fn same_class_method_select_in(
         &mut self,
