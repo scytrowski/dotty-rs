@@ -328,6 +328,17 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
 }
 """, "Answer.value() = 42", 42,
             ),
+            "example/Box.tasty": (
+                "example.Box", r"public int answer\(\)", "BoxRuntime.java",
+                """public final class BoxRuntime {
+  public static void main(String[] args) {
+    int actual = new example.Box(17).answer();
+    if (actual != 42) throw new AssertionError("Box.answer() = " + actual);
+    System.out.println("Box(17).answer() = " + actual);
+  }
+}
+""", "Box(17).answer() = 42", 42,
+            ),
             "example/PrivateFields.tasty": (
                 "example.PrivateFields", r"public int seedValue\(\)",
                 "PrivateFieldsRuntime.java",
@@ -615,6 +626,12 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Flags class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Box.tasty":
+                signatures = (r"public example\.Box\(int\)", r"public int answer\(\)")
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Box class has unexpected signatures: {javap}")
+                if re.search(r"public (?:final )?int start\(\)", javap):
+                    raise RuntimeError(f"plain constructor input became a public accessor: {javap}")
             if relative.as_posix() == "example/Conditionals.tasty":
                 signatures = (
                     r"public int choose\(boolean, int, int\)",

@@ -106,7 +106,7 @@ need not have been typed by that operation.
 | Bootstrapped `Int`, `Unit`, `Object` are `Builtin`, `owner: None`, `info: Missing` (`definitions.rs`, `bootstrap`, `builtin_symbol`). `declare_special_aliases` only installs `&`/`|` package owners. | Use exact `Definitions` identities for a bounded external-name mapping (`scala.Int`, `scala.Unit`, `java.lang.Object`). Do not turn every ownerless or same-named symbol into a builtin. Do not require external builtins to have source `ClassInfo`. |
 | Source `ClassInfo.prefix` is normalized to `no_prefix` (`complete_class_info`); it does not contain the full Scala package prefix. | Reconstruct serialized package prefixes from the canonical owner chain. Never emit a local direct reference for an external builtin just because its core prefix is `NoPrefix`. |
 | `ClassInfo.parents` stores types, not typed superclass constructor trees (`types/class_info.rs`); the parser's implicit parent list is empty. | The pickler must explicitly lower the supported implicit Object parent to the oracle's constructor-call shape, as a serialization rule for this exact class form. Require the canonical Object parent; no arbitrary-parent inference. |
-| Source constructor semantic result is the owning class (`completion/constructors.rs`), but the wire return tree is `scala.Unit` (also documented by [`unpickler/constructor.rs`](../crates/dotty-tasty-unpickler/src/constructor.rs)). | Lower constructor return syntax separately from effective result. The canonical source constructor remains authoritative. Restrict to the validated default constructor; do not copy JVM constructor bytecode generation. |
+| Source constructor semantic result is the owning class (`completion/constructors.rs`), but the wire return tree is `scala.Unit` (also documented by [`unpickler/constructor.rs`](../crates/dotty-tasty-unpickler/src/constructor.rs)). | Lower constructor return syntax separately from effective result. The canonical source constructor remains authoritative. Accept only the validated default constructor or one ordinary plain Int clause; do not copy JVM constructor bytecode generation. |
 | A source default constructor need not have a typed RHS, and the upstream template uses a synthetic local template owner (`TreePickler`, `registerDef(tree.symbol)`). | Plan must identify default-constructor provenance explicitly. The original `Answer` oracle shape has **no RHS**, an `EMPTYCLAUSE`, a Unit return tree and a `STABLE` tail; keep that as the narrow producer contract, not a universal Scala constructor rule. The separate class-state audit observes variations for synthesized constructors. Template bookkeeping stays local, without fake source `SymbolId`s or a claimed typed constructor body. |
 | `SymbolFlags` (`symbols/flags.rs`) does not model Scala's constructor `STABLE` marker. The independently printed class also has a compiler-injected `SourceFile` annotation. | Treat default-constructor `STABLE` as a narrowly derived wire fact after checking constructor kind/provenance, not a new guessed semantic flag. General annotations remain unsupported. The [#1190 oracle](tasty-pickler-oracle.md) confirms the minimal file can omit the injected provenance annotation and Positions/Comments while retaining SOURCEFILEattr. |
 | [`unpickler`](../crates/dotty-tasty-unpickler/src/unpickler.rs) enters/completes symbols and types, not a typed AST/body. | Semantic parity checks compare normalized owners/signatures/parents; separately inspect the RHS structurally and compile it independently. |
@@ -206,7 +206,8 @@ It is compiler-generated, not evidence of a source annotation in the core store.
 | Class `SymbolId`, complete `ClassInfo` | One `TYPEDEF` containing `TEMPLATE`; definition-address map keyed by class ID. `ClassInfo.class` and scope owner must equal the root ID. Package/class output path follows this same chain. |
 | Template and source class association | Template header is not a second source class symbol. Keep its address/bookkeeping private; validate the source `TypeDef.rhs` edge and class ownership. |
 | `ClassInfo.parents == [Definitions.object_type]` | Explicit implicit-parent `APPLY(SELECTin(NEW(Object type), signed Object <init>, Object owner type))` from the observed oracle. `java.lang.Object` is a language dependency name here, not a JVM descriptor. |
-| Canonical primary constructor `SymbolId` | `DEFDEF <init>`, empty value clause, `scala.Unit` return tree, no RHS, `STABLE`; bind the constructor ID to the definition address. Completed constructor info must instead return the owning class after clause normalization. |
+| Canonical primary constructor `SymbolId` | `DEFDEF <init>`, either the preserved empty clause or one ordered plain Int parameter clause, `scala.Unit` return tree, no RHS, `STABLE`; bind the constructor ID and each derived constructor parameter ID to their definition addresses. Completed constructor info must instead return the owning class after clause normalization. |
+| Plain primary-constructor parameter | The source tree has a class-owned template parameter and a distinct constructor-owned derived parameter. Validate both exact index entries, owners, source order, Int syntax/signature and `PrivateLocal` source metadata; emit the template `PARAM` before parents and the constructor `PARAM` under `<init>`. Reject `val`/`var` accessor identities rather than substituting them. |
 | Method `SymbolId`, source `DefDef` | `DEFDEF` name is an ordinary name, scoped by class nesting; no owner guessed from spelling. Signature comes from clauses + result tree. Parameterless `value` carries no empty-clause marker. |
 | Ordered parameter `SymbolId`s | `PARAM` definitions in source clause order; method owners/types checked against semantic signature. Empty and absent clauses stay distinct. Nonempty clauses are characterization fixtures, deferred from first complete slice. |
 | Method result `TypeId == Definitions.int` | Oracle uses `IDENTtpt(Int, TYPEREF(Int, TERMREFpkg(scala)))`; a semantic `TypeTree` alone would encode the type directly. #1190 must pin any allowed syntax-wrapper normalization before changing this observed form. |
@@ -766,6 +767,11 @@ The default constructor retains its existing source-to-wire special case:
 the parser's synthetic constructor clause and normalized empty semantic clause
 produce `DEFDEF <init>` with `EMPTYCLAUSE`, Unit wire result, no RHS and
 `STABLE`. Ordinary source declarations do not inherit this constructor rule.
+For a plain Int primary-constructor clause, the template first emits its
+class-owned `PARAM` declarations; `<init>` then emits the exact
+constructor-owned parameter IDs in source order, with `IDENTtpt Int` syntax
+sharing the template parameter's Int reference. The wire return remains Unit
+while the completed constructor MethodType returns the class instance.
 
 The audit proves that tested declaration/parameter identities, owners,
 completed signatures, source clause order and typed body roots are available
@@ -779,7 +785,7 @@ information or an unsupported form; it must not guess by spelling.
 ### Sprint 2 v1 boundary
 
 The characterized v1 input is one named package, one ordinary public class
-with its default constructor, zero or more ordinary public monomorphic methods,
+with its default constructor or one plain Int primary-constructor clause, zero or more ordinary public monomorphic methods,
 and zero or one ordinary Int value-parameter clause per method. A clause may be
 absent, explicitly empty, or contain ordinary Int parameters. Accepted method
 bodies are an Int literal, a parameter reference, a same-class method
