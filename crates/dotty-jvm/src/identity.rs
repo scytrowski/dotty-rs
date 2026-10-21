@@ -1021,32 +1021,51 @@ fn validate_and_build_method_dispatch(
     }
 
     for child in metadata.iter() {
-        let Some(superclass) = child.superclass() else {
+        let mut ancestors = Vec::new();
+        let mut next = child.superclass().map(|superclass| superclass.parent());
+        while let Some(parent) = next.and_then(|parent_symbol| {
+            metadata
+                .iter()
+                .find(|candidate| candidate.identity().symbol() == parent_symbol)
+        }) {
+            ancestors.push(parent);
+            next = parent.superclass().map(|superclass| superclass.parent());
+        }
+        let Some(nearest_ancestor) = ancestors.first().copied() else {
             continue;
         };
-        let Some(parent) = metadata
-            .iter()
-            .find(|candidate| candidate.identity().symbol() == superclass.parent())
-        else {
-            continue;
-        };
-        let parent_method_ids = declared_methods(unit, parent.identity().symbol())?;
 
         for child_method in child.methods() {
             let child_symbol = unit.store.symbols.get(child_method.symbol());
             let has_override_modifier = child_symbol.flags.contains(SymbolFlags::OVERRIDE);
-            let same_name_declarations = parent_method_ids
+            let same_name_declarations = ancestors
                 .iter()
-                .copied()
-                .filter(|symbol| unit.store.symbols.get(*symbol).name == child_symbol.name)
+                .map(|ancestor| {
+                    declared_methods(unit, ancestor.identity().symbol()).map(|methods| {
+                        methods
+                            .into_iter()
+                            .filter(|symbol| {
+                                unit.store.symbols.get(*symbol).name == child_symbol.name
+                            })
+                            .map(|symbol| (*ancestor, symbol))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
                 .collect::<Vec<_>>();
-            let exact_planned = parent.methods().iter().find(|parent_method| {
-                parent_method.name() == child_method.name()
-                    && parent_method.descriptor().as_str() == child_method.descriptor().as_str()
+            let exact_planned = ancestors.iter().find_map(|ancestor| {
+                ancestor.methods().iter().find_map(|parent_method| {
+                    (parent_method.name() == child_method.name()
+                        && parent_method.descriptor().as_str()
+                            == child_method.descriptor().as_str())
+                    .then_some((*ancestor, parent_method))
+                })
             });
             let mut same_parameter_parent = None;
             if !has_override_modifier {
-                for parent_symbol in &same_name_declarations {
+                for (ancestor, parent_symbol) in &same_name_declarations {
                     if unit.store.symbols.get(*parent_symbol).visibility != Visibility::Public {
                         continue;
                     }
@@ -1056,7 +1075,7 @@ fn validate_and_build_method_dispatch(
                         *parent_symbol,
                         definitions,
                     )? {
-                        same_parameter_parent = Some(*parent_symbol);
+                        same_parameter_parent = Some((*ancestor, *parent_symbol));
                         break;
                     }
                 }
@@ -1067,24 +1086,32 @@ fn validate_and_build_method_dispatch(
                     return Err(invalid_override(
                         child.identity().symbol(),
                         child_method.symbol(),
-                        parent.identity().symbol(),
+                        nearest_ancestor.identity().symbol(),
                         None,
                         JvmOverrideIssue::NoParentDeclaration,
                     ));
                 }
-                let Some(parent_method) = exact_planned else {
+                let Some((parent, parent_method)) = exact_planned else {
                     let matching_unplanned =
-                        same_name_declarations.iter().copied().find(|symbol| {
-                            !parent
-                                .methods()
-                                .iter()
-                                .any(|planned| planned.symbol() == *symbol)
+                        same_name_declarations
+                            .iter()
+                            .copied()
+                            .find(|(ancestor, symbol)| {
+                                !ancestor
+                                    .methods()
+                                    .iter()
+                                    .any(|planned| planned.symbol() == *symbol)
+                            });
+                    let (error_parent, error_method) = matching_unplanned
+                        .or_else(|| same_name_declarations.first().copied())
+                        .map_or((nearest_ancestor, None), |(ancestor, symbol)| {
+                            (ancestor, Some(symbol))
                         });
                     return Err(invalid_override(
                         child.identity().symbol(),
                         child_method.symbol(),
-                        parent.identity().symbol(),
-                        matching_unplanned.or_else(|| same_name_declarations.first().copied()),
+                        error_parent.identity().symbol(),
+                        error_method,
                         if matching_unplanned.is_some() {
                             JvmOverrideIssue::ParentMethodUnplanned
                         } else {
@@ -1126,21 +1153,21 @@ fn validate_and_build_method_dispatch(
                     ));
                 }
             } else if let Some(parent_method) = exact_planned
-                && unit.store.symbols.get(parent_method.symbol()).visibility == Visibility::Public
+                && unit.store.symbols.get(parent_method.1.symbol()).visibility == Visibility::Public
             {
                 return Err(invalid_override(
                     child.identity().symbol(),
                     child_method.symbol(),
-                    parent.identity().symbol(),
-                    Some(parent_method.symbol()),
+                    parent_method.0.identity().symbol(),
+                    Some(parent_method.1.symbol()),
                     if child_symbol.visibility == Visibility::Public {
                         JvmOverrideIssue::OverrideModifierRequired
                     } else {
                         JvmOverrideIssue::NarrowerVisibility
                     },
                 ));
-            } else if let Some(parent_symbol) = same_parameter_parent {
-                let parent_method = parent
+            } else if let Some((ancestor, parent_symbol)) = same_parameter_parent {
+                let parent_method = ancestor
                     .methods()
                     .iter()
                     .find(|planned| planned.symbol() == parent_symbol);
@@ -1164,7 +1191,7 @@ fn validate_and_build_method_dispatch(
                 return Err(invalid_override(
                     child.identity().symbol(),
                     child_method.symbol(),
-                    parent.identity().symbol(),
+                    ancestor.identity().symbol(),
                     Some(parent_symbol),
                     issue,
                 ));

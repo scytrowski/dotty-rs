@@ -9666,6 +9666,29 @@ fn source_subclass_rejects_overrides_of_final_grandparent_methods_without_output
 }
 
 #[test]
+fn source_subclass_requires_override_for_a_concrete_grandparent_method() {
+    let output = TestOutputDirectory::new("missing-grandparent-override-modifier");
+    let source = "class Base { def value(): Int = 1 }\nclass Middle extends Base {}\nclass Leaf extends Middle { def value(): Int = 2 }\n";
+    let error = compile_source_classes(source, "MissingGrandparentOverride.scala", output.path())
+        .expect_err("a method overriding an inherited grandparent method needs `override`");
+
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Codegen(JvmCodegenError::InvalidJvmOverride {
+                issue: JvmOverrideIssue::OverrideModifierRequired,
+                ..
+            })
+        ),
+        "expected a contextual missing-override error, got {error:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "an invalid transitive override must publish no class files"
+    );
+}
+
+#[test]
 fn final_parent_method_name_collision_fails_closed_when_parent_method_is_unplanned() {
     let output = TestOutputDirectory::new("unplanned-final-parent-method-override");
     let source = "class Base { final def value(): Int = 1 }\nclass Derived extends Base { override def value(): Int = 2 }\n";
