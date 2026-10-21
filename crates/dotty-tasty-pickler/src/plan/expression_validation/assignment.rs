@@ -80,26 +80,103 @@ impl Validator<'_, '_> {
             });
         };
         let target = *target;
-        if !self.registered_local_symbols.contains(&target)
-            || !self.visible_locals.contains(&target)
-            || self.symbol(target)?.flags != SymbolFlags::MUTABLE
-            || self.complete(target)? != self.plan.definitions.int
-            || *prefix != self.plan.definitions.no_prefix
+        let target_type = if self.registered_local_symbols.contains(&target) {
+            if !self.visible_locals.contains(&target)
+                || self.symbol(target)?.flags != SymbolFlags::MUTABLE
+                || self.complete(target)? != self.plan.definitions.int
+                || *prefix != self.plan.definitions.no_prefix
+            {
+                return Err(PickleError::Reference {
+                    symbol: target,
+                    reason: crate::ReferenceError::NotRegistered,
+                });
+            }
+            self.plan.definitions.int
+        } else if self.class_members.is_some()
+            && self.plan.store.symbols.contains(target)
+            && self.plan.store.symbols.get(target).kind == SymbolKind::Field
         {
+            let source_lhs = self.source_tree(source_assign.lhs)?;
+            let typed_lhs = self.plan.typed_ast.try_get(typed_assign.lhs).ok_or(
+                PickleError::InvalidTypedTree {
+                    tree: typed_assign.lhs,
+                },
+            )?;
+            let (TreeKind::Ident(source_ident), TreeKind::Ident(typed_ident)) =
+                (&source_lhs.kind, &typed_lhs.kind)
+            else {
+                return Err(
+                    self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                );
+            };
+            if source_ident.name != typed_ident.name
+                || source_ident.backquoted != typed_ident.backquoted
+            {
+                return Err(PickleError::SourceShape {
+                    tree: source_assign.lhs,
+                    expected: SourceRole::Body,
+                });
+            }
+            let field = self
+                .class_members
+                .and_then(|members| {
+                    members.iter().find_map(|member| match member {
+                        ClassMemberPicklePlan::Field(field) if field.symbol == target => {
+                            Some(*field)
+                        }
+                        _ => None,
+                    })
+                })
+                .ok_or(PickleError::Reference {
+                    symbol: target,
+                    reason: crate::ReferenceError::NotRegistered,
+                })?;
+            if self.symbol(target)?.flags != SymbolFlags::MUTABLE {
+                return Err(PickleError::Reference {
+                    symbol: target,
+                    reason: crate::ReferenceError::Metadata,
+                });
+            }
+            let field_type = self.complete(target)?;
+            if field_type != field.declared_type
+                || (field_type != self.plan.definitions.int
+                    && field_type != self.plan.definitions.boolean)
+            {
+                return Err(PickleError::UnsupportedTypeReference { ty: field_type });
+            }
+            self.same_class_field_target(
+                target,
+                source_ident.name,
+                *prefix,
+                typed_assign.lhs,
+                field_type,
+            )?;
+            field_type
+        } else {
             return Err(PickleError::Reference {
                 symbol: target,
                 reason: crate::ReferenceError::NotRegistered,
             });
-        }
+        };
 
         self.validate_method_expression_inner(
             Some(source_assign.lhs),
             Some(typed_assign.lhs),
             method,
-            self.plan.definitions.int,
+            target_type,
             depth,
             Some(visited),
         )?;
-        self.validate_int_expression(source_assign.rhs, typed_assign.rhs, method, depth, visited)
+        if target_type == self.plan.definitions.int {
+            self.validate_int_expression(
+                source_assign.rhs,
+                typed_assign.rhs,
+                method,
+                depth,
+                visited,
+            )
+        } else {
+            self.validate_if_condition(source_assign.rhs, typed_assign.rhs, method, depth, visited)
+        }
     }
 }

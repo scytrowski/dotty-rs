@@ -35,6 +35,13 @@ enum TestCorruption {
         field_reader: &'static str,
         identifier: &'static str,
     },
+    ImmutableFieldAssignmentTarget {
+        method: &'static str,
+        field_reader: &'static str,
+    },
+    ParenthesizedUnitCycle {
+        method: &'static str,
+    },
 }
 
 fn with_frontend<R>(
@@ -124,6 +131,14 @@ fn class_tree_for(
 }
 
 fn clone_typed_ast(ast: &AstArena<Typed>) -> AstArena<Typed> {
+    let mut cloned = AstArena::new();
+    for (_, tree) in ast.iter() {
+        cloned.alloc(tree.clone());
+    }
+    cloned
+}
+
+fn clone_untyped_ast(ast: &AstArena<Untyped>) -> AstArena<Untyped> {
     let mut cloned = AstArena::new();
     for (_, tree) in ast.iter() {
         cloned.alloc(tree.clone());
@@ -586,13 +601,19 @@ fn emit_class_state_source(
         }
 
         let mut typed_ast = clone_typed_ast(typer.typed_ast());
+        let mut source_ast = clone_untyped_ast(ast);
         if let Some(corruption) = corruption {
             let (name, field_type) = match corruption {
                 TestCorruption::LiteralMethod(name) => (name, None),
+                TestCorruption::ParenthesizedUnitCycle { method } => (method, None),
                 TestCorruption::ShadowedFieldTarget {
                     method,
                     field_reader,
                     identifier: _,
+                }
+                | TestCorruption::ImmutableFieldAssignmentTarget {
+                    method,
+                    field_reader,
                 } => {
                     let reader = members
                         .iter()
@@ -666,6 +687,21 @@ fn emit_class_state_source(
                     };
                     typed_ast.get_mut(local_or_parameter).ty = field_type.unwrap();
                 }
+                TestCorruption::ImmutableFieldAssignmentTarget { .. } => {
+                    let TreeKind::Assign(assignment) = &typed_ast.get(typed_root).kind else {
+                        panic!("assignment corruption target must be an Assign")
+                    };
+                    let lhs = assignment.lhs;
+                    typed_ast.get_mut(lhs).ty = field_type.unwrap();
+                }
+                TestCorruption::ParenthesizedUnitCycle { .. } => {
+                    let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+                        &mut source_ast.get_mut(rhs).kind
+                    else {
+                        panic!("cycle corruption target must be parenthesized")
+                    };
+                    parens.inner = rhs;
+                }
             }
         }
 
@@ -673,7 +709,7 @@ fn emit_class_state_source(
         ClassStatePicklePlan {
             store: typer.store(),
             definitions,
-            source_ast: ast,
+            source_ast: &source_ast,
             typed_ast: &typed_ast,
             source_index: index,
             typed_bindings: &bindings,
@@ -852,6 +888,173 @@ fn class_state_lowers_implicit_and_explicit_private_primitive_field_reads() {
             .expect("start the pinned Scala 3.9 -from-tasty gate");
         assert!(result.success(), "PrivateFields -from-tasty gate failed");
     }
+}
+
+#[test]
+fn class_state_serializes_private_mutable_field_assignments() {
+    let source = "package example\nclass MutableFieldWrites:\n  private var current: Int = 0\n  private var enabled: Boolean = false\n  def get(): Int = current\n  def set(value: Int): Unit = (current = value)\n  def isEnabled(): Boolean = enabled\n  def setEnabled(value: Boolean): Unit = enabled = value\n  def increment(): Int =\n    current = current + 1\n    current\n";
+    let output = emit_class_state_source(
+        source,
+        "MutableFieldWrites",
+        "MutableFieldWrites.scala",
+        None,
+    )
+    .expect("private mutable field assignment should preserve source TASTy semantics");
+    assert_eq!(
+        output.intended_tasty_path(),
+        "example/MutableFieldWrites.tasty"
+    );
+    TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let methods = output.declarations()[3..]
+        .iter()
+        .filter_map(|declaration| {
+            let body = addresses
+                .get(declaration.address)
+                .unwrap()
+                .decode_defdef_body()
+                .ok()?;
+            Some((file.render_name(body.name).unwrap(), body.rhs?))
+        })
+        .collect::<HashMap<_, _>>();
+    let RawTree::LengthNode(set_node) = &methods["set"] else {
+        panic!("set body must be ASSIGN")
+    };
+    assert_eq!(set_node.tag, ASSIGN_TAG);
+    let set = set_node.decode_assign().unwrap();
+    let RawTree::NatAst { tag, child, .. } = set.left else {
+        panic!("field assignment target must be SELECT")
+    };
+    assert_eq!(tag, SELECT_TAG);
+    let RawTree::Ast { tag, .. } = *child else {
+        panic!("field assignment receiver must be QUALTHIS")
+    };
+    assert_eq!(tag, QUALTHIS_TAG);
+    assert_eq!(raw_tree_tag(&set.right), TERMREFDIRECT_TAG);
+
+    let RawTree::LengthNode(increment_node) = &methods["increment"] else {
+        panic!("increment body must preserve its source block")
+    };
+    assert_eq!(increment_node.tag, BLOCK_TAG);
+    let StructuredNode::Block(increment) = increment_node.decode_structured().unwrap() else {
+        panic!("increment body must decode as BLOCK")
+    };
+    assert_eq!(increment.stats.len(), 1);
+    let RawTree::LengthNode(assign_node) = &increment.stats[0] else {
+        panic!("increment statement must be ASSIGN")
+    };
+    assert_eq!(assign_node.tag, ASSIGN_TAG);
+    let assignment = assign_node.decode_assign().unwrap();
+    assert_eq!(raw_tree_tag(&assignment.left), SELECT_TAG);
+    assert_eq!(raw_tree_tag(&increment.expression), SELECT_TAG);
+
+    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1393/generated/example/MutableFieldWrites.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1393/tmp"))
+            .status()
+            .expect("start the pinned Scala 3.9 mutable field gate");
+        assert!(
+            result.success(),
+            "MutableFieldWrites -from-tasty gate failed"
+        );
+    }
+}
+
+#[test]
+fn class_state_rejects_inconsistent_mutability_metadata() {
+    let source = "package example\nclass ImmutableTarget:\n  private var current: Int = 0\n  def set(value: Int): Unit = current = value\n";
+    with_mutable_frontend(
+        source,
+        "ImmutableTarget",
+        "ImmutableTarget.scala",
+        |store,
+         ast,
+         source,
+         index,
+         definitions,
+         typed_ast,
+         class,
+         members,
+         constructor,
+         bindings| {
+            let field = members
+                .iter()
+                .find_map(|member| match member {
+                    ClassMemberPicklePlan::Field(field) => Some(field.symbol),
+                    _ => None,
+                })
+                .unwrap();
+            store.symbols.get_mut(field).flags = SymbolFlags::EMPTY;
+            let class_tree = class_tree_for(ast, source, index, class);
+            let rejected = ClassStatePicklePlan {
+                store,
+                definitions,
+                source_ast: ast,
+                typed_ast,
+                source_index: index,
+                typed_bindings: &bindings,
+                source: SourceMetadata {
+                    id: source,
+                    name: "ImmutableTarget.scala".into(),
+                },
+                class,
+                class_tree,
+                constructor,
+                members: &members,
+            }
+            .validate()
+            .is_err();
+            assert!(rejected, "immutable assignment target accepted");
+        },
+    );
+}
+
+#[test]
+fn class_state_rejects_assignment_retargeted_to_readonly_field() {
+    let source = "package example\nclass ReadonlyAssignmentTarget:\n  private val immutable: Int = 1\n  private var current: Int = 0\n  def immutableValue(): Int = immutable\n  def set(value: Int): Unit = current = value\n";
+    let result = emit_class_state_source(
+        source,
+        "ReadonlyAssignmentTarget",
+        "ReadonlyAssignmentTarget.scala",
+        Some(TestCorruption::ImmutableFieldAssignmentTarget {
+            method: "set",
+            field_reader: "immutableValue",
+        }),
+    );
+    assert!(matches!(
+        result,
+        Err(PickleError::Reference {
+            reason: ReferenceError::Metadata,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn class_state_rejects_cyclic_unit_parentheses_with_depth_error() {
+    let source = "package example\nclass CyclicUnitParentheses:\n  private var current: Int = 0\n  def set(value: Int): Unit = (current = value)\n";
+    assert!(matches!(
+        emit_class_state_source(
+            source,
+            "CyclicUnitParentheses",
+            "CyclicUnitParentheses.scala",
+            Some(TestCorruption::ParenthesizedUnitCycle { method: "set" }),
+        ),
+        Err(PickleError::LimitExceeded {
+            kind: LimitKind::ExpressionDepth,
+            ..
+        })
+    ));
 }
 
 #[test]

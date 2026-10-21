@@ -1264,6 +1264,8 @@ impl Validator<'_, '_> {
                 self.validate_int_expression(rhs, body, method, depth, seen)
             } else if result_type == p.definitions.boolean {
                 self.validate_if_condition(rhs, body, method, depth, seen)
+            } else if result_type == p.definitions.unit {
+                self.validate_unit_expression(rhs, body, method, depth, seen)
             } else {
                 Err(PickleError::BodyType {
                     tree: body,
@@ -1298,6 +1300,22 @@ impl Validator<'_, '_> {
             let mut local_visited = HashSet::new();
             let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
             return self.validate_boolean_prefix(rhs, body, method, depth, seen);
+        }
+        if result_type == p.definitions.unit
+            && matches!(source_rhs.kind, TreeKind::Assign(_))
+            && matches!(node.kind, TreeKind::Assign(_))
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_unit_expression(rhs, body, method, depth, seen);
+        }
+        if result_type == p.definitions.unit
+            && matches!(source_rhs.kind, TreeKind::Block(_))
+            && matches!(node.kind, TreeKind::Block(_))
+        {
+            let mut local_visited = HashSet::new();
+            let seen = visited.as_deref_mut().unwrap_or(&mut local_visited);
+            return self.validate_unit_expression(rhs, body, method, depth, seen);
         }
         self.source_typed_binding(rhs, body)?;
         self.root_source_typed_span(source_rhs.position, node.position, body)?;

@@ -170,6 +170,13 @@ impl Validator<'_, '_> {
         depth: usize,
         visited: &mut HashSet<TreeId<Typed>>,
     ) -> Result<(), PickleError> {
+        let depth_limit = self.limits.expression_depth_limit();
+        if depth > depth_limit {
+            return Err(PickleError::LimitExceeded {
+                kind: LimitKind::ExpressionDepth,
+                limit: depth_limit,
+            });
+        }
         let typed = self
             .plan
             .typed_ast
@@ -182,6 +189,20 @@ impl Validator<'_, '_> {
                 tree: typed_id,
                 ty: typed.ty,
             });
+        }
+        if let TreeKind::PhaseSpecific(UntypedNode::Parens(parens)) =
+            &self.source_tree(source_id)?.kind
+        {
+            self.source_typed_binding(source_id, typed_id)?;
+            self.span(self.source_tree(source_id)?.position)?;
+            self.charge(1)?;
+            return self.validate_unit_expression(
+                parens.inner,
+                typed_id,
+                method,
+                depth + 1,
+                visited,
+            );
         }
         match (&self.source_tree(source_id)?.kind, &typed.kind) {
             (TreeKind::Assign(_), TreeKind::Assign(_)) => {
