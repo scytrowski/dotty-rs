@@ -10023,3 +10023,291 @@ fn source_local_declarations_export_method_scoped_canonical_bindings() {
     };
     assert_eq!(unit.validate(), Ok(()));
 }
+
+#[test]
+fn super_calls_fixture_combines_parameterized_construction_and_special_dispatch() {
+    let first_output = TestOutputDirectory::new("super-calls-first");
+    let second_output = TestOutputDirectory::new("super-calls-second");
+    let first = compile_fixture_classes("SuperCalls.scala", first_output.path()).unwrap();
+    let second = compile_fixture_classes("SuperCalls.scala", second_output.path()).unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Derived", "Runner"]
+    );
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>()
+    );
+    for (artifacts, output) in [(&first, &first_output), (&second, &second_output)] {
+        assert_eq!(output.class_files().len(), 3);
+        for artifact in artifacts {
+            assert_eq!(fs::read(&artifact.path).unwrap(), artifact.class.bytes());
+            let class = decode_emitted_class(artifact);
+            assert!(class.access_flags.is_public());
+            assert!(
+                class
+                    .access_flags
+                    .contains(dotty_classfile::access_flags::ACC_SUPER)
+            );
+            assert!(
+                class
+                    .methods
+                    .iter()
+                    .all(|method| method.access_flags.is_public()
+                        && !method.access_flags.is_static())
+            );
+            for (name, _) in methods_with_descriptors(&class) {
+                assert!(
+                    !has_stack_map_table(&class, &name),
+                    "the fixture is branchless"
+                );
+            }
+        }
+    }
+    let base = decode_emitted_class(&first[0]);
+    let derived = decode_emitted_class(&first[1]);
+    let runner = decode_emitted_class(&first[2]);
+    for (class, parent, descriptor) in [
+        (&base, "java/lang/Object", "(I)V"),
+        (&derived, "Base", "(I)V"),
+        (&runner, "java/lang/Object", "()V"),
+    ] {
+        assert_eq!(
+            class.constant_pool.class_name(class.super_class.unwrap()),
+            Ok(parent)
+        );
+        assert_eq!(
+            methods_with_descriptors(class)
+                .into_iter()
+                .filter(|(name, _)| name == "<init>")
+                .collect::<Vec<_>>(),
+            [("<init>".to_owned(), descriptor.to_owned())]
+        );
+    }
+    assert_eq!(base.fields.len(), 1);
+    let current = &base.fields[0];
+    assert_eq!(base.constant_pool.utf8(current.name_index), Ok("current"));
+    assert_eq!(base.constant_pool.utf8(current.descriptor_index), Ok("I"));
+    assert!(current.access_flags.is_private());
+    assert!(!current.access_flags.is_final());
+    assert!(derived.fields.is_empty());
+    assert!(runner.fields.is_empty());
+    assert_opcode_sequence(
+        emitted_method_code(&base, "<init>"),
+        &[0x2a, 0xb7, 0x2a, 0x1b, 0xb5, 0xb1],
+    );
+    assert_field_reference(
+        &base,
+        emitted_method_code(&base, "<init>"),
+        0xb5,
+        "Base",
+        "current",
+        "I",
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&derived, "<init>"),
+        &[0x2a, 0x1b, 0xb7, 0xb1],
+    );
+    assert_invocation_sequence(
+        &derived,
+        emitted_method_code(&derived, "<init>"),
+        &[(0xb7, "Base", "<init>", "(I)V")],
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&derived, "value"),
+        &[0x2a, 0xb7, 0x04, 0x60, 0xac],
+    );
+    for (method, target) in [
+        ("value", "value"),
+        ("original", "value"),
+        ("advance", "increment"),
+    ] {
+        assert_invocation_sequence(
+            &derived,
+            emitted_method_code(&derived, method),
+            &[(0xb7, "Base", target, "()I")],
+        );
+    }
+    assert_invocation_sequence(
+        &base,
+        emitted_method_code(&base, "doubled"),
+        &[
+            (0xb6, "Base", "value", "()I"),
+            (0xb6, "Base", "value", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "evaluate"),
+        &[(0xb6, "Base", "doubled", "()I")],
+    );
+    for (method, owner) in [("fromBase", "Base"), ("fromDerived", "Derived")] {
+        assert_invocation_sequence(
+            &runner,
+            emitted_method_code(&runner, method),
+            &[
+                (0xb7, owner, "<init>", "(I)V"),
+                (0xb6, "Runner", "evaluate", "(LBase;)I"),
+            ],
+        );
+    }
+    for (class, method, stack, locals) in [
+        (&base, "<init>", 2, 2),
+        (&derived, "<init>", 2, 2),
+        (&derived, "value", 2, 1),
+        (&runner, "evaluate", 1, 2),
+        (&runner, "fromDerived", 4, 2),
+        (&runner, "afterAdvance", 3, 3),
+    ] {
+        let method = class
+            .methods
+            .iter()
+            .find(|entry| class.constant_pool.utf8(entry.name_index) == Ok(method))
+            .unwrap();
+        let [Attribute::Code(code)] = method.attributes.as_slice() else {
+            panic!("one Code attribute");
+        };
+        assert_eq!((code.max_stack, code.max_locals), (stack, locals));
+    }
+    if require_jdk_or_skip() {
+        verify_parameterized_super_calls_with_jdk(first_output.path());
+    }
+}
+
+fn verify_parameterized_super_calls_with_jdk(output: &Path) {
+    let classpath = output.to_str().unwrap();
+    // Separate disassemblies keep identically named parent/child methods distinct.
+    for (class, methods) in [
+        (
+            "Base",
+            vec![
+                (
+                    "public Base(int);",
+                    vec![
+                        "aload_0",
+                        "invokespecial",
+                        "aload_0",
+                        "iload_1",
+                        "putfield",
+                        "return",
+                    ],
+                ),
+                (
+                    "public int doubled();",
+                    vec![
+                        "aload_0",
+                        "invokevirtual",
+                        "aload_0",
+                        "invokevirtual",
+                        "iadd",
+                        "ireturn",
+                    ],
+                ),
+            ],
+        ),
+        (
+            "Derived",
+            vec![
+                (
+                    "public Derived(int);",
+                    vec!["aload_0", "iload_1", "invokespecial", "return"],
+                ),
+                (
+                    "public int value();",
+                    vec!["aload_0", "invokespecial", "iconst_1", "iadd", "ireturn"],
+                ),
+                (
+                    "public int original();",
+                    vec!["aload_0", "invokespecial", "ireturn"],
+                ),
+                (
+                    "public int advance();",
+                    vec!["aload_0", "invokespecial", "ireturn"],
+                ),
+            ],
+        ),
+        (
+            "Runner",
+            vec![(
+                "public int evaluate(Base);",
+                vec!["aload_1", "invokevirtual", "ireturn"],
+            )],
+        ),
+    ] {
+        let javap = Command::new("javap")
+            .args(["-p", "-c", "-v", "-classpath", classpath, class])
+            .output()
+            .unwrap();
+        assert!(
+            javap.status.success(),
+            "{}",
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let text = String::from_utf8_lossy(&javap.stdout);
+        assert!(text.contains("major version: 65"));
+        for (header, instructions) in methods {
+            assert_javap_instruction_sequence(&text, header, &instructions);
+        }
+        if class == "Derived" {
+            for reference in [
+                "Base.\"<init>\":(I)V",
+                "Base.value:()I",
+                "Base.increment:()I",
+            ] {
+                assert!(text.contains(reference), "missing {reference}: {text}");
+            }
+        }
+    }
+    let harness = output.join("ParameterizedSuperCallsHarness.java");
+    fs::write(&harness, r#"public final class ParameterizedSuperCallsHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    if (runner.fromBase(10) != 20) throw new AssertionError("Base constructor and virtual call");
+    if (runner.fromDerived(10) != 22) throw new AssertionError("Derived override dispatch");
+    if (runner.original(10) != 10) throw new AssertionError("special Base.value");
+    if (runner.advance(10) != 11) throw new AssertionError("special Base.increment");
+    if (runner.afterAdvance(10) != 12) throw new AssertionError("state after special mutation");
+    if (new Derived(10).value() != 11 || new Derived(10).doubled() != 22) throw new AssertionError("inherited virtual dispatch");
+    if (runner.fromDerived(0) != 2 || runner.fromDerived(-3) != -4 || runner.fromBase(-3) != -6) throw new AssertionError("signed constructor parameters");
+    System.out.println("parameterized super calls verified");
+  }
+}
+"#).unwrap();
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+        .arg(harness)
+        .output()
+        .unwrap();
+    assert!(
+        javac.status.success(),
+        "{}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "ParameterizedSuperCallsHarness",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        java.status.success(),
+        "{}",
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "parameterized super calls verified"
+    );
+}
