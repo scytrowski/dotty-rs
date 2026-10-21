@@ -10,10 +10,11 @@ use dotty_tasty::tasty::{
     AstError, CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail,
     FIELDACCESSOR_TAG, FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG,
     PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
-    RawName, RawTree, Reader, ReferenceNode, SHAREDTERM_TAG, SHAREDTYPE_TAG, STATIC_TAG,
-    SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode, StructuredTree, TEMPLATE_TAG,
-    TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG, TYPEREF_TAG,
-    TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue, VALDEF_TAG,
+    RawName, RawTree, Reader, ReferenceNode, RenderedSignedName, SHAREDTERM_TAG, SHAREDTYPE_TAG,
+    STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode, StructuredTree,
+    TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG,
+    TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue,
+    TypeApplyNode, VALDEF_TAG,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -2038,14 +2039,47 @@ fn resolve_reference_prefix_at_depth(
                 return Some(qualify_symbol_address(name, current_package));
             }
             let target = decode_shared_tree(file, reference.address)?;
+            if let ReferenceResolution::Resolved(name) =
+                resolve_reference_name_at_depth(file, &target, current_package, depth + 1)
+            {
+                return Some(name.as_internal().to_owned());
+            }
             resolve_reference_prefix_at_depth(file, &target, current_package, depth + 1)
+        }
+        RawTree::Leaf(term) if term.name_ref().is_some() => {
+            resolve_qualified_name(file, term.name_ref()?)
         }
         _ => match prefix.decode_structured().ok()? {
             StructuredTree::AstChild(child) => {
                 resolve_reference_prefix_at_depth(file, &child.child, current_package, depth + 1)
             }
+            StructuredTree::Length(StructuredNode::AppliedType(AppliedTypeNode {
+                tycon, ..
+            })) => resolve_reference_prefix_at_depth(file, &tycon, current_package, depth + 1),
             StructuredTree::Ident(IdentNode { type_tree, .. }) => {
                 resolve_reference_prefix_at_depth(file, &type_tree, current_package, depth + 1)
+            }
+            StructuredTree::Select(SelectNode {
+                tag,
+                name,
+                qualifier,
+            }) => {
+                let segment = wire_name(file, name)?;
+                let owner = resolve_reference_prefix_at_depth(
+                    file,
+                    &qualifier,
+                    current_package,
+                    depth + 1,
+                )?;
+                let selected_type_member = tag == dotty_tasty::tasty::SELECTTPT_TAG
+                    && matches!(qualifier, RawTree::Leaf(term) if term.ast_ref().is_some());
+                Some(if selected_type_member && !owner.is_empty() {
+                    format!("{}{}{}", owner.trim_matches('/'), "$", segment)
+                } else if owner.is_empty() || owner == "_root_" {
+                    segment
+                } else {
+                    format!("{}/{segment}", owner.trim_matches('/'))
+                })
             }
             StructuredTree::Reference(ReferenceNode {
                 tag: TERMREFPKG_TAG,
@@ -2227,7 +2261,15 @@ fn resolve_reference_name_at_depth(
                 .unwrap_or(ReferenceResolution::Unresolved)
         }
         StructuredTree::Length(StructuredNode::SelectIn(selection)) => {
-            let Some(name) = render_tree_name(file, selection.name) else {
+            if let ReferenceResolution::Resolved(name) = resolve_reference_name_at_depth(
+                file,
+                &selection.underlying_type,
+                current_package,
+                depth + 1,
+            ) {
+                return ReferenceResolution::Resolved(name);
+            }
+            let Some(name) = render_member_name(file, selection.name) else {
                 return ReferenceResolution::Unresolved;
             };
             resolve_reference_prefix_at_depth(
@@ -2242,12 +2284,24 @@ fn resolve_reference_name_at_depth(
                     return None;
                 }
                 let selected_name = name.rsplit('/').next().unwrap_or(&name);
-                if prefix.is_empty() || prefix == "_root_" {
+                if selected_name == "<init>"
+                    && matches!(selection.qualifier, RawTree::Ast { .. })
+                    && !prefix.is_empty()
+                {
+                    Some(ReferenceResolution::Resolved(BinaryName::from_internal(
+                        prefix.to_owned(),
+                    )))
+                } else if prefix.is_empty() || prefix == "_root_" {
                     Some(ReferenceResolution::Resolved(BinaryName::from_internal(
                         name,
                     )))
                 } else if matches!(selection.qualifier, RawTree::Ast { .. })
-                    && prefix.rsplit('/').next() == Some(selected_name)
+                    && prefix.rsplit('/').next().is_some_and(|segment| {
+                        segment == selected_name
+                            || segment
+                                .strip_suffix(selected_name)
+                                .is_some_and(|owner| owner.ends_with('$'))
+                    })
                 {
                     Some(ReferenceResolution::Resolved(BinaryName::from_internal(
                         prefix.to_owned(),
@@ -2262,6 +2316,13 @@ fn resolve_reference_name_at_depth(
         }
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
             resolve_reference_name_at_depth(file, &type_tree, current_package, depth + 1)
+        }
+        StructuredTree::Length(StructuredNode::TypeApply(TypeApplyNode { function, .. }))
+        | StructuredTree::Length(StructuredNode::Apply(ApplyNode { function, .. })) => {
+            resolve_reference_name_at_depth(file, &function, current_package, depth + 1)
+        }
+        StructuredTree::Length(StructuredNode::AppliedType(AppliedTypeNode { tycon, .. })) => {
+            resolve_reference_name_at_depth(file, &tycon, current_package, depth + 1)
         }
         StructuredTree::AstChild(child) => {
             resolve_reference_name_at_depth(file, &child.child, current_package, depth + 1)
@@ -2872,6 +2933,17 @@ fn module_class_wire_name(file: &TastyFile<'_>, reference: u32) -> Option<String
 
 fn render_tree_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
     resolve_qualified_name(file, reference)
+}
+
+/// Render the selected member's source-level name, including the original
+/// spelling of a signed name. Its signature is not part of the binary class
+/// name; the selection's owner tree establishes where the member lives.
+fn render_member_name(file: &TastyFile<'_>, reference: u32) -> Option<String> {
+    match file.render_signed_name(reference).ok()? {
+        Some(RenderedSignedName::Signed { original, .. })
+        | Some(RenderedSignedName::TargetSigned { original, .. }) => Some(original),
+        None => resolve_qualified_name(file, reference).or_else(|| wire_name(file, reference)),
+    }
 }
 
 #[cfg(test)]
@@ -3658,6 +3730,60 @@ mod tests {
             sym_utils.resolved_binary_name.as_deref(),
             Some("dotty/tools/dotc/core/SymUtils")
         );
+    }
+
+    #[test]
+    fn resolves_nested_applied_compiler_parent_constructor() {
+        let trees_bytes = fixture_bytes("scala3-compiler/dotty/tools/dotc/ast/Trees.tasty");
+        let trees_file = parse_classloader_tasty(&trees_bytes).unwrap();
+        let trees_index = trees_file.ast_address_index().unwrap();
+        let nested_binary_name = trees_index
+            .iter()
+            .filter(|node| node.tag == TYPEDEF_TAG)
+            .find_map(|node| {
+                let StructuredNode::TypeDef(DefinitionBody::TypeDef { name, .. }) =
+                    node.decode_structured().ok()?
+                else {
+                    return None;
+                };
+                (trees_file.render_name(name).ok()?.as_str() == "Instance")
+                    .then(|| resolve_symbol_address(&trees_file, node.offset as u32))?
+            })
+            .expect("Trees.tasty must identify the nested Instance owner chain");
+        assert_eq!(nested_binary_name, "Trees$Instance");
+
+        for (file, requested, expected_trait) in [
+            (
+                "scala3-compiler/dotty/tools/dotc/ast/tpd.tasty",
+                "dotty/tools/dotc/ast/tpd$",
+                "dotty/tools/dotc/ast/TypedTreeInfo",
+            ),
+            (
+                "scala3-compiler/dotty/tools/dotc/ast/untpd.tasty",
+                "dotty/tools/dotc/ast/untpd$",
+                "dotty/tools/dotc/ast/UntypedTreeInfo",
+            ),
+        ] {
+            let bytes = fixture_bytes(file);
+            let decoded = decode_module_class_with_resolvers(
+                &bytes,
+                &BinaryName::from_internal(requested),
+                |_, _| None,
+                |_, _| None,
+            )
+            .unwrap_or_else(|error| panic!("{requested}: {error:?}"));
+
+            assert_eq!(
+                decoded.super_class.as_internal(),
+                "dotty/tools/dotc/ast/Trees$Instance",
+                "{requested}"
+            );
+            assert_eq!(
+                decoded.interfaces,
+                vec![BinaryName::from_internal(expected_trait)],
+                "{requested}"
+            );
+        }
     }
 
     #[test]
