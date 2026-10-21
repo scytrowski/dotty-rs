@@ -80,6 +80,10 @@ be ancestor-related to each other as well as assignable to the canonical
 source result. The JVM backend does not infer a sibling LUB or project
 `Type::Or` to Root.
 
+The parameterized `Base`/`Left`/`Right` source, both branch orders, nested
+condition, receiver and argument contexts, and the exact pre-emission rejection
+are recorded in the [sibling reference joins audit](jvm-sibling-reference-joins.md).
+
 ## Projection and dispatch boundaries
 
 | Concern | Current behavior | Follow-up requirement |

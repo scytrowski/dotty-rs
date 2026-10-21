@@ -1063,6 +1063,203 @@ class Branch:
     assert!(output.class_files().is_empty());
 }
 
+#[test]
+fn sibling_reference_join_audit_uses_the_real_parameterized_source_program() {
+    let source = r#"
+class Base(seed: Int):
+  private var current: Int = seed
+  def value(): Int = current
+  def doubled(): Int = value() + value()
+
+class Left(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 1
+
+class Right(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 2
+
+class Runner:
+  def choose(flag: Boolean, seed: Int): Base =
+    if flag then new Left(seed) else new Right(seed)
+  def chooseReverse(flag: Boolean, seed: Int): Base =
+    if flag then new Right(seed) else new Left(seed)
+  def run(flag: Boolean, seed: Int): Int =
+    choose(flag, seed).doubled()
+  def accept(value: Base): Int = value.doubled()
+  def viaArgument(flag: Boolean, seed: Int): Int = accept(choose(flag, seed))
+  def chooseNested(first: Boolean, second: Boolean, seed: Int): Base =
+    if first then new Left(seed)
+    else if second then new Right(seed)
+    else new Left(seed)
+"#;
+    let output = TestOutputDirectory::new("sibling-reference-join-audit");
+    let mut observed = false;
+    let result = compile_source_batch_observed(
+        source,
+        "SiblingReferenceJoinAudit.scala",
+        output.path(),
+        SourceId::from_index(1433),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, definitions| {
+            observed = true;
+            let base = audit_class_named(unit, "Base");
+            let left = audit_class_named(unit, "Left");
+            let right = audit_class_named(unit, "Right");
+            let runner = audit_class_named(unit, "Runner");
+            assert_eq!(audit_class_parent(unit, base), definitions.object_class);
+            assert_eq!(audit_class_parent(unit, left), base);
+            assert_eq!(audit_class_parent(unit, right), base);
+            let hierarchy = unit
+                .class_hierarchy(definitions)
+                .expect("the planned sibling classes retain their exact Base edges");
+            assert!(
+                hierarchy
+                    .superclasses()
+                    .iter()
+                    .any(|edge| edge.class() == left && edge.parent() == base)
+            );
+            assert!(
+                hierarchy
+                    .superclasses()
+                    .iter()
+                    .any(|edge| edge.class() == right && edge.parent() == base)
+            );
+
+            for method_name in ["choose", "chooseReverse", "chooseNested"] {
+                let method = audit_method_named(unit, runner, method_name);
+                let signature = match unit.store.symbols.info(method.method) {
+                    dotty_core::SymbolInfo::Complete(signature) => *signature,
+                    other => panic!("{method_name} has complete typed signature: {other:?}"),
+                };
+                let Type::Method(signature) = unit.store.types.get(signature) else {
+                    panic!("{method_name} has a plain method type")
+                };
+                assert_eq!(audit_type_symbol(unit, signature.result), Some(base));
+
+                let body = unit.typed_ast.get(method.body.expect("method has a body"));
+                let TreeKind::If(if_tree) = &body.kind else {
+                    panic!("{method_name} retains its source If at the typed root")
+                };
+                if method_name == "chooseNested" {
+                    let nested = unit.typed_ast.get(if_tree.else_branch);
+                    assert!(matches!(nested.kind, TreeKind::If(_)));
+                }
+                let Type::Or {
+                    left: then_ty,
+                    right: else_ty,
+                } = unit.store.types.get(body.ty)
+                else {
+                    panic!("{method_name} preserves the typer's sibling Or result")
+                };
+                let mut arms = [
+                    audit_type_symbol(unit, *then_ty).expect("left union arm has canonical class"),
+                    audit_type_symbol(unit, *else_ty).expect("right union arm has canonical class"),
+                ];
+                arms.sort_by_key(|symbol| symbol.index());
+                let mut expected = [left, right];
+                expected.sort_by_key(|symbol| symbol.index());
+                assert_eq!(
+                    arms, expected,
+                    "{method_name} retains the exact sibling symbols"
+                );
+            }
+
+            let base_doubled = audit_method_named(unit, base, "doubled").method;
+            let choose = audit_method_named(unit, runner, "choose").method;
+            let run = audit_method_named(unit, runner, "run");
+            let run_targets = typed_tree_targets(unit, run.body.expect("run has body"));
+            assert!(run_targets.contains(&choose));
+            assert!(run_targets.contains(&base_doubled));
+
+            let accept = audit_method_named(unit, runner, "accept");
+            let accept_signature = match unit.store.symbols.info(accept.method) {
+                dotty_core::SymbolInfo::Complete(signature) => *signature,
+                other => panic!("accept has complete typed signature: {other:?}"),
+            };
+            let Type::Method(accept_signature) = unit.store.types.get(accept_signature) else {
+                panic!("accept has a plain method type")
+            };
+            assert_eq!(
+                audit_type_symbol(unit, accept_signature.params[0].ty),
+                Some(base),
+                "the argument context is explicitly Base-typed"
+            );
+            let via_argument = audit_method_named(unit, runner, "viaArgument");
+            let argument_targets =
+                typed_tree_targets(unit, via_argument.body.expect("viaArgument has body"));
+            assert!(argument_targets.contains(&choose));
+            assert!(argument_targets.contains(&accept.method));
+        }),
+    );
+    assert!(
+        observed,
+        "the real source reaches the typed frontend observer: {result:?}"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::ReferenceTypeMismatch { .. }
+            ))
+        ),
+        "the first current rejection remains the explicit JVM reference join policy: {result:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn inferred_sibling_reference_join_audit_preserves_the_typed_union() {
+    let source = r#"
+class Base
+class Left extends Base
+class Right extends Base
+class Branch:
+  def choose(flag: Boolean) =
+    if flag then new Left() else new Right()
+"#;
+    let output = TestOutputDirectory::new("inferred-sibling-reference-join-audit");
+    let mut observed = false;
+    let result = compile_source_batch_observed(
+        source,
+        "InferredSiblingReferenceJoinAudit.scala",
+        output.path(),
+        SourceId::from_index(1434),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, _| {
+            observed = true;
+            let branch = audit_class_named(unit, "Branch");
+            let method = audit_method_named(unit, branch, "choose");
+            let signature = match unit.store.symbols.info(method.method) {
+                dotty_core::SymbolInfo::Complete(signature) => *signature,
+                other => panic!("choose has complete typed signature: {other:?}"),
+            };
+            let Type::Method(signature) = unit.store.types.get(signature) else {
+                panic!("choose has a plain method type")
+            };
+            assert!(matches!(
+                unit.store.types.get(signature.result),
+                Type::Or { .. }
+            ));
+            let body = unit.typed_ast.get(method.body.expect("choose has a body"));
+            assert!(matches!(body.kind, TreeKind::If(_)));
+            assert!(matches!(unit.store.types.get(body.ty), Type::Or { .. }));
+        }),
+    );
+    assert!(
+        observed,
+        "the inferred source reached the typed observer: {result:?}"
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::UnsupportedJvmType {
+                kind: dotty_jvm::UnsupportedJvmTypeKind::Union,
+                ..
+            }
+        ))
+    ));
+    assert!(output.class_files().is_empty());
+}
+
 fn audit_symbol_name(unit: &JvmCompilationUnit<'_>, symbol: SymbolId) -> String {
     let info = unit.store.symbols.get(symbol);
     let name = unit.store.names.resolve(info.name.text());
