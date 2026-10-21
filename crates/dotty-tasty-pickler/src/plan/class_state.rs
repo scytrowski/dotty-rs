@@ -82,6 +82,11 @@ impl ClassStateValidator<'_, '_> {
         if text.len() > self.limits.max_name_bytes {
             return None;
         }
+        let (negative, text) = if let Some(text) = text.strip_prefix('-') {
+            (true, text)
+        } else {
+            (false, text.strip_prefix('+').unwrap_or(text))
+        };
         let digits = text.replace('_', "");
         let digits = match radix {
             2 => digits
@@ -97,7 +102,20 @@ impl ClassStateValidator<'_, '_> {
             _ => return None,
         };
         let value = u32::from_str_radix(digits, radix).ok()?;
-        i32::try_from(value).ok()
+        if radix == 10 {
+            if negative {
+                (value <= (i32::MAX as u32) + 1).then(|| (-(i64::from(value))) as i32)
+            } else {
+                i32::try_from(value).ok()
+            }
+        } else {
+            let value = value as i32;
+            Some(if negative {
+                value.wrapping_neg()
+            } else {
+                value
+            })
+        }
     }
 
     fn charge(&mut self, amount: usize) -> Result<(), PickleError> {
@@ -146,11 +164,6 @@ impl ClassStateValidator<'_, '_> {
     }
 
     fn same_canonical_type(&self, actual: TypeId, expected: TypeId) -> bool {
-        let actual = match self.plan.store.types.try_get(actual) {
-            Some(Type::Constant(Constant::Int(_))) => self.plan.definitions.int,
-            Some(Type::Constant(Constant::Boolean(_))) => self.plan.definitions.boolean,
-            _ => actual,
-        };
         let expected_symbol = match self.plan.store.types.try_get(expected) {
             Some(Type::TypeRef {
                 prefix,
@@ -165,6 +178,14 @@ impl ClassStateValidator<'_, '_> {
                 target: dotty_core::TypeRefTarget::Symbol(symbol),
             }) if *prefix == self.plan.definitions.no_prefix && *symbol == expected_symbol
         )
+    }
+
+    fn initializer_has_type(&self, actual: TypeId, expected: TypeId) -> bool {
+        match self.plan.store.types.try_get(actual) {
+            Some(Type::Constant(Constant::Int(_))) => expected == self.plan.definitions.int,
+            Some(Type::Constant(Constant::Boolean(_))) => expected == self.plan.definitions.boolean,
+            _ => self.same_canonical_type(actual, expected),
+        }
     }
 
     fn package_owner_chain(&self, class: SymbolId) -> Result<(), PickleError> {
@@ -874,7 +895,7 @@ impl ClassStateValidator<'_, '_> {
             Some(_) => typed.ty,
             None => return Err(PickleError::InvalidType { ty: typed.ty }),
         };
-        if !self.same_canonical_type(initializer_type, field.declared_type) {
+        if !self.initializer_has_type(initializer_type, field.declared_type) {
             return Err(PickleError::FieldType {
                 symbol: field.symbol,
                 expected: field.declared_type,
