@@ -71,21 +71,23 @@ constructor targets from names or `ClassInfo.parents`.
 Unqualified `super.value()` and `super.add(4)` now type through the real
 source pipeline. The typed `Super` carries `Type::SuperType` with
 `ThisType(Derived)` and the direct parent's canonical `TypeRef`; its `Select`
-carries a `TermRefTarget::Symbol` for the declaration in that parent's own
-scope. The ordinary application path uses this selected method type directly,
-without passing the `Super` receiver through inherited virtual-member lookup.
-The source-to-typed index retains the `Super`, `Select`, and `Apply` roots.
+carries a `TermRefTarget::Symbol` for the declaration found on that parent or
+its validated ancestors. The ordinary application path uses this selected
+method type directly, without treating the call as virtual lookup on the
+current class. The source-to-typed index retains the `Super`, `Select`, and
+`Apply` roots.
 
 The typer rejects trait-qualified or outer-qualified super, use outside an
 ordinary source class instance method, no direct non-Object parent, multiple
-parents, generic/non-plain parent types, missing direct declarations, overload
-buckets, non-method terms, and private, abstract, static, or extension
+parents, generic/non-plain parent types, missing inherited declarations,
+ambiguous overload buckets, non-method terms, and private, abstract, static, or extension
 methods. Failures are typed (`UnsupportedSuper`, `MemberNotFound`, or
 `OverloadedSelectionDeferred`) and never rewrite the expression as a virtual
-call. For the accepted unqualified shape, `dotty-jvm` now checks the exact
+call. For the accepted unqualified shape, `dotty-jvm` checks the exact
 `SuperType`, direct-parent hierarchy edge, canonical selected method symbol,
-parent declaration, and method plan before emitting `aload_0`, ordered
-arguments, and `invokespecial`. Ordinary selected calls still emit
+effective method on the parent, and method plan before emitting `aload_0`,
+ordered arguments, and `invokespecial` with the immediate parent as owner.
+Ordinary selected calls still emit
 `invokevirtual`.
 
 The untyped AST for the supported spelling `super.value()` is a selection
@@ -93,12 +95,12 @@ whose qualifier is `TreeKind::Super { qual: This(None), mix: None }` and whose
 name is `value`; an application adds an `Apply` with the argument list. The
 parser also retains the qualifier of `super[Base]` in `mix`, and the outer
 qualifier in `Base.super`. The typer produces a `Type::SuperType` and canonical
-selected member for the supported unqualified direct-parent form; the other
+selected member for the supported unqualified super form; the other
 qualifiers remain rejected.
 
 ## Target semantic and bytecode contracts
 
-Typing of an unqualified direct-parent call retains canonical identity, not
+Typing of an unqualified super call retains canonical identity, not
 only a member name. For `Derived extends Base` with `super.value()`, the typed
 relation is:
 
@@ -115,9 +117,11 @@ Apply(select, [])
 ```
 
 `Base.value` above means its canonical `SymbolId`, including its declaring
-owner and signature. Resolve it in the typer against the direct parent and
-retain the exact selected symbol through lowering. A string lookup in the JVM
-adapter is not proof of the source selection.
+owner and signature. Resolve it in the typer starting at the direct parent and
+retain the exact selected symbol through lowering. The JVM symbolic owner for
+`invokespecial` is the immediate parent, allowing `ACC_SUPER` selection to
+choose a method inherited through it. A string lookup in the JVM adapter is
+not proof of the source selection.
 
 ### Constructor arguments before superclass initialization
 
@@ -185,9 +189,9 @@ and post-super analysis intact as a regression baseline.
 
 ### Explicit direct-super methods
 
-The initial explicit-super slice should accept only an unqualified
+The explicit-super slice accepts only an unqualified
 `super.method(args)` whose target is a public, monomorphic, concrete,
-ordinary instance method declared by the one planned direct parent. It must
+ordinary instance method reachable through the planned direct parent. It must
 preserve the exact typed target symbol, JVM name, descriptor, visibility, and
 argument order. The JVM adapter should represent this as a distinct
 `SpecialSuper` invocation kind (or a separate checked target), emit
@@ -195,8 +199,8 @@ argument order. The JVM adapter should represent this as a distinct
 
 The narrow slice rejects qualified `super[Base]`, `Base.super`, trait/mixin
 selection, private or inaccessible methods, abstract methods, static methods,
-methods with unsupported/generic or erased signatures, inherited declarations
-whose owner is not the direct parent, and any target that is missing or
+methods with unsupported/generic or erased signatures, declarations not
+reachable through the direct parent, and any target that is missing or
 ambiguous. These should become specific typed errors before class publication.
 
 Constructor and ordinary method uses of `invokespecial` are separate verifier
@@ -212,9 +216,10 @@ constructor handling or rewrite allocation aliases.
 With `ACC_SUPER`, JVMS 21 §6.5 `invokespecial` selects the method starting at
 the current class's direct superclass when the symbolic reference names a
 superclass and the resolved method is not `<init>`. Constructor invocation is
-explicitly excluded from that selection rule. The first slice intentionally
-uses the one direct parent as both checked symbolic owner and selection start;
-trait and qualified-super dispatch need separate semantics. See [JVMS 21
+explicitly excluded from that selection rule. The adapter uses the direct
+parent as the symbolic owner even when the selected canonical declaration is
+further up the validated ancestry; the JVM then applies the specified
+selection rule. Trait and qualified-super dispatch need separate semantics. See [JVMS 21
 §6.5 `invokespecial`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.invokespecial).
 
 Method descriptors encode the formal arguments and return type, not the
@@ -232,12 +237,12 @@ baseline for all follow-up work.
 | Source shape | Current observed result | Required boundary / next owner |
 | --- | --- | --- |
 | `class Derived(start: Int) extends Base(start)` | Supported for one public planned parent primary constructor and one plain clause containing Int/Boolean literals or exact child primary-constructor parameters. The emitted prologue loads `this`, then source-ordered arguments, then invokes the canonical parent `<init>` descriptor before field initializers; `ClassInfo.parents` remains `TypeRef(Base)`. Primitive, literal, and planned reference argument paths are covered by `ParameterizedSuper.scala` | Preserve exact frontend source/typed identity proof, hierarchy validation, and verifier behavior; broaden argument forms only in a separately scoped issue |
-| `super.value()` targeting direct `Base.value` | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical Base symbol; `dotty-jvm` verifies the exact direct-parent proof and emits `invokespecial`; JDK21 CI verifies execution | Preserve canonical symbol and verifier proofs in the combined source-to-JVM integration from [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
+| `super.value()` targeting a method inherited through the direct parent | Typer produces a source-mapped `Super → Select → Apply` targeting the canonical declaring symbol; `dotty-jvm` verifies the ancestor path and emits `invokespecial` with the immediate parent as symbolic owner; JDK21 CI verifies execution | Preserve canonical symbol and verifier proofs in the combined source-to-JVM integration from [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `super.add(n)`, Boolean/reference results, or a branched super call | The planned direct-parent method, exact descriptor, argument order, and result are checked; branches receive classfile stack-map frames and the mandatory JDK gate verifies execution | Preserve the approved direct-parent public instance-method subset; broader signatures and call shapes need a scoped issue |
 | Parameterized parent plus explicit direct-super calls in one source-to-JVM run | `SuperCalls.scala` compiles unchanged through one frontend session per build; decoded classfiles and JDK 21 execution verify the combined constructor and dispatch paths | Two fresh sessions emit identical Base/Derived/Runner bytes in source order; mandatory JDK CI runs the numeric and verifier checks — [#1375](https://github.com/scytrowski/dotty-rs/issues/1375) |
 | `extends Base` with accessible `Base.<init>()V` | Supported and verified by existing source-backed regression | Preserve direct-parent ownership and post-super analysis in `dotty-jvm` and `dotty-classfile` |
 | `base.value()` or inherited `derived.value()` | Supported virtual calls use the selected declaration's owner and `invokevirtual` | Preserve current dynamic-dispatch and `Methodref` behavior |
-| Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Rejected in typer or the JVM adapter with typed shape, owner, or metadata errors; no class artifact is published | Keep these shapes rejected in the initial slice — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
+| Qualified/mixin super, no direct parent, inaccessible/abstract/unsupported selected method | Rejected in typer or the JVM adapter with typed shape, owner, or metadata errors; no class artifact is published | Keep these shapes rejected in the bounded slice — [#1374](https://github.com/scytrowski/dotty-rs/issues/1374) |
 
 Source typing proof, verifier support, and bounded lowering remain separate
 contracts at their owning boundaries. The integration fixture exercises the
@@ -274,5 +279,5 @@ virtual constructor invocation, and branched constructors at their actual
 validation layers. These checks preserve the bounded initialization contract.
 
 Nested allocation arguments, arbitrary effectful pre-super evaluation, branched
-constructors, qualified/trait super, grandparent methods, multilevel inheritance,
-and Scala ABI/TASTy emission remain deferred.
+constructors, qualified/trait super, transitive argument assignability,
+hierarchy-aware joins, and Scala ABI/TASTy emission remain deferred.

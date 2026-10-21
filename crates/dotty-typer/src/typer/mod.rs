@@ -3048,6 +3048,51 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn super_member_lookup_follows_the_immediate_parent_to_a_grandparent_method() {
+        let source_text = "class Base { def value(): Int = 10 }; class Middle extends Base {}; class Leaf extends Middle { override def value(): Int = 20; def parentValue(): Int = super.value() }";
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(source_text);
+        let base = class_symbol(&parsed, &store, &index, source, "Base");
+        let base_value = method_named_on_class(&parsed, &store, &index, source, "value", base);
+        let (parent_value, rhs) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "parentValue");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let typed = typer
+            .type_expression(
+                rhs,
+                ExpressionContext {
+                    lexical: index.declaration_context_of(parent_value).unwrap(),
+                    owner: parent_value,
+                    local_scopes: None,
+                },
+            )
+            .expect("super lookup reaches the inherited method through Middle");
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("expected the typed super method application");
+        };
+        let selected_method = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(application.function).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(method),
+                ..
+            } => *method,
+            other => panic!("expected canonical inherited method target, got {other:?}"),
+        };
+        assert_eq!(selected_method, base_value);
+        assert_eq!(typer.store().symbols.get(selected_method).owner, Some(base));
+    }
+
     fn derived_override_value(
         parsed: &dotty_parser::ParseResult,
         store: &SemanticStore,
