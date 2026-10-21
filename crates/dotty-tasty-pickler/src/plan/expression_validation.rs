@@ -454,6 +454,21 @@ impl Validator<'_, '_> {
         Ok(())
     }
 
+    fn unqualified_name_is_shadowed(
+        &self,
+        source_name: dotty_core::Name,
+        method: &MethodPicklePlan,
+    ) -> bool {
+        method.parameter_clauses.iter().flatten().any(|parameter| {
+            self.plan.store.symbols.contains(*parameter)
+                && self.plan.store.symbols.get(*parameter).name == source_name
+        }) || self.visible_locals.iter().any(|local| {
+            self.plan.store.symbols.contains(*local)
+                && self.plan.store.symbols.get(*local).name == source_name
+                && self.plan.store.symbols.get(*local).owner == Some(method.symbol)
+        })
+    }
+
     fn same_class_method_application_target(
         &mut self,
         target: SymbolId,
@@ -914,6 +929,25 @@ impl Validator<'_, '_> {
                         ty: typed.ty,
                     });
                 };
+                if self.class_members.is_some()
+                    && self.plan.store.symbols.contains(*symbol)
+                    && self.plan.store.symbols.get(*symbol).kind == SymbolKind::Field
+                {
+                    if self.unqualified_name_is_shadowed(source.name, method) {
+                        return Err(PickleError::Reference {
+                            symbol: *symbol,
+                            reason: crate::ReferenceError::NotRegistered,
+                        });
+                    }
+                    self.same_class_field_target(
+                        *symbol,
+                        source.name,
+                        *prefix,
+                        typed_id,
+                        self.plan.definitions.boolean,
+                    )?;
+                    return Ok(());
+                }
                 if !matches!(self.ty(*prefix)?, Type::NoPrefix) {
                     return Err(PickleError::Reference {
                         symbol: *symbol,
@@ -936,6 +970,46 @@ impl Validator<'_, '_> {
                     });
                 }
                 Ok(())
+            }
+            (TreeKind::Select(source), TreeKind::Select(selection))
+                if source.name == selection.name && source.backquoted == selection.backquoted =>
+            {
+                let source_qualifier = self.source_tree(source.qualifier)?;
+                let typed_qualifier = self.plan.typed_ast.try_get(selection.qualifier).ok_or(
+                    PickleError::InvalidTypedTree {
+                        tree: selection.qualifier,
+                    },
+                )?;
+                if !matches!(source_qualifier.kind, TreeKind::This(this) if this.qual.is_none())
+                    || !matches!(typed_qualifier.kind, TreeKind::This(this) if this.qual.is_none())
+                {
+                    return Err(
+                        self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))
+                    );
+                }
+                self.source_typed_binding(source.qualifier, selection.qualifier)?;
+                self.paired_source_typed_span(
+                    source_qualifier.position,
+                    typed_qualifier.position,
+                    selection.qualifier,
+                )?;
+                let Type::TermRef {
+                    prefix,
+                    target: TermRefTarget::Symbol(symbol),
+                } = self.ty(typed.ty)?
+                else {
+                    return Err(PickleError::BodyType {
+                        tree: typed_id,
+                        ty: typed.ty,
+                    });
+                };
+                self.same_class_field_target(
+                    *symbol,
+                    source.name,
+                    *prefix,
+                    typed_id,
+                    self.plan.definitions.boolean,
+                )
             }
             _ => Err(self.unsupported(UnsupportedFeature::BodyExpression, Some(method.symbol))),
         }
@@ -1057,10 +1131,18 @@ impl Validator<'_, '_> {
 
         let branch_join = match self.ty(typed.ty)? {
             Type::Constant(Constant::Int(value)) => {
-                let then_join =
-                    self.int_branch_constant(typed_if.then_branch, then_type, method.symbol)?;
-                let else_join =
-                    self.int_branch_constant(typed_if.else_branch, else_type, method.symbol)?;
+                let then_join = self.int_branch_constant(
+                    source_if.then_branch,
+                    typed_if.then_branch,
+                    then_type,
+                    method,
+                )?;
+                let else_join = self.int_branch_constant(
+                    source_if.else_branch,
+                    typed_if.else_branch,
+                    else_type,
+                    method,
+                )?;
                 if then_join != Some(*value) || else_join != Some(*value) {
                     return Err(PickleError::BodyType {
                         tree: typed_id,
@@ -1078,8 +1160,18 @@ impl Validator<'_, '_> {
             }
         };
         if branch_join == self.plan.definitions.int {
-            self.int_branch_constant(typed_if.then_branch, then_type, method.symbol)?;
-            self.int_branch_constant(typed_if.else_branch, else_type, method.symbol)?;
+            self.int_branch_constant(
+                source_if.then_branch,
+                typed_if.then_branch,
+                then_type,
+                method,
+            )?;
+            self.int_branch_constant(
+                source_if.else_branch,
+                typed_if.else_branch,
+                else_type,
+                method,
+            )?;
         }
         Ok(branch_join)
     }
@@ -1087,16 +1179,42 @@ impl Validator<'_, '_> {
     /// Returns `Some(value)` for an Int singleton and `None` for a widened Int
     /// (including a previously validated Int formal or parameterless method reference).
     fn int_branch_constant(
-        &self,
+        &mut self,
+        source_tree: TreeId<Untyped>,
         tree: TreeId<Typed>,
         ty: TypeId,
-        method: SymbolId,
+        method: &MethodPicklePlan,
     ) -> Result<Option<i32>, PickleError> {
         if ty == self.plan.definitions.int {
             return Ok(None);
         }
         match self.ty(ty)? {
             Type::Constant(Constant::Int(value)) => Ok(Some(*value)),
+            Type::TermRef {
+                prefix,
+                target: TermRefTarget::Symbol(symbol),
+            } if self.plan.store.symbols.contains(*symbol)
+                && self.plan.store.symbols.get(*symbol).kind == SymbolKind::Field =>
+            {
+                let source = self.source_tree(source_tree)?;
+                let TreeKind::Ident(ident) = source.kind else {
+                    return Err(PickleError::BodyType { tree, ty });
+                };
+                if self.unqualified_name_is_shadowed(ident.name, method) {
+                    return Err(PickleError::Reference {
+                        symbol: *symbol,
+                        reason: crate::ReferenceError::NotRegistered,
+                    });
+                }
+                self.same_class_field_target(
+                    *symbol,
+                    ident.name,
+                    *prefix,
+                    tree,
+                    self.plan.definitions.int,
+                )?;
+                Ok(None)
+            }
             Type::TermRef {
                 target: TermRefTarget::Symbol(symbol),
                 ..
@@ -1107,7 +1225,7 @@ impl Validator<'_, '_> {
                 ) || (self.plan.store.symbols.get(*symbol).kind == SymbolKind::Local
                     && self.registered_local_symbols.contains(symbol)
                     && self.visible_locals.contains(symbol)
-                    && self.plan.store.symbols.get(*symbol).owner == Some(method)))
+                    && self.plan.store.symbols.get(*symbol).owner == Some(method.symbol)))
                 && self.complete(*symbol)? == self.plan.definitions.int =>
             {
                 Ok(None)
@@ -1244,6 +1362,12 @@ impl Validator<'_, '_> {
                     && p.store.symbols.contains(*target)
                     && p.store.symbols.get(*target).kind == SymbolKind::Field
                 {
+                    if self.unqualified_name_is_shadowed(source_ident.name, method) {
+                        return Err(PickleError::Reference {
+                            symbol: *target,
+                            reason: crate::ReferenceError::NotRegistered,
+                        });
+                    }
                     self.same_class_field_target(
                         *target,
                         source_ident.name,
