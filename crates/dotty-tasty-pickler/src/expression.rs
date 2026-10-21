@@ -557,6 +557,11 @@ fn lower_expression_inner(
         {
             return context.same_class_method_select(class, *target);
         }
+        if store.symbols.contains(*target)
+            && store.symbols.get(*target).kind == dotty_core::SymbolKind::Field
+        {
+            return context.same_class_field_select(class, *target, false);
+        }
         if !parameters.contains(target) {
             return Err(PickleError::Reference {
                 symbol: *target,
@@ -643,7 +648,6 @@ fn lower_expression_inner(
             .flatten()
             .ok_or(PickleError::InvalidSymbol { symbol: method })?;
         if !store.symbols.contains(*target)
-            || store.symbols.get(*target).kind != dotty_core::SymbolKind::Method
             || store.symbols.get(*target).owner != Some(class)
             || !matches!(store.types.try_get(*prefix), Some(Type::ThisType { class: prefix_class }) if *prefix_class == class)
             || !matches!(store.types.try_get(qualifier.ty), Some(Type::ThisType { class: qualifier_class }) if *qualifier_class == class)
@@ -653,7 +657,16 @@ fn lower_expression_inner(
                 reason: crate::ReferenceError::Owner,
             });
         }
-        return context.same_class_method_select_on_this(class, *target);
+        return match store.symbols.get(*target).kind {
+            dotty_core::SymbolKind::Method => {
+                context.same_class_method_select_on_this(class, *target)
+            }
+            dotty_core::SymbolKind::Field => context.same_class_field_select(class, *target, true),
+            _ => Err(PickleError::Reference {
+                symbol: *target,
+                reason: crate::ReferenceError::Kind,
+            }),
+        };
     }
     let TreeKind::Literal(literal) = &tree.kind else {
         return Err(PickleError::Unsupported {
