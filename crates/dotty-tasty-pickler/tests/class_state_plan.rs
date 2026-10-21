@@ -457,6 +457,110 @@ fn source_typer_counter_and_private_values_satisfy_the_read_only_plan() {
     })
 }
 
+#[test]
+fn counter_constructor_parameter_initializes_its_own_mutable_field() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let source =
+        std::fs::read_to_string(root.join("tests/fixtures/tasty_pickler/Counter.scala")).unwrap();
+    let output = emit_class_state_source(&source, "Counter", "Counter.scala", None)
+        .expect("Counter's constructor parameter should initialize its field");
+    let repeated = emit_class_state_source(&source, "Counter", "Counter.scala", None)
+        .expect("a fresh compiler session should emit Counter");
+    assert_eq!(output.bytes(), repeated.bytes());
+
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let class = output.declarations()[0].symbol;
+    let name = |declaration: &SkeletonDeclaration| {
+        let raw = addresses.get(declaration.address).unwrap();
+        match raw.tag {
+            PARAM_TAG => file
+                .render_name(raw.decode_parameter().unwrap().name())
+                .unwrap(),
+            DEFDEF_TAG => file
+                .render_name(raw.decode_defdef_body().unwrap().name)
+                .unwrap(),
+            VALDEF_TAG => match raw.decode_definition_body().unwrap() {
+                DefinitionBody::ValDef { name, .. } => file.render_name(name).unwrap(),
+                _ => unreachable!(),
+            },
+            _ => String::new(),
+        }
+    };
+    let constructor = output
+        .declarations()
+        .iter()
+        .find(|declaration| declaration.owner == class && name(declaration) == "<init>")
+        .expect("class-owned constructor declaration");
+    let template_parameter = output
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            declaration.owner == class
+                && addresses.get(declaration.address).unwrap().tag == PARAM_TAG
+                && name(declaration) == "start"
+        })
+        .expect("class-owned template parameter");
+    let constructor_parameter = output
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            declaration.owner == constructor.symbol
+                && addresses.get(declaration.address).unwrap().tag == PARAM_TAG
+                && name(declaration) == "start"
+        })
+        .expect("constructor-owned signature parameter");
+    assert_ne!(template_parameter.symbol, constructor_parameter.symbol);
+
+    let constructor_node = addresses.get(constructor.address).unwrap();
+    let constructor_body = constructor_node.decode_defdef_body().unwrap();
+    assert_eq!(constructor_body.parameters.len(), 1);
+    assert_eq!(
+        file.render_name(constructor_body.parameters[0].name())
+            .unwrap(),
+        "start"
+    );
+    assert!(constructor_body.rhs.is_none());
+
+    let field = output
+        .declarations()
+        .iter()
+        .find(|declaration| declaration.owner == class && name(declaration) == "current")
+        .expect("class-owned current field");
+    let field_body = addresses
+        .get(field.address)
+        .unwrap()
+        .decode_definition_body()
+        .unwrap();
+    let DefinitionBody::ValDef { rhs: Some(rhs), .. } = field_body else {
+        panic!("current field should retain its initializer")
+    };
+    let RawTree::Leaf(SimpleTerm {
+        tag: TERMREFDIRECT_TAG,
+        value: TermValue::AstRef(reference),
+        ..
+    }) = rhs
+    else {
+        panic!("current initializer should directly reference constructor parameter")
+    };
+    assert_eq!(reference, constructor_parameter.address);
+
+    if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
+        let candidate = root.join("target/issue-1395/generated/example/Counter.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", root.join("target/issue-1395/tmp"))
+            .status()
+            .expect("start the pinned Scala 3.9 Counter interoperability gate");
+        assert!(result.success(), "Counter -from-tasty gate failed");
+    }
+}
+
 fn private_fields_output() -> (PickledTasty, SymbolId, Vec<SymbolId>, TreeId<Typed>) {
     let source_text = "package example\nclass PrivateFields:\n  private val seed: Int = 42\n  private val enabled: Boolean = true\n  private var counter: Int = 0\n  def constant(): Int = 1\n";
     with_frontend(source_text, |ast, source, index, definitions, typer| {
@@ -1765,11 +1869,19 @@ fn constructor_parameter_initializer_references_match_source_name_target_and_pre
             let source_rhs = definition.rhs.unwrap();
             let parameter = constructor.parameter_clauses[0][0];
             let other = constructor.parameter_clauses[0][1];
+            let TreeKind::DefDef(constructor_definition) = &ast.get(constructor.source_tree).kind
+            else {
+                unreachable!()
+            };
+            let class_parameter = index
+                .symbol_at(source, constructor_definition.value_param_clauses[0][0])
+                .expect("class-owned canonical parameter identity");
             let mut changed_bindings = bindings.clone();
 
             for (prefix, target) in [
                 (definitions.no_prefix, other),
                 (definitions.object_type, parameter),
+                (definitions.no_prefix, class_parameter),
             ] {
                 let bad_type = store.types.alloc(Type::TermRef {
                     prefix,
