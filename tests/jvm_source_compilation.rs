@@ -8058,10 +8058,15 @@ fn assert_javap_instruction_sequence(output: &str, method_header: &str, expected
         .find(method_header)
         .unwrap_or_else(|| panic!("javap output omitted method {method_header:?}:\n{output}"));
     let method = &output[method_start..];
-    let method_end = method[1..]
-        .find("\n  public ")
-        .or_else(|| method[1..].find("\n  private "))
-        .map_or(method.len(), |offset| offset + 1);
+    let method_end = [
+        method[1..].find("\n  public "),
+        method[1..].find("\n  private "),
+        method[1..].find("\n}"),
+    ]
+    .into_iter()
+    .flatten()
+    .min()
+    .map_or(method.len(), |offset| offset + 1);
     let method = &method[..method_end];
     let code = method
         .split_once("Code:")
@@ -8077,6 +8082,27 @@ fn assert_javap_instruction_sequence(output: &str, method_header: &str, expected
     assert_eq!(
         instructions, expected,
         "unexpected javap instructions for {method_header}:\n{method}"
+    );
+}
+
+#[test]
+fn javap_instruction_extraction_stops_at_the_enclosing_class_boundary() {
+    let output = r#"
+  public int doubled();
+    descriptor: ()I
+    Code:
+       0: aload_0
+       1: invokevirtual #7                  // Method value:()I
+       4: ireturn
+}
+Classfile /tmp/Derived.class
+  major version: 65
+  flags: (0x0021) ACC_PUBLIC, ACC_SUPER
+"#;
+    assert_javap_instruction_sequence(
+        output,
+        "public int doubled();",
+        &["aload_0", "invokevirtual", "ireturn"],
     );
 }
 
