@@ -1694,6 +1694,58 @@ fn actual_object_multiway_joins_are_independent_of_predecessor_order() {
 }
 
 #[test]
+fn provisional_object_join_evidence_cannot_become_an_object_input_through_locals() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Left".to_owned(), "java/lang/Object".to_owned()),
+        ("example/Right".to_owned(), "java/lang/Object".to_owned()),
+    ])
+    .unwrap();
+
+    for (left_slot, right_slot) in [(2, 3), (3, 2)] {
+        for add_backedge in [false, true] {
+            let mut sequence = CodeSequence::new();
+            let right = sequence.new_label().unwrap();
+            let join = sequence.new_label().unwrap();
+            sequence
+                .instruction(Instruction::ILoad(local(1)))
+                .branch(BranchInstruction::IfEq(right.clone()))
+                .instruction(Instruction::ALoad(local(left_slot)))
+                .branch(BranchInstruction::Goto(join.clone()))
+                .bind(right)
+                .unwrap()
+                .instruction(Instruction::ALoad(local(right_slot)))
+                .bind(join.clone())
+                .unwrap()
+                .instruction(Instruction::AStore(local(4)))
+                .instruction(Instruction::ALoad(local(4)));
+            if add_backedge {
+                sequence
+                    .instruction(Instruction::ILoad(local(1)))
+                    .branch(BranchInstruction::IfEq(join));
+            }
+            sequence.instruction(Instruction::AReturn);
+
+            let graph = ControlFlowGraph::build(&sequence).unwrap();
+            assert!(matches!(
+                CfgCodeAnalyzer::analyze_with_hierarchy(
+                    &graph,
+                    "rejectProvisionalObjectLoop",
+                    "(ZLexample/Left;Lexample/Right;)Ljava/lang/Object;",
+                    false,
+                    &pool,
+                    owner,
+                    &hierarchy,
+                ),
+                Err(AnalysisError::IncompatibleStackValue { .. })
+            ));
+        }
+    }
+}
+
+#[test]
 fn parameter_slot_limit_matches_the_linear_analyzer() {
     let descriptor = format!("({})V", "I".repeat(256));
     let mut sequence = CodeSequence::new();
