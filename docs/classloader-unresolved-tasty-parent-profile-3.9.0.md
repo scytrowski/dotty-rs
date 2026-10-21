@@ -11,32 +11,45 @@ change production parent-resolution behavior.
 ## Reconciled population
 
 The frozen root list still accounts for 50 roots / 8,949 weighted observations:
-18 compiler roots / 8,590 and 32 library roots / 359. The current pinned
-classpath-backed standalone decoder reproduces `tasty.unresolved_supertype`
-for 42 roots / 8,929 observations. Eight library roots / 20 observations now
-decode successfully with this focused classpath: `scala/collection/IndexedSeq`
-(1), `scala/collection/LinearSeq` (1), `scala/collection/View$` (2),
-`scala/collection/immutable/IndexedSeq` (4),
-`scala/collection/immutable/Seq` (6), `scala/collection/mutable/ArraySeq$`
-(2), `scala/collection/mutable/Buffer` (1), and
-`scala/collection/mutable/Map` (3). The profile records those as `none`; it
-does not rewrite the frozen baseline. This is a precise 20-observation
-population difference from the source-corpus audit.
+18 compiler roots / 8,590 and 32 library roots / 359. Standalone decoding of
+the requested resource reproduces `tasty.unresolved_supertype` for 42 roots /
+8,929 observations. Eight library roots / 20 observations decode directly;
+this alone does not mean that loading their dependency graph succeeds.
 
-The root TSV records every Template parent, not just the first failure. Its
-`reproduced_unresolved_parent_index` and `deepest_typed_cause` columns come from
-the normal class/module TASTy decoder. `profile_first_unresolved_parent_index`
-records the independent per-parent diagnostic pass, which continues after an
-earlier unresolved parent. Root artifacts, versions and SHA-256 hashes are
-retained on each row. The profile includes stable wire addresses and bounded
-raw shapes; it does not use arena IDs or debug formatting.
+The profile now also runs `ClassLoader::load_class_detailed` for every root.
+Full loading ends with `tasty.unresolved_supertype` for 41 roots / 379
+observations, `tasty.missing_type_def` for 6 roots / 8,463 observations, and
+success for 3 roots / 107 observations. The six missing-type roots are
+`dotty/tools/dotc/ast/tpd$` (1,715), `dotty/tools/dotc/ast/untpd$` (141),
+`dotty/tools/dotc/config/SourceVersion$` (19),
+`dotty/tools/dotc/core/Symbols$` (3,652),
+`dotty/tools/dotc/core/Types$` (2,545), and
+`dotty/tools/dotc/parsing/Tokens$` (391). Their exact dependency chains and
+selected JAR origins are included in the TSV. For example, `tpd$` fails while
+loading `Trees$Instance` and then `Trees`; `Symbols$` fails through
+`Property$Key` to `Property`. The three full-load successes are
+`JavaTokens$` (22), `Action$` (84), and `SymbolInformation$` (1). This
+focused classloader path is not identical to the source typer's resolver, so
+these outcomes are reported separately from the frozen source-audit count.
 
-The issue baseline reports 279 affected source files, but its frozen root TSV
-contains no source-file-to-root rows or request-origin data. This focused run
-intentionally does not execute the 1,236-file source audit, so it cannot
-reconcile those 279 files or assign source origins per root. The root and
-weighted-observation counts are exact; source-file/origin attribution remains
-unmeasured here.
+The root TSV records every Template parent, not just the first failure. It
+separates standalone decoder cause/index from the full-load deepest cause,
+failing binary name, dependency chain, and selected resource origin.
+`profile_first_unresolved_parent_index` records the independent per-parent
+diagnostic pass, which continues after an earlier unresolved parent. Root
+artifacts, versions and SHA-256 hashes are retained on each row. The profile
+includes stable wire addresses and bounded raw shapes; it does not use arena
+IDs or debug formatting. The pinned profile asserts the 41/6/3 full-load
+classification as well as the 50-root weighted accounting.
+
+The saved #1342 audit report confirms 8,949 observations over 50 root targets
+and 279 affected source files. Its normalized summary does not preserve a
+complete source-file-to-root relation. The focused profile preserves exact
+root artifact provenance and actual classloader dependency origins, but cannot
+assign all 279 source files or independent source request origins to roots.
+The 279-file aggregate reconciles to the frozen baseline; per-root source
+attribution is an explicit remaining limit of the saved evidence, not a claim
+that the missing relation was reconstructed.
 
 ## Failure families and follow-up ranking
 
@@ -75,8 +88,10 @@ wire shape and resolution boundary retained:
 
 All 163 parent rows are available in
 [`classloader-unresolved-tasty-parent-profile-3.9.0.tsv`](classloader-unresolved-tasty-parent-profile-3.9.0.tsv).
-The profile was run twice and compared byte-for-byte. No semantic corpus
-baseline or production behavior was changed.
+The two focused runs produced byte-identical output (SHA-256
+`a9b0a37b57fd9dd91dc5f6c08ae09088a34d7cf77ff16e63aa7e59934c8a326c`). Empty
+TSV cells use `-`. No semantic corpus baseline or production behavior was
+changed.
 
 ## Reproduction
 
