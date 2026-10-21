@@ -24,8 +24,11 @@ boundaries without changing the borrowed input contract or current support
 surface.
 
 The accepted shape is the oracle's ordinary public class in one explicit named
-package, implicit Object parent, default constructor and one or more public
-methods with an Int or Boolean result. Bodies may be typed Int/Boolean literals,
+package, implicit Object parent, a default constructor or one primary
+constructor with one plain Int parameter clause, and one or more public methods
+with an Int or Boolean result. Plain constructor parameters retain their
+distinct class-owned template and constructor-owned signature identities;
+source `val` and `var` accessor parameters remain unsupported. Bodies may be typed Int/Boolean literals,
 references to a same-typed ordinary formal, ordinary parameterless references,
 or bounded recursive applications of a canonical same-class method with one
 plain clause of Int parameters.
