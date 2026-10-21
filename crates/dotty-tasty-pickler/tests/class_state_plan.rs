@@ -532,9 +532,22 @@ fn counter_constructor_parameter_initializes_its_own_mutable_field() {
         .unwrap()
         .decode_definition_body()
         .unwrap();
-    let DefinitionBody::ValDef { rhs: Some(rhs), .. } = field_body else {
+    let DefinitionBody::ValDef {
+        rhs: Some(rhs),
+        tail,
+        ..
+    } = field_body
+    else {
         panic!("current field should retain its initializer")
     };
+    assert!(
+        tail.iter()
+            .any(|modifier| matches!(modifier, DefinitionTail::Modifier(PRIVATE_TAG)))
+    );
+    assert!(
+        tail.iter()
+            .any(|modifier| matches!(modifier, DefinitionTail::Modifier(MUTABLE_TAG)))
+    );
     let RawTree::Leaf(SimpleTerm {
         tag: TERMREFDIRECT_TAG,
         value: TermValue::AstRef(reference),
@@ -545,8 +558,37 @@ fn counter_constructor_parameter_initializes_its_own_mutable_field() {
     };
     assert_eq!(reference, constructor_parameter.address);
 
+    let method_names = output
+        .declarations()
+        .iter()
+        .filter(|declaration| declaration.owner == class)
+        .filter_map(|declaration| {
+            let body = addresses
+                .get(declaration.address)?
+                .decode_defdef_body()
+                .ok()?;
+            Some((file.render_name(body.name).ok()?, *declaration, body))
+        })
+        .filter(|(name, _, _)| name != "<init>")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        method_names
+            .iter()
+            .map(|(name, _, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        ["get", "set", "increment"]
+    );
+    for (_, method, body) in &method_names {
+        assert!(body.rhs.is_some(), "source method body must be emitted");
+        assert!(
+            output.body(method.symbol).is_some(),
+            "pickled method body must retain the frontend's typed root"
+        );
+    }
+    assert_eq!(file.encode_validated().unwrap(), output.bytes());
+
     if std::env::var_os("RUN_SCALA_ORACLE").is_some() {
-        let candidate = root.join("target/issue-1395/generated/example/Counter.tasty");
+        let candidate = root.join("target/issue-1396/generated/example/Counter.tasty");
         std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
         std::fs::write(&candidate, output.bytes()).unwrap();
         let result = Command::new("python3")
@@ -554,7 +596,7 @@ fn counter_constructor_parameter_initializes_its_own_mutable_field() {
             .arg("verify")
             .arg(&candidate)
             .arg("--runtime")
-            .env("TMPDIR", root.join("target/issue-1395/tmp"))
+            .env("TMPDIR", root.join("target/issue-1396/tmp"))
             .status()
             .expect("start the pinned Scala 3.9 Counter interoperability gate");
         assert!(result.success(), "Counter -from-tasty gate failed");

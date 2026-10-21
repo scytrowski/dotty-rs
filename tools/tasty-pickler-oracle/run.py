@@ -236,6 +236,15 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         )
         if not all(member in decompiled for member in expected_members):
             raise RuntimeError(f"fresh Mutable TASTy lost a field or method: {decompiled}")
+    if relative.as_posix() == "example/Counter.tasty":
+        expected_members = (
+            "private[this] var current: scala.Int = start",
+            "def get(): scala.Int = Counter.this.current",
+            "def set(value: scala.Int): scala.Unit = Counter.this.current = value",
+            "def increment(): scala.Int =",
+        )
+        if not all(member in decompiled for member in expected_members):
+            raise RuntimeError(f"fresh Counter TASTy lost its field or methods: {decompiled}")
     toolchain.compiler(["-from-tasty", "-d", compiled, staged])
     emitted = compiled / relative.with_suffix(".class")
     if not emitted.is_file() or emitted.stat().st_size == 0:
@@ -565,23 +574,24 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 "example.Counter", r"public int increment\(\)", "CounterRuntime.java",
                 """public final class CounterRuntime {
   public static void main(String[] args) {
-    example.Counter counter = new example.Counter(5);
-    example.Counter other = new example.Counter(12);
-    if (counter.get() != 5 || other.get() != 12)
+    example.Counter a = new example.Counter(4);
+    example.Counter b = new example.Counter(10);
+    if (a.get() != 4 || b.get() != 10)
       throw new AssertionError("constructor field initializer or independent instances");
-    counter.set(8);
-    if (counter.increment() != 9 || counter.get() != 9 || other.get() != 12)
-      throw new AssertionError("mutating getter/setter/increment");
-    other.set(30);
-    if (other.get() != 30 || counter.get() != 9)
-      throw new AssertionError("mutable state leaked between instances");
-    counter.set(-2);
-    if (counter.increment() != -1 || counter.get() != -1)
-      throw new AssertionError("negative mutable field state");
-    System.out.println("Counter = independent state, 9, 30, -1");
+    a.set(8);
+    if (a.get() != 8 || b.get() != 10)
+      throw new AssertionError("setter changed the wrong instance");
+    if (a.increment() != 9 || a.get() != 9 || b.get() != 10)
+      throw new AssertionError("increment changed the wrong instance");
+    if (b.increment() != 11 || b.get() != 11 || a.get() != 9)
+      throw new AssertionError("instances do not retain independent state");
+    example.Counter negative = new example.Counter(-2);
+    if (negative.get() != -2)
+      throw new AssertionError("negative constructor input was not retained");
+    System.out.println("Counter = independent state, 9, 11, -2");
   }
 }
-""", "Counter = independent state, 9, 30, -1", 9,
+""", "Counter = independent state, 9, 11, -2", 9,
             ),
             "example/Loop.tasty": (
                 "example.Loop", r"public int sumTo\(int\)", "LoopRuntime.java",
