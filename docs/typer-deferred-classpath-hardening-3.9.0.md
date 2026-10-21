@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 7865)
-Total output lines: 464
-
 # Deferred classpath hardening: Scala 3.9.0 (#1023)
 
 ## Lifecycle contract
@@ -203,7 +200,63 @@ reports the parent error; valid lazy identity is not guessed complete.
 
 The five resolution-family attribution tables are byte-identical to #976.
 They include distinct targets, materialized-prefix counts, package/object,
-classloader, and u…865 tokens truncated…urrent measured reach | Risk / reusable work |
+classloader, and unknown/multiple-candidate causes. No newly materialized
+generic receiver/member blocker is observed. The complete cause rows are in
+the raw report; there are 3,100 tracked local-method observations:
+
+| First blocker | #976 observations / files | #1023 observations / files |
+| --- | --- | --- |
+| ImportQualifierNotFound | 2908 / 277 | 2908 / 277 |
+| SymbolResolution | 27 / 7 | 27 / 7 |
+| TypeNameNotFound | 83 / 31 | 83 / 31 |
+| TermNameNotFound | 20 / 12 | 20 / 12 |
+| MemberLookup | 62 / 28 | 62 / 28 |
+
+For ImportQualifierNotFound, 2,446 observations have an unresolved first
+segment/package (30 distinct targets), 361 a term/object materialization gap
+(36 targets), and 101 lack a matching failed request. TermNameNotFound adds
+eight term/object-gap observations on two targets. Materialized-prefix and
+unsupported-generic attribution remain explicit; no ambiguous request is
+assigned a guessed cause. Source import naming/default-import reachability
+remains separate from the package/object binary adapter boundary.
+
+## Frozen semantic cohorts and real method reach
+
+The [120-row TSV](typer-classpath-corpus-audit-3.9.0-deferred-cohorts.tsv) retains
+both original and current row text, exact source tree identities where present,
+current resolution targets/outcomes, observed shells/completions, resolved
+requests, first blocker, and full method status. Shell/completion columns are
+operation observations, including work subsequently rolled back. They do not
+claim that the enclosing method retained those semantic states.
+
+| Cohort | Retained rows | Current result |
+| --- | ---: | --- |
+| #946 impure functions | 13 | SymbolResolution; zero fully typed |
+| #826–#829 ordinary function types | 12 | Eight ImportQualifierNotFound, one MemberLookup, three TypeNameNotFound; zero fully typed |
+| #856 immutable inferred fields | Seven direct fields + 14 enclosing method rows | Every field probe and enclosing row remains ImportQualifierNotFound |
+| #858 mutable inferred fields | Seven direct fields + 10 enclosing method rows | Three field probes complete; three ImportQualifierNotFound and one TypeNameNotFound; no fully typed enclosing method |
+| #880 singleton cohort | 22 | ImportQualifierNotFound; zero fully typed |
+| #899 local signatures | 14 | ImportQualifierNotFound; zero fully typed |
+| #929 local values | 21 | 16 ImportQualifierNotFound, four anonymous-given identity blockers, one inline-value blocker; no completed local declaration mapping |
+
+98 rows have an exact enclosing resolver-attempt trace, 14 have a direct field
+probe trace, and eight have no resolver work observed because they stop at
+another semantic gate. Absence of a trace is reported as `unobserved`, rather
+than inferring that a dependency exists or completed. No row changes its
+first blocker or full method outcome from #976.
+
+Representative deepest local-method observations are `SymbolLoaders.scala`
+`addPrefix` (tree 510), `checkPathMatches` (579), and `simpleDesugar` (607).
+Their enclosing `needCompile` attempt (tree 739) successfully crosses
+AbstractFile classpath materialization and completes eight classes before
+`UnstableSelectionPrefix`. These local rows inherit that first blocker and
+remain untyped. They demonstrate classpath reach without claiming their own
+bodies completed. The full-method denominator still measures typed local
+DefDef mappings, not successful dependency loads or isolated field probes.
+
+## Next sprint decision
+
+| Candidate | Current measured reach | Risk / reusable work |
 | --- | --- | --- |
 | A. Package term / Scala object materialization | 2749 unsupported requests / 80 keys; type resource 2212 / 51, companion `$` resource 2196 / 46 | High module/companion identity risk; reuse shared Packages, canonical shell/completion contracts, transactions, resource probes |
 | B. Anonymous classes | 32 observations / 15 files, unchanged | High anonymous ownership/ClassInfo/lowering risk; reuses ordinary `new`, but the same import/classpath blockers remain |
