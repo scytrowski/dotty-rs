@@ -15,7 +15,8 @@ use dotty_core::ast::{
 use dotty_core::{
     Constant, Definitions, MethodKind, Name, NameId, Namespace, SemanticStore, SourceDefinition,
     SourceId, SourceSemanticIndex, SourceSpan, Symbol, SymbolFlags, SymbolId, SymbolInfo,
-    SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type, TypeId, Typed, Untyped, Visibility,
+    SymbolKind, SymbolOrigin, TermRefTarget, TreeId, Type, TypeId, TypeRefTarget, Typed, Untyped,
+    Visibility,
 };
 
 use crate::{
@@ -774,6 +775,11 @@ impl<'a> Validator<'_, 'a> {
         {
             return Err(PickleError::SourceOrder { class: p.class });
         }
+        // Check constructor inputs before class-scope exact-membership checks:
+        // an accessor-bearing `val`/`var` parameter adds a legitimate field to
+        // that scope, but this serializer slice must report it as an
+        // unsupported constructor form rather than an opaque scope mismatch.
+        self.constructor(template.constructor)?;
         let mut entered = HashSet::new();
         let mut invalid_scope = false;
         for symbol in class_scope.entered_symbols() {
@@ -795,7 +801,6 @@ impl<'a> Validator<'_, 'a> {
                 return Err(PickleError::ScopeMembers { owner: p.class });
             }
         }
-        self.constructor(template.constructor)?;
         for method in p.methods {
             self.method(method)?;
         }
@@ -849,28 +854,26 @@ impl<'a> Validator<'_, 'a> {
             );
         }
         self.charge(definition.value_param_clauses.len())?;
-        if definition.value_param_clauses.len() > 1
-            || definition
-                .value_param_clauses
-                .first()
-                .is_some_and(|clause| !clause.is_empty())
+        if definition.value_param_clauses.len() > 1 {
+            return Err(self.unsupported(
+                UnsupportedFeature::ParameterClauses,
+                Some(constructor.symbol),
+            ));
+        }
+        if definition
+            .source_param_clause_order
+            .as_ref()
+            .is_some_and(|order| {
+                order.as_slice() != [dotty_core::ast::DefParamClauseOrder::ValueParams(0)]
+                    || definition.value_param_clauses.len() != 1
+            })
         {
             return Err(self.unsupported(
                 UnsupportedFeature::ParameterClauses,
                 Some(constructor.symbol),
             ));
         }
-        self.parameters(
-            constructor.symbol,
-            definition,
-            &constructor.parameter_clauses,
-        )?;
-        if definition.source_param_clause_order.is_some() {
-            return Err(self.unsupported(
-                UnsupportedFeature::ParameterClauses,
-                Some(constructor.symbol),
-            ));
-        }
+        self.constructor_parameters(definition, &constructor.parameter_clauses)?;
         if definition.rhs.is_some() {
             return Err(self.unsupported(
                 UnsupportedFeature::ConstructorBody,
@@ -893,7 +896,9 @@ impl<'a> Validator<'_, 'a> {
                 role: TypeRole::ConstructorSignature,
             });
         };
-        if !signature.params.is_empty() || signature.kind != MethodKind::Plain {
+        if signature.kind != MethodKind::Plain
+            || signature.params.len() != constructor.parameter_clauses.iter().flatten().count()
+        {
             return Err(PickleError::MalformedType {
                 ty,
                 role: TypeRole::ConstructorSignature,
@@ -907,6 +912,179 @@ impl<'a> Validator<'_, 'a> {
                 ty: result,
                 role: TypeRole::ConstructorResult,
             });
+        }
+        Ok(())
+    }
+
+    fn constructor_parameters(
+        &mut self,
+        definition: &DefDef<Untyped>,
+        clauses: &[Vec<SymbolId>],
+    ) -> Result<(), PickleError> {
+        let constructor = self.plan.constructor.symbol;
+        let class = self.plan.class;
+        self.charge(clauses.len())?;
+        if clauses.len() != definition.value_param_clauses.len() || clauses.len() > 1 {
+            return Err(self.unsupported(UnsupportedFeature::ParameterClauses, Some(constructor)));
+        }
+        let signature_id = self.complete(constructor)?;
+        let Type::Method(signature) = self.ty(signature_id)? else {
+            return Err(PickleError::MalformedType {
+                ty: signature_id,
+                role: TypeRole::ConstructorSignature,
+            });
+        };
+        let int = self.builtin(Builtin::Int, self.plan.definitions.int, "Int")?;
+        let int_name = self.symbol(int)?.name;
+        let mut seen_constructor = HashSet::new();
+        let mut seen_template = HashSet::new();
+        let actual_parameters = definition.value_param_clauses.iter().flatten().count();
+        if actual_parameters != clauses.iter().flatten().count()
+            || signature.params.len() != actual_parameters
+        {
+            return Err(PickleError::ParameterOrder {
+                method: constructor,
+                clause: 0,
+            });
+        }
+        if actual_parameters != 0 {
+            self.scope(constructor)?;
+        }
+        let mut signature_index = 0;
+        for (clause_index, (source_clause, symbols)) in definition
+            .value_param_clauses
+            .iter()
+            .zip(clauses)
+            .enumerate()
+        {
+            self.charge(source_clause.len())?;
+            if source_clause.len() != symbols.len() {
+                return Err(PickleError::ParameterOrder {
+                    method: constructor,
+                    clause: clause_index,
+                });
+            }
+            for (&tree, &parameter_symbol) in source_clause.iter().zip(symbols) {
+                if !seen_constructor.insert(parameter_symbol) {
+                    return Err(PickleError::DuplicateDeclaration {
+                        symbol: parameter_symbol,
+                    });
+                }
+                let TreeKind::ValDef(parameter) = &self.source_tree(tree)?.kind else {
+                    return Err(PickleError::SourceShape {
+                        tree,
+                        expected: SourceRole::Parameter,
+                    });
+                };
+                let source = self.plan.source.id;
+                if self
+                    .plan
+                    .source_index
+                    .derived_symbol_at(constructor, source, tree)
+                    != Some(parameter_symbol)
+                {
+                    return Err(PickleError::SourceBinding {
+                        source,
+                        tree,
+                        expected: parameter_symbol,
+                        actual: self
+                            .plan
+                            .source_index
+                            .derived_symbol_at(constructor, source, tree),
+                    });
+                }
+                let template_symbol = self.plan.source_index.symbol_at(source, tree).ok_or(
+                    PickleError::SourceDefinition {
+                        symbol: parameter_symbol,
+                    },
+                )?;
+                if !seen_template.insert(template_symbol) {
+                    return Err(PickleError::DuplicateDeclaration {
+                        symbol: template_symbol,
+                    });
+                }
+                let template_record = self.symbol(template_symbol)?;
+                let parameter_record = self.symbol(parameter_symbol)?;
+                // Parser-internal accessors are expected for ordinary class
+                // parameters; PrivateLocal distinguishes a plain constructor
+                // input from source `val`/`var` accessor parameters. Reject
+                // those forms before examining their distinct field identity.
+                if parameter.metadata.modifiers.as_slice()
+                    != [
+                        dotty_core::ast::Modifier::ParamAccessor,
+                        dotty_core::ast::Modifier::PrivateLocal,
+                    ]
+                    || parameter.metadata.visibility.is_some()
+                    || !parameter.metadata.annotations.is_empty()
+                    || parameter.rhs.is_some()
+                {
+                    return Err(self.unsupported(
+                        UnsupportedFeature::PrimaryConstructorInput,
+                        Some(parameter_symbol),
+                    ));
+                }
+                if template_symbol == parameter_symbol
+                    || template_record.kind != SymbolKind::Parameter
+                    || template_record.owner != Some(class)
+                    || template_record.origin != SymbolOrigin::Source(source)
+                    || template_record.visibility != Visibility::Private
+                    || !template_record.flags.is_empty()
+                    || !template_record.annotations.is_empty()
+                    || parameter_record.kind != SymbolKind::Parameter
+                    || parameter_record.owner != Some(constructor)
+                    || parameter_record.origin != SymbolOrigin::Source(source)
+                    || parameter_record.visibility != Visibility::Public
+                    || !parameter_record.flags.is_empty()
+                    || !parameter_record.annotations.is_empty()
+                    || template_record.name != *parameter.name.as_name()
+                    || parameter_record.name != *parameter.name.as_name()
+                    || self.plan.source_index.definition_of(template_symbol)
+                        != Some(SourceDefinition::Canonical { source, tree })
+                    || self.plan.source_index.definition_of(parameter_symbol)
+                        != Some(SourceDefinition::Derived { source, tree })
+                {
+                    return Err(PickleError::SourceDefinition {
+                        symbol: parameter_symbol,
+                    });
+                }
+                let TreeKind::Ident(parameter_type) = &self.source_tree(parameter.tpt)?.kind else {
+                    return Err(self.unsupported(
+                        UnsupportedFeature::PrimaryConstructorInput,
+                        Some(parameter_symbol),
+                    ));
+                };
+                let semantic_type = self.complete(parameter_symbol)?;
+                let template_type = match template_record.info {
+                    SymbolInfo::Complete(ty) => Some(ty),
+                    SymbolInfo::Missing | SymbolInfo::Deferred(_) => None,
+                    info => {
+                        return Err(PickleError::IncompleteSymbol {
+                            symbol: template_symbol,
+                            info,
+                        });
+                    }
+                };
+                let signature_parameter = signature.params[signature_index];
+                if parameter_type.name != int_name
+                    || signature_parameter.name.as_name() != parameter.name.as_name()
+                    || signature_parameter.erased
+                    || signature_parameter.varargs
+                    || !matches!(self.ty(signature_parameter.ty)?, Type::TypeRef { prefix, target: TypeRefTarget::Symbol(symbol) }
+                        if *prefix == self.plan.definitions.no_prefix && *symbol == int)
+                    || semantic_type != self.plan.definitions.int
+                    || template_type.is_some_and(|ty| ty != self.plan.definitions.int)
+                    || self
+                        .scope(constructor)?
+                        .lookup_all(parameter.name.as_name())
+                        != [parameter_symbol]
+                {
+                    return Err(PickleError::Unsupported {
+                        feature: UnsupportedFeature::PrimaryConstructorInput,
+                        symbol: Some(parameter_symbol),
+                    });
+                }
+                signature_index += 1;
+            }
         }
         Ok(())
     }
