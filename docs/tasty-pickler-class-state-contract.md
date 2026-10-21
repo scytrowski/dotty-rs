@@ -146,8 +146,10 @@ Scala 3.9 encodes these assignments as
 direct reference to the field declaration. A direct `set(value): Unit =
 current = value` remains an `ASSIGN`; source-ordered mutation followed by a read
 remains a `BLOCK` with the assignment in its statements and the read as its
-final expression. The Rust-produced fixture is checked for those exact wire
-shapes, decompiled by the pinned Scala compiler, compiled with `-from-tasty`
+final expression. Transparent source parentheses around a `Unit` assignment
+preserve source binding/span checks and lower to the same wire shape. The
+Rust-produced fixture is checked for those exact wire shapes, decompiled by the
+pinned Scala compiler, compiled with `-from-tasty`
 without adjacent source/class files, and executed to check independent object
 state, assignment, and increment behavior. This validates TASTy semantics and
 Scala-reader/runtime behavior; it does not claim a JVM backing-field ABI.
