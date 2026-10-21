@@ -1,6 +1,7 @@
 name: Typer full corpus audit
 
 on:
+  push: {}
   workflow_dispatch:
     inputs:
       run_full_audit:
@@ -21,7 +22,7 @@ concurrency:
 
 jobs:
   audit:
-    if: inputs.run_full_audit == 'run-full-audit'
+    if: github.event_name == 'workflow_dispatch' && inputs.run_full_audit == 'run-full-audit'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
