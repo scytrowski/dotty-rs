@@ -471,6 +471,7 @@ impl JvmPrimaryConstructorPlan {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn metadata(
         &self,
         store: &SemanticStore,
@@ -478,6 +479,25 @@ impl JvmPrimaryConstructorPlan {
         owner: SymbolId,
         class_identities: Option<&[crate::JvmClassIdentity]>,
         superclass: Option<&crate::JvmSuperclassPlan>,
+    ) -> Result<JvmConstructorMetadata, JvmCodegenError> {
+        self.metadata_with_unit(
+            store,
+            definitions,
+            owner,
+            class_identities,
+            superclass,
+            None,
+        )
+    }
+
+    pub(crate) fn metadata_with_unit(
+        &self,
+        store: &SemanticStore,
+        definitions: &Definitions,
+        owner: SymbolId,
+        class_identities: Option<&[crate::JvmClassIdentity]>,
+        superclass: Option<&crate::JvmSuperclassPlan>,
+        unit: Option<&crate::JvmCompilationUnit<'_>>,
     ) -> Result<JvmConstructorMetadata, JvmCodegenError> {
         let fail = |issue| JvmCodegenError::InvalidPrimaryConstructor {
             constructor: self.constructor,
@@ -559,6 +579,7 @@ impl JvmPrimaryConstructorPlan {
                     owner,
                     definitions,
                     class_identities,
+                    unit,
                 )?
             }
             None => crate::descriptor::descriptor_for(&plan, store, owner, definitions, true)?,

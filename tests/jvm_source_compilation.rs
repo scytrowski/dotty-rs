@@ -657,7 +657,7 @@ fn typed_tree_targets(unit: &JvmCompilationUnit<'_>, root: TreeId<Typed>) -> Vec
 }
 
 #[test]
-fn multilevel_source_audit_records_typed_identity_and_current_backend_rejection() {
+fn multilevel_source_audit_validates_the_three_level_hierarchy_proofs() {
     let source = r#"
 class Base(seed: Int):
   private var current: Int = seed
@@ -679,11 +679,10 @@ class Runner:
   def chooseReverse(flag: Boolean, seed: Int): Middle =
     if flag then new Leaf(seed) else new Middle(seed)
   def chosenValue(flag: Boolean, seed: Int): Int = choose(flag, seed).value()
+  def leafIdentity(leaf: Leaf): Leaf = leaf
 "#;
     let output = TestOutputDirectory::new("multilevel-source-audit");
     let mut observed = false;
-    let mut audited_parent = None;
-    let mut audited_leaf = None;
     let result = compile_source_batch_observed(
         source,
         "MultilevelAudit.scala",
@@ -692,15 +691,47 @@ class Runner:
         SourceUnitCardinality::AtLeastTwo,
         Some(&mut |unit, definitions| {
             observed = true;
+            let hierarchy = unit
+                .class_hierarchy(definitions)
+                .expect("the complete source-proven three-class chain is accepted");
             let base = audit_class_named(unit, "Base");
             let middle = audit_class_named(unit, "Middle");
             let leaf = audit_class_named(unit, "Leaf");
             let runner = audit_class_named(unit, "Runner");
-            audited_parent = Some(middle);
-            audited_leaf = Some(leaf);
             assert_eq!(audit_class_parent(unit, base), definitions.object_class);
             assert_eq!(audit_class_parent(unit, middle), base);
             assert_eq!(audit_class_parent(unit, leaf), middle);
+            assert_eq!(
+                hierarchy
+                    .superclasses()
+                    .iter()
+                    .map(|edge| (edge.class(), edge.parent()))
+                    .collect::<Vec<_>>(),
+                [
+                    (base, definitions.object_class),
+                    (middle, base),
+                    (leaf, middle),
+                    (runner, definitions.object_class),
+                ]
+            );
+            let metadata = unit
+                .metadata(definitions)
+                .expect("three-level source classes retain exact immediate-parent metadata");
+            assert_eq!(
+                metadata
+                    .iter()
+                    .map(|class| (
+                        class.identity().symbol(),
+                        class.superclass().unwrap().parent(),
+                    ))
+                    .collect::<Vec<_>>(),
+                [
+                    (base, definitions.object_class),
+                    (middle, base),
+                    (leaf, middle),
+                    (runner, definitions.object_class),
+                ]
+            );
 
             let base_plan = unit.classes.iter().find(|plan| plan.class == base).unwrap();
             let JvmClassInitializationPlan::PrimaryConstructor(base_constructor) =
@@ -844,18 +875,21 @@ class Runner:
     );
 
     assert!(observed, "source passed through the canonical frontend");
-    assert!(matches!(
+    assert!(!matches!(
         result,
-        Err(PipelineFailure::Codegen(JvmCodegenError::InvalidJvmSuperclass {
-            class,
-            parent: Some(parent),
-            issue: dotty_jvm::JvmSuperclassIssue::InheritanceTooDeep,
-        })) if Some(class) == audited_leaf && Some(parent) == audited_parent
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::InvalidJvmSuperclass {
+                issue: dotty_jvm::JvmSuperclassIssue::InheritanceTooDeep,
+                ..
+            }
+        ))
     ));
-    assert!(
-        output.class_files().is_empty(),
-        "failed class batches publish nothing"
-    );
+    if result.is_err() {
+        assert!(
+            output.class_files().is_empty(),
+            "failed class batches publish nothing"
+        );
+    }
 }
 
 #[test]

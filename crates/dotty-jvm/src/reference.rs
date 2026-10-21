@@ -114,10 +114,11 @@ pub(super) fn project_method_signature_type(
     ty: TypeId,
     definitions: &Definitions,
     class_identities: &[JvmClassIdentity],
+    unit: Option<&JvmCompilationUnit<'_>>,
 ) -> Result<JvmType, JvmCodegenError> {
     let class = method_signature_class_target(store, ty, definitions)?;
     project_class(
-        None,
+        unit,
         store,
         ty,
         class,
@@ -328,39 +329,10 @@ fn project_class(
         }
         Err(error) => return Err(error),
     };
-    let object_rooted = if class_info.parents.len() != 1 {
-        false
-    } else if let Some(parent) = type_symbol(store, class_info.parents[0]) {
-        if parent == object {
-            true
-        } else {
-            let parent_is_planned = class_identities.is_some_and(|identities| {
-                identities
-                    .iter()
-                    .any(|identity| identity.symbol() == parent)
-            }) || unit
-                .is_some_and(|unit| unit.classes.iter().any(|plan| plan.class == parent));
-            if parent_is_planned {
-                let parent_info = crate::identity::class_info(store, parent)?;
-                parent_info.parents.len() == 1
-                    && type_symbol(store, parent_info.parents[0]) == Some(object)
-            } else {
-                false
-            }
-        }
-    } else {
-        false
-    };
-    if !object_rooted {
-        return Err(JvmCodegenError::UnsupportedJvmReferenceType {
-            ty,
-            kind: UnsupportedJvmReferenceTypeKind::NotObjectDerived,
-        });
-    }
 
-    // Validate complete unit metadata when this is a public standalone
-    // projection. Expression lowering supplies the metadata it already
-    // validated when creating the local layout.
+    // Validate complete unit metadata before asking the hierarchy proof about
+    // this exact target. An unplanned canonical class has no ancestry proof in
+    // this unit and should remain a planned-target error.
     let is_planned = if let Some(class_identities) = class_identities {
         class_identities
             .iter()
@@ -383,6 +355,51 @@ fn project_class(
     };
     if !is_planned {
         return Err(JvmCodegenError::ReferenceClassNotInJvmPlan { class });
+    }
+
+    let object_rooted = if let Some(unit) = unit {
+        let hierarchy = unit.class_hierarchy(definitions)?;
+        let mut cursor = class;
+        let mut rooted = false;
+        while let Some(edge) = hierarchy
+            .superclasses()
+            .iter()
+            .find(|edge| edge.class() == cursor)
+        {
+            if edge.parent() == object {
+                rooted = true;
+                break;
+            }
+            cursor = edge.parent();
+        }
+        rooted
+    } else if class_info.parents.len() != 1 {
+        false
+    } else if let Some(parent) = type_symbol(store, class_info.parents[0]) {
+        if parent == object {
+            true
+        } else {
+            let parent_is_planned = class_identities.is_some_and(|identities| {
+                identities
+                    .iter()
+                    .any(|identity| identity.symbol() == parent)
+            });
+            if parent_is_planned {
+                let parent_info = crate::identity::class_info(store, parent)?;
+                parent_info.parents.len() == 1
+                    && type_symbol(store, parent_info.parents[0]) == Some(object)
+            } else {
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if !object_rooted {
+        return Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            ty,
+            kind: UnsupportedJvmReferenceTypeKind::NotObjectDerived,
+        });
     }
 
     Ok(JvmType::Reference(class))

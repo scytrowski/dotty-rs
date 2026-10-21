@@ -92,22 +92,26 @@ are read-only; the lifetime-bound references keep the caller as the owner.
 `JvmCompilationUnit::class_hierarchy` projects a read-only proof for each
 planned class in plan order. Each parent must be one canonical, unqualified
 `TypeRef` to a class symbol. `java/lang/Object` is the required root; a
-planned subclass may have one planned parent whose own parent is Object. The
-bounded graph rejects cycles, self or multiple parents, missing plans,
+planned ancestry may contain at most three ordinary user classes (`Base`,
+`Middle`, and `Leaf`) and two non-Object edges. The bounded graph rejects
+cycles, self or multiple parents, missing plans,
 unsupported/final/non-public parents, and parent self types. It requires an
 accessible no-argument constructor unless a primary-constructor plan carries
 a validated same-session direct-super proof for the selected public parent
-primary constructor. The proof retains child and parent `SymbolId`s alongside
-their checked JVM internal names, and can also be projected to
+primary constructor. Every edge and its parent's constructor proof is checked
+independently. The proof retains child and parent `SymbolId`s alongside their
+checked JVM internal names, and can also be projected to
 internal-name-only edges for downstream class-file checks. Unit-aware class
 metadata carries the matching direct-parent proof. Whole-class emission uses it for the class-file
 `super_class` and emits either `<init>()V` or the proved parameterized
-`<init>` descriptor. The supported graph is
-limited to the canonical Object root and one same-unit edge from a public
-ordinary class to a public, non-final ordinary parent whose own parent is
-Object. Deeper or external chains, unavailable constructors, and other
-unsupported shapes fail before bytes are returned. The projection also rejects
-a child method with the same JVM name and descriptor as a projected
+`<init>` descriptor. The supported graph is limited to the canonical Object
+root and a maximum three-class same-unit chain of public ordinary classes with
+public, non-final parents. A fourth user class, external chains, unavailable
+constructors, and other unsupported shapes fail before bytes are returned.
+Exact planned class references in unit-aware method, constructor, and field
+metadata require the complete unit hierarchy proof; standalone projections
+remain restricted to metadata they can validate locally. The projection also
+rejects a child method with the same JVM name and descriptor as a projected
 non-private final method in its direct parent. If that parent method is not
 planned, the backend conservatively rejects a child method with the same name.
 General override conformance and hierarchy-aware reference joins remain outside
@@ -907,7 +911,8 @@ selected method symbols against their direct-parent owners and verifies exact
 Derived reference frames and branch target PCs before JDK execution.
 The source/classfile negative tests retain typed rejection and empty source
 output batches; the existing publisher still stages only fully encoded batches.
-No production lowering or publication behavior changes are needed for this
-integration increment. Nested allocation arguments, arbitrary effectful
-pre-super evaluation, branched constructors, qualified/trait super, grandparent
-methods, multilevel inheritance, and Scala ABI/TASTy emission remain deferred.
+This increment extends hierarchy validation and exact planned-class projection;
+multilevel constructor or method lowering is still deferred. Nested allocation
+arguments, arbitrary effectful pre-super evaluation, branched constructors,
+qualified/trait super, grandparent methods, and Scala ABI/TASTy emission also
+remain deferred.

@@ -957,6 +957,7 @@ struct HierarchyFixture {
     base: SymbolId,
     derived: SymbolId,
     third: SymbolId,
+    fourth: SymbolId,
 }
 
 impl HierarchyFixture {
@@ -988,6 +989,15 @@ impl HierarchyFixture {
             SymbolOrigin::Synthetic,
             SymbolFlags::EMPTY,
         );
+        let fourth = add_reference_class(
+            &mut identity.store,
+            owner,
+            "Fourth",
+            definitions.no_prefix,
+            definitions.object_type,
+            SymbolOrigin::Synthetic,
+            SymbolFlags::EMPTY,
+        );
         let base_type = identity.store.types.alloc(Type::TypeRef {
             prefix: definitions.no_prefix,
             target: TypeRefTarget::Symbol(identity.class),
@@ -998,6 +1008,11 @@ impl HierarchyFixture {
             target: TypeRefTarget::Symbol(derived),
         });
         set_class_parents(&mut identity.store, third, vec![derived_type]);
+        let third_type = identity.store.types.alloc(Type::TypeRef {
+            prefix: definitions.no_prefix,
+            target: TypeRefTarget::Symbol(third),
+        });
+        set_class_parents(&mut identity.store, fourth, vec![third_type]);
         Self {
             store: identity.store,
             ast: TypedAst::new(),
@@ -1005,6 +1020,7 @@ impl HierarchyFixture {
             base: identity.class,
             derived,
             third,
+            fourth,
         }
     }
 
@@ -1127,6 +1143,106 @@ fn compilation_unit_projects_one_hop_canonical_superclass_proofs_in_plan_order()
 }
 
 #[test]
+fn compilation_unit_hierarchy_accepts_three_user_classes_in_any_plan_order() {
+    let fixture = HierarchyFixture::new();
+    let before = (
+        *fixture.store.symbols.info(fixture.base),
+        *fixture.store.symbols.info(fixture.derived),
+        *fixture.store.symbols.info(fixture.third),
+    );
+    let unit = fixture.unit(&[fixture.third, fixture.base, fixture.derived]);
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+
+    assert_eq!(
+        (
+            *fixture.store.symbols.info(fixture.base),
+            *fixture.store.symbols.info(fixture.derived),
+            *fixture.store.symbols.info(fixture.third),
+        ),
+        before
+    );
+    assert_eq!(
+        hierarchy
+            .superclasses()
+            .iter()
+            .map(|plan| (plan.class(), plan.parent()))
+            .collect::<Vec<_>>(),
+        vec![
+            (fixture.third, fixture.derived),
+            (fixture.base, fixture.definitions.object_class),
+            (fixture.derived, fixture.base),
+        ]
+    );
+    assert_eq!(
+        hierarchy
+            .internal_name_edges()
+            .iter()
+            .map(|edge| (edge.child_internal_name(), edge.parent_internal_name()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("example/Third", "example/Derived"),
+            ("example/Base", "java/lang/Object"),
+            ("example/Derived", "example/Base"),
+        ]
+    );
+    let metadata = unit.metadata(&fixture.definitions).unwrap();
+    assert_eq!(
+        metadata
+            .iter()
+            .map(|class| (
+                class.identity().symbol(),
+                class.superclass().unwrap().parent(),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (fixture.third, fixture.derived),
+            (fixture.base, fixture.definitions.object_class),
+            (fixture.derived, fixture.base),
+        ]
+    );
+}
+
+#[test]
+fn reference_projection_requires_the_complete_unit_proof_for_a_deep_class() {
+    let mut fixture = HierarchyFixture::new();
+    let third_type = fixture.store.types.alloc(Type::TypeRef {
+        prefix: fixture.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(fixture.third),
+    });
+    let unit = fixture.unit(&[fixture.third, fixture.derived, fixture.base]);
+
+    assert_eq!(
+        crate::reference::project_type(&unit, third_type, &fixture.definitions),
+        Ok(JvmType::Reference(fixture.third))
+    );
+
+    let identities = crate::identity::unit_class_identities(&unit).unwrap();
+    assert_eq!(
+        crate::reference::project_method_signature_type(
+            &fixture.store,
+            third_type,
+            &fixture.definitions,
+            &identities,
+            Some(&unit),
+        ),
+        Ok(JvmType::Reference(fixture.third))
+    );
+    assert!(matches!(
+        crate::reference::project_method_signature_type(
+            &fixture.store,
+            third_type,
+            &fixture.definitions,
+            &identities,
+            None,
+        ),
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            kind: crate::UnsupportedJvmReferenceTypeKind::NotObjectDerived,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn whole_class_emission_uses_the_validated_parent_for_class_and_constructor() {
     let fixture = HierarchyFixture::new();
     let unit = fixture.unit(&[fixture.base, fixture.derived]);
@@ -1214,14 +1330,14 @@ fn compilation_unit_hierarchy_rejects_unplanned_final_cyclic_and_deep_parents() 
         })
     ));
 
-    let too_deep = fixture.unit(&[fixture.base, fixture.derived, fixture.third]);
+    let too_deep = fixture.unit(&[fixture.base, fixture.derived, fixture.third, fixture.fourth]);
     assert!(matches!(
         too_deep.class_hierarchy(&fixture.definitions),
         Err(JvmCodegenError::InvalidJvmSuperclass {
             class,
             parent: Some(parent),
             issue: crate::JvmSuperclassIssue::InheritanceTooDeep,
-        }) if class == fixture.third && parent == fixture.derived
+        }) if class == fixture.fourth && parent == fixture.third
     ));
 
     let mut self_parent = HierarchyFixture::new();
@@ -1741,6 +1857,7 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
             counter_signature,
             &fixture.definitions,
             &identities,
+            None,
         ),
         Ok(JvmType::Reference(counter))
     );
@@ -1750,6 +1867,7 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
             wrong_prefix,
             &fixture.definitions,
             &identities,
+            None,
         ),
         Err(JvmCodegenError::UnsupportedJvmReferenceType {
             ty: wrong_prefix,
@@ -1762,6 +1880,7 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
             no_prefix_signature,
             &fixture.definitions,
             &identities,
+            None,
         ),
         Ok(JvmType::Reference(counter))
     );
@@ -1771,6 +1890,7 @@ fn method_signature_projection_requires_exact_class_and_package_identity() {
             foreign_signature,
             &fixture.definitions,
             &identities,
+            None,
         ),
         Err(JvmCodegenError::ReferenceClassNotInJvmPlan {
             class: foreign_counter,
@@ -1881,13 +2001,14 @@ fn reference_projection_rejects_external_anonymous_generic_and_inherited_classes
         .set_info(inherited, SymbolInfo::Complete(inherited_info));
     let inherited_type = fixture.type_ref(inherited);
     let unit = fixture.unit();
-    assert_eq!(
+    assert!(matches!(
         unit.reference_type(inherited_type, &fixture.definitions),
-        Err(JvmCodegenError::UnsupportedJvmReferenceType {
-            ty: inherited_type,
-            kind: crate::UnsupportedJvmReferenceTypeKind::NotObjectDerived,
-        })
-    );
+        Err(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            issue: crate::JvmSuperclassIssue::ParentNotPlanned,
+            ..
+        }) if class == inherited
+    ));
 }
 
 fn alloc_symbol_named(

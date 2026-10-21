@@ -217,6 +217,7 @@ pub(crate) fn append_direct_super_constructor_call(
         .map(|metadata| metadata.identity().clone())
         .collect::<Vec<_>>();
     let mut context = ConstructorInitializerContext {
+        unit,
         store: unit.store,
         typed_ast: unit.typed_ast,
         definitions,
@@ -307,6 +308,7 @@ pub(crate) fn append_direct_super_constructor_call(
 }
 
 struct ConstructorInitializerContext<'a> {
+    unit: &'a JvmCompilationUnit<'a>,
     store: &'a SemanticStore,
     typed_ast: &'a TypedAst,
     definitions: &'a Definitions,
@@ -350,6 +352,7 @@ pub(super) fn lower(
         .map(|class| class.identity().clone())
         .collect::<Vec<_>>();
     let mut context = ConstructorInitializerContext {
+        unit,
         store: unit.store,
         typed_ast: unit.typed_ast,
         definitions,
@@ -735,6 +738,7 @@ impl ConstructorInitializerContext<'_> {
                     self.current_field,
                     parameter_type,
                     Some(self.class_identities),
+                    Some(self.unit),
                 );
             }
         }
@@ -753,6 +757,7 @@ impl ConstructorInitializerContext<'_> {
                     tree,
                     ty,
                     Some(self.class_identities),
+                    Some(self.unit),
                 )
             }
             result => result,

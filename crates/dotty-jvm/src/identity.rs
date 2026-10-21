@@ -296,6 +296,25 @@ pub(super) fn unit_hierarchy(
     }
 
     for plan in &unit.classes {
+        let mut cursor = plan.class;
+        let mut planned_classes = 1;
+        while let Some(parent) = parents.get(&cursor).copied() {
+            if parent == definitions.object_class {
+                break;
+            }
+            planned_classes += 1;
+            if planned_classes > 3 {
+                return Err(JvmCodegenError::InvalidJvmSuperclass {
+                    class: plan.class,
+                    parent: parents.get(&plan.class).copied(),
+                    issue: crate::JvmSuperclassIssue::InheritanceTooDeep,
+                });
+            }
+            cursor = parent;
+        }
+    }
+
+    for plan in &unit.classes {
         let parent = parents[&plan.class];
         if parent == definitions.object_class {
             continue;
@@ -321,13 +340,6 @@ pub(super) fn unit_hierarchy(
                 class: plan.class,
                 parent: Some(parent),
                 issue: crate::JvmSuperclassIssue::ParentHasSelfType,
-            });
-        }
-        if parents.get(&parent) != Some(&definitions.object_class) {
-            return Err(JvmCodegenError::InvalidJvmSuperclass {
-                class: plan.class,
-                parent: Some(parent),
-                issue: crate::JvmSuperclassIssue::InheritanceTooDeep,
             });
         }
         let parent_plan = plans[&parent];
@@ -526,6 +538,7 @@ pub(super) fn class_metadata(
             plan.class,
             definitions,
             descriptor_context,
+            unit,
         )?;
         let key = (
             method.name().to_owned(),
@@ -546,12 +559,13 @@ pub(super) fn class_metadata(
     let constructor = match &plan.initialization {
         crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
             let class_identities = descriptor_context.map(|(_, identities)| identities);
-            Some(constructor.metadata(
+            Some(constructor.metadata_with_unit(
                 store,
                 definitions,
                 plan.class,
                 class_identities,
                 superclass,
+                unit,
             )?)
         }
         _ => None,
@@ -687,6 +701,7 @@ fn field_metadata(
         plan.field,
         field_type_id,
         class_identities,
+        unit,
     )?;
 
     let initializer_id = plan
@@ -707,6 +722,7 @@ fn field_metadata(
         initializer_id,
         initializer.ty,
         class_identities,
+        unit,
     )?;
     if matches!(initializer_type, crate::JvmType::Reference(_))
         && !matches!(&initializer.kind, dotty_core::ast::TreeKind::Ident(_))
@@ -771,6 +787,7 @@ pub(super) fn project_field_value_type(
     symbol: dotty_core::SymbolId,
     ty: dotty_core::TypeId,
     class_identities: Option<&[JvmClassIdentity]>,
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<crate::JvmType, JvmCodegenError> {
     match crate::descriptor::primitive_semantic_value_type(store, definitions, symbol, ty) {
         Err(error @ JvmCodegenError::UnsupportedJvmType { .. }) => match class_identities {
@@ -779,6 +796,7 @@ pub(super) fn project_field_value_type(
                 ty,
                 definitions,
                 class_identities,
+                unit,
             ),
             None => Err(error),
         },
@@ -819,6 +837,7 @@ pub(super) fn typed_expression_field_value_type(
     initializer: dotty_core::TreeId<dotty_core::ast::Typed>,
     ty: dotty_core::TypeId,
     class_identities: Option<&[JvmClassIdentity]>,
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<crate::JvmType, JvmCodegenError> {
     let target = match store.types.try_get(ty) {
         Some(Type::TermRef {
@@ -827,7 +846,7 @@ pub(super) fn typed_expression_field_value_type(
         }) => *target,
         _ => {
             let value_type =
-                project_field_value_type(store, definitions, symbol, ty, class_identities)?;
+                project_field_value_type(store, definitions, symbol, ty, class_identities, unit)?;
             if matches!(value_type, crate::JvmType::Reference(_)) {
                 return Err(JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
                     field: symbol,
@@ -853,8 +872,14 @@ pub(super) fn typed_expression_field_value_type(
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: target }),
         SymbolInfo::Complete(target_ty) => *target_ty,
     };
-    let value_type =
-        project_field_value_type(store, definitions, symbol, target_ty, class_identities)?;
+    let value_type = project_field_value_type(
+        store,
+        definitions,
+        symbol,
+        target_ty,
+        class_identities,
+        unit,
+    )?;
     let parameter_owner = referenced.owner.and_then(|owner| {
         store
             .symbols
@@ -1457,6 +1482,7 @@ fn method_metadata(
     owner: dotty_core::SymbolId,
     definitions: &Definitions,
     descriptor_context: Option<(&SemanticStore, &[JvmClassIdentity])>,
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
 ) -> Result<JvmMethodMetadata, JvmCodegenError> {
     // Descriptor projection verifies canonical method/parameter ownership and
     // type correspondence before any output layout is constructed.
@@ -1468,6 +1494,7 @@ fn method_metadata(
                 owner,
                 definitions,
                 class_identities,
+                unit,
             )?
         }
         None => plan.descriptor(store, owner, definitions)?,

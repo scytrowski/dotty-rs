@@ -46,13 +46,15 @@ parent's method symbol and declaring class, while an exact override points to
 the child's distinct symbol. This metadata does not copy method bodies or
 change JVM `invokevirtual` selection.
 
-The JVM adapter accepts a canonical Object root and one same-unit edge from a
-public ordinary class to a public, non-final ordinary parent whose own parent
-is Object. Its checked hierarchy proof requires a public accessible parent
+The JVM adapter accepts a canonical Object root and up to two same-unit edges
+between public ordinary classes, so a planned `Base → Middle → Leaf` chain is
+validated without admitting a fourth class in the ancestry. Each edge is
+checked independently, and each child must have a public accessible parent
 constructor with a supported descriptor. Parameterized calls additionally require
 the canonical source/typed parent-argument proof; accepted arguments are bounded
-literals or exact child constructor parameters. It rejects cycles, deeper chains, external or missing
-parents, and unsupported class shapes before output. Emission uses the proven
+literals or exact child constructor parameters. It rejects cycles, a fourth
+planned user class in the chain, external or missing parents, and unsupported
+class shapes before output. Emission uses the proven
 parent's canonical symbol and checked internal name. Instance-call resolution
 accepts the receiver's exact planned class or its validated direct parent as
 the selected method owner. For inherited calls, the resolver confirms the
@@ -64,8 +66,10 @@ conversion applies to method and constructor arguments, immutable local
 initializers, reference field writes, and returns; it retains each value's
 exact source/JVM class identity and emits no cast. It does not enable mutable
 reference locals, arbitrary `Object` upcasts, or implicit reference
-conversions without the unit proof. These checks do not use method-name lookup
-or name-based class identity.
+conversions without the unit proof. Exact planned class references may be
+projected through the complete unit hierarchy proof; argument assignability and
+inherited method lookup remain bounded to the direct-parent cases described
+above. These checks do not use method-name lookup or name-based class identity.
 
 Keep the source and class-file identities distinct:
 
@@ -170,9 +174,11 @@ An additional branching client validates exact frame reference identities and
 branch target PCs. Existing Inheritance, ReferenceHolder, and ReferenceObjectApis
 fixtures and their deterministic/bytecode/runtime checks remain unchanged.
 
-The supported hierarchy is still one planned class-parent hop. Nested allocation
+The validated hierarchy now permits at most three planned user classes on one
+ancestry path. Emitting and executing multilevel constructor chains, inherited
+grandparent method lookup, transitive argument assignability, nested allocation
 arguments, arbitrary effectful pre-super evaluation, branched constructors,
-qualified/trait super, grandparent methods, multilevel inheritance, and Scala
-ABI/TASTy emission remain deferred. Invalid source/plan/verification inputs fail
+qualified/trait super, and Scala ABI/TASTy emission remain deferred. Invalid
+source/plan/verification inputs fail
 before the source batch publishes classfiles; later OS failures retain the
 existing best-effort rollback contract.
