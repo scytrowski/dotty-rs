@@ -338,6 +338,11 @@ fn counter_source_has_semantic_unpickler_owner_and_signature_parity() {
             })
             .unwrap_or_else(|| panic!("Counter.{expected_name} declaration"))
     });
+    let set_parameter_address = addresses
+        .children_of(methods[1].address)
+        .find(|node| node.tag == PARAM_TAG)
+        .expect("set(value: Int) parameter node")
+        .offset as u32;
     let mut semantic_store = SemanticStore::new();
     let semantic_definitions = Definitions::bootstrap(&mut semantic_store);
     let builtin_symbols = [
@@ -378,6 +383,7 @@ fn counter_source_has_semantic_unpickler_owner_and_signature_parity() {
             declaration,
         )
     });
+    let semantic_set_parameter = semantic_index.symbol_at(set_parameter_address).unwrap();
     for address in [
         constructor.address,
         template_parameter.address,
@@ -386,6 +392,7 @@ fn counter_source_has_semantic_unpickler_owner_and_signature_parity() {
         methods[0].address,
         methods[1].address,
         methods[2].address,
+        set_parameter_address,
     ] {
         unpickler.complete_symbol(address).unwrap();
     }
@@ -431,6 +438,10 @@ fn counter_source_has_semantic_unpickler_owner_and_signature_parity() {
             .get(semantic_field)
             .flags
             .contains(SymbolFlags::MUTABLE)
+    );
+    assert_eq!(
+        semantic_store.symbols.get(semantic_set_parameter).owner,
+        Some(semantic_methods[1].1)
     );
     assert_builtin_type(
         &semantic_store,
@@ -501,6 +512,14 @@ fn counter_source_has_semantic_unpickler_owner_and_signature_parity() {
         }
         assert_builtin_type(&semantic_store, signature.result, expected_result);
     }
+    assert_builtin_type(
+        &semantic_store,
+        match semantic_store.symbols.info(semantic_set_parameter) {
+            SymbolInfo::Complete(ty) => *ty,
+            info => panic!("Counter.set parameter has incomplete info: {info:?}"),
+        },
+        semantic_definitions.int,
+    );
 }
 
 fn compile_source() -> Product {
