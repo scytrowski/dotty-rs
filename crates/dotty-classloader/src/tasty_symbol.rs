@@ -78,6 +78,9 @@ pub(crate) struct DecodedTastyModuleIdentity {
 pub struct UnresolvedParentReference {
     /// Zero-based position in the `Template` parent list.
     pub parent_index: usize,
+    /// AST-section address of the enclosing `Template` node. Together with
+    /// `parent_index`, this identifies a parent without relying on arena IDs.
+    pub template_wire_address: usize,
     /// Coarse deterministic shape category.
     pub shape: String,
     /// Whether the parent contains a semantic reference tree.
@@ -86,8 +89,19 @@ pub struct UnresolvedParentReference {
     pub has_reference_prefix: bool,
     /// Name-table spellings visible in the raw parent tree.
     pub visible_names: Vec<String>,
-    /// Debug rendering of the raw parent tree, including wire tags and
-    /// reference addresses.
+    /// TASTy reference/selection tag at the first semantic reference shape,
+    /// as a stable hexadecimal tag byte when the tree contains one.
+    pub reference_tag: Option<String>,
+    /// Name-table spelling carried by the first semantic reference.
+    pub reference_name: Option<String>,
+    /// Package/selection prefix recoverable from the first semantic reference.
+    pub reference_prefix: Option<String>,
+    /// Owner and alias name when the tree contains a package-object alias
+    /// candidate. This is evidence about the encoded owner, not proof that
+    /// the alias target exists on the classpath.
+    pub alias_owner: Option<String>,
+    pub alias_name: Option<String>,
+    /// Bounded normalized rendering of the raw parent tree's wire tag shape.
     pub raw_tree: String,
 }
 
@@ -779,7 +793,13 @@ fn decode_impl(
                 (None, false) => BinaryName::from_internal("java/lang/Object"),
                 (None, true) => {
                     return Err(TastyDecodeError::UnresolvedSupertype(Box::new(
-                        unresolved_parent_reference(&file, parent, parent_index, package),
+                        unresolved_parent_reference(
+                            &file,
+                            parent,
+                            parent_index,
+                            package,
+                            template_node.offset,
+                        ),
                     )));
                 }
             }
@@ -803,6 +823,7 @@ fn decode_impl(
                 parent,
                 parent_index,
                 package,
+                template_node.offset,
             )))
         })?);
     }
@@ -832,6 +853,7 @@ fn unresolved_parent_reference(
     parent: &RawTree<'_>,
     parent_index: usize,
     package: &str,
+    template_wire_address: usize,
 ) -> UnresolvedParentReference {
     let visible_names = parent_visible_names(file, parent);
     let has_semantic_reference = parent_has_semantic_reference(file, parent, package);
@@ -847,13 +869,81 @@ fn unresolved_parent_reference(
         "other" if has_semantic_reference => "unsupported-prefix".to_owned(),
         shape => shape.to_owned(),
     };
+    let reference_details = parent_reference_details(file, parent, 0);
+    let alias = unresolved_alias_reference(file, parent);
     UnresolvedParentReference {
         parent_index,
+        template_wire_address,
         shape,
         has_semantic_reference,
         has_reference_prefix,
         visible_names,
+        reference_tag: reference_details
+            .as_ref()
+            .map(|details| details.tag.clone()),
+        reference_name: reference_details
+            .as_ref()
+            .and_then(|details| details.name.clone()),
+        reference_prefix: reference_details.and_then(|details| details.prefix),
+        alias_owner: alias
+            .as_ref()
+            .map(|(owner, _)| owner.as_internal().to_owned()),
+        alias_name: alias.map(|(_, alias)| alias),
         raw_tree: parent_raw_shape(parent, 0),
+    }
+}
+
+struct ParentReferenceDetails {
+    tag: String,
+    name: Option<String>,
+    prefix: Option<String>,
+}
+
+fn parent_reference_details(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<ParentReferenceDetails> {
+    const MAX_PARENT_PROFILE_DEPTH: usize = 128;
+    if depth >= MAX_PARENT_PROFILE_DEPTH {
+        return None;
+    }
+    match tree.decode_structured().ok() {
+        Some(StructuredTree::Reference(reference)) => Some(ParentReferenceDetails {
+            tag: format!("0x{:02x}", reference.tag),
+            name: resolve_qualified_name(file, reference.reference),
+            prefix: resolve_reference_prefix(file, &reference.qualifier),
+        }),
+        Some(StructuredTree::Ident(ident)) => {
+            parent_reference_details(file, &ident.type_tree, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::Apply(apply))) => {
+            parent_reference_details(file, &apply.function, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::AppliedType(applied))) => {
+            parent_reference_details(file, &applied.tycon, depth + 1)
+        }
+        Some(StructuredTree::Length(StructuredNode::SelectIn(selection))) => {
+            parent_reference_details(file, &selection.underlying_type, depth + 1).or_else(|| {
+                Some(ParentReferenceDetails {
+                    tag: format!("0x{:02x}", selection.tag),
+                    name: wire_name(file, selection.name),
+                    prefix: resolve_selection_path_at_depth(file, &selection.qualifier, 0)
+                        .map(|owner| owner.as_internal().to_owned()),
+                })
+            })
+        }
+        _ => match tree {
+            RawTree::Leaf(term) if term.ast_ref().is_some() => {
+                let reference = term.ast_ref()?;
+                let shared = decode_shared_tree(file, reference.address)?;
+                parent_reference_details(file, &shared, depth + 1)
+            }
+            RawTree::Ast { child, .. } | RawTree::NatAst { child, .. } => {
+                parent_reference_details(file, child, depth + 1)
+            }
+            _ => None,
+        },
     }
 }
 
@@ -2660,6 +2750,7 @@ mod tests {
         };
 
         assert_eq!(parent.parent_index, 0);
+        assert!(parent.template_wire_address > 0, "profile: {parent:#?}");
         assert!(parent.has_semantic_reference, "profile: {parent:#?}");
         assert!(parent.has_reference_prefix, "profile: {parent:#?}");
         assert!(
@@ -2673,6 +2764,18 @@ mod tests {
                 .any(|name| name == "scala/annotation")
         );
         assert_eq!(parent.shape, "package-qualified", "profile: {parent:#?}");
+        assert_eq!(
+            parent.reference_tag.as_deref(),
+            Some("0x75"),
+            "profile: {parent:#?}"
+        );
+        assert!(
+            parent
+                .reference_name
+                .as_deref()
+                .is_some_and(|name| name == "Annotation"),
+            "profile: {parent:#?}"
+        );
     }
 
     #[test]
@@ -2882,6 +2985,16 @@ mod tests {
         };
         assert_eq!(parent.shape, "applied");
         assert_eq!(parent.parent_index, 1);
+        assert!(parent.template_wire_address > 0, "profile: {parent:#?}");
+        assert_eq!(
+            parent.reference_tag.as_deref(),
+            Some("0x75"),
+            "profile: {parent:#?}"
+        );
+        assert_eq!(parent.reference_name.as_deref(), Some("Iterator"));
+        assert_eq!(parent.reference_prefix.as_deref(), Some("scala/package"));
+        assert_eq!(parent.alias_owner.as_deref(), Some("scala/package"));
+        assert_eq!(parent.alias_name.as_deref(), Some("Iterator"));
         assert!(parent.has_semantic_reference);
         assert!(!parent.has_reference_prefix);
         assert!(parent.visible_names.iter().any(|name| name == "Iterator"));
