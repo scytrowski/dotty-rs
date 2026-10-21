@@ -387,27 +387,38 @@ fn sibling_join_requires_a_checked_non_object_path_from_both_inputs() {
         .instruction(Instruction::AReturn);
     let graph = ControlFlowGraph::build(&sequence).unwrap();
 
-    for hierarchy in [
-        ClassHierarchy::from_edges([("example/Left".to_owned(), "example/Base".to_owned())])
+    for (hierarchy, return_type) in [
+        (
+            ClassHierarchy::from_edges([("example/Left".to_owned(), "example/Base".to_owned())])
+                .unwrap(),
+            "example/Base",
+        ),
+        (
+            ClassHierarchy::from_edges([
+                ("example/Left".to_owned(), "java/lang/Object".to_owned()),
+                ("example/Right".to_owned(), "java/lang/Object".to_owned()),
+            ])
             .unwrap(),
-        ClassHierarchy::from_edges([
-            ("example/Left".to_owned(), "java/lang/Object".to_owned()),
-            ("example/Right".to_owned(), "java/lang/Object".to_owned()),
-        ])
-        .unwrap(),
+            "java/lang/Object",
+        ),
     ] {
-        assert!(matches!(
-            CfgCodeAnalyzer::analyze_with_hierarchy(
-                &graph,
-                "rejectUnprovenSiblingJoin",
-                "(ZLexample/Left;Lexample/Right;)Lexample/Base;",
-                false,
-                &pool,
-                owner,
-                &hierarchy,
+        let descriptor = format!("(ZLexample/Left;Lexample/Right;)L{return_type};");
+        let result = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "rejectUnprovenSiblingJoin",
+            &descriptor,
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
             ),
-            Err(AnalysisError::IncompatibleStackValue { value: 0, .. })
-        ));
+            "unexpected result: {result:?}"
+        );
     }
 }
 
@@ -1618,6 +1629,65 @@ fn explicit_base_object_ancestor_joins_work_in_both_operand_orders() {
                 .unwrap()
                 .operand_stack
                 .as_slice(),
+            [FlowValue::Object(class)] if class.internal_name() == "java/lang/Object"
+        ));
+    }
+}
+
+#[test]
+fn actual_object_multiway_joins_are_independent_of_predecessor_order() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Left".to_owned(), "java/lang/Object".to_owned()),
+        ("example/Right".to_owned(), "java/lang/Object".to_owned()),
+    ])
+    .unwrap();
+
+    for order in [
+        [3, 4, 5],
+        [3, 5, 4],
+        [4, 3, 5],
+        [4, 5, 3],
+        [5, 3, 4],
+        [5, 4, 3],
+    ] {
+        let mut sequence = CodeSequence::new();
+        let second = sequence.new_label().unwrap();
+        let third = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(local(1)))
+            .branch(BranchInstruction::IfEq(second.clone()))
+            .instruction(Instruction::ALoad(local(order[0])))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(second)
+            .unwrap()
+            .instruction(Instruction::ILoad(local(2)))
+            .branch(BranchInstruction::IfEq(third.clone()))
+            .instruction(Instruction::ALoad(local(order[1])))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(third)
+            .unwrap()
+            .instruction(Instruction::ALoad(local(order[2])))
+            .bind(join)
+            .unwrap()
+            .instruction(Instruction::AReturn);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "chooseObjectOrSibling",
+            "(ZZLjava/lang/Object;Lexample/Left;Lexample/Right;)Ljava/lang/Object;",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .unwrap();
+        let join_state = flow.entry_state(graph.blocks().last().unwrap().id).unwrap();
+        assert!(matches!(
+            join_state.operand_stack.as_slice(),
             [FlowValue::Object(class)] if class.internal_name() == "java/lang/Object"
         ));
     }

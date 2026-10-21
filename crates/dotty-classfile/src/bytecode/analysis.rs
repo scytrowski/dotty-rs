@@ -3619,6 +3619,13 @@ impl CfgCodeAnalyzer {
             }
         }
 
+        validate_object_only_stack_joins(
+            graph,
+            &block_entries,
+            &block_stack_join_evidence,
+            hierarchy,
+        )?;
+
         let max_stack =
             u16::try_from(max_stack).map_err(|_| AnalysisError::StackLimitExceeded {
                 instruction: 0,
@@ -4086,12 +4093,8 @@ fn join_flow_values_with_evidence(
         }
         (FlowValue::Object(_), FlowValue::Object(incoming)) => {
             let mut classes = evidence.iter().collect::<Vec<_>>();
-            let allow_object = incoming.internal_name() == "java/lang/Object"
-                || classes
-                    .iter()
-                    .any(|class| class.internal_name() == "java/lang/Object");
             classes.push(incoming);
-            let Some(joined) = hierarchy.nearest_common_ancestor(classes, allow_object) else {
+            let Some(joined) = hierarchy.nearest_common_ancestor(classes, true) else {
                 return Err((left.clone(), right.clone()));
             };
             evidence.insert(incoming.clone());
@@ -4099,6 +4102,57 @@ fn join_flow_values_with_evidence(
         }
         _ => join_flow_values(left, right, hierarchy).ok_or_else(|| (left.clone(), right.clone())),
     }
+}
+
+fn validate_object_only_stack_joins(
+    graph: &ControlFlowGraph,
+    block_entries: &[Option<BlockEntryState>],
+    block_evidence: &[Option<Vec<std::collections::BTreeSet<ClassIdentity>>>],
+    hierarchy: &ClassHierarchy,
+) -> Result<(), AnalysisError> {
+    if block_entries.len() != block_evidence.len() || block_entries.len() != graph.blocks().len() {
+        return Err(AnalysisError::InvalidControlFlowGraph {
+            block: graph.entry_block(),
+        });
+    }
+    for (block_index, (entry, evidence)) in block_entries.iter().zip(block_evidence).enumerate() {
+        let block = graph.blocks()[block_index].id;
+        let (Some(entry), Some(evidence)) = (entry, evidence) else {
+            continue;
+        };
+        if entry.operand_stack.len() != evidence.len() {
+            return Err(AnalysisError::InvalidControlFlowGraph { block });
+        }
+        for (value, (flow_value, classes)) in entry.operand_stack.iter().zip(evidence).enumerate() {
+            let FlowValue::Object(joined) = flow_value else {
+                continue;
+            };
+            if joined.internal_name() != "java/lang/Object"
+                || classes
+                    .iter()
+                    .any(|class| class.internal_name() == "java/lang/Object")
+                || hierarchy
+                    .nearest_common_ancestor(classes.iter(), false)
+                    .is_some()
+            {
+                continue;
+            }
+            let mut classes = classes.iter();
+            let Some(expected) = classes.next() else {
+                return Err(AnalysisError::InvalidControlFlowGraph { block });
+            };
+            let Some(incoming) = classes.find(|class| *class != expected) else {
+                return Err(AnalysisError::InvalidControlFlowGraph { block });
+            };
+            return Err(AnalysisError::IncompatibleStackValue {
+                block,
+                value,
+                expected: FlowValue::Object(expected.clone()),
+                incoming: FlowValue::Object(incoming.clone()),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn join_flow_values(

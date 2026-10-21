@@ -116,7 +116,9 @@ At each reachable block:
    and a widened state requeues dependent blocks. Missing paths, an `Object`-
    only intersection without an actual `Object` input, and interfaces do not
    provide a join proof. An actual `Object` input may join at `Object` only
-   when every other input has an explicit checked path to it.
+   when every other input has an explicit checked path to it. Eligibility is
+   decided from the complete converged input evidence, independent of
+   predecessor processing order.
    Initialized/uninitialized mismatches,
    different allocation sites, primitive/reference mismatches, and different
    stack heights return typed analysis errors. Never infer a shared ancestor
