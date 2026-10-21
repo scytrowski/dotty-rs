@@ -7066,6 +7066,388 @@ fn three_level_parameterized_constructors_and_super_calls_compose() {
 }
 
 #[test]
+fn full_multilevel_inheritance_fixture_verifies_construction_dispatch_and_joins() {
+    let first_output = TestOutputDirectory::new("multilevel-inheritance-first");
+    let second_output = TestOutputDirectory::new("multilevel-inheritance-second");
+    let first = compile_fixture_classes("MultilevelInheritance.scala", first_output.path())
+        .expect("the complete real-source multilevel fixture compiles in one session");
+    let second = compile_fixture_classes("MultilevelInheritance.scala", second_output.path())
+        .expect("a fresh frontend session emits the same complete source fixture");
+    let identities = |artifacts: &[EmittedArtifact]| {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(identities(&first), identities(&second));
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Middle", "Leaf", "Runner"],
+        "complete class batches retain source order"
+    );
+
+    let classes = first
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.class.internal_name(),
+                decode_emitted_class(artifact),
+            )
+        })
+        .collect::<Vec<_>>();
+    let class = |name: &str| {
+        &classes
+            .iter()
+            .find(|(candidate, _)| *candidate == name)
+            .unwrap_or_else(|| panic!("{name} class is emitted"))
+            .1
+    };
+    for (name, parent) in [
+        ("Base", "java/lang/Object"),
+        ("Middle", "Base"),
+        ("Leaf", "Middle"),
+        ("Runner", "java/lang/Object"),
+    ] {
+        let emitted = class(name);
+        assert_eq!(emitted.version.major, 65);
+        assert!(emitted.access_flags.is_public());
+        assert_eq!(
+            emitted
+                .constant_pool
+                .class_name(emitted.super_class.unwrap()),
+            Ok(parent),
+            "{name} records its exact immediate parent"
+        );
+    }
+
+    assert_eq!(class("Base").fields.len(), 1);
+    let current = &class("Base").fields[0];
+    assert_eq!(
+        class("Base").constant_pool.utf8(current.name_index),
+        Ok("current")
+    );
+    assert_eq!(
+        class("Base").constant_pool.utf8(current.descriptor_index),
+        Ok("I")
+    );
+    assert!(current.access_flags.is_private());
+    assert!(!current.access_flags.is_final());
+    assert!(class("Middle").fields.is_empty());
+    assert!(class("Leaf").fields.is_empty());
+
+    for (name, expected) in [
+        (
+            "Base",
+            vec![("<init>", "(I)V"), ("value", "()I"), ("doubled", "()I")],
+        ),
+        ("Middle", vec![("<init>", "(I)V"), ("value", "()I")]),
+        (
+            "Leaf",
+            vec![("<init>", "(I)V"), ("value", "()I"), ("parentValue", "()I")],
+        ),
+        (
+            "Runner",
+            vec![
+                ("<init>", "()V"),
+                ("evaluate", "(LBase;)I"),
+                ("run", "(I)I"),
+                ("choose", "(ZI)LMiddle;"),
+                ("reverseChoose", "(ZI)LMiddle;"),
+                ("chosenValue", "(ZI)I"),
+                ("reverseChosenValue", "(ZI)I"),
+                ("produceBase", "(I)LBase;"),
+            ],
+        ),
+    ] {
+        assert_eq!(
+            methods_with_descriptors(class(name)),
+            expected
+                .into_iter()
+                .map(|(name, descriptor)| (name.to_owned(), descriptor.to_owned()))
+                .collect::<Vec<_>>(),
+            "{name} exposes only its planned method descriptors"
+        );
+        assert!(
+            class(name)
+                .methods
+                .iter()
+                .all(|method| method.access_flags.is_public())
+        );
+    }
+    assert!(
+        class("Middle").methods.iter().all(|method| {
+            class("Middle").constant_pool.utf8(method.name_index) != Ok("doubled")
+        })
+    );
+    assert!(
+        class("Leaf")
+            .methods
+            .iter()
+            .all(|method| { class("Leaf").constant_pool.utf8(method.name_index) != Ok("doubled") })
+    );
+
+    for (name, parent, descriptor) in [
+        ("Base", "java/lang/Object", "()V"),
+        ("Middle", "Base", "(I)V"),
+        ("Leaf", "Middle", "(I)V"),
+    ] {
+        let code = emitted_method_code(class(name), "<init>");
+        let constructor_calls = decode_subset_instructions(code)
+            .iter()
+            .filter(|(_, opcode)| *opcode == 0xb7)
+            .count();
+        assert_eq!(
+            constructor_calls, 1,
+            "{name} invokes exactly one constructor"
+        );
+        assert_method_reference(class(name), code, 0xb7, parent, "<init>", descriptor);
+    }
+    let base_constructor = emitted_method_code(class("Base"), "<init>");
+    let base_instructions = decode_subset_instructions(base_constructor);
+    let object_init = base_instructions
+        .iter()
+        .find(|(_, opcode)| *opcode == 0xb7)
+        .expect("Base invokes Object constructor")
+        .0;
+    let current_stores = base_instructions
+        .iter()
+        .filter(|(_, opcode)| *opcode == 0xb5)
+        .collect::<Vec<_>>();
+    assert_eq!(current_stores.len(), 1, "Base.current is initialized once");
+    assert_field_reference(
+        class("Base"),
+        base_constructor,
+        0xb5,
+        "Base",
+        "current",
+        "I",
+    );
+    assert!(object_init < current_stores[0].0);
+    assert_method_reference(
+        class("Middle"),
+        emitted_method_code(class("Middle"), "<init>"),
+        0xb7,
+        "Base",
+        "<init>",
+        "(I)V",
+    );
+    assert_method_reference(
+        class("Leaf"),
+        emitted_method_code(class("Leaf"), "<init>"),
+        0xb7,
+        "Middle",
+        "<init>",
+        "(I)V",
+    );
+
+    assert_invocation_sequence(
+        class("Base"),
+        emitted_method_code(class("Base"), "doubled"),
+        &[
+            (0xb6, "Base", "value", "()I"),
+            (0xb6, "Base", "value", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        class("Middle"),
+        emitted_method_code(class("Middle"), "value"),
+        &[(0xb7, "Base", "value", "()I")],
+    );
+    for (method, parent) in [("value", "Middle"), ("parentValue", "Middle")] {
+        assert_invocation_sequence(
+            class("Leaf"),
+            emitted_method_code(class("Leaf"), method),
+            &[(0xb7, parent, "value", "()I")],
+        );
+    }
+    assert_invocation_sequence(
+        class("Runner"),
+        emitted_method_code(class("Runner"), "evaluate"),
+        &[(0xb6, "Base", "doubled", "()I")],
+    );
+    assert_invocation_sequence(
+        class("Runner"),
+        emitted_method_code(class("Runner"), "run"),
+        &[
+            (0xb7, "Leaf", "<init>", "(I)V"),
+            (0xb6, "Runner", "evaluate", "(LBase;)I"),
+        ],
+    );
+    for method in ["choose", "reverseChoose"] {
+        let code = emitted_method_code(class("Runner"), method);
+        let branch_constructor_order = if method == "choose" {
+            [
+                (0xb7, "Middle", "<init>", "(I)V"),
+                (0xb7, "Leaf", "<init>", "(I)V"),
+            ]
+        } else {
+            [
+                (0xb7, "Leaf", "<init>", "(I)V"),
+                (0xb7, "Middle", "<init>", "(I)V"),
+            ]
+        };
+        assert_invocation_sequence(class("Runner"), code, &branch_constructor_order);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xc0),
+            "{method} needs no checkcast"
+        );
+        let frames = stack_map_frames(class("Runner"), method);
+        let branch_targets = decode_branch_targets(code)
+            .into_iter()
+            .map(|(_, _, target)| target)
+            .collect::<Vec<_>>();
+        assert!(!branch_targets.is_empty());
+        assert!(
+            branch_targets
+                .iter()
+                .all(|target| { frames.iter().any(|frame| frame.pc == *target) })
+        );
+        assert!(frames.iter().any(|frame| {
+            frame.stack == [StackMapVerificationType::Object("Middle".to_owned())]
+        }));
+        let method_info = class("Runner")
+            .methods
+            .iter()
+            .find(|entry| class("Runner").constant_pool.utf8(entry.name_index) == Ok(method))
+            .expect("reference conditional method exists");
+        let [Attribute::Code(code_info)] = method_info.attributes.as_slice() else {
+            panic!("{method} has one Code attribute");
+        };
+        assert!(code_info.max_stack >= 3);
+        assert_eq!(code_info.max_locals, 3);
+    }
+    assert_invocation_sequence(
+        class("Runner"),
+        emitted_method_code(class("Runner"), "chosenValue"),
+        &[
+            (0xb6, "Runner", "choose", "(ZI)LMiddle;"),
+            (0xb6, "Middle", "value", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        class("Runner"),
+        emitted_method_code(class("Runner"), "reverseChosenValue"),
+        &[
+            (0xb6, "Runner", "reverseChoose", "(ZI)LMiddle;"),
+            (0xb6, "Middle", "value", "()I"),
+        ],
+    );
+    let produce_base = emitted_method_code(class("Runner"), "produceBase");
+    assert_invocation_sequence(
+        class("Runner"),
+        produce_base,
+        &[(0xb7, "Leaf", "<init>", "(I)V")],
+    );
+    assert!(
+        !produce_base.contains(&0xc0),
+        "produceBase emits no checkcast"
+    );
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = first_output.path().to_str().expect("UTF-8 classpath");
+    let javap = Command::new("javap")
+        .args([
+            "-c",
+            "-v",
+            "-classpath",
+            classpath,
+            "Base",
+            "Middle",
+            "Leaf",
+            "Runner",
+        ])
+        .output()
+        .expect("start javap for the complete multilevel batch");
+    assert!(
+        javap.status.success(),
+        "javap rejected the multilevel class batch\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "major version: 65",
+        "Base.\"<init>\":(I)V",
+        "Middle.\"<init>\":(I)V",
+        "Leaf.\"<init>\":(I)V",
+        "Base.value:()I",
+        "Middle.value:()I",
+        "StackMapTable",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap output omitted {expected}"
+        );
+    }
+
+    let harness = first_output
+        .path()
+        .join("MultilevelInheritanceHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class MultilevelInheritanceHarness {
+    public static void main(String[] args) {
+        Runner runner = new Runner();
+        if (new Base(10).doubled() != 20) throw new AssertionError("base");
+        if (new Middle(10).doubled() != 22) throw new AssertionError("middle virtual dispatch");
+        if (new Leaf(10).doubled() != 24) throw new AssertionError("leaf virtual dispatch");
+        if (new Leaf(10).parentValue() != 11) throw new AssertionError("direct parent super");
+        if (runner.run(10) != 24 || runner.run(0) != 4 || runner.run(-3) != -2) throw new AssertionError("constructor arguments");
+        if (runner.chosenValue(true, 10) != 11 || runner.chosenValue(false, 10) != 12) throw new AssertionError("forward join");
+        if (runner.reverseChosenValue(true, 10) != 12 || runner.reverseChosenValue(false, 10) != 11) throw new AssertionError("reverse join");
+        Base produced = runner.produceBase(10);
+        if (!(produced instanceof Leaf) || produced.doubled() != 24) throw new AssertionError("Leaf as Base");
+        System.out.println("multilevel inheritance verified");
+    }
+}
+"#,
+    )
+    .expect("write multilevel source JVM harness");
+    let javac = Command::new("javac")
+        .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for the multilevel harness");
+    assert!(
+        javac.status.success(),
+        "javac rejected the multilevel harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "MultilevelInheritanceHarness",
+        ])
+        .output()
+        .expect("start JDK 21 verifier for the multilevel harness");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected the multilevel classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "multilevel inheritance verified"
+    );
+}
+
+#[test]
 fn scala_single_inheritance_and_virtual_dispatch_pass_the_end_to_end_jdk_gate() {
     let first_output = TestOutputDirectory::new("inheritance-first-build");
     let second_output = TestOutputDirectory::new("inheritance-second-build");
