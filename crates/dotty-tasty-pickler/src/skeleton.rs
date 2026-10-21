@@ -154,6 +154,87 @@ impl ValidatedPicklePlan<'_, '_> {
                 role: TypeRole::ClassInfo,
             });
         };
+        let constructor_source = p.source_ast.try_get(p.constructor.source_tree).ok_or(
+            PickleError::InvalidSourceTree {
+                tree: p.constructor.source_tree,
+            },
+        )?;
+        let dotty_core::ast::TreeKind::DefDef(constructor_definition) = &constructor_source.kind
+        else {
+            return Err(PickleError::SourceShape {
+                tree: p.constructor.source_tree,
+                expected: crate::SourceRole::Constructor,
+            });
+        };
+        let mut template_parameters = Vec::new();
+        let mut constructor_parameters = Vec::new();
+        for (source_clause, symbols) in constructor_definition
+            .value_param_clauses
+            .iter()
+            .zip(&p.constructor.parameter_clauses)
+        {
+            for (&tree, &constructor_parameter) in source_clause.iter().zip(symbols) {
+                let template_parameter = p.source_index.symbol_at(p.source.id, tree).ok_or(
+                    PickleError::SourceDefinition {
+                        symbol: constructor_parameter,
+                    },
+                )?;
+                let template_record = symbol(self, template_parameter)?;
+                let template_name = context.intern_name(template_record.name)?;
+                // The canonical class-owned template binder may remain
+                // incomplete in SourceSemanticIndex for a plain constructor
+                // parameter. The validated constructor-owned MethodType is the
+                // source of its Int type; the paired identity is still exact.
+                let template_type_syntax = context.lower_type(p.definitions.int)?;
+                context.bind_declaration(
+                    template_parameter,
+                    AstNode::Length {
+                        tag: PARAM_TAG,
+                        fields: vec![
+                            AstField::Nat(template_name),
+                            AstField::Tree(template_type_syntax),
+                        ],
+                    },
+                )?;
+                template_parameters.push(context.declaration_label(template_parameter).ok_or(
+                    PickleError::Reference {
+                        symbol: template_parameter,
+                        reason: ReferenceError::NotRegistered,
+                    },
+                )?);
+
+                let constructor_record = symbol(self, constructor_parameter)?;
+                let constructor_name = context.intern_name(constructor_record.name)?;
+                let constructor_type = match constructor_record.info {
+                    SymbolInfo::Complete(ty) => ty,
+                    info => {
+                        return Err(PickleError::IncompleteSymbol {
+                            symbol: constructor_parameter,
+                            info,
+                        });
+                    }
+                };
+                let constructor_type_syntax = context.primitive_type_syntax(constructor_type)?;
+                context.bind_declaration(
+                    constructor_parameter,
+                    AstNode::Length {
+                        tag: PARAM_TAG,
+                        fields: vec![
+                            AstField::Nat(constructor_name),
+                            AstField::Tree(constructor_type_syntax),
+                        ],
+                    },
+                )?;
+                constructor_parameters.push(
+                    context.declaration_label(constructor_parameter).ok_or(
+                        PickleError::Reference {
+                            symbol: constructor_parameter,
+                            reason: ReferenceError::NotRegistered,
+                        },
+                    )?,
+                );
+            }
+        }
         // The validated ClassInfo supplies the canonical implicit Object type.
         // Its constructor application is the frozen Scala oracle's wire form.
         let parent_type = context.lower_type(*parent)?;
@@ -177,22 +258,29 @@ impl ValidatedPicklePlan<'_, '_> {
         })?;
 
         let name = context.intern_name(symbol(self, p.constructor.symbol)?.name)?;
-        let empty_clause = marker(&mut context, EMPTYCLAUSE_TAG)?;
+        let empty_clause = if constructor_parameters.is_empty() {
+            Some(marker(&mut context, EMPTYCLAUSE_TAG)?)
+        } else {
+            None
+        };
         // Unit is wire return syntax only: the semantic constructor signature
         // still returns its owning class. Default-constructor provenance was
         // checked in the source plan; its required STABLE is not a core flag.
         let unit = context.constructor_return_type()?;
         let stable = marker(&mut context, STABLE_TAG)?;
+        let mut constructor_fields = vec![AstField::Nat(name)];
+        if let Some(empty_clause) = empty_clause {
+            constructor_fields.push(AstField::Tree(empty_clause));
+        } else {
+            constructor_fields.extend(constructor_parameters.iter().copied().map(AstField::Tree));
+        }
+        constructor_fields.push(AstField::Tree(unit));
+        constructor_fields.push(AstField::Tree(stable));
         context.bind_declaration(
             p.constructor.symbol,
             AstNode::Length {
                 tag: DEFDEF_TAG,
-                fields: vec![
-                    AstField::Nat(name),
-                    AstField::Tree(empty_clause),
-                    AstField::Tree(unit),
-                    AstField::Tree(stable),
-                ],
+                fields: constructor_fields,
             },
         )?;
         let constructor_label =
@@ -202,10 +290,14 @@ impl ValidatedPicklePlan<'_, '_> {
                     symbol: p.constructor.symbol,
                     reason: ReferenceError::NotRegistered,
                 })?;
-        let mut stats = vec![
+        let mut stats = template_parameters
+            .into_iter()
+            .map(AstField::Tree)
+            .collect::<Vec<_>>();
+        stats.extend([
             AstField::Tree(parent_application),
             AstField::Tree(constructor_label),
-        ];
+        ]);
         let mut bodies = Vec::new();
         for method in p.methods {
             let name = context.intern_name(symbol(self, method.symbol)?.name)?;
@@ -356,6 +448,14 @@ impl ValidatedPicklePlan<'_, '_> {
                     .iter()
                     .flat_map(|method| method.parameter_clauses.iter().flatten().copied()),
             )
+            .chain(
+                constructor_definition
+                    .value_param_clauses
+                    .iter()
+                    .flat_map(|clause| clause.iter())
+                    .filter_map(|tree| p.source_index.symbol_at(p.source.id, *tree)),
+            )
+            .chain(p.constructor.parameter_clauses.iter().flatten().copied())
         {
             let label = context
                 .declaration_label(id)
