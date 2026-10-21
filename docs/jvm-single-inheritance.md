@@ -60,15 +60,16 @@ accepts the receiver's exact planned class or a class on its validated
 ancestry as the selected method owner. For inherited calls, the resolver
 confirms the canonical method symbol is declared and planned by that owner
 and appears unchanged in the receiver's effective dispatch metadata. Reference
-assignability accepts a `Derived` value where `Base` is required only when the
-same validated direct-parent proof establishes that assignment. The bounded
-conversion applies to method and constructor arguments, immutable local
-initializers, reference field writes, and returns; it retains each value's
+assignability accepts a `Leaf` value where `Middle` or `Base` is required only
+when the same validated canonical ancestry proof establishes that assignment
+within two user-class edges. The bounded conversion applies to method and
+constructor arguments, immutable local initializers, reference field writes,
+and returns; it retains each value's
 exact source/JVM class identity and emits no cast. It does not enable mutable
 reference locals, arbitrary `Object` upcasts, or implicit reference
-conversions without the unit proof. Exact planned class references may be
-projected through the complete unit hierarchy proof; argument assignability
-remains bounded to direct-parent cases. Inherited method lookup follows the
+conversions without the unit proof. Exact planned class references and
+transitive assignments may be projected through the complete unit hierarchy
+proof. Inherited method lookup follows the
 validated ancestry and retains the canonical declaring symbol. These checks do
 not use name-based class identity.
 
@@ -111,10 +112,11 @@ the selected declaration, not from the static receiver type. Thus
 method name and descriptor and use `invokevirtual`. At runtime the JVM resolves
 that virtual call against the receiver class, so `new Derived()` dispatches to
 `Derived.value`. `Runner.evaluate(base: Base)` must carry a `Base` formal
-descriptor; passing a typed `Derived` value, initializing an immutable `Base`
-local, or returning a `Derived` value from a method declared `Base` is accepted
-only through the validated direct-parent edge. The JVM verifier receives that
-same hierarchy proof, so no `checkcast` is needed. This must not be confused
+descriptor; passing a typed `Leaf` value, initializing an immutable `Base`
+local, or returning a `Leaf` value from a method declared `Base` is accepted
+only through up to two validated parent edges in the same unit. The JVM
+verifier receives that same hierarchy proof, so no `checkcast` is needed. This
+must not be confused
 with merging two possible values at a control-flow join. A hierarchy-aware
 merge requires a separately defined least upper-bound operation; do not reuse
 the one-directional assignability check.
@@ -136,7 +138,7 @@ publish partial output.
 | --- | --- | --- | --- |
 | `class Base { def value(): Int = 20; def doubled(): Int = value() }` | Frontend and root-class emission support the shape | `Base.super_class = java/lang/Object`; `doubled` uses `invokevirtual Base.value:()I`; ordinary method receiver is initialized `Base` | Root-class source/JVM integration test |
 | `class Derived extends Base {}` | Source pipeline emits the batch when `Base` is a planned public no-arg class with Object as its parent | `Derived.super_class = Base`; constructor invokes `Base.<init>()V` exactly once before ordinary use | Covered by source-backed classfile regression and JDK verifier gate |
-| `def evaluate(base: Base) = base.doubled(); evaluate(new Derived())` | Accepted when the direct `Derived <: Base` proof is present in the emission unit | `evaluate` keeps descriptor `Base`; `invokevirtual Base.doubled` accepts the `Base` receiver, and no cast or merge is emitted | Other subtype depths and external hierarchy facts remain unsupported |
+| `def evaluate(base: Base) = base.doubled(); evaluate(new Leaf())` | Accepted when the validated `Leaf → Middle → Base` proof is present in the emission unit | `evaluate` keeps descriptor `Base`; `invokevirtual Base.doubled` accepts the `Base` receiver, and no cast or merge is emitted | Other subtype depths and external hierarchy facts remain unsupported |
 | `Inheritance.scala` end-to-end fixture | Real Scala frontend compiles `Base`, `Derived`, and `Runner`; two fresh sessions emit byte-identical batches | Decoded class metadata and method references are asserted; `javap -c -v` and a Java 21+ `-Xverify:all` harness validate descriptors, frames, constructors, and dynamic dispatch | Mandatory JDK 21+ CI gate; local JDK is optional |
 | Unknown/wrong parent type | If name/type resolution cannot resolve it, reject in the frontend; otherwise hierarchy validation rejects noncanonical or non-class parents | No class file should be produced | Source resolution and canonical hierarchy projection; never lower by name guess |
 | Parent cycle (`A extends B`, `B extends A`) | `JvmSuperclassIssue::InheritanceCycle` | No `super_class` chain is emitted | Validated hierarchy graph in `dotty-jvm`, keyed by canonical symbols |
@@ -152,7 +154,7 @@ publish partial output.
 | `def read(): Int = super.value()` | Supported for an explicit unqualified Super(This) selecting a planned public concrete method reachable through the direct parent | Emits checked `invokespecial` with the immediate parent as symbolic owner; ordinary calls keep `invokevirtual` | See [super-call contract](jvm-super-calls.md) and `SuperCalls.scala` for combined parameterized construction and runtime verification; multilevel inheritance is characterized in the [multilevel inheritance audit](jvm-multilevel-inheritance.md) |
 
 The end-to-end tests guarantee the supported three-class constructor chain,
-transitive method lookup and runtime dispatch, direct-parent subtype
+transitive method lookup and runtime dispatch, direct and two-edge subtype
 argument/return paths, and explicit `super.method()` dispatch through the
 immediate parent. Rejected hierarchy rows must remain typed
 failures without partial output. Rows that describe other future behavior are
@@ -176,8 +178,8 @@ branch target PCs. Existing Inheritance, ReferenceHolder, and ReferenceObjectApi
 fixtures and their deterministic/bytecode/runtime checks remain unchanged.
 
 The validated hierarchy permits at most three planned user classes on one
-ancestry path. Transitive argument assignability, hierarchy-aware reference
-joins, nested allocation arguments, arbitrary effectful pre-super evaluation,
+ancestry path. Hierarchy-aware reference joins, nested allocation arguments,
+arbitrary effectful pre-super evaluation,
 branched constructors, qualified/trait super, and Scala ABI/TASTy emission
 remain deferred. Invalid
 source/plan/verification inputs fail

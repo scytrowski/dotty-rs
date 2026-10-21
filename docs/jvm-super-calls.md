@@ -279,5 +279,7 @@ virtual constructor invocation, and branched constructors at their actual
 validation layers. These checks preserve the bounded initialization contract.
 
 Nested allocation arguments, arbitrary effectful pre-super evaluation, branched
-constructors, qualified/trait super, transitive argument assignability,
-hierarchy-aware joins, and Scala ABI/TASTy emission remain deferred.
+constructors, qualified/trait super, hierarchy-aware joins, and Scala
+ABI/TASTy emission remain deferred. Transitive reference assignability is
+limited to two validated same-unit ancestry edges; see the
+[single-inheritance contract](jvm-single-inheritance.md).
