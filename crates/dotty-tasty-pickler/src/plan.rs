@@ -1005,6 +1005,10 @@ impl<'a> Validator<'_, 'a> {
                 }
                 let template_record = self.symbol(template_symbol)?;
                 let parameter_record = self.symbol(parameter_symbol)?;
+                // These paired declarations bypass source_symbol, so validate
+                // provenance for both independently owned parameter identities.
+                self.span(template_record.position)?;
+                self.span(parameter_record.position)?;
                 // Parser-internal accessors are expected for ordinary class
                 // parameters; PrivateLocal distinguishes a plain constructor
                 // input from source `val`/`var` accessor parameters. Reject
