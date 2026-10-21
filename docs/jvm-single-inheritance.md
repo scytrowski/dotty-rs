@@ -19,6 +19,16 @@ inherited bodies into child plans. Inherited calls keep the selected
 declaration's owner in the JVM `Methodref`; the JVM performs dynamic override
 selection at runtime.
 
+The broader `MultilevelInheritance.scala` fixture verifies the bounded
+three-class subset end to end: each class names its immediate JVM parent,
+constructor parameters are forwarded one edge at a time, and ordinary
+`Base.doubled()` dispatches through a `Leaf` override. Its `Runner` also passes
+`Leaf` as `Base`, returns `Leaf` as `Base`, and joins `Middle` and `Leaf` in
+both branch orders using the source-typed `Middle` result. Decoded classfiles,
+deterministic independent sessions, `javap -c -v`, and the mandatory JDK 21+
+`java -Xverify:all` harness pin this composition. The class-file major version
+is 65. A fourth user class and sibling reference joins remain rejected.
+
 ## Current pipeline and identity contracts
 
 `ClassInfo.parents` carries projected parent types. For `Derived extends
@@ -89,7 +99,8 @@ chain of up to three classes: `Base extends Object`, `Middle extends Base`, and
 `Leaf extends Middle`. Each class has an accessible public parent constructor
 and a checked argument list. The no-argument case uses `()V`; parameterized
 construction uses the actual parent descriptor, including `(I)V` in
-`SuperCalls.scala`. Keep traits, multiple or deeper inheritance, generic and
+`SuperCalls.scala` and `MultilevelInheritance.scala`. Keep traits, multiple or
+four-or-more-class inheritance, generic and
 external parents, inaccessible constructors, bridges, and other forms
 rejected until separately specified and tested.
 

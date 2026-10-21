@@ -115,6 +115,11 @@ proof with parameterized constructor forwarding and direct-super calls:
 once before its own initializers; `super.value()` uses the immediate parent as
 its `invokespecial` owner. Inherited `ChainBase.doubled()` remains one method
 body and uses `invokevirtual` for dynamic dispatch on a `ChainLeaf`.
+The full `MultilevelInheritance.scala` source regression combines those paths
+with both source-typed `Middle`/`Leaf` conditional branch orders, a `Leaf` to
+`Base` call and return, decoded `Object(Middle)` frames, deterministic output,
+and a JDK 21+ execution harness. CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1` for
+the source compilation tests so missing JDK tools fail the gate.
 Exact planned class references in unit-aware method, constructor, and field
 metadata require the complete unit hierarchy proof; standalone projections
 remain restricted to metadata they can validate locally. The projection also

@@ -68,9 +68,9 @@ initialized `this`. Class-file analysis supports exact object parameters and
 results by default, and explicitly proven subtype assignments when a
 `ClassHierarchy` is supplied. Source bytecode lowering supports planned
 reference parameters and results through `if`, `while`, and ordinary planned
-calls, plus the validated direct-parent conversions listed above. It still
-rejects mutable reference locals, hierarchy joins, arrays, null, and branched
-constructors.
+calls, plus the validated ancestor conversions listed above. It still rejects
+mutable reference locals, sibling or unrelated hierarchy joins, arrays, null,
+and branched constructors.
 
 ## Bounded state model
 
@@ -260,6 +260,7 @@ straight-line builder methods.
 | Reference-bearing conditional and current `this` | Seed local 0 as emitting class; preserve exact receiver state at branch target | Covered by field/call branch and loop cases under JDK verifier |
 | `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner; virtual calls also check supported exact object arguments and results | Covered by classfile analyzer tests and JDK verifier gate |
 | Ancestor-related initialized classes at a stack join | Widen to the already-present ancestor and emit its `Object` frame entry | Classfile analyzer and builder regressions; JDK gate |
+| Real `Middle`/`Leaf` source branches returning `Middle` | Keep the canonical source result and encode `Object(Middle)` at both branch-order joins | `MultilevelInheritance.scala`, decoded `StackMapTable`, and mandatory JDK 21+ source gate |
 | Sibling or unrelated initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to their common ancestor or `Object` | Classfile analyzer regression tests |
 | Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
 | Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |
@@ -269,7 +270,7 @@ straight-line builder methods.
 | Missing, wrong-kind, or malformed CP `Class` entry | Existing typed constant-pool validation error; never manufacture a frame type | Builder/decoder validation remains the current boundary |
 | Branched constructor before `this`/super initialization | Keep rejected as unsupported constructor flow | `ClassFileBuilder` rejects branched `<init>` analysis |
 | Exact planned reference method parameter/result | Accept; seed parameter frames and require matching initialized `areturn` values | Source integration and mandatory JDK 21 verifier gate |
-| Direct `Derived -> Base` argument, field value, or return | Accept only with the explicit validated edge; preserve the concrete value class and emit no cast | `Inheritance.scala` source integration, decoded metadata assertions, and JDK 21 `-Xverify:all` harness |
+| Transitive `Leaf -> Base` argument or return | Accept only with the validated two-edge ancestry; preserve the concrete value class and emit no cast | `MultilevelInheritance.scala`, decoded descriptors/references, and JDK 21 `-Xverify:all` harness |
 
 The backend converts exact planned reference-CFG cases and explicitly proven
 direct-parent assignments from negative to positive coverage. Remaining
@@ -284,10 +285,12 @@ constructor-safety, hierarchy-join, and descriptor boundaries.
 - `dotty-jvm` maps validated plan identities to classfile names and emits only
   the bounded source forms described above.
 - Branched `<init>` and `UninitializedThis` remain a separate constructor-flow
-  problem. Hierarchy-aware joins, arrays, `null`, interface inheritance,
-  exception-flow joins, and arbitrary uninitialized values remain out of
-  scope. The source adapter currently proves only one direct same-unit
-  `Derived -> Base` edge.
+  problem. General least-upper-bound inference, sibling joins, arrays, `null`,
+  interface inheritance, exception-flow joins, and arbitrary uninitialized
+  values remain out of scope. For source compilation, the adapter proves the
+  bounded same-unit `Base -> Object`, `Middle -> Base`, and `Leaf -> Middle`
+  chain; a source-typed `If` joins distinct initialized references only when
+  they are ancestor-related and both fit its canonical result class.
 
 ## Combined constructor and dispatch evidence
 
@@ -310,5 +313,5 @@ or JVM adapter errors and an empty published batch.
 
 This evidence does not broaden the verifier/source contract: nested allocation
 arguments, arbitrary effectful pre-super evaluation, branched constructors,
-qualified/trait super, grandparent methods, multilevel inheritance, and Scala
-ABI/TASTy emission remain deferred.
+qualified/trait-qualified `super`, explicit grandparent-qualified super,
+general reference LUB inference, and Scala ABI/TASTy emission remain deferred.
