@@ -1264,6 +1264,8 @@ impl Validator<'_, '_> {
                 self.validate_int_expression(rhs, body, method, depth, seen)
             } else if result_type == p.definitions.boolean {
                 self.validate_if_condition(rhs, body, method, depth, seen)
+            } else if result_type == p.definitions.unit {
+                self.validate_unit_expression(rhs, body, method, depth, seen)
             } else {
                 Err(PickleError::BodyType {
                     tree: body,
