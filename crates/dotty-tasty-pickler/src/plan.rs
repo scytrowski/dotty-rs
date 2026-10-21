@@ -39,6 +39,13 @@ pub struct SourceMetadata {
 /// not a way to authenticate arbitrary arena-relative numeric IDs.
 pub trait SourceTypedBindings {
     fn typed_at(&self, source: SourceId, tree: TreeId<Untyped>) -> Option<TreeId<Typed>>;
+
+    /// Exact source/typed/symbol/scope proofs for method-local value declarations.
+    /// Producers that support local values must return the canonical frontend
+    /// bindings; the pickler never reconstructs them from names.
+    fn local_value_bindings(&self, _source: SourceId, _method: SymbolId) -> Vec<LocalValueBinding> {
+        Vec::new()
+    }
 }
 
 impl<F> SourceTypedBindings for F
@@ -173,6 +180,73 @@ impl<'a> PicklePlan<'a> {
             package,
         })
     }
+}
+
+/// Validate one ordinary method from a class-state plan using the same paired
+/// source/typed checks, parameter identities, and local-binding rules as the
+/// established method serializer. Class-state validation calls this only after
+/// validating its own field and template contract.
+pub(crate) fn validate_class_state_method(
+    class: &crate::ClassStatePicklePlan<'_>,
+    methods: &[MethodPicklePlan],
+    local_values: &[LocalValueBinding],
+) -> Result<(), PickleError> {
+    let constructor = DefaultConstructorPlan {
+        symbol: class.constructor.symbol,
+        source_tree: class.constructor.source_tree,
+        parameter_clauses: class.constructor.parameter_clauses.clone(),
+    };
+    let plan = PicklePlan {
+        store: class.store,
+        definitions: class.definitions,
+        typed_ast: class.typed_ast,
+        source_ast: class.source_ast,
+        source_index: class.source_index,
+        typed_bindings: class.typed_bindings,
+        source: class.source.clone(),
+        // The method validator does not inspect the compilation-unit root.
+        source_root: class.class_tree,
+        class: class.class,
+        class_tree: class.class_tree,
+        constructor,
+        methods,
+        local_values,
+    };
+    let mut validator = Validator {
+        plan: &plan,
+        limits: ValidationLimits::default(),
+        remaining: ValidationLimits::default().max_items,
+        local_bindings: HashMap::new(),
+        registered_local_symbols: HashSet::new(),
+        seen_local_bindings: HashSet::new(),
+        seen_local_symbols: HashSet::new(),
+        visible_locals: HashSet::new(),
+    };
+    for binding in local_values {
+        if validator
+            .local_bindings
+            .insert(binding.source_tree, *binding)
+            .is_some()
+            || !validator.registered_local_symbols.insert(binding.symbol)
+        {
+            return Err(PickleError::DuplicateDeclaration {
+                symbol: binding.symbol,
+            });
+        }
+    }
+    for method in methods {
+        validator.method(method)?;
+    }
+    if validator.seen_local_bindings.len() != local_values.len() {
+        let binding = local_values
+            .iter()
+            .find(|binding| !validator.seen_local_bindings.contains(&binding.source_tree))
+            .expect("binding count mismatch has an unseen binding");
+        return Err(PickleError::SourceDefinition {
+            symbol: binding.symbol,
+        });
+    }
+    Ok(())
 }
 
 struct Validator<'p, 'a> {
