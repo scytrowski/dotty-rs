@@ -186,6 +186,8 @@ impl ValidatedPicklePlan<'_, '_> {
                 // parameter. The validated constructor-owned MethodType is the
                 // source of its Int type; the paired identity is still exact.
                 let template_type_syntax = context.lower_type(p.definitions.int)?;
+                let private = marker(&mut context, PRIVATE_TAG)?;
+                let local = marker(&mut context, LOCAL_TAG)?;
                 context.bind_declaration(
                     template_parameter,
                     AstNode::Length {
@@ -193,6 +195,8 @@ impl ValidatedPicklePlan<'_, '_> {
                         fields: vec![
                             AstField::Nat(template_name),
                             AstField::Tree(template_type_syntax),
+                            AstField::Tree(private),
+                            AstField::Tree(local),
                         ],
                     },
                 )?;
