@@ -6542,7 +6542,7 @@ fn inherited_virtual_calls_keep_the_declaring_methodref_and_dispatch_dynamically
 #[test]
 fn transitive_inherited_calls_keep_declaring_methodrefs_and_dispatch_dynamically() {
     let output = TestOutputDirectory::new("transitive-inherited-virtual-calls");
-    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2; def baseOnly(): Int = 7 }\nclass Middle extends Base { override def value(): Int = 20 }\nclass Leaf extends Middle { override def value(): Int = 21; def parentValue(): Int = super.value() }\nclass Runner { def throughBase(base: Base): Int = base.doubled(); def viaLeaf(leaf: Leaf): Int = leaf.baseOnly(); def viaLeafDoubled(leaf: Leaf): Int = leaf.doubled() }\n";
+    let source = "class Base { def value(): Int = 10; def doubled(): Int = value() * 2; def baseOnly(): Int = 7 }\nclass Middle extends Base { override def value(): Int = 20 }\nclass Leaf extends Middle { override def value(): Int = 21; def parentValue(): Int = super.value(); def viaThis(): Int = this.baseOnly() }\nclass Runner { def throughBase(base: Base): Int = base.doubled(); def viaLeaf(leaf: Leaf): Int = leaf.baseOnly(); def viaLeafDoubled(leaf: Leaf): Int = leaf.doubled() }\n";
     let mut observed_metadata = None;
     let mut observe = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
         observed_metadata = Some(
@@ -6646,6 +6646,11 @@ fn transitive_inherited_calls_keep_declaring_methodrefs_and_dispatch_dynamically
         emitted_method_code(&leaf, "parentValue"),
         &[(0xb7, "Middle", "value", "()I")],
     );
+    assert_invocation_sequence(
+        &leaf,
+        emitted_method_code(&leaf, "viaThis"),
+        &[(0xb6, "Base", "baseOnly", "()I")],
+    );
     for class in [&middle, &leaf] {
         assert!(
             class.methods.iter().all(|method| !matches!(
@@ -6667,7 +6672,7 @@ fn transitive_inherited_calls_keep_declaring_methodrefs_and_dispatch_dynamically
         let harness = output.path().join("TransitiveInheritedCallsHarness.java");
         fs::write(
             &harness,
-            "public final class TransitiveInheritedCallsHarness { public static void main(String[] args) { Runner runner = new Runner(); Base base = new Base(); Leaf leaf = new Leaf(); if (runner.throughBase(base) != 20 || runner.throughBase(leaf) != 42 || runner.viaLeaf(leaf) != 7 || runner.viaLeafDoubled(leaf) != 42 || leaf.parentValue() != 20) throw new AssertionError(); System.out.println(\"transitive inherited dispatch verified\"); } }\n",
+            "public final class TransitiveInheritedCallsHarness { public static void main(String[] args) { Runner runner = new Runner(); Base base = new Base(); Leaf leaf = new Leaf(); if (runner.throughBase(base) != 20 || runner.throughBase(leaf) != 42 || runner.viaLeaf(leaf) != 7 || runner.viaLeafDoubled(leaf) != 42 || leaf.parentValue() != 20 || leaf.viaThis() != 7) throw new AssertionError(); System.out.println(\"transitive inherited dispatch verified\"); } }\n",
         )
         .expect("write transitive-call harness");
         let javac = Command::new("javac")
