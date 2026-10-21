@@ -74,6 +74,11 @@ rejected. Field initializers are limited to matching primitive literals or a
 direct reference to one of those exact constructor-owned parameters.
 Field-to-field reads are rejected because successful typing alone does not
 establish safe initialization order.
+The constructor-owned scope must resolve each parameter uniquely, both
+parameter identities must retain source-local provenance, and any completed
+class-owned template parameter type must agree with the constructor's `Int`
+signature. Missing or deferred template parameter types remain valid because
+the typer does not complete every accessor identity eagerly.
 
 Validation borrows the compilation session and cannot publish bytes or mutate
 its semantic store. Unsupported or inconsistent inputs return typed errors,

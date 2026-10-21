@@ -561,6 +561,88 @@ fn counter_constructor_parameter_initializes_its_own_mutable_field() {
     }
 }
 
+#[test]
+fn malformed_constructor_contract_never_publishes_class_state_output() {
+    let source_text =
+        "package example\nclass Counter(start: Int):\n  private var current: Int = start\n";
+    with_mutable_frontend(
+        source_text,
+        "Counter",
+        "Counter.scala",
+        |store,
+         ast,
+         source,
+         index,
+         definitions,
+         typed_ast,
+         class,
+         members,
+         constructor,
+         bindings| {
+            let class_tree = class_tree_for(ast, source, index, class);
+            let TreeKind::DefDef(constructor_definition) = &ast.get(constructor.source_tree).kind
+            else {
+                unreachable!()
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let template_parameter = index.symbol_at(source, parameter_tree).unwrap();
+            let constructor_parameter = constructor.parameter_clauses[0][0];
+            let emit = |store: &SemanticStore| {
+                ClassStatePicklePlan {
+                    store,
+                    definitions,
+                    source_ast: ast,
+                    typed_ast,
+                    source_index: index,
+                    typed_bindings: &bindings,
+                    source: SourceMetadata {
+                        id: source,
+                        name: "Counter.scala".into(),
+                    },
+                    class,
+                    class_tree,
+                    constructor: constructor.clone(),
+                    members: &members,
+                }
+                .validate()
+                .and_then(|validated| validated.pickle())
+            };
+
+            emit(store).unwrap_or_else(|error| panic!("valid control should emit: {error:?}"));
+
+            let scope_id = index.scope_of(constructor.symbol).unwrap();
+            let original_scope = std::mem::replace(
+                store.scopes.get_mut(scope_id),
+                Scope::new(Some(constructor.symbol)),
+            );
+            assert!(
+                matches!(emit(store), Err(PickleError::ScopeMembers { owner }) if owner == constructor.symbol)
+            );
+            *store.scopes.get_mut(scope_id) = original_scope;
+
+            let foreign_source = SourceId::from_index(1391);
+            for parameter in [template_parameter, constructor_parameter] {
+                let original_position = store.symbols.get(parameter).position.unwrap();
+                store.symbols.get_mut(parameter).position =
+                    Some(SourceSpan::new(foreign_source, original_position.span()));
+                assert!(
+                    matches!(emit(store), Err(PickleError::SourceSpan { expected, actual }) if expected == source && actual == foreign_source)
+                );
+                store.symbols.get_mut(parameter).position = Some(original_position);
+            }
+
+            let original_info = store.symbols.get(template_parameter).info;
+            store.symbols.get_mut(template_parameter).info =
+                SymbolInfo::Complete(definitions.boolean);
+            assert!(matches!(
+                emit(store),
+                Err(PickleError::UnsupportedTypeReference { ty }) if ty == definitions.boolean
+            ));
+            store.symbols.get_mut(template_parameter).info = original_info;
+        },
+    );
+}
+
 fn private_fields_output() -> (PickledTasty, SymbolId, Vec<SymbolId>, TreeId<Typed>) {
     let source_text = "package example\nclass PrivateFields:\n  private val seed: Int = 42\n  private val enabled: Boolean = true\n  private var counter: Int = 0\n  def constant(): Int = 1\n";
     with_frontend(source_text, |ast, source, index, definitions, typer| {

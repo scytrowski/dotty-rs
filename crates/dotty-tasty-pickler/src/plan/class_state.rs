@@ -649,6 +649,22 @@ impl ClassStateValidator<'_, '_> {
                         expected: SourceRole::Parameter,
                     });
                 };
+                let constructor_scope_id = self
+                    .plan
+                    .source_index
+                    .scope_of(plan.symbol)
+                    .ok_or(PickleError::ScopeMembers { owner: plan.symbol })?;
+                if !self.plan.store.scopes.contains(constructor_scope_id) {
+                    return Err(PickleError::InvalidScope {
+                        scope: constructor_scope_id,
+                    });
+                }
+                let constructor_scope = self.plan.store.scopes.get(constructor_scope_id);
+                if constructor_scope.owner != Some(plan.symbol)
+                    || constructor_scope.lookup_all(parameter.name.as_name()) != [symbol]
+                {
+                    return Err(PickleError::ScopeMembers { owner: plan.symbol });
+                }
                 if self
                     .plan
                     .source_index
@@ -669,18 +685,48 @@ impl ClassStateValidator<'_, '_> {
                     .symbol_at(self.plan.source.id, tree)
                     .ok_or(PickleError::SourceDefinition { symbol })?;
                 let canonical_record = self.symbol(canonical)?;
+                let parameter_record = self.symbol(symbol)?;
+                self.source_identity(
+                    canonical,
+                    tree,
+                    SymbolKind::Parameter,
+                    *parameter.name.as_name(),
+                    class,
+                )?;
+                for position in [canonical_record.position, parameter_record.position]
+                    .into_iter()
+                    .flatten()
+                {
+                    if position.source() != self.plan.source.id {
+                        return Err(PickleError::SourceSpan {
+                            expected: self.plan.source.id,
+                            actual: position.source(),
+                        });
+                    }
+                }
                 if canonical == symbol
                     || canonical_record.kind != SymbolKind::Parameter
                     || canonical_record.owner != Some(class)
+                    || canonical_record.origin != SymbolOrigin::Source(self.plan.source.id)
                     || canonical_record.visibility != Visibility::Private
                     || !canonical_record.flags.is_empty()
                     || !canonical_record.annotations.is_empty()
                     || canonical_record.name != *parameter.name.as_name()
-                    || self.symbol(symbol)?.name != *parameter.name.as_name()
-                    || self.symbol(symbol)?.origin != SymbolOrigin::Source(self.plan.source.id)
-                    || self.symbol(symbol)?.visibility != Visibility::Public
-                    || !self.symbol(symbol)?.flags.is_empty()
-                    || !self.symbol(symbol)?.annotations.is_empty()
+                    || parameter_record.name != *parameter.name.as_name()
+                    || parameter_record.origin != SymbolOrigin::Source(self.plan.source.id)
+                    || parameter_record.visibility != Visibility::Public
+                    || !parameter_record.flags.is_empty()
+                    || !parameter_record.annotations.is_empty()
+                    || self.plan.source_index.definition_of(canonical)
+                        != Some(SourceDefinition::Canonical {
+                            source: self.plan.source.id,
+                            tree,
+                        })
+                    || self.plan.source_index.definition_of(symbol)
+                        != Some(SourceDefinition::Derived {
+                            source: self.plan.source.id,
+                            tree,
+                        })
                 {
                     return Err(PickleError::SourceDefinition { symbol });
                 }
@@ -716,6 +762,25 @@ impl ClassStateValidator<'_, '_> {
                     });
                 };
                 let signature_param = signature.params[signature_index];
+                match canonical_record.info {
+                    SymbolInfo::Complete(ty) => match self.plan.store.types.try_get(ty) {
+                        Some(Type::NoType | Type::Error(_)) => {
+                            return Err(PickleError::IncompleteType { ty });
+                        }
+                        Some(_) if !self.same_canonical_type(ty, self.plan.definitions.int) => {
+                            return Err(PickleError::UnsupportedTypeReference { ty });
+                        }
+                        Some(_) => {}
+                        None => return Err(PickleError::InvalidType { ty }),
+                    },
+                    SymbolInfo::Missing | SymbolInfo::Deferred(_) => {}
+                    info => {
+                        return Err(PickleError::IncompleteSymbol {
+                            symbol: canonical,
+                            info,
+                        });
+                    }
+                }
                 if tpt.name != int_name
                     || signature_param.name.as_name() != parameter.name.as_name()
                     || signature_param.erased
