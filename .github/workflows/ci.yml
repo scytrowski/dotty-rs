@@ -82,6 +82,22 @@ jobs:
       - name: Install stable Rust toolchain
         run: rustup toolchain install stable --profile minimal
 
+      - name: Record Rust version for cache key
+        id: rust-version
+        run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache JVM gate build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-cargo-classfile-jvm-${{ hashFiles('**/Cargo.lock') }}-${{ steps.rust-version.outputs.version }}-test-no-debug-no-incremental
+          restore-keys: |
+            ${{ runner.os }}-cargo-classfile-jvm-${{ steps.rust-version.outputs.version }}-
+
       - name: Verify generated class files with the JVM
         env:
           DOTTY_CLASSFILE_REQUIRE_JDK: '1'
