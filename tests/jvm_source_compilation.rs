@@ -702,6 +702,18 @@ class Runner:
             assert_eq!(audit_class_parent(unit, middle), base);
             assert_eq!(audit_class_parent(unit, leaf), middle);
             assert_eq!(
+                hierarchy.nearest_common_non_object_ancestor(leaf, middle),
+                Some(middle)
+            );
+            assert_eq!(
+                hierarchy.nearest_common_non_object_ancestor(middle, base),
+                Some(base)
+            );
+            assert_eq!(
+                hierarchy.nearest_common_non_object_ancestor(leaf, leaf),
+                Some(leaf)
+            );
+            assert_eq!(
                 hierarchy
                     .superclasses()
                     .iter()
@@ -1258,6 +1270,153 @@ class Branch:
         ))
     ));
     assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn sibling_source_hierarchy_proves_the_canonical_common_base_deterministically() {
+    let source = r#"
+class Base(seed: Int):
+  private var current: Int = seed
+  def value(): Int = current
+
+class Left(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 1
+
+class Right(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 2
+
+class Runner:
+  def accept(value: Base): Int = value.value()
+"#;
+    let mut baseline_classes: Option<Vec<(String, Vec<u8>)>> = None;
+    let mut baseline_edges = None;
+
+    for (session, reverse_plans) in [(0, false), (1, true)] {
+        let output = TestOutputDirectory::new(&format!("sibling-hierarchy-session-{session}"));
+        let mut observed_edges = None;
+        let artifacts = compile_source_batch_observed(
+            source,
+            "SiblingHierarchy.scala",
+            output.path(),
+            SourceId::from_index(1434 + session),
+            SourceUnitCardinality::AtLeastTwo,
+            Some(&mut |unit, definitions| {
+                let base = audit_class_named(unit, "Base");
+                let left = audit_class_named(unit, "Left");
+                let right = audit_class_named(unit, "Right");
+                assert_ne!(base, left);
+                assert_ne!(base, right);
+                assert_ne!(left, right);
+                assert_eq!(audit_class_parent(unit, left), base);
+                assert_eq!(audit_class_parent(unit, right), base);
+                assert_eq!(audit_class_parent(unit, base), definitions.object_class);
+
+                let hierarchy = unit
+                    .class_hierarchy(definitions)
+                    .expect("the real source sibling graph validates with both constructors");
+                assert_eq!(
+                    hierarchy.nearest_common_non_object_ancestor(left, right),
+                    Some(base)
+                );
+                assert_eq!(
+                    hierarchy.nearest_common_non_object_ancestor(right, left),
+                    Some(base)
+                );
+                assert_eq!(
+                    hierarchy.nearest_common_non_object_ancestor(left, left),
+                    Some(left)
+                );
+                assert_eq!(
+                    hierarchy.nearest_common_non_object_ancestor(left, base),
+                    Some(base)
+                );
+
+                for (child, expected_parent) in [(left, base), (right, base)] {
+                    let class_plan = unit
+                        .classes
+                        .iter()
+                        .find(|plan| plan.class == child)
+                        .unwrap();
+                    let JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+                        &class_plan.initialization
+                    else {
+                        panic!("source sibling has a primary constructor plan")
+                    };
+                    assert_eq!(constructor.parameters().len(), 1);
+                    assert_eq!(
+                        unit.store.symbols.get(constructor.parameters()[0]).owner,
+                        Some(constructor.symbol())
+                    );
+                    assert_eq!(
+                        constructor
+                            .direct_super_constructor()
+                            .expect("sibling has an accessible direct-parent constructor")
+                            .parent_class(),
+                        expected_parent
+                    );
+                }
+
+                let internal_edges = hierarchy.internal_name_edges();
+                let classfile_hierarchy = dotty_classfile::bytecode::ClassHierarchy::from_edges(
+                    internal_edges.iter().map(|edge| {
+                        (
+                            edge.child_internal_name().to_owned(),
+                            edge.parent_internal_name().to_owned(),
+                        )
+                    }),
+                )
+                .expect("canonical sibling edges project into the class-file hierarchy");
+                assert!(classfile_hierarchy.is_assignable("Left", "Base"));
+                assert!(classfile_hierarchy.is_assignable("Right", "Base"));
+
+                let mut normalized_edges = internal_edges
+                    .iter()
+                    .map(|edge| {
+                        (
+                            edge.child_internal_name().to_owned(),
+                            edge.parent_internal_name().to_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                normalized_edges.sort();
+                observed_edges = Some(normalized_edges);
+
+                if reverse_plans {
+                    unit.classes.reverse();
+                    let reordered = unit
+                        .class_hierarchy(definitions)
+                        .expect("permuting class plan order preserves the validated proof");
+                    assert_eq!(
+                        reordered.nearest_common_non_object_ancestor(left, right),
+                        Some(base)
+                    );
+                }
+            }),
+        )
+        .expect("hierarchy queries do not change sibling class emission");
+
+        let mut emitted = artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        emitted.sort_by(|left, right| left.0.cmp(&right.0));
+        let edges = observed_edges.expect("the source frontend ran the hierarchy observer");
+        if let Some(expected) = &baseline_classes {
+            assert_eq!(
+                &emitted, expected,
+                "fresh sessions emit identical class bytes"
+            );
+            assert_eq!(Some(&edges), baseline_edges.as_ref());
+        } else {
+            baseline_classes = Some(emitted);
+            baseline_edges = Some(edges);
+        }
+    }
 }
 
 fn audit_symbol_name(unit: &JvmCompilationUnit<'_>, symbol: SymbolId) -> String {

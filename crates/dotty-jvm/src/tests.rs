@@ -1406,6 +1406,120 @@ fn whole_class_emission_uses_the_validated_parent_for_class_and_constructor() {
 }
 
 #[test]
+fn common_planned_ancestor_is_nearest_unique_and_ignores_plan_order() {
+    let fixture = HierarchyFixture::new();
+    let chain = fixture.unit(&[fixture.base, fixture.derived, fixture.third]);
+    let chain_hierarchy = chain.class_hierarchy(&fixture.definitions).unwrap();
+    assert_eq!(
+        chain_hierarchy.nearest_common_non_object_ancestor(fixture.third, fixture.derived),
+        Some(fixture.derived)
+    );
+    assert_eq!(
+        chain_hierarchy.nearest_common_non_object_ancestor(fixture.derived, fixture.third),
+        Some(fixture.derived)
+    );
+    assert_eq!(
+        chain_hierarchy.nearest_common_non_object_ancestor(fixture.third, fixture.base),
+        Some(fixture.base)
+    );
+    assert_eq!(
+        chain_hierarchy.nearest_common_non_object_ancestor(fixture.third, fixture.third),
+        Some(fixture.third)
+    );
+
+    let reversed_chain = fixture.unit(&[fixture.third, fixture.derived, fixture.base]);
+    let reversed_hierarchy = reversed_chain
+        .class_hierarchy(&fixture.definitions)
+        .unwrap();
+    assert_eq!(
+        reversed_hierarchy.nearest_common_non_object_ancestor(fixture.third, fixture.derived),
+        Some(fixture.derived)
+    );
+
+    let mut siblings = HierarchyFixture::new();
+    let sibling_parent = siblings.store.types.alloc(Type::TypeRef {
+        prefix: siblings.definitions.no_prefix,
+        target: TypeRefTarget::Symbol(siblings.base),
+    });
+    set_class_parents(&mut siblings.store, siblings.third, vec![sibling_parent]);
+    let sibling_unit = siblings.unit(&[siblings.third, siblings.base, siblings.derived]);
+    let sibling_hierarchy = sibling_unit.class_hierarchy(&siblings.definitions).unwrap();
+    assert_eq!(
+        sibling_hierarchy.nearest_common_non_object_ancestor(siblings.derived, siblings.third),
+        Some(siblings.base)
+    );
+    assert_eq!(
+        sibling_hierarchy.nearest_common_non_object_ancestor(siblings.third, siblings.derived),
+        Some(siblings.base)
+    );
+
+    let classfile_hierarchy = dotty_classfile::bytecode::ClassHierarchy::from_edges(
+        sibling_hierarchy
+            .internal_name_edges()
+            .into_iter()
+            .map(|edge| {
+                (
+                    edge.child_internal_name().to_owned(),
+                    edge.parent_internal_name().to_owned(),
+                )
+            }),
+    )
+    .expect("the checked sibling JVM names form a valid class-file hierarchy");
+    assert!(classfile_hierarchy.is_assignable("example/Derived", "example/Base"));
+    assert!(classfile_hierarchy.is_assignable("example/Third", "example/Base"));
+}
+
+#[test]
+fn common_planned_ancestor_rejects_object_only_and_foreign_same_name_inputs() {
+    let mut fixture = HierarchyFixture::new();
+    set_class_parents(
+        &mut fixture.store,
+        fixture.third,
+        vec![fixture.definitions.object_type],
+    );
+    let package = fixture.store.symbols.get(fixture.base).owner.unwrap();
+    let foreign_base = add_reference_class(
+        &mut fixture.store,
+        package,
+        "Base",
+        fixture.definitions.no_prefix,
+        fixture.definitions.object_type,
+        SymbolOrigin::Synthetic,
+        SymbolFlags::EMPTY,
+    );
+    assert_ne!(foreign_base, fixture.base);
+    assert_eq!(
+        fixture
+            .store
+            .names
+            .resolve(fixture.store.symbols.get(foreign_base).name.text()),
+        fixture
+            .store
+            .names
+            .resolve(fixture.store.symbols.get(fixture.base).name.text())
+    );
+
+    let unit = fixture.unit(&[fixture.base, fixture.derived, fixture.third]);
+    let hierarchy = unit.class_hierarchy(&fixture.definitions).unwrap();
+    assert_eq!(
+        hierarchy.nearest_common_non_object_ancestor(fixture.base, fixture.third),
+        None,
+        "sharing only the builtin Object root is not an approved source ancestor"
+    );
+    assert_eq!(
+        hierarchy.nearest_common_non_object_ancestor(foreign_base, fixture.derived),
+        None,
+        "same-spelled symbols are not substituted for the planned canonical class"
+    );
+    assert_eq!(
+        hierarchy
+            .nearest_common_non_object_ancestor(fixture.definitions.object_class, fixture.base),
+        None,
+        "the builtin Object class is not a planned common-ancestor result"
+    );
+}
+
+#[test]
 fn compilation_unit_hierarchy_rejects_unplanned_final_cyclic_and_deep_parents() {
     let fixture = HierarchyFixture::new();
     let missing = fixture.unit(&[fixture.derived]);
