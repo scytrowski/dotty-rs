@@ -2085,6 +2085,7 @@ mod tests {
             "dotty/tools/dotc/core/Contexts",
             "dotty/tools/dotc/core/Symbols",
             "dotty/tools/dotc/parsing/Tokens",
+            "dotty/tools/dotc/ast/tpd",
         ];
         let compiler_root = fixture_path("../dotty-tasty/tests/fixtures/scala3-compiler");
         let library_root = fixture_path("../dotty-tasty/tests/fixtures/scala3-library");
@@ -2216,12 +2217,37 @@ mod tests {
                 assert_eq!(store.symbols.get(module_class).links.companion, None);
             }
 
+            // Symbols$ is in #1412's frozen unresolved-parent cohort. Resolve
+            // it through its Object term prefix so this gate proves a real
+            // post-parent-repair ModuleClass and member, not only an identity.
             if matches!(binary.simple_name(), "Types" | "Symbols" | "Tokens") {
-                assert_eq!(
-                    resolver.complete_module_class(&mut store, module_class),
-                    Ok(true),
-                    "the authoritative compiler parent should permit completion for {binary}"
-                );
+                let symbols_member = if binary.simple_name() == "Symbols" {
+                    let object_ref = store.types.alloc(Type::TermRef {
+                        prefix,
+                        target: dotty_core::TermRefTarget::Symbol(object),
+                    });
+                    let member_name = Name::new(store.names.intern("NoSymbol"), Namespace::Term);
+                    let member = resolver
+                        .resolve_member(
+                            &mut store,
+                            &MemberRequest {
+                                prefix: object_ref,
+                                name: member_name,
+                                selector: MemberSelector::Unique,
+                                space: MemberSpace::Prefix,
+                            },
+                        )
+                        .unwrap()
+                        .expect("Symbols declares the real NoSymbol member");
+                    Some((object_ref, member_name, member))
+                } else {
+                    assert_eq!(
+                        resolver.complete_module_class(&mut store, module_class),
+                        Ok(true),
+                        "the authoritative compiler parent should permit completion for {binary}"
+                    );
+                    None
+                };
                 let SymbolInfo::Complete(info) = store.symbols.get(module_class).info else {
                     panic!("{binary} ModuleClass should be complete after parent resolution");
                 };
@@ -2229,6 +2255,70 @@ mod tests {
                     panic!("{binary} should complete to ClassInfo");
                 };
                 assert_eq!(info.class, module_class);
+                if let Some((object_ref, member_name, member)) = symbols_member {
+                    assert_eq!(info.parents.len(), 1);
+                    let parent = store.types.get(info.parents[0]).reference_symbol().unwrap();
+                    assert_eq!(
+                        store.names.resolve(store.symbols.get(parent).name.text()),
+                        "SymUtils"
+                    );
+                    assert_eq!(store.symbols.get(parent).owner, Some(package));
+                    assert!(matches!(
+                        store.symbols.get(member).kind,
+                        SymbolKind::Field | SymbolKind::Method
+                    ));
+                    assert_eq!(store.symbols.get(member).owner, Some(module_class));
+                    assert!(matches!(
+                        store.symbols.get(member).origin,
+                        dotty_core::SymbolOrigin::Tasty(_)
+                    ));
+                    assert_eq!(
+                        resolver.resolve_member(
+                            &mut store,
+                            &MemberRequest {
+                                prefix: object_ref,
+                                name: member_name,
+                                selector: MemberSelector::Unique,
+                                space: MemberSpace::Prefix,
+                            },
+                        ),
+                        Ok(Some(member)),
+                        "repeat Object-member lookup must reuse the declaration"
+                    );
+                    let profile = resolver.take_module_resolution_profile();
+                    assert_eq!(profile.module_member_successes, 2);
+                    assert!(
+                        profile
+                            .completed_module_classes
+                            .contains("dotty/tools/dotc/core/Symbols")
+                    );
+                }
+                continue;
+            }
+
+            if binary.simple_name() == "tpd" {
+                let store_mark = store.checkpoint();
+                let session_mark = resolver.session.checkpoint();
+                let error = resolver
+                    .complete_module_class(&mut store, module_class)
+                    .expect_err(
+                        "tpd's nested Trees.Instance resource is not independently present",
+                    );
+                let reason = error.to_string();
+                assert!(
+                    reason.contains("class not found: dotty/tools/dotc/ast/Trees$Instance"),
+                    "{reason}"
+                );
+                assert_eq!(store.checkpoint(), store_mark);
+                assert_eq!(resolver.session.checkpoint(), session_mark);
+                assert_eq!(store.symbols.get(object).info, SymbolInfo::Missing);
+                assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+                let retry = resolver
+                    .complete_module_class(&mut store, module_class)
+                    .expect_err("retry should preserve the same typed residual");
+                assert_eq!(retry.to_string(), reason);
+                assert_eq!(store.checkpoint(), store_mark);
+                assert_eq!(resolver.session.checkpoint(), session_mark);
                 continue;
             }
 

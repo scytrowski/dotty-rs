@@ -884,6 +884,23 @@ If a source-owned Object of the same name exists without a session-validated
 ModuleClass pair, package-term resolution reports an identity conflict and
 leaves the source package, Object, and ModuleClass entries untouched.
 
+The focused #1415 gate uses the frozen #1412 roots to distinguish a completed
+module from a decoded parent or an entered identity shell:
+
+| Real compiler root | Frozen unresolved-parent observations | Current completion/member result |
+| --- | ---: | --- |
+| `dotty/tools/dotc/core/Symbols$` | 3,652 | `Symbols$` completes in place with the TASTy parent `SymUtils`; `NoSymbol` resolves twice through the Object `TermRef` to the same TASTy-owned field. |
+| `dotty/tools/dotc/core/Types$` | 2,545 | `Types$` completes in place with its pinned `TypeUtils` parent. |
+| `dotty/tools/dotc/ast/tpd$` | 1,715 | The selected parent resolves to `Trees$Instance`, but completion rolls back because this fixture set has no independent `Trees$Instance` resource. The typed missing-class failure is stable on retry. |
+
+The `Symbols$` gate also checks that the canonical Object and ModuleClass
+remain distinct symbols in the package's Term and Type namespaces, that the
+completed ClassInfo retains the ModuleClass ID and ordered TASTy parent, and
+that repeated member lookup adds no new declarations. `tpd$` remains an
+explicit residual; the test does not synthesize a binary identity for the
+nested `Trees.Instance` type. The complete frozen-root profile records other
+downstream dependency failures separately from this direct module gate.
+
 ## Post-compiler-module Scala 3.9 audit (#1342)
 
 Current classloader and Object ModuleClass corpus measurements, including the
