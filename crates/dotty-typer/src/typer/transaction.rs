@@ -17,6 +17,9 @@ impl SourceTyper<'_> {
         if outermost || !committed {
             self.import_qualifier_cache.clear();
         }
+        if !committed {
+            self.import_member_cache.clear();
+        }
     }
 
     pub(super) fn run_atomic<T>(

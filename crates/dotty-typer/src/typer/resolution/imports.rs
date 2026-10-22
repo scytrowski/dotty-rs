@@ -1158,6 +1158,11 @@ impl SourceTyper<'_> {
                 }
             }
             if !found_locally {
+                let cache_key = ImportMemberCacheKey { qualifier, name };
+                if let Some(symbol) = self.import_member_cache.get(&cache_key).copied() {
+                    matches.push(symbol);
+                    continue;
+                }
                 let prefix = self.type_prefix_for_qualifier(qualifier)?;
                 let request = MemberRequest {
                     prefix,
@@ -1177,6 +1182,7 @@ impl SourceTyper<'_> {
                     if !self.store.symbols.contains(symbol) {
                         return Err(TyperError::UnknownSymbol { symbol });
                     }
+                    self.import_member_cache.insert(cache_key, symbol);
                     matches.push(symbol);
                 }
             }
