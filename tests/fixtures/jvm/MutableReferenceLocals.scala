@@ -1,5 +1,6 @@
 class Base(seed: Int):
-  def value(): Int = seed
+  private val currentSeed: Int = seed
+  def value(): Int = currentSeed
 
 class Left(seed: Int) extends Base(seed):
   override def value(): Int = super.value() + 1

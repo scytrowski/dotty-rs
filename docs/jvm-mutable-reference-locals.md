@@ -13,13 +13,13 @@ increment.
 
 ## Source evidence and current failure matrix
 
-`tests/fixtures/jvm/MutableReferenceLocals.scala` preserves the issue's
-candidate source unchanged. The repository frontend currently stops while
-typing `Base.value`: the bare constructor parameter `seed` is reported as
-`TermNameNotFound` at the exact `seed` source span. No typed unit, JVM plan,
-lowering, or classfile analysis is reached for this exact source. This is a
-limitation of this repository's frontend, not evidence that the source is
-invalid Scala.
+`tests/fixtures/jvm/MutableReferenceLocals.scala` is the bounded integration
+fixture for this increment. It changes only `Base` storage: `seed` is copied
+into a supported private `currentSeed` field, and `Base.value` reads that
+field. This keeps the fixture focused on mutable reference locals and avoids
+adding plain constructor-parameter capture semantics to the frontend/backend.
+The original source shape (`def value(): Int = seed`) remains unsupported and
+is outside this increment.
 
 The PR review independently compiled the exact source with its cached Scala
 3.9.0 reference compiler; its reported compiler revision begins with the
@@ -29,21 +29,18 @@ assignments, `current.value()` selections, and contextual sibling union. This
 is reviewer-run compatibility evidence; the local environment used for this
 audit did not have that compiler available.
 
-The two checked-in adaptations isolate distinct behaviors. The readback
-fixture changes only `Base` to store `seed` in `currentSeed` while preserving
-all three `current.value()` reads. The typed fixture keeps that storage
-adaptation but returns an integer literal from candidate methods, isolating
-local CFG behavior from virtual dispatch. The exact issue source still has an
-earlier unresolved `seed` reference in `Base.value`.
+The typed fixture keeps the same `Base` storage adaptation but returns an
+integer literal from candidate methods, isolating local CFG behavior from
+virtual dispatch. The source candidate is therefore intentionally bounded to
+the frontend/backend features supported by this increment.
 
 | Input | `choose` | `repeat` | `initialize` | Reached stage |
 | --- | --- | --- | --- | --- |
-| Exact issue source | `TermNameNotFound(seed)` in `Base.value` | Same earlier unit failure | Same earlier unit failure | Typer, before candidate method completion |
-| `MutableReferenceLocalsReadback.scala`, only `Base` storage adapted | Branch assignment selects `Right.value()` when true | Loop assignments select `Right.value()` after one or more iterations and `Left.value()` after zero iterations | Sibling-`If` initialization dispatches to the selected subtype | Source JVM pipeline; JDK 25 `-Xverify:all` execution |
+| `MutableReferenceLocals.scala`, `Base` storage adapted | Branch assignment selects `Right.value()` when true | Loop assignments select `Right.value()` after one or more iterations and `Left.value()` after zero iterations | Sibling-`If` initialization dispatches to the selected subtype | Source JVM pipeline; JDK 25 `-Xverify:all` execution |
 | `MutableReferenceLocalsTyped.scala`, `current.value()` replaced by `42` | Canonical `current: Base` survives a one-arm branch assignment and is returned after the join | Canonical `current: Base` survives loop assignments and remains initialized for zero or more iterations | An explicit `Base` local consumes a checked sibling-union initializer | Source JVM pipeline; branch and loop local-frame regressions |
 
-The readback test now proves the mutable local reaches virtual invocation after
-branch, loop, and initializer joins, then runs those methods under
+The candidate fixture test proves the mutable local reaches virtual invocation
+after branch, loop, and initializer joins, then runs those methods under
 `java -Xverify:all` and checks subtype-specific results. The literal-result
 fixture separately pins canonical local symbols, owners, mutability flags,
 declared types, typed initializer/assignment nodes, and class identities from a
@@ -209,9 +206,9 @@ local behavior must remain unchanged.
 | #1459 | `dotty-typer`, `dotty-jvm` + classfile integration | Permit direct applicable method calls on planned mutable local receivers, then compose reference writes and calls through `If` and `While` while preserving source definite initialization and verifier joins. Bare field selections and overloaded mutable-local calls keep the stable-prefix restriction. |
 | #1460 | End-to-end integration / CI | Real Scala source to JDK 21+ execution, decoded local frames, exact bytecode and runtime dispatch after #1455–#1459. |
 
-The adapted readback fixture now exercises `current.value()` end to end. The
-unadapted issue source still fails earlier while resolving `seed` in
-`Base.value`; that source-name blocker is outside this mutable-reference-local
+The candidate fixture exercises `current.value()` end to end. The original
+plain constructor-parameter read in `Base.value` remains a separate frontend
+and storage concern and is not covered by this mutable-reference-local
 increment.
 
 ## Compatibility and runtime validation

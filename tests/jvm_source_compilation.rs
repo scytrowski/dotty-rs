@@ -10883,44 +10883,13 @@ fn initialized_mutable_reference_local_can_be_discarded_as_an_expression() {
 }
 
 #[test]
-fn mutable_reference_issue_candidate_pins_the_current_source_frontend_blocker() {
+fn mutable_reference_issue_candidate_calls_dispatch_after_local_cfg_joins() {
     let source = fs::read_to_string(fixture_path("MutableReferenceLocals.scala"))
-        .expect("read the exact issue candidate fixture");
-    let output = TestOutputDirectory::new("mutable-reference-local-candidate");
-    let result = compile_source_batch(
-        &source,
-        "MutableReferenceLocals.scala",
-        output.path(),
-        SourceId::from_index(1454),
-        SourceUnitCardinality::AtLeastTwo,
-    );
-    let Err(PipelineFailure::Typer(TyperError::TermNameNotFound {
-        source: error_source,
-        position,
-        ..
-    })) = result
-    else {
-        panic!("the exact issue candidate should fail at the unresolved constructor parameter");
-    };
-    assert_eq!(error_source, SourceId::from_index(1454));
-    let position = position.expect("the error should retain the unresolved seed span");
-    assert_eq!(position.source(), SourceId::from_index(1454));
-    let range = position.span().range();
-    assert_eq!(
-        &source[range.start() as usize..range.end() as usize],
-        "seed"
-    );
-    assert!(output.class_files().is_empty());
-}
-
-#[test]
-fn mutable_reference_readback_calls_dispatch_after_local_cfg_joins() {
-    let source = fs::read_to_string(fixture_path("MutableReferenceLocalsReadback.scala"))
-        .expect("read the minimally adapted, readback-preserving fixture");
-    let output = TestOutputDirectory::new("mutable-reference-readback-dispatch");
+        .expect("read the issue candidate fixture with bounded Base storage");
+    let output = TestOutputDirectory::new("mutable-reference-candidate-dispatch");
     let artifacts = compile_source_batch(
         &source,
-        "MutableReferenceLocalsReadback.scala",
+        "MutableReferenceLocals.scala",
         output.path(),
         SourceId::from_index(1454),
         SourceUnitCardinality::AtLeastTwo,
@@ -10936,10 +10905,10 @@ fn mutable_reference_readback_calls_dispatch_after_local_cfg_joins() {
 
     if require_jdk_or_skip() {
         let output_path = output.path().to_str().expect("UTF-8 output path");
-        let harness = output.path().join("MutableReferenceReadbackHarness.java");
+        let harness = output.path().join("MutableReferenceCandidateHarness.java");
         fs::write(
             &harness,
-            r#"public final class MutableReferenceReadbackHarness {
+            r#"public final class MutableReferenceCandidateHarness {
   public static void main(String[] args) {
     Runner runner = new Runner();
     if (runner.choose(false, 10) != 11 || runner.choose(true, 10) != 12)
@@ -10969,7 +10938,7 @@ fn mutable_reference_readback_calls_dispatch_after_local_cfg_joins() {
                 "-Xverify:all",
                 "-classpath",
                 output_path,
-                "MutableReferenceReadbackHarness",
+            "MutableReferenceCandidateHarness",
             ])
             .output()
             .expect("start java verifier");
