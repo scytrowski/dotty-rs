@@ -38,7 +38,7 @@ use std::fmt;
 /// classfile-only concepts) are not reconstructed from `.tasty` at all,
 /// so a `.tasty`-backed symbol still gets no [`crate::symbol::ClassfileMetadata`]
 /// entry.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyClass {
     pub flags: ClassAccessFlags,
     /// The class's real `PRIVATE_TAG`/`PROTECTED_TAG` modifier, kept
@@ -156,7 +156,7 @@ pub(crate) enum DeclaredQualifier {
 }
 
 /// One `ValDef` reconstructed from a class's `Template.stats`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyField {
     pub name: String,
     pub flags: FieldAccessFlags,
@@ -167,7 +167,7 @@ pub(crate) struct DecodedTastyField {
 }
 
 /// One `DefDef` reconstructed from a class's `Template.stats`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyMethod {
     pub name: String,
     pub flags: MethodAccessFlags,
@@ -189,7 +189,7 @@ pub(crate) struct DecodedTastyMethod {
 }
 
 /// One term parameter of a [`DecodedTastyMethod`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DecodedTastyParameter {
     pub name: String,
     pub declared_type: Option<BinaryName>,

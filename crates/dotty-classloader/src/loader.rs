@@ -568,20 +568,32 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// shared loading session return the same module identity without adding
     /// another declarations scope.
     pub fn complete_module(&mut self, name: &BinaryName) -> Result<ModuleIdentity, ClassLoadError> {
+        self.complete_module_with_tasty_cache(name, &mut HashMap::new())
+            .0
+    }
+
+    pub(crate) fn complete_module_with_tasty_cache(
+        &mut self,
+        name: &BinaryName,
+        decoded_cache: &mut HashMap<BinaryName, tasty_symbol::DecodedTastyClass>,
+    ) -> (Result<ModuleIdentity, ClassLoadError>, bool) {
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
-        let result = self.complete_module_inner(name);
+        let mut decoded_cache_hit = false;
+        let result = self.complete_module_inner(name, decoded_cache, &mut decoded_cache_hit);
         if result.is_err() {
             self.session.rollback_to(self.store, session_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.repository.discard_rolled_back_symbols(self.store);
         }
-        result
+        (result, decoded_cache_hit)
     }
 
     fn complete_module_inner(
         &mut self,
         name: &BinaryName,
+        decoded_cache: &mut HashMap<BinaryName, tasty_symbol::DecodedTastyClass>,
+        decoded_cache_hit: &mut bool,
     ) -> Result<ModuleIdentity, ClassLoadError> {
         let identity = self.ensure_module_identity_inner(name)?;
         match self.store.symbols.get(identity.module_class).info {
@@ -658,34 +670,41 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let alias_error = RefCell::new(None);
         let class_path = &self.class_path;
-        let decoded = tasty_symbol::decode_module_class_with_resolvers(
-            resource.bytes(),
-            &identity.module_class_name,
-            |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
-                Ok(target) => target,
-                Err(error) => {
-                    alias_error.borrow_mut().get_or_insert(error);
-                    None
-                }
-            },
-            |package, simple_name| match resolve_tasty_bare_reference(
-                class_path,
-                package,
-                simple_name,
-            ) {
-                Ok(target) => target,
-                Err(error) => {
-                    alias_error.borrow_mut().get_or_insert(error);
-                    None
-                }
-            },
-        );
-        if let Some(error) = alias_error.into_inner() {
-            return Err(error.into_class_load_error().0);
-        }
-        let decoded = decoded.map_err(|error| {
-            ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
-        })?;
+        let decoded = if let Some(decoded) = decoded_cache.get(name) {
+            *decoded_cache_hit = true;
+            decoded.clone()
+        } else {
+            let decoded = tasty_symbol::decode_module_class_with_resolvers(
+                resource.bytes(),
+                &identity.module_class_name,
+                |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        alias_error.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                },
+                |package, simple_name| match resolve_tasty_bare_reference(
+                    class_path,
+                    package,
+                    simple_name,
+                ) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        alias_error.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                },
+            );
+            if let Some(error) = alias_error.into_inner() {
+                return Err(error.into_class_load_error().0);
+            }
+            let decoded = decoded.map_err(|error| {
+                ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
+            })?;
+            decoded_cache.insert(name.clone(), decoded.clone());
+            decoded
+        };
 
         let module_class = self.store.symbols.get(identity.module_class);
         if module_class.kind != SymbolKind::ModuleClass

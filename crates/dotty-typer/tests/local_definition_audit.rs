@@ -117,6 +117,8 @@ fn merge_module_resolution_profile(
     target.new_object_identities += source.new_object_identities;
     target.reused_object_identities += source.reused_object_identities;
     target.module_member_successes += source.module_member_successes;
+    target.module_decode_cache_hits += source.module_decode_cache_hits;
+    target.module_decode_cache_misses += source.module_decode_cache_misses;
     target
         .resolved_object_targets
         .extend(source.resolved_object_targets);
@@ -137,6 +139,8 @@ fn merge_module_resolution_profile(
 fn merged_module_resolution_profiles_union_only_resolved_object_and_member_targets() {
     let mut aggregate = ModuleResolutionProfile {
         package_term_successes: 1,
+        module_decode_cache_hits: 2,
+        module_decode_cache_misses: 1,
         resolved_object_targets: BTreeSet::from(["fixture::First".to_owned()]),
         resolved_member_targets: BTreeSet::from([
             "fixture/First::namespace=term::name=value::space=Prefix::selector=Unique".to_owned(),
@@ -146,6 +150,8 @@ fn merged_module_resolution_profiles_union_only_resolved_object_and_member_targe
 
     let next = ModuleResolutionProfile {
         package_term_successes: 2,
+        module_decode_cache_hits: 3,
+        module_decode_cache_misses: 4,
         resolved_object_targets: BTreeSet::from([
             "fixture::First".to_owned(),
             "fixture::Second".to_owned(),
@@ -160,6 +166,8 @@ fn merged_module_resolution_profiles_union_only_resolved_object_and_member_targe
     merge_module_resolution_profile(&mut aggregate, next);
 
     assert_eq!(aggregate.package_term_successes, 3);
+    assert_eq!(aggregate.module_decode_cache_hits, 5);
+    assert_eq!(aggregate.module_decode_cache_misses, 5);
     assert_eq!(
         aggregate.resolved_object_targets,
         BTreeSet::from(["fixture::First".to_owned(), "fixture::Second".to_owned()])
@@ -12699,6 +12707,10 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         "  completed_module_classes={} module_member_successes={}",
         completed_module_classes.len(),
         module_profile.module_member_successes
+    );
+    println!(
+        "  module_decode_cache_hits={} module_decode_cache_misses={}",
+        module_profile.module_decode_cache_hits, module_profile.module_decode_cache_misses
     );
     println!(
         "  external_package_term_successes={} distinct_external_objects={}",

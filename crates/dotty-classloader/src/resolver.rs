@@ -10,7 +10,7 @@ use dotty_core::{
     ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver,
     Type, TypeId, TypeRefTarget,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 struct ResolverUndo {
     session: SessionCheckpoint,
@@ -49,6 +49,10 @@ pub struct ModuleResolutionProfile {
     pub member_targets: std::collections::BTreeSet<String>,
     /// Sorted module binary names whose ModuleClass completion succeeded.
     pub completed_module_classes: std::collections::BTreeSet<String>,
+    /// Module completion requests served from the resolver-local decoded TASTy cache.
+    pub module_decode_cache_hits: u64,
+    /// Module completion requests that successfully populated the decoded TASTy cache.
+    pub module_decode_cache_misses: u64,
 }
 
 /// Resolves core symbols from a classpath while sharing the caller's store,
@@ -70,6 +74,10 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
     module_profile: ModuleResolutionProfile,
     collect_module_resolution_profile: bool,
     negative_module_member_lookups: HashSet<(BinaryName, Name)>,
+    // Decoded facts are immutable classpath data, so they can safely outlive a
+    // failed semantic-store transaction. Keep them resolver-local so they
+    // never retain SymbolId, TypeId, or ScopeId values across rollback.
+    decoded_module_cache: HashMap<BinaryName, crate::tasty_symbol::DecodedTastyClass>,
     #[cfg(test)]
     package_failure_after_segment: Option<usize>,
 }
@@ -86,6 +94,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             module_profile: ModuleResolutionProfile::default(),
             collect_module_resolution_profile: false,
             negative_module_member_lookups: HashSet::new(),
+            decoded_module_cache: HashMap::new(),
             #[cfg(test)]
             package_failure_after_segment: None,
         }
@@ -293,7 +302,15 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
-        let result = loader.complete_module(name);
+        let (result, decoded_cache_hit) =
+            loader.complete_module_with_tasty_cache(name, &mut self.decoded_module_cache);
+        if self.collect_module_resolution_profile {
+            if decoded_cache_hit {
+                self.module_profile.module_decode_cache_hits += 1;
+            } else if self.decoded_module_cache.contains_key(name) {
+                self.module_profile.module_decode_cache_misses += 1;
+            }
+        }
         let (class_path, session) = loader.into_parts();
         self.class_path = Some(class_path);
         self.session = session;
@@ -3135,6 +3152,26 @@ mod tests {
         );
         assert_eq!(store.checkpoint(), store_mark);
         assert_eq!(resolver.session.checkpoint(), session_mark);
+
+        let another_absent_name = Name::new(store.names.intern("alsoAbsent"), Namespace::Term);
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: object_ref,
+                    name: another_absent_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            ),
+            Ok(None),
+            "a distinct missing member should reuse the immutable decoded module data"
+        );
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        let profile = resolver.take_module_resolution_profile();
+        assert_eq!(profile.module_decode_cache_misses, 1);
+        assert_eq!(profile.module_decode_cache_hits, 1);
 
         assert!(
             resolver
