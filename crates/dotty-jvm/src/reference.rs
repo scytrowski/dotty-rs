@@ -93,6 +93,81 @@ pub(super) fn project_type(
     project_type_with_metadata(unit, ty, definitions, None)
 }
 
+/// Proves the narrow checked JVM representation for an explicitly expected
+/// sibling union. The source `Type::Or` remains untouched.
+pub(super) fn project_sibling_union_to_expected_type(
+    unit: &JvmCompilationUnit<'_>,
+    source_type: TypeId,
+    expected_type: TypeId,
+    definitions: &Definitions,
+) -> Result<crate::JvmSiblingUnionProjection, JvmCodegenError> {
+    unit.validate()?;
+    let unsupported = || JvmCodegenError::UnsupportedSiblingUnionProjection {
+        source_type,
+        expected_type,
+    };
+    let Some(Type::Or { left, right }) = unit.store.types.try_get(source_type) else {
+        return Err(unsupported());
+    };
+    let source_arms = [*left, *right];
+    let mut arm_classes = Vec::with_capacity(2);
+    for arm in source_arms {
+        let JvmType::Reference(class) = project_expected_class_type(unit, arm, definitions)? else {
+            return Err(unsupported());
+        };
+        arm_classes.push(class);
+    }
+    let JvmType::Reference(expected_class) =
+        project_expected_class_type(unit, expected_type, definitions)?
+    else {
+        return Err(unsupported());
+    };
+    let [left_class, right_class] = arm_classes.as_slice() else {
+        return Err(unsupported());
+    };
+    let arm_classes = [*left_class, *right_class];
+
+    // A Type::Or produced by the audited frontend represents two distinct
+    // siblings. Ancestor pairs already have an ordinary exact projection and
+    // must continue to use that existing path.
+    if arm_classes[0] == arm_classes[1]
+        || is_validated_subtype(unit, arm_classes[0], arm_classes[1], definitions)?
+        || is_validated_subtype(unit, arm_classes[1], arm_classes[0], definitions)?
+    {
+        return Err(unsupported());
+    }
+
+    let hierarchy = unit.class_hierarchy(definitions)?;
+    if hierarchy.nearest_common_non_object_ancestor(arm_classes[0], arm_classes[1])
+        != Some(expected_class)
+        || !is_validated_subtype(unit, arm_classes[0], expected_class, definitions)?
+        || !is_validated_subtype(unit, arm_classes[1], expected_class, definitions)?
+    {
+        return Err(unsupported());
+    }
+
+    Ok(crate::JvmSiblingUnionProjection {
+        source_type,
+        expected_type,
+        source_arms: arm_classes,
+        representation: JvmType::Reference(expected_class),
+    })
+}
+
+fn project_expected_class_type(
+    unit: &JvmCompilationUnit<'_>,
+    ty: TypeId,
+    definitions: &Definitions,
+) -> Result<JvmType, JvmCodegenError> {
+    match project_type_with_metadata(unit, ty, definitions, None) {
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            kind: UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+            ..
+        }) => project_constructor_type(unit, ty, definitions),
+        result => result,
+    }
+}
+
 /// Projects the canonical class type used by source constructor applications.
 /// Source typing retains the owning package as the class reference prefix;
 /// accepting it here still requires an exact root-package TypeRef matching the

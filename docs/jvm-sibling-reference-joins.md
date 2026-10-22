@@ -130,8 +130,21 @@ behavior or claim the two paths are the same.
 The typer's `Type::Or` is source semantic information. It must not be replaced
 with `Base` merely because `Base` is a known JVM ancestor. Source conformance,
 method erasure/descriptors, and verifier stack-map joins are separate
-questions. A later implementation needs an explicit source-result policy
-before it can tell the CFG analyzer that `Base` is the intended join type.
+questions. Issue #1436 adds a checked projection proof for an exact two-arm
+sibling union when the typed source context already supplies the expected
+class. The proof requires canonical class references from this emission unit,
+ordinary non-generic planned classes, and the expected class to equal their
+nearest common non-`Object` ancestor in the validated hierarchy. It accepts
+the package-owner prefix emitted by the source typer only after checking that
+it is the exact canonical owner of the referenced class.
+
+`JvmSiblingUnionProjection` retains the original union `TypeId`, expected
+source `TypeId`, arm `SymbolId`s in source order, and checked JVM reference
+representation. It does not edit the `TypedAst` or authorize a projection
+without an explicit expected type. The ordinary standalone `reference_type`
+path still rejects `Type::Or`; no control-flow bytecode consumes this proof
+yet. Issue #1438 owns using it for sibling-valued `if` emission and verifier
+stack-map joins.
 
 Independently, the JVMS 21 verifier permits a stack-map entry
 `Object(Base)` when both incoming initialized values are assignable to Base.
@@ -149,11 +162,9 @@ characterization; it is not reported as an independent Scala oracle run.
 
 ## Conservative scope for follow-up work
 
-Any later support should require a unique, explicitly proven common
-superclass from the current planned hierarchy, and should keep source typing
-separate from class-file dataflow. This audit does not authorize a global
-union-to-class projection, inferred fallback to `java/lang/Object`, a cast,
-or a change to the typer.
+Further support should keep source typing separate from class-file dataflow.
+This proof does not authorize a global union-to-class projection, inferred
+fallback to `java/lang/Object`, a cast, or a change to the typer.
 
 `JvmClassHierarchy::nearest_common_non_object_ancestor(left, right)` now
 answers that source-independent proof query from its validated canonical

@@ -2042,6 +2042,18 @@ fn reference_projection_rejects_unplanned_stale_and_noncanonical_targets() {
             kind: crate::UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
         })
     );
+    assert_eq!(
+        unit.project_sibling_union_to_expected_type(
+            union_type,
+            counter_parent,
+            &fixture.definitions
+        ),
+        Err(JvmCodegenError::UnsupportedSiblingUnionProjection {
+            source_type: union_type,
+            expected_type: counter_parent,
+        }),
+        "an Object-only shared root or one union arm is not an expected sibling base"
+    );
 }
 
 #[test]

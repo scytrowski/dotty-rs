@@ -243,9 +243,11 @@ headers/back-edges. A source-typed reference `if` may join two different
 initialized classes only when the validated unit hierarchy proves that one is
 an ancestor of the other and both are assignable to the `If` tree's canonical
 result class. The result stays that source-selected class, with no cast or
-guessed common parent. Sibling and unrelated classes, including `Type::Or`
-results, remain rejected. A local that is not initialized on every path
-becomes unusable, and a later read fails.
+guessed common parent. Sibling `Type::Or` results now have a separate checked
+projection proof when an explicit expected class is their nearest non-`Object`
+common ancestor; the source type stays unchanged, and expression/CFG lowering
+does not consume this proof yet (#1438). A local that is not initialized on
+every path becomes unusable, and a later read fails.
 
 Allocation may occur in a branch or loop body only as one complete
 `new`/`dup`/supported-argument/`invokespecial` sequence inside a basic block.
@@ -265,7 +267,8 @@ unsupported states remain typed build errors.
 | Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified ancestry relation of up to two edges; full allocation sequence remains in one basic block |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
 | Ancestor-related initialized references at a typed `If` join | Keep the canonical source result class | Both branch classes must be ancestor-related and assignable to that result; classfile frames verify the join |
-| Sibling, unrelated, or non-canonical reference types at a join | No classfile emitted | Typed reference/branch error; no sibling LUB, `Object`, or `Type::Or` projection |
+| Sibling union at a join | Checked projection evidence is available only for an exact two-arm planned-class `Type::Or` with an explicit expected nearest non-`Object` common ancestor; bytecode lowering remains unsupported until #1438 | No inferred target or AST rewrite; `Object`-only, forged, malformed, nested unsupported, and non-canonical cases fail |
+| Unrelated or non-canonical reference types at a join | No classfile emitted | Typed reference/branch error; no guessed superclass, `Object` widening, cast, or name-based projection |
 
 Object-construction typing, canonical constructor and receiver identity,
 uninitialized-reference verifier constraints, and the multi-class planning
