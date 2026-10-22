@@ -16,21 +16,27 @@ the requested resource reproduces `tasty.unresolved_supertype` for 42 roots /
 8,929 observations. Eight library roots / 20 observations decode directly;
 this alone does not mean that loading their dependency graph succeeds.
 
-The profile now also runs `ClassLoader::load_class_detailed` for every root.
-Full loading ends with `tasty.unresolved_supertype` for 41 roots / 379
-observations, `tasty.missing_type_def` for 6 roots / 8,463 observations, and
-success for 3 roots / 107 observations. The six missing-type roots are
+The profile also runs `ClassLoader::load_class_detailed` for every root. The
+post-#1414 run compared with the checked-in pre-#1414 snapshot moves
+`tasty.unresolved_supertype` from 41 roots / 379 weighted observations to 27
+roots / 124 observations: 14 roots / 255 weighted observations recovered,
+with no newly unresolved roots. The full-loader outcomes are now
+`tasty.missing_type_def` for 7 roots / 8,560 observations,
+`classloader.not_found` for 7 / 28,
+`tasty.unresolved_supertype` for 27 / 124, and success for 9 / 237. The seven
+missing-type roots are
 `dotty/tools/dotc/ast/tpd$` (1,715), `dotty/tools/dotc/ast/untpd$` (141),
 `dotty/tools/dotc/config/SourceVersion$` (19),
 `dotty/tools/dotc/core/Symbols$` (3,652),
 `dotty/tools/dotc/core/Types$` (2,545), and
-`dotty/tools/dotc/parsing/Tokens$` (391). Their exact dependency chains and
-selected JAR origins are included in the TSV. For example, `tpd$` fails while
-loading `Trees$Instance` and then `Trees`; `Symbols$` fails through
-`Property$Key` to `Property`. The three full-load successes are
-`JavaTokens$` (22), `Action$` (84), and `SymbolInformation$` (1). This
-focused classloader path is not identical to the source typer's resolver, so
-these outcomes are reported separately from the frozen source-audit count.
+`dotty/tools/dotc/parsing/Tokens$` (391), and `scala/Predef$` (97). Exact
+dependency chains and selected JAR origins are included in the TSV. For
+`tpd$` (1,715) and `untpd$` (141), the applied parent now resolves to the
+verified `dotty/tools/dotc/ast/Trees$Instance`; loading continues to `Trees`
+and stops there on `tasty.missing_type_def`. These roots therefore demonstrate
+the parent-resolution change, not complete class loading. The full-loader
+profile is not identical to the source typer's resolver, so the two outcome
+sets remain separate.
 
 The root TSV records every Template parent, not just the first failure. It
 separates standalone decoder cause/index from the full-load deepest cause,
@@ -39,8 +45,9 @@ failing binary name, dependency chain, and selected resource origin.
 diagnostic pass, which continues after an earlier unresolved parent. Root
 artifacts, versions and SHA-256 hashes are retained on each row. The profile
 includes stable wire addresses and bounded raw shapes; it does not use arena
-IDs or debug formatting. The pinned profile asserts the 41/6/3 full-load
-classification as well as the 50-root weighted accounting.
+IDs or debug formatting. The pinned profile asserts the updated per-root
+movement (41 to 27 unresolved roots, 379 to 124 weighted observations), the
+full-load outcome classification, and the 50-root weighted accounting.
 
 A single instrumented source audit pass now records the source-file-to-root
 relation for all 50 frozen roots. It found 8,948 unresolved-supertype
@@ -89,8 +96,11 @@ wire shape and resolution boundary retained:
    slices; the profile's `alias_owner` / `alias_name` columns show where an
    actual alias was identified.
 
-All 163 parent rows are available in
-[`classloader-unresolved-tasty-parent-profile-3.9.0.tsv`](classloader-unresolved-tasty-parent-profile-3.9.0.tsv), and the source-level root map is in
+All 163 post-#1414 parent rows are available in
+[`classloader-unresolved-tasty-parent-profile-3.9.0-post-1414.tsv`](classloader-unresolved-tasty-parent-profile-3.9.0-post-1414.tsv).
+The pre-#1414 comparison snapshot used by the profile test remains in
+[`classloader-unresolved-tasty-parent-profile-3.9.0.tsv`](classloader-unresolved-tasty-parent-profile-3.9.0.tsv),
+and the source-level root map is in
 [`classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv`](classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv).
 The profile test joins source-audit observations and unique source-file counts
 from the retained provenance TSV by the `::requested=` identity (not the
@@ -99,7 +109,7 @@ asserts exact coverage of all 50 frozen roots and that the joined observations
 sum to 8,948 across 279 source files. This makes the checked-in profile
 directly reproducible without rerunning the source corpus audit. Two focused
 profile runs produced byte-identical final output (SHA-256
-`287942c01a548f3ec0325bec12b2d40a23da32ab209df75c1d9430c33661d78f`). Empty
+`7b74d1f4bfdb5ea8b5df5802fff7900e9a93e71495476cdccaa1afc6cb7b9c9d`). Empty
 TSV cells use `-`. No semantic corpus baseline or production behavior was
 changed.
 
@@ -137,4 +147,4 @@ sha256sum /tmp/parent-profile-a.tsv /tmp/parent-profile-b.tsv
 ```
 
 Both files should hash to
-`7157dbe16e1aa8286381276500afafed7c27e52147d69be97a59359cf52a27ac`.
+`7b74d1f4bfdb5ea8b5df5802fff7900e9a93e71495476cdccaa1afc6cb7b9c9d`.
