@@ -1616,11 +1616,88 @@ fn sibling_source_hierarchy_proves_the_canonical_common_base_deterministically()
 }
 
 #[test]
+fn sibling_inheritance_batch_is_byte_for_byte_deterministic_across_fresh_frontends() {
+    let source = fs::read_to_string(fixture_path("SiblingConstructors.scala"))
+        .expect("read the real sibling inheritance and conditional fixture");
+    let first_output = TestOutputDirectory::new("sibling-inheritance-determinism-first");
+    let second_output = TestOutputDirectory::new("sibling-inheritance-determinism-second");
+    let first = compile_source_batch(
+        &source,
+        "SiblingConstructors.scala",
+        first_output.path(),
+        SourceId::from_index(1439),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("first independent source frontend emits the sibling batch");
+    let second = compile_source_batch(
+        &source,
+        "SiblingConstructors.scala",
+        second_output.path(),
+        SourceId::from_index(1440),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("second independent source frontend emits the sibling batch");
+    let identity_and_bytes = |artifacts: &[EmittedArtifact]| {
+        artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected_names = ["Base", "Left", "Right", "Runner"];
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        expected_names
+    );
+    assert_eq!(
+        second
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        expected_names
+    );
+    assert_eq!(identity_and_bytes(&first), identity_and_bytes(&second));
+    for (output, artifacts) in [(&first_output, &first), (&second_output, &second)] {
+        assert_eq!(
+            output.class_files(),
+            expected_names.map(|name| output.path().join(format!("{name}.class")))
+        );
+        for artifact in artifacts {
+            decode_emitted_class(artifact);
+        }
+    }
+}
+
+#[test]
 fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
     let output = TestOutputDirectory::new("sibling-constructors-runtime");
     let artifacts = compile_fixture_classes("SiblingConstructors.scala", output.path())
         .expect("emit the complete sibling constructor and dispatch batch");
     assert_eq!(artifacts.len(), 4);
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Left", "Right", "Runner"],
+        "the complete class batch is published in source declaration order"
+    );
+    assert_eq!(
+        output.class_files(),
+        [
+            output.path().join("Base.class"),
+            output.path().join("Left.class"),
+            output.path().join("Right.class"),
+            output.path().join("Runner.class")
+        ]
+    );
     let decode_class = |name: &str| {
         let artifact = artifacts
             .iter()
@@ -1632,6 +1709,27 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
     let left = decode_class("Left");
     let right = decode_class("Right");
     let runner = decode_class("Runner");
+    for (class, name) in [
+        (&base, "Base"),
+        (&left, "Left"),
+        (&right, "Right"),
+        (&runner, "Runner"),
+    ] {
+        assert_eq!(
+            class.version.major, 65,
+            "{name} uses the JDK 21 classfile version"
+        );
+        assert!(class.access_flags.is_public(), "{name} is public");
+        assert!(
+            !class.access_flags.is_interface(),
+            "{name} is an ordinary class"
+        );
+        assert!(
+            class.interfaces.is_empty(),
+            "{name} has no fabricated interfaces"
+        );
+        assert_eq!(class.constant_pool.class_name(class.this_class), Ok(name));
+    }
     assert_eq!(
         base.constant_pool
             .class_name(base.super_class.expect("Base has a superclass")),
@@ -1654,7 +1752,26 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
             .class_name(runner.super_class.expect("Runner has a superclass")),
         Ok("java/lang/Object")
     );
-    assert!(methods_with_descriptors(&base).contains(&("<init>".to_owned(), "(I)V".to_owned())));
+    assert_eq!(
+        methods_with_descriptors(&base),
+        [
+            ("<init>".to_owned(), "(I)V".to_owned()),
+            ("value".to_owned(), "()I".to_owned()),
+            ("doubled".to_owned(), "()I".to_owned())
+        ]
+    );
+    for method in &base.methods {
+        assert!(method.access_flags.is_public(), "Base methods are public");
+        assert!(
+            !method.access_flags.is_static(),
+            "Base methods are instance methods"
+        );
+    }
+    assert_eq!(base.fields.len(), 1, "Base owns the sole current field");
+    let current = &base.fields[0];
+    assert!(current.access_flags.is_private());
+    assert_eq!(base.constant_pool.utf8(current.name_index), Ok("current"));
+    assert_eq!(base.constant_pool.utf8(current.descriptor_index), Ok("I"));
     assert_invocation_sequence(
         &base,
         emitted_method_code(&base, "<init>"),
@@ -1668,10 +1785,35 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
         "current",
         "I",
     );
+    assert_eq!(
+        decode_subset_instructions(emitted_method_code(&base, "<init>"))
+            .iter()
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        [0x2a, 0xb7, 0x2a, 0x1b, 0xb5, 0xb1],
+        "Base alone initializes current from its own seed parameter after Object construction"
+    );
     for class in [&left, &right] {
-        assert!(
-            methods_with_descriptors(class).contains(&("<init>".to_owned(), "(I)V".to_owned()))
+        assert_eq!(
+            class.fields.len(),
+            0,
+            "children do not redeclare Base state"
         );
+        assert_eq!(
+            methods_with_descriptors(class),
+            [
+                ("<init>".to_owned(), "(I)V".to_owned()),
+                ("value".to_owned(), "()I".to_owned())
+            ],
+            "each child declares only its forwarding constructor and override"
+        );
+        for method in &class.methods {
+            assert!(method.access_flags.is_public(), "child methods are public");
+            assert!(
+                !method.access_flags.is_static(),
+                "child methods are instance methods"
+            );
+        }
         assert_invocation_sequence(
             class,
             emitted_method_code(class, "<init>"),
@@ -1681,6 +1823,14 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
             class,
             emitted_method_code(class, "value"),
             &[(0xb7, "Base", "value", "()I")],
+        );
+        assert_eq!(
+            decode_subset_instructions(emitted_method_code(class, "<init>"))
+                .iter()
+                .map(|(_, opcode)| *opcode)
+                .collect::<Vec<_>>(),
+            [0x2a, 0x1b, 0xb7, 0xb1],
+            "each sibling forwards its own constructor parameter from local slot one"
         );
     }
     assert_invocation_sequence(
@@ -1725,6 +1875,52 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
             (0xb6, "Base", "doubled", "()I"),
         ],
     );
+    assert_eq!(
+        methods_with_descriptors(&runner),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("evaluate".to_owned(), "(LBase;)I".to_owned()),
+            ("fromLeft".to_owned(), "(I)I".to_owned()),
+            ("fromRight".to_owned(), "(I)I".to_owned()),
+            ("choose".to_owned(), "(ZI)LBase;".to_owned()),
+            ("reverseChoose".to_owned(), "(ZI)LBase;".to_owned()),
+            ("run".to_owned(), "(ZI)I".to_owned()),
+            ("acceptChoice".to_owned(), "(ZI)I".to_owned())
+        ]
+    );
+    for method in ["choose", "reverseChoose"] {
+        let code = emitted_method_code(&runner, method);
+        let targets = decode_branch_targets(code);
+        let frames = stack_map_frames(&runner, method);
+        let base_join = frames
+            .iter()
+            .find(|frame| frame.stack == [StackMapVerificationType::Object("Base".to_owned())])
+            .expect("the StackMapTable resolves the common Base through a CONSTANT_Class");
+        assert!(
+            base_join.pc < code.len(),
+            "join frame PC is inside the Code array"
+        );
+        assert!(
+            targets.iter().any(|(_, _, target)| *target == base_join.pc),
+            "the Base frame starts at the emitted branch join"
+        );
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xc0),
+            "{method} contains no inserted checkcast"
+        );
+        let method_info = runner
+            .methods
+            .iter()
+            .find(|method_info| runner.constant_pool.utf8(method_info.name_index) == Ok(method))
+            .unwrap();
+        let [Attribute::Code(code_attribute)] = method_info.attributes.as_slice() else {
+            panic!("{method} has one Code attribute")
+        };
+        assert!(code_attribute.max_stack >= 3);
+        assert_eq!(code_attribute.max_locals, 3);
+    }
 
     if !require_jdk_or_skip() {
         return;
@@ -1735,17 +1931,25 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
         r#"public final class SiblingConstructorsHarness {
     public static void main(String[] args) {
         Runner runner = new Runner();
+        Base base = new Base(10);
+        if (base.doubled() != 20) throw new AssertionError("base dispatch");
+        if (new Left(10).doubled() != 22) throw new AssertionError("left override");
+        if (new Right(10).doubled() != 24) throw new AssertionError("right override");
         if (runner.fromLeft(10) != 22) throw new AssertionError("left dispatch");
         if (runner.fromRight(10) != 24) throw new AssertionError("right dispatch");
         if (runner.fromLeft(-3) != -4) throw new AssertionError("left negative seed");
         if (runner.fromRight(-3) != -2) throw new AssertionError("right negative seed");
-        if (runner.choose(true, 10).doubled() != 22) throw new AssertionError("left If result");
-        if (runner.choose(false, 10).doubled() != 24) throw new AssertionError("right If result");
+        Base leftChoice = runner.choose(true, 10);
+        Base rightChoice = runner.choose(false, 10);
+        if (leftChoice.getClass() != Left.class || rightChoice.getClass() != Right.class) throw new AssertionError("exact runtime classes");
+        if (leftChoice.doubled() != 22) throw new AssertionError("left If result");
+        if (rightChoice.doubled() != 24) throw new AssertionError("right If result");
         if (runner.reverseChoose(true, 10).doubled() != 24) throw new AssertionError("reversed right If result");
         if (runner.reverseChoose(false, 10).doubled() != 22) throw new AssertionError("reversed left If result");
         if (runner.run(true, 10) != 22 || runner.run(false, 10) != 24) throw new AssertionError("Base receiver");
         if (runner.acceptChoice(true, 10) != 22 || runner.acceptChoice(false, 10) != 24) throw new AssertionError("Base argument");
         if (runner.run(true, -3) != -4 || runner.run(false, -3) != -2) throw new AssertionError("negative seeds");
+        if (runner.run(true, 0) != 2 || runner.run(false, 0) != 4) throw new AssertionError("zero seeds");
     }
 }
 "#,
@@ -1763,6 +1967,20 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
         String::from_utf8_lossy(&javac.stdout),
         String::from_utf8_lossy(&javac.stderr)
     );
+    let javap = Command::new("javap")
+        .args(["-c", "-v", "-classpath", &classpath, "Runner"])
+        .output()
+        .expect("start javap for sibling-inheritance bytecode assertions");
+    assert!(
+        javap.status.success(),
+        "javap rejected Runner.class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap.contains("(ZI)LBase;"));
+    assert!(javap.contains("StackMapTable"));
+    assert!(javap.contains("Base.doubled:()I"));
     let java = Command::new("java")
         .args([
             "-Xverify:all",
