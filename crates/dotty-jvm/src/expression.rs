@@ -152,7 +152,7 @@ struct JvmLoweringContext<'a> {
     method: &'a JvmMethodMetadata,
     local_layout: Option<&'a JvmLocalLayout>,
     initialized_locals: HashSet<SymbolId>,
-    reference_assignment_control_flow_depth: usize,
+    reference_assignment_restricted_region_depth: usize,
     call_context: Option<(
         &'a JvmCompilationUnit<'a>,
         &'a JvmClassMetadata,
@@ -176,7 +176,7 @@ impl<'a> JvmLoweringContext<'a> {
             method,
             local_layout: None,
             initialized_locals: HashSet::new(),
-            reference_assignment_control_flow_depth: 0,
+            reference_assignment_restricted_region_depth: 0,
             call_context: None,
             expected_expression_type: None,
             node_visits: 0,
@@ -1074,7 +1074,7 @@ fn emit_assignment(
         });
     }
     if matches!(local.ty(), JvmType::Reference(_))
-        && context.reference_assignment_control_flow_depth > 0
+        && context.reference_assignment_restricted_region_depth > 0
     {
         return Err(JvmCodegenError::ReferenceLocalInUnsupportedControlFlow {
             tree: tree_id,
@@ -2257,9 +2257,9 @@ fn emit_short_circuit_boolean_intrinsic(
     })?;
 
     let initialized_on_skip = context.initialized_locals.clone();
-    context.reference_assignment_control_flow_depth += 1;
+    context.reference_assignment_restricted_region_depth += 1;
     let argument_flow = emit_expression(context, *argument, code, depth + 1)?;
-    context.reference_assignment_control_flow_depth -= 1;
+    context.reference_assignment_restricted_region_depth -= 1;
     if argument_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
             tree: tree_id,
@@ -2607,7 +2607,6 @@ fn emit_if_body(
             error,
         })?;
     let initialized_before_branches = context.initialized_locals.clone();
-    context.reference_assignment_control_flow_depth += 1;
     let then_flow =
         emit_expression_with_expected(context, then_branch, expected_type, code, depth + 1)?;
     let initialized_then = context.initialized_locals.clone();
@@ -2637,7 +2636,6 @@ fn emit_if_body(
     let else_flow =
         emit_expression_with_expected(context, else_branch, expected_type, code, depth + 1)?;
     let initialized_else = context.initialized_locals.clone();
-    context.reference_assignment_control_flow_depth -= 1;
     let flow = merge_if_flows(
         context,
         tree_id,
@@ -2722,9 +2720,9 @@ fn emit_while_body(
         })?;
 
     let initialized_before_loop = context.initialized_locals.clone();
-    context.reference_assignment_control_flow_depth += 1;
+    context.reference_assignment_restricted_region_depth += 1;
     let condition_flow = emit_expression(context, condition, code, depth + 1)?;
-    context.reference_assignment_control_flow_depth -= 1;
+    context.reference_assignment_restricted_region_depth -= 1;
     if condition_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::InvalidWhileCondition {
             tree: condition,
@@ -2740,9 +2738,7 @@ fn emit_while_body(
             error,
         })?;
 
-    context.reference_assignment_control_flow_depth += 1;
     let body_flow = emit_expression(context, body, code, depth + 1)?;
-    context.reference_assignment_control_flow_depth -= 1;
     match body_flow {
         Flow::Value(_) => {
             code.pop()
