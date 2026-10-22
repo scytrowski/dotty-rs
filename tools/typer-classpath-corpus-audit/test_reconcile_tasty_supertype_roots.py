@@ -89,6 +89,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
             rows, summary = reconcile(baseline, historical, parents, provenance)
 
             self.assertEqual(len(rows), 52)  # header + 50 frozen roots + one new root origin
+            self.assertTrue(all(len(row) == len(rows[0]) for row in rows))
             self.assertEqual(rows[1][0], "compiler/Root0")
             self.assertEqual(rows[1][7], "2")
             self.assertEqual(rows[1][10], "0")
