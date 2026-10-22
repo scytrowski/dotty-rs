@@ -5659,6 +5659,16 @@ fn unsupported_local_source_shapes_fail_at_their_pipeline_stage_without_artifact
         |failure| matches!(failure, PipelineFailure::Typer(_)),
     );
     assert_source_failure(
+        "immutable-reference-local-assignment",
+        "class ImmutableReferenceAssignment(seed: Int):\n  def run(): Int =\n    val current: ImmutableReferenceAssignment = new ImmutableReferenceAssignment(seed)\n    current = new ImmutableReferenceAssignment(seed)\n    42\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    assert_source_failure(
+        "unrelated-reference-local-assignment",
+        "class UnrelatedReferenceAssignment(seed: Int):\n  def run(): Int =\n    var current: UnrelatedReferenceAssignment = new UnrelatedReferenceAssignment(seed)\n    current = \"other\"\n    42\n",
+        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    );
+    assert_source_failure(
         "missing-local-reference",
         "class MissingLocal { def run(): Int = missing }\n",
         |failure| matches!(failure, PipelineFailure::Typer(_)),
@@ -10207,46 +10217,176 @@ fn mutable_reference_local_initialization_uses_a_category_one_slot() {
 }
 
 #[test]
-fn mutable_reference_local_cannot_be_copied_into_an_immutable_local() {
-    let output = TestOutputDirectory::new("reference-var-copy-rejected");
-    let result = compile_planned_constructor_source(
+fn mutable_reference_local_assignment_accepts_a_checked_subtype_and_dispatches() {
+    let output = TestOutputDirectory::new("reference-var-assignment");
+    let source = "class Base(seed: Int):\n  private var current: Int = seed\n  def value(): Int = current\nclass Left(seed: Int) extends Base(seed):\n  override def value(): Int = super.value() + 1\nclass Right(seed: Int) extends Base(seed):\n  override def value(): Int = super.value() + 2\nclass Runner:\n  def change(seed: Int): Base =\n    var current: Base = new Left(seed)\n    current = new Right(seed)\n    current\n  def same(seed: Int): Base =\n    var current: Base = new Left(seed)\n    current = new Base(seed)\n    current\n  def unchanged(seed: Int): Base =\n    var current: Base = new Left(seed)\n    current\n";
+    let artifacts = compile_planned_constructor_source(source, output.path())
+        .expect("a mutable planned-reference local accepts a checked subtype assignment");
+    let runner = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner source class is emitted");
+    let mut reader = Reader::new(runner.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Runner class");
+    class
+        .validate_references()
+        .expect("valid Runner references");
+    let change = emitted_method_code(&class, "change");
+    assert_eq!(
+        decode_subset_instructions(change)
+            .iter()
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        [
+            0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0xb0
+        ],
+        "the reassigned reference is loaded from its canonical slot and returned"
+    );
+    assert_eq!(
+        decode_subset_instructions(change)
+            .iter()
+            .map(|(_, opcode)| *opcode)
+            .filter(|opcode| *opcode == 0x4d)
+            .count(),
+        2,
+        "the initial declaration and reassignment each store one reference"
+    );
+    assert_invocation_sequence(
+        &class,
+        change,
+        &[
+            (0xb7, "Left", "<init>", "(I)V"),
+            (0xb7, "Right", "<init>", "(I)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &class,
+        emitted_method_code(&class, "unchanged"),
+        &[(0xb7, "Left", "<init>", "(I)V")],
+    );
+    assert_invocation_sequence(
+        &class,
+        emitted_method_code(&class, "same"),
+        &[
+            (0xb7, "Left", "<init>", "(I)V"),
+            (0xb7, "Base", "<init>", "(I)V"),
+        ],
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("MutableReferenceAssignmentHarness.java");
+        fs::write(
+            &harness,
+            "public final class MutableReferenceAssignmentHarness { public static void main(String[] args) { Runner runner = new Runner(); int[][] cases = {{10, 12, 11}, {0, 2, 1}, {-3, -1, -2}}; for (int[] test : cases) { if (runner.change(test[0]).value() != test[1] || runner.same(test[0]).value() != test[0] || runner.unchanged(test[0]).value() != test[2]) throw new AssertionError(java.util.Arrays.toString(test)); } } }\n",
+        )
+        .expect("write mutable-reference assignment harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected mutable-reference assignment harness\\nstdout:\\n{}\\nstderr:\\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "MutableReferenceAssignmentHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected mutable-reference assignment classes\\nstdout:\\n{}\\nstderr:\\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn mutable_reference_local_assignment_remains_unsupported_in_if_and_while_bodies() {
+    let sources = [
+        (
+            "reference-var-if-assignment-rejected",
+            "class Base(seed: Int)\nclass Runner:\n  def change(flag: Boolean, seed: Int): Int =\n    var current: Base = new Base(seed)\n    if flag then current = new Base(seed) else current = new Base(seed)\n    42\n",
+        ),
+        (
+            "reference-var-while-assignment-rejected",
+            "class Base(seed: Int)\nclass Runner:\n  def change(flag: Boolean, seed: Int): Int =\n    var current: Base = new Base(seed)\n    while flag do current = new Base(seed)\n    42\n",
+        ),
+    ];
+
+    for (directory, source) in sources {
+        let output = TestOutputDirectory::new(directory);
+        let result = compile_planned_constructor_source(source, output.path());
+        assert!(
+            matches!(
+                result,
+                Err(PipelineFailure::Codegen(
+                    JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. }
+                ))
+            ),
+            "mutable reference assignments in branch and loop bodies remain outside the straight-line increment"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "a failed source batch publishes no classes"
+        );
+    }
+}
+
+#[test]
+fn initialized_mutable_reference_local_can_be_copied_into_an_immutable_local() {
+    let output = TestOutputDirectory::new("reference-var-copy-accepted");
+    let artifacts = compile_planned_constructor_source(
         "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    val saved = counter\n    42\n",
         output.path(),
-    );
-    assert!(
-        matches!(
-            result,
-            Err(PipelineFailure::Codegen(
-                JvmCodegenError::ReferenceLocalInstructionUnsupported { .. }
-            ))
-        ),
-        "copying a mutable reference local must remain an unsupported read"
-    );
-    assert!(
-        output.class_files().is_empty(),
-        "a failed source batch publishes no classes"
+    )
+    .expect("an initialized mutable reference local can be copied");
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client class is emitted");
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Client class");
+    assert_eq!(
+        decode_subset_instructions(emitted_method_code(&class, "run"))
+            .iter()
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        [0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0x4e, 0x10, 0xac],
+        "the initialized mutable local is loaded once before storing the immutable copy"
     );
 }
 
 #[test]
-fn mutable_reference_local_cannot_be_discarded_as_an_expression() {
-    let output = TestOutputDirectory::new("reference-var-discard-rejected");
-    let result = compile_planned_constructor_source(
+fn initialized_mutable_reference_local_can_be_discarded_as_an_expression() {
+    let output = TestOutputDirectory::new("reference-var-discard-accepted");
+    let artifacts = compile_planned_constructor_source(
         "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    counter\n    42\n",
         output.path(),
-    );
-    assert!(
-        matches!(
-            result,
-            Err(PipelineFailure::Codegen(
-                JvmCodegenError::ReferenceLocalInstructionUnsupported { .. }
-            ))
-        ),
-        "discarding a mutable reference local must remain an unsupported read"
-    );
-    assert!(
-        output.class_files().is_empty(),
-        "a failed source batch publishes no classes"
+    )
+    .expect("an initialized mutable reference local can be discarded");
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client class is emitted");
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Client class");
+    assert_eq!(
+        decode_subset_instructions(emitted_method_code(&class, "run"))
+            .iter()
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        [0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0x57, 0x10, 0xac],
+        "the initialized mutable local is loaded once before the discarded value is popped"
     );
 }
 

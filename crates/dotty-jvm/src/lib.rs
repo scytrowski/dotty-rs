@@ -914,11 +914,10 @@ pub enum JvmCodegenError {
         source_type: TypeId,
         expected_type: TypeId,
     },
-    /// This reference-local operation is not in the supported immutable-val subset.
+    /// A reference-local operation is outside the supported straight-line subset.
     ReferenceLocalInstructionUnsupported { tree: TreeId<Typed> },
-    /// Reserved for compatibility; local layouts accept validated mutable
-    /// planned-class references. Unsupported reads and assignments use
-    /// `ReferenceLocalInstructionUnsupported`.
+    /// Reserved for compatibility; validated mutable planned-class locals
+    /// support initialized reads and straight-line assignments.
     UnsupportedMutableReferenceLocal { symbol: SymbolId },
     /// Reference local operations require reference-aware CFG analysis.
     ReferenceLocalInUnsupportedControlFlow {
