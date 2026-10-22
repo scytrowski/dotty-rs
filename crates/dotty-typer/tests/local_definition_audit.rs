@@ -79,6 +79,9 @@ struct ResolverMetrics {
     package_term_type_class_resource: usize,
     package_term_without_type_class_resource: usize,
     package_classpath_probe_errors: usize,
+    classpath_probe_cache: HashMap<(usize, BinaryName), String>,
+    classpath_probe_cache_hits: usize,
+    classpath_probe_cache_misses: usize,
     package_term_type_class_targets: BTreeSet<String>,
     package_term_companion_resource: usize,
     package_term_companion_targets: BTreeSet<String>,
@@ -353,6 +356,31 @@ impl<E: ClassPathEntry> AuditResolver<E> {
 
     fn resolver_mut(&mut self) -> &mut ClasspathSymbolResolver<E> {
         self.inner.as_mut().expect("audit resolver is available")
+    }
+
+    fn probe_class_resource(&mut self, binary: &BinaryName) -> Option<String> {
+        let class_path = self.class_path_probe.as_ref()?;
+        let key = (Arc::as_ptr(&class_path.0) as usize, binary.clone());
+        let cached = {
+            self.metrics
+                .borrow()
+                .classpath_probe_cache
+                .get(&key)
+                .cloned()
+        };
+        if let Some(label) = cached {
+            self.metrics.borrow_mut().classpath_probe_cache_hits += 1;
+            return Some(label);
+        }
+        let label = match class_path.find_class(binary) {
+            Ok(Some(resource)) => class_resource_label(&resource),
+            Ok(None) => "absent".to_owned(),
+            Err(error) => format!("error:{}", error.code()),
+        };
+        let mut metrics = self.metrics.borrow_mut();
+        metrics.classpath_probe_cache_misses += 1;
+        metrics.classpath_probe_cache.insert(key, label.clone());
+        Some(label)
     }
 }
 
@@ -980,9 +1008,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         );
         let mut type_resource = "not-probed".to_owned();
         let mut companion_resource = "not-probed".to_owned();
-        if prefix.target_kind == "Package"
-            && let Some(class_path) = &self.class_path_probe
-        {
+        if prefix.target_kind == "Package" && self.class_path_probe.is_some() {
             let internal = if prefix.identity.is_empty() {
                 name.clone()
             } else {
@@ -990,34 +1016,29 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             };
             let binary =
                 dotty_classloader::classloader::BinaryName::from_internal(internal.clone());
+            type_resource = self.probe_class_resource(&binary).unwrap_or_default();
             let mut metrics = self.metrics.borrow_mut();
-            match class_path.find_class(&binary) {
-                Ok(Some(resource)) => {
-                    type_resource = class_resource_label(&resource);
-                    if request.name.is_term() {
-                        metrics.package_term_type_class_resource += 1;
-                        metrics
-                            .package_term_type_class_targets
-                            .insert(target_key.clone());
-                    } else {
-                        metrics.package_type_class_resource += 1;
-                        metrics
-                            .package_type_class_targets
-                            .insert(target_key.clone());
-                    }
+            if type_resource != "absent" && !type_resource.starts_with("error:") {
+                if request.name.is_term() {
+                    metrics.package_term_type_class_resource += 1;
+                    metrics
+                        .package_term_type_class_targets
+                        .insert(target_key.clone());
+                } else {
+                    metrics.package_type_class_resource += 1;
+                    metrics
+                        .package_type_class_targets
+                        .insert(target_key.clone());
                 }
-                Ok(None) if request.name.is_term() => {
-                    type_resource = "absent".to_owned();
-                    metrics.package_term_without_type_class_resource += 1
-                }
-                Ok(None) => type_resource = "absent".to_owned(),
-                Err(error) => {
-                    type_resource = format!("error:{}", error.code());
-                    metrics.package_classpath_probe_errors += 1;
-                }
+            } else if type_resource == "absent" && request.name.is_term() {
+                metrics.package_term_without_type_class_resource += 1;
+            } else if type_resource.starts_with("error:") {
+                metrics.package_classpath_probe_errors += 1;
             }
+            drop(metrics);
             if request.name.is_term() && (name == "package" || name.ends_with('$')) {
-                metrics
+                self.metrics
+                    .borrow_mut()
                     .package_term_object_looking_targets
                     .insert(target_key.clone());
             }
@@ -1025,19 +1046,15 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 let companion = dotty_classloader::classloader::BinaryName::from_internal(format!(
                     "{internal}$"
                 ));
-                match class_path.find_class(&companion) {
-                    Ok(Some(resource)) => {
-                        companion_resource = class_resource_label(&resource);
-                        metrics.package_term_companion_resource += 1;
-                        metrics
-                            .package_term_companion_targets
-                            .insert(target_key.clone());
-                    }
-                    Ok(None) => companion_resource = "absent".to_owned(),
-                    Err(error) => {
-                        companion_resource = format!("error:{}", error.code());
-                        metrics.package_classpath_probe_errors += 1;
-                    }
+                companion_resource = self.probe_class_resource(&companion).unwrap_or_default();
+                let mut metrics = self.metrics.borrow_mut();
+                if companion_resource != "absent" && !companion_resource.starts_with("error:") {
+                    metrics.package_term_companion_resource += 1;
+                    metrics
+                        .package_term_companion_targets
+                        .insert(target_key.clone());
+                } else if companion_resource.starts_with("error:") {
+                    metrics.package_classpath_probe_errors += 1;
                 }
             }
         }
@@ -1047,7 +1064,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 store.symbols.get(symbol).info,
                 dotty_core::SymbolInfo::Complete(_)
             )
-            && let Some(class_path) = &self.class_path_probe
+            && self.class_path_probe.is_some()
         {
             let origin = match store.symbols.get(symbol).origin {
                 dotty_core::SymbolOrigin::Source(_) => "source",
@@ -1058,12 +1075,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             };
             let candidate = audit_binary_candidate(store, symbol);
             let status = match candidate.as_deref() {
-                Some(name) => match class_path.find_class(
+                Some(name) => match self.probe_class_resource(
                     &dotty_classloader::classloader::BinaryName::from_internal(name),
                 ) {
-                    Ok(Some(_)) => "resource-found",
-                    Ok(None) => "resource-absent",
-                    Err(_) => "probe-error",
+                    Some(result) if result == "absent" => "resource-absent",
+                    Some(result) if result.starts_with("error:") => "probe-error",
+                    Some(_) => "resource-found",
+                    None => "probe-error",
                 },
                 None => "binary-name-unrecoverable",
             };
@@ -11022,6 +11040,40 @@ fn audit_source_inner_filtered(
                 .collect()
         })
     };
+    if !import_prefix_only && method_tree_filter.is_none() && focused_method_tree_filter.is_none() {
+        let target_ranges = local_method_trees(&parsed.ast)
+            .into_iter()
+            .map(|(_, range)| range)
+            .chain(
+                audit
+                    .patdef_profile
+                    .structural_patdef_ids
+                    .iter()
+                    .filter_map(|id| {
+                        parsed
+                            .ast
+                            .iter()
+                            .find(|(tree, _)| tree.index() == *id)
+                            .and_then(|(_, node)| {
+                                node.position.map(|position| position.span().range())
+                            })
+                    }),
+            )
+            .collect::<Vec<_>>();
+        let selected_roots = target_ranges
+            .iter()
+            .filter_map(|target| {
+                root_methods
+                    .iter()
+                    .filter(|(_, _, _, range)| {
+                        range.start() <= target.start() && target.end() <= range.end()
+                    })
+                    .min_by_key(|(_, _, _, range)| range.end().saturating_sub(range.start()))
+                    .map(|(_, tree, _, _)| tree.index())
+            })
+            .collect::<BTreeSet<_>>();
+        root_methods.retain(|(_, tree, _, _)| selected_roots.contains(&tree.index()));
+    }
     if let Some(allowed) = method_tree_filter {
         assert_eq!(
             root_methods.len(),
@@ -12658,6 +12710,14 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!(
         "  package_classpath_probe_errors={}",
         metrics.package_classpath_probe_errors
+    );
+    println!(
+        "  classpath_probe_cache_hits={}",
+        metrics.classpath_probe_cache_hits
+    );
+    println!(
+        "  classpath_probe_cache_misses={}",
+        metrics.classpath_probe_cache_misses
     );
     println!(
         "  package_term_companion_object_resource_requests={}",
