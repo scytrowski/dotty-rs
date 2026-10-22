@@ -13,6 +13,11 @@ from pathlib import Path
 ROOT_PATTERN = re.compile(r"(?:^|::)requested=([^:]+)")
 
 
+def has_resolved_binary_name(value: str) -> bool:
+    """The parent-profile TSV uses '-' for absent binary identities."""
+    return value.strip() not in ("", "-")
+
+
 def read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     with path.open(newline="", encoding="utf-8") as source:
         reader = csv.DictReader(source, delimiter="\t")
@@ -205,7 +210,7 @@ def reconcile(
             original = old_rows[index]
             if original["template_wire_address"] != current["template_wire_address"]:
                 raise ValueError(f"parent wire address changed for {root}[{index}]")
-            if current["resolved_binary_name"]:
+            if has_resolved_binary_name(current["resolved_binary_name"]):
                 resolved_original_parents += 1
             else:
                 still_unresolved_original_parents += 1

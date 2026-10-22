@@ -14,6 +14,18 @@ def write_tsv(path: Path, rows: list[dict[str, str]]) -> None:
 
 
 class ReconcileTastySupertypeRootsTests(unittest.TestCase):
+    def test_real_profile_dash_sentinel_remains_unresolved(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        profile = repo / "docs/classloader-unresolved-tasty-parent-profile-3.9.0.tsv"
+        provenance = repo / "docs/classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv"
+        baseline = repo / "docs/typer-classpath-corpus-audit-post-compiler-modules-3.9.0-tasty-supertype-roots.tsv"
+
+        _, summary = reconcile(baseline, profile, profile, provenance, provenance)
+
+        self.assertIn("exact_original_parent_references_resolved=0", summary)
+        self.assertIn("exact_original_parent_references_still_unresolved=42", summary)
+        self.assertIn("historical_roots_where_original_failed_parent_resolved=0", summary)
+
     def test_preserves_all_frozen_roots_and_surfaces_observation_delta(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
