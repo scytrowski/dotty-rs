@@ -4145,14 +4145,17 @@ fn merge_flow_states_with_evidence(
             (FlowLocalState::Object(_), FlowLocalState::Object(_)) => {
                 let previous_len = local_evidence[index].len();
                 let mut classes = local_evidence[index].clone();
-                classes.extend(incoming_local_evidence[index].iter().cloned());
-                if classes.is_empty() {
+                if local_evidence[index].is_empty()
+                    && let FlowLocalState::Object(class) = &*existing
+                {
+                    classes.insert(class.clone());
+                }
+                if incoming_local_evidence[index].is_empty() {
                     if let FlowLocalState::Object(class) = incoming {
                         classes.insert(class.clone());
                     }
-                    if let FlowLocalState::Object(class) = &*existing {
-                        classes.insert(class.clone());
-                    }
+                } else {
+                    classes.extend(incoming_local_evidence[index].iter().cloned());
                 }
                 let classes = classes.into_iter().collect::<Vec<_>>();
                 if let Some(joined) = hierarchy.nearest_common_ancestor(classes.iter(), false) {
@@ -6216,7 +6219,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_sibling_reference_locals_degrade_to_top_and_cannot_be_loaded() {
+    fn sibling_reference_local_widens_to_checked_base_and_can_be_loaded() {
         let mut existing = BlockEntryState {
             locals: vec![FlowLocalState::Object(class_identity("example/Left"))],
             operand_stack: vec![],
@@ -6241,17 +6244,17 @@ mod tests {
             )
             .unwrap()
         );
-        assert_eq!(existing.locals, [FlowLocalState::Top]);
+        assert!(matches!(
+            existing.locals.as_slice(),
+            [FlowLocalState::Object(class)] if class.internal_name() == "example/Base"
+        ));
 
         let local_evidence = local_join_evidence(&existing);
         let mut frame = frame_from_state(&existing, &local_evidence);
-        assert_eq!(
-            frame.load_local(4, LocalIndex::new(0), ValueKind::Reference),
-            Err(AnalysisError::UninitializedLocal {
-                instruction: 4,
-                index: 0,
-            })
-        );
+        frame
+            .load_local(4, LocalIndex::new(0), ValueKind::Reference)
+            .unwrap();
+        assert_eq!(frame.stack_classes, [Some(class_identity("example/Base"))]);
     }
 
     #[test]

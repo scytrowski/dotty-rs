@@ -512,6 +512,56 @@ fn local_reference_loop_header_widens_and_top_stays_unreadable() {
 }
 
 #[test]
+fn missing_or_object_only_local_ancestry_does_not_create_a_join() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchies = [
+        ClassHierarchy::default(),
+        ClassHierarchy::from_edges([
+            ("example/Left".to_owned(), "java/lang/Object".to_owned()),
+            ("example/Right".to_owned(), "java/lang/Object".to_owned()),
+        ])
+        .unwrap(),
+    ];
+
+    for hierarchy in hierarchies {
+        let mut sequence = CodeSequence::new();
+        let alternate = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(local(1)))
+            .branch(BranchInstruction::IfEq(alternate.clone()))
+            .instruction(Instruction::ALoad(local(2)))
+            .instruction(Instruction::AStore(local(4)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(alternate)
+            .unwrap()
+            .instruction(Instruction::ALoad(local(3)))
+            .instruction(Instruction::AStore(local(4)))
+            .bind(join.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(local(4)))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let result = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "rejectUnprovenLocalJoin",
+            "(ZLexample/Left;Lexample/Right;)V",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        );
+        assert!(matches!(
+            result,
+            Err(AnalysisError::UninitializedLocal { index: 4, .. })
+        ));
+    }
+}
+
+#[test]
 fn sibling_join_requires_a_checked_non_object_path_from_both_inputs() {
     let mut pool_builder = ConstantPoolBuilder::new();
     let owner = pool_builder.class("example/Client").unwrap();

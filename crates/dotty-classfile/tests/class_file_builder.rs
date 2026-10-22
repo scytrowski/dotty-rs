@@ -886,6 +886,97 @@ fn ancestor_stack_joins_encode_the_verified_middle_class() {
 }
 
 #[test]
+fn initialized_reference_local_join_interns_its_stack_map_class() {
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Left".to_owned(), "example/Base".to_owned()),
+        ("example/Right".to_owned(), "example/Base".to_owned()),
+    ])
+    .unwrap();
+    let mut builder = ClassFileBuilder::new(
+        "example/LocalJoins",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder.set_verification_hierarchy(hierarchy);
+    builder
+        .add_static_method("choose", "(ZLexample/Left;Lexample/Right;)V", |code| {
+            let alternate = code.new_label()?;
+            let join = code.new_label()?;
+            code.iload(0)?;
+            code.ifeq(alternate.clone())?;
+            code.aload(1)?;
+            code.astore(3)?;
+            code.goto(join.clone())?;
+            code.mark(alternate)?;
+            code.aload(2)?;
+            code.astore(3)?;
+            code.mark(join)?;
+            code.aload(3)?;
+            code.pop()?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let code = code_attribute(method_named(&class_file, "choose"));
+    assert_eq!((code.max_stack, code.max_locals), (1, 4));
+    let [Attribute::Other(stack_map)] = code.attributes.as_slice() else {
+        panic!("local reference join should have a StackMapTable");
+    };
+    let payload = stack_map.bytes;
+    let mut cursor = 0;
+    assert_eq!(
+        u16::from_be_bytes([payload[cursor], payload[cursor + 1]]),
+        2
+    );
+    cursor += 2;
+    assert_eq!(payload[cursor], 255, "alternate target is a full_frame");
+    cursor += 3; // frame type and offset_delta
+    let alternate_locals = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+    cursor += 2;
+    assert_eq!(alternate_locals, 3);
+    assert_eq!(payload[cursor], 1); // boolean parameter
+    cursor += 1;
+    for _ in 0..2 {
+        assert_eq!(payload[cursor], 7);
+        cursor += 3;
+    }
+    assert_eq!(
+        u16::from_be_bytes([payload[cursor], payload[cursor + 1]]),
+        0
+    );
+    cursor += 2;
+
+    assert_eq!(payload[cursor], 255, "join frame is a full_frame");
+    cursor += 3; // frame type and offset_delta
+    let locals = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+    cursor += 2;
+    assert_eq!(locals, 4);
+    assert_eq!(payload[cursor], 1); // boolean parameter
+    cursor += 1;
+    for expected in ["example/Left", "example/Right", "example/Base"] {
+        assert_eq!(payload[cursor], 7, "expected Object({expected}) local");
+        let index = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            payload[cursor + 1],
+            payload[cursor + 2],
+        ]));
+        assert_eq!(class_file.constant_pool.class_name(index), Ok(expected));
+        cursor += 3;
+    }
+    assert_eq!(
+        u16::from_be_bytes([payload[cursor], payload[cursor + 1]]),
+        0
+    );
+    cursor += 2;
+    assert_eq!(cursor, payload.len());
+}
+
+#[test]
 fn sibling_stack_joins_encode_the_verified_common_superclass() {
     let hierarchy = ClassHierarchy::from_edges([
         ("example/Left".to_owned(), "example/Base".to_owned()),

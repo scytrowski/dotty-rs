@@ -47,9 +47,10 @@ safety.
 
 `CfgCodeAnalyzer` tracks `Top`, integer, initialized class references,
 allocation-site-specific uninitialized references, and a bounded explicit
-class hierarchy for assignability checks and operand-stack joins. Stack joins
-may widen initialized references to the nearest shared, checked non-`Object`
-superclass. Locals with different incoming states degrade to `Top`. Ordinary
+class hierarchy for assignability checks and reference joins. Stack values and
+initialized object locals may widen to the nearest shared, checked non-`Object`
+superclass. A local with an incoming `Top`, incompatible category, receiver,
+or unsupported state remains unusable. Ordinary
 instance methods seed local 0 with the exact emitting class,
 while branched constructors remain unsupported. The
 `StackMapFrameGenerator` maps every initialized class through a validated
@@ -123,25 +124,30 @@ At each reachable block:
    different allocation sites, primitive/reference mismatches, and different
    stack heights return typed analysis errors. Never infer a shared ancestor
    such as `java/lang/Object` from missing edges.
-2. A local slot whose incoming states are identical keeps that state. Any
-   disagreement degrades the local to `Top`. A later read of `Top` fails as
-   uninitialized/unusable; this is the definite-assignment guard that makes
-   local degradation safe. No instruction may load an uninitialized or `Top`
-   local.
-3. `Top` is absorbing for locals. Each local can therefore degrade at most
-   once. Stack values can widen only along the validated, eight-edge-bounded
-   superclass chain. The worklist reprocesses a block whenever either its
-   locals or stack state changes and has a defensive work limit derived from
-   the observed stack width and hierarchy depth. Traverse blocks, successors,
-   and local slots in stable source/index order so results do not depend on
-   hash-map order.
+2. A local slot whose incoming states are identical keeps that state. Two
+   initialized object states may widen to the nearest common non-`Object`
+   superclass only when every original incoming class has an explicit path in
+   the checked hierarchy. Keep those original classes as evidence through
+   widening and later loop inputs; do not prove a join from the current
+   aggregate alone. Without a unique checked ancestor, the result is `Top`.
+3. `Top` is absorbing for locals. Any path with an uninitialized or unusable
+   slot therefore prevents that local from becoming readable after the join.
+   A later read of `Top` fails as uninitialized/unusable. Stack and local
+   references can widen only along the validated, eight-edge-bounded
+   superclass chain. The worklist reprocesses a block whenever a local,
+   operand-stack value, or retained proof changes and has a defensive work
+   limit derived from graph size, state widths, evidence, and hierarchy depth.
+   Traverse blocks, successors, and local slots in stable source/index order so
+   results do not depend on hash-map order.
 
 These rules are intentionally narrower than JVMS assignment compatibility.
-Reference stack joins use only explicit superclass edges and never infer a
-classpath relationship. Distinct local references become `Top` even when one
-is an ancestor of the other or both share a checked superclass, so there is no
-hierarchy-based local promotion. A later read of that slot fails as
-uninitialized/unusable.
+Reference stack and initialized-local joins use only explicit superclass
+edges and never infer a classpath relationship. A local is widened only when
+all paths carry initialized references and the complete checked evidence
+proves their common non-`Object` ancestor. Primitive/reference differences,
+receiver/reference differences, missing hierarchy paths, and any incoming
+`Top` remain `Top`; no later store on another path can make that slot
+definitely initialized.
 
 The source-level `Base`-declared sibling case and its separate typer, method
 descriptor, and verifier questions are characterized in the [sibling
@@ -275,7 +281,8 @@ straight-line builder methods.
 | Exact `Left`/`Right` source branches returning `Base` | Preserve the source `Type::Or`, then encode the checked `Object(Base)` frame at both branch-order joins; do not infer `Object` or insert a cast | `SiblingConstructors.scala`, decoded `StackMapTable` with CP-resolved `Base`, byte-identical fresh frontend sessions, and mandatory JDK 21+ `-Xverify:all` gate |
 | Other sibling initialized classes at a stack join | Join only at the nearest checked non-`Object` superclass; reject missing paths and inferred `Object`-only intersections | Classfile analyzer regressions; source lowering also requires the exact expected-parent proof |
 | Unrelated initialized classes at a stack join | Typed incompatible-stack reference error; do not infer a common class | Classfile analyzer regression tests |
-| Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
+| Different initialized classes at a local join | Join only at their nearest checked non-`Object` superclass, using complete predecessor evidence | Classfile analyzer and local-frame regressions |
+| Missing assignment or unproven ancestry at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
 | Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |
 | Uninitialized local read or uninitialized object escape | Typed uninitialized-use error; never emit the class | Classfile analyzer allocation regressions |
 | Branch between `new` and matching constructor | Typed unsupported/uninitialized-on-edge error | Classfile analyzer allocation regressions |

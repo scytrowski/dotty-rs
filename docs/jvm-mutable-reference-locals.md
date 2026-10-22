@@ -152,11 +152,13 @@ initializer paths still require the declared-target proof above.
 
 The classfile CFG analyzer in
 `crates/dotty-classfile/src/bytecode/analysis.rs` keeps local states separate
-from operand-stack values. Local disagreements currently become
-`FlowLocalState::Top`; operand-stack references use a separate checked
-hierarchy join. This is conservative, but does not retain the checked
-non-Object ancestor for initialized reference locals. The classfile layer must
-remain Scala-independent.
+from operand-stack values. At the time of this audit, every local disagreement
+became `FlowLocalState::Top`. Follow-up #1455 now allows two or more
+definitely initialized object inputs to join at their nearest uniquely checked
+non-`Object` superclass, retaining the original class evidence through CFG
+widening. A `Top`, uninitialized, primitive/reference, receiver/reference, or
+unproven input still prevents an initialized local join. The classfile layer
+remains Scala-independent.
 
 The source JVM emitter intersects initialized-local sets at reachable `If`
 branches. For `While`, it restores the pre-loop initialized-local set at the

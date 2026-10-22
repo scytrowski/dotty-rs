@@ -1696,6 +1696,32 @@ fn sibling_reference_stack_join_frames_verify_with_jdk() {
                 },
             )
             .unwrap();
+        joins
+            .add_static_method(
+                if left_first {
+                    "chooseLocal"
+                } else {
+                    "chooseLocalReversed"
+                },
+                "(ZLexample/Left;Lexample/Right;)Lexample/Base;",
+                move |code| {
+                    let otherwise = code.new_label()?;
+                    let join = code.new_label()?;
+                    code.iload(0)?;
+                    code.ifeq(otherwise.clone())?;
+                    code.aload(if left_first { 1 } else { 2 })?;
+                    code.astore(3)?;
+                    code.goto(join.clone())?;
+                    code.mark(otherwise)?;
+                    code.aload(if left_first { 2 } else { 1 })?;
+                    code.astore(3)?;
+                    code.mark(join)?;
+                    code.aload(3)?;
+                    code.areturn()?;
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
     fs::write(
         directory.path().join("example/SiblingJoin.class"),
@@ -1703,7 +1729,7 @@ fn sibling_reference_stack_join_frames_verify_with_jdk() {
     )
     .unwrap();
     let harness = directory.path().join("SiblingJoinHarness.java");
-    fs::write(&harness, "import example.*; public class SiblingJoinHarness { public static void main(String[] args) { Left left = new Left(); Right right = new Right(); if (SiblingJoin.choose(true, left, right) != left || SiblingJoin.choose(false, left, right) != right || SiblingJoin.chooseReversed(true, left, right) != right || SiblingJoin.chooseReversed(false, left, right) != left) throw new AssertionError(); System.out.println(\"sibling-stack-join=ok\"); } }\n").unwrap();
+    fs::write(&harness, "import example.*; public class SiblingJoinHarness { public static void main(String[] args) { Left left = new Left(); Right right = new Right(); if (SiblingJoin.choose(true, left, right) != left || SiblingJoin.choose(false, left, right) != right || SiblingJoin.chooseReversed(true, left, right) != right || SiblingJoin.chooseReversed(false, left, right) != left || SiblingJoin.chooseLocal(true, left, right) != left || SiblingJoin.chooseLocal(false, left, right) != right || SiblingJoin.chooseLocalReversed(true, left, right) != right || SiblingJoin.chooseLocalReversed(false, left, right) != left) throw new AssertionError(); System.out.println(\"sibling-reference-joins=ok\"); } }\n").unwrap();
     let dir = directory.path().to_str().unwrap();
     let javac = run(
         "javac",
@@ -1725,7 +1751,7 @@ fn sibling_reference_stack_join_frames_verify_with_jdk() {
     );
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
-        "sibling-stack-join=ok"
+        "sibling-reference-joins=ok"
     );
     let javap = run(
         "javap",
