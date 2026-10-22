@@ -4228,7 +4228,7 @@ mod tests {
     #[test]
     fn keeps_object_owned_selected_parent_unresolved() {
         let error = decode(
-            &fixture_bytes("scala3-library/review/OwnerBaseChild.tasty"),
+            &fixture_bytes("scala3-parent-selected/review/OwnerBaseChild.tasty"),
             &BinaryName::from_internal("review/Child"),
         )
         .expect_err("an object-owned type path is not a package-qualified JVM name");
@@ -4245,7 +4245,7 @@ mod tests {
     #[test]
     fn keeps_two_object_owned_selected_parent_unresolved() {
         let error = decode(
-            &fixture_bytes("scala3-library/review/TwoOwnerBaseChild.tasty"),
+            &fixture_bytes("scala3-parent-selected/review/TwoOwnerBaseChild.tasty"),
             &BinaryName::from_internal("review/TwoOwnersChild"),
         )
         .expect_err("nested object owners cannot be joined as package segments");
@@ -4260,7 +4260,7 @@ mod tests {
     #[test]
     fn keeps_fully_qualified_object_owned_selected_parent_unresolved() {
         let error = decode(
-            &fixture_bytes("scala3-library/review/FullyQualifiedOwnerChild.tasty"),
+            &fixture_bytes("scala3-parent-selected/review/FullyQualifiedOwnerChild.tasty"),
             &BinaryName::from_internal("review/FullyQualifiedOwnerChild"),
         )
         .expect_err("a fully qualified object path is not a package path");
@@ -4275,7 +4275,7 @@ mod tests {
     #[test]
     fn keeps_fully_qualified_nested_object_parent_unresolved() {
         let error = decode(
-            &fixture_bytes("scala3-library/review/FullyQualifiedNestedChild.tasty"),
+            &fixture_bytes("scala3-parent-selected/review/FullyQualifiedNestedChild.tasty"),
             &BinaryName::from_internal("review/FullyQualifiedNestedChild"),
         )
         .expect_err("a fully qualified nested object path is not a package path");
