@@ -2319,7 +2319,23 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
                 is_package_qualifier(file, &ident.type_tree, depth + 1)
             }
             Ok(StructuredTree::Select(selection)) => {
+                // In TASTy, a term SELECT rooted in a package may name either
+                // a subpackage or an object. Admit only package paths
+                // independently covered by pinned Scala fixtures; do not
+                // infer arbitrary selected segments from the current package.
+                let selected_package = wire_name(file, selection.name).and_then(|name| {
+                    let owner = parent_wire_path(file, &selection.qualifier, depth + 1)?;
+                    let owner = owner.strip_prefix("_root_/").unwrap_or(&owner);
+                    Some(if owner.is_empty() || owner == "_root_" {
+                        name
+                    } else {
+                        format!("{owner}/{name}")
+                    })
+                });
                 selection.tag == dotty_tasty::tasty::SELECT_TAG
+                    && selected_package
+                        .as_deref()
+                        .is_some_and(|package| matches!(package, "scala" | "scala/annotation"))
                     && is_package_qualifier(file, &selection.qualifier, depth + 1)
             }
             Ok(StructuredTree::Reference(reference)) => {
@@ -3425,10 +3441,10 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 20);
+        assert_eq!(current_unresolved_roots.len(), 22);
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            21
+            19
         );
         assert!(!recovered_roots.is_empty());
         assert_eq!(
@@ -3935,6 +3951,36 @@ mod tests {
             &BinaryName::from_internal("review/TwoOwnersChild"),
         )
         .expect_err("nested object owners cannot be joined as package segments");
+
+        assert!(matches!(
+            &error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 1 && parent.shape == "selected-qualified"
+        ));
+    }
+
+    #[test]
+    fn keeps_fully_qualified_object_owned_selected_parent_unresolved() {
+        let error = decode(
+            &fixture_bytes("scala3-library/review/FullyQualifiedOwnerChild.tasty"),
+            &BinaryName::from_internal("review/FullyQualifiedOwnerChild"),
+        )
+        .expect_err("a fully qualified object path is not a package path");
+
+        assert!(matches!(
+            &error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 1 && parent.shape == "selected-qualified"
+        ));
+    }
+
+    #[test]
+    fn keeps_fully_qualified_nested_object_parent_unresolved() {
+        let error = decode(
+            &fixture_bytes("scala3-library/review/FullyQualifiedNestedChild.tasty"),
+            &BinaryName::from_internal("review/FullyQualifiedNestedChild"),
+        )
+        .expect_err("a fully qualified nested object path is not a package path");
 
         assert!(matches!(
             &error,

@@ -90,13 +90,17 @@ check rather than a claim that the module has completed as a `ClassInfo`.
 
 The selected-parent resolver now accepts a reconstructed slash-separated
 path only when the terminal node is a type selection and every node in its
-qualifier chain is a package reference. A term reference or a selection in
-the qualifier may name an object or a nested type, whose JVM identity needs
-`$` separators; those forms remain `UnresolvedSupertype` unless their exact
-binary owner is independently established. Two Scala 3.9.0 TASTy controls for
-`Owner.Base` and `Other.Inner.Base` cover those one- and two-object cases; their
-compiled JVM interfaces are `review/Owner$Base` and
-`review/Other$Inner$Base` respectively.
+qualifier chain is a package reference. TASTy term selections can denote
+objects as well as subpackages, so selected package segments are admitted only
+for the pinned `scala` and `scala.annotation` paths, with their package
+reference chain intact. Other selected segments and term references remain
+`UnresolvedSupertype` unless their exact binary owner is independently
+established. This rejects both abbreviated and fully qualified object paths,
+whose JVM identity uses `$` separators. Two Scala 3.9.0 TASTy controls for
+`Owner.Base`, `Other.Inner.Base`, `review.Owner.Base`, and
+`_root_.review.Other.Inner.Base` cover abbreviated and fully qualified
+one- and two-object cases; their compiled JVM interfaces are
+`review/Owner$Base` and `review/Other$Inner$Base` respectively.
 
 Package-object alias traversal remains bounded to 64 hops and rejects cycles
 and ambiguous/missing targets. The existing Scala 3.9 `Source` loading test
@@ -114,15 +118,16 @@ this change does not add default-import lookup or a general candidate guess.
   callbacks.
 - Existing `loads_scala39_source_with_its_applied_iterator_alias_parent`
   remains the positive package-object alias regression.
-- `keeps_object_owned_selected_parent_unresolved` and
-  `keeps_two_object_owned_selected_parent_unresolved`: pass for real Scala
-  3.9.0 TASTy fixtures, covering one and two object-owner levels.
+- The four `keeps_*object*parent_unresolved` tests pass for real Scala 3.9.0
+  TASTy fixtures, covering abbreviated and fully qualified one- and two-object
+  owner paths.
 - The bounded 50-root profile was run twice with pinned Scala 3.9.0 JARs and
-  the configured JDK 21. Both runs report 41 to 20 unresolved roots, 21 recovered roots /
-  281 weighted observations, and zero newly unresolved roots; unresolved
-  weighted observations change from 379 to 98. Both generated files are
-  byte-identical (SHA-256 `08206a8a10bbb6b71a53a6515e89ceeded1d0eff43cfc1af9c9f0982059dcc5b`).
+  Temurin 21.0.8. Both runs report 41 to 22 unresolved roots, 19 recovered
+  roots / 278 weighted observations, and zero newly unresolved roots;
+  unresolved weighted observations change from 379 to 101. Both generated
+  files are byte-identical (SHA-256
+  `348fe53f920a4413dede18fed0eb614bfe75fd8f95f5b775c97eb2ff0a50138d`).
 - The separate current-library TSV contains 136 rows covering all 32 roots /
   359 weighted observations (SHA-256
-  `6d1470f10a217a96567cdea28f3398424db19b02aa4a5e38477ae1472a6ed742`).
+  `eea692bbe8b32b19b5483c6f4c41ba3ff7859ce78045db7254490560a69ca81e`).
 - No full Typer source-corpus audit was run for this library-only increment.
