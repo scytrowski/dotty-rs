@@ -103,6 +103,12 @@ profile runs produced byte-identical final output (SHA-256
 TSV cells use `-`. No semantic corpus baseline or production behavior was
 changed.
 
+The library-only follow-up in
+[`classloader-library-parent-review-3.9.0.md`](classloader-library-parent-review-3.9.0.md)
+reconciles all 32 frozen library roots and records focused post-#1413 outcomes
+for `Predef$`, `retainsCap`, and `switch`, without changing this historical
+profile or claiming a full source-corpus audit.
+
 ## Reproduction
 
 Run the ignored test twice with `SCALA39_COMPILER_JAR`,

@@ -1124,9 +1124,10 @@ fn parent_profile_owner(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) 
     })
 }
 
-/// Reconstructs a bounded diagnostic path from structural TASTy nodes. This
-/// deliberately does not feed the production parent resolver: it preserves
-/// nested owners for the profile without widening accepted classpath names.
+/// Reconstructs a bounded structural path from TASTy nodes. The path alone is
+/// not sufficient evidence for production resolution: the selected-parent
+/// caller separately requires exactly one terminal type selection, rejecting
+/// nested owners whose JVM binary name is not established by this path.
 fn parent_wire_path(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> Option<String> {
     const MAX_PARENT_PROFILE_DEPTH: usize = 128;
     if depth >= MAX_PARENT_PROFILE_DEPTH {
@@ -2260,6 +2261,18 @@ fn resolve_reference_name_at_depth(
             })
             .unwrap_or(ReferenceResolution::Unresolved)
         }
+        StructuredTree::Select(_) => {
+            let Some(name) = parent_wire_path(file, tree, depth + 1)
+                .map(|name| name.strip_prefix("_root_/").unwrap_or(&name).to_owned())
+                .filter(|name| name.contains('/') && !name.starts_with('/'))
+            else {
+                return ReferenceResolution::Unresolved;
+            };
+            if !has_one_terminal_type_selection(file, tree, depth + 1) {
+                return ReferenceResolution::Unresolved;
+            }
+            ReferenceResolution::Resolved(BinaryName::from_internal(name))
+        }
         StructuredTree::Ident(IdentNode { type_tree, .. }) => {
             resolve_reference_name_at_depth(file, &type_tree, current_package, depth + 1)
         }
@@ -2268,6 +2281,76 @@ fn resolve_reference_name_at_depth(
         }
         _ => ReferenceResolution::NotAReference,
     }
+}
+
+/// Returns true only when this is one terminal type selection whose qualifier
+/// is a chain of package references. Term references and selections can name
+/// objects or nested types; joining those names with `/` would lose the JVM
+/// `$` owner boundary.
+fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> bool {
+    fn is_package_qualifier(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> bool {
+        const MAX_SELECTION_DEPTH: usize = 256;
+        if depth >= MAX_SELECTION_DEPTH {
+            return false;
+        }
+        if let RawTree::Leaf(term) = tree
+            && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
+        {
+            let Some(reference) = term.ast_ref() else {
+                return false;
+            };
+            let Some(target) = decode_shared_tree(file, reference.address) else {
+                return false;
+            };
+            return is_package_qualifier(file, &target, depth + 1);
+        }
+        if let RawTree::Leaf(term) = tree {
+            return matches!(term.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG)
+                && term
+                    .name_ref()
+                    .and_then(|name| resolve_qualified_name(file, name))
+                    .is_some();
+        }
+        match tree.decode_structured() {
+            Ok(StructuredTree::AstChild(child)) => {
+                is_package_qualifier(file, &child.child, depth + 1)
+            }
+            Ok(StructuredTree::Ident(ident)) => {
+                is_package_qualifier(file, &ident.type_tree, depth + 1)
+            }
+            Ok(StructuredTree::Select(selection)) => {
+                // In TASTy, a term SELECT rooted in a package may name either
+                // a subpackage or an object. Admit only package paths
+                // independently covered by pinned Scala fixtures; do not
+                // infer arbitrary selected segments from the current package.
+                let selected_package = wire_name(file, selection.name).and_then(|name| {
+                    let owner = parent_wire_path(file, &selection.qualifier, depth + 1)?;
+                    let owner = owner.strip_prefix("_root_/").unwrap_or(&owner);
+                    Some(if owner.is_empty() || owner == "_root_" {
+                        name
+                    } else {
+                        format!("{owner}/{name}")
+                    })
+                });
+                selection.tag == dotty_tasty::tasty::SELECT_TAG
+                    && selected_package
+                        .as_deref()
+                        .is_some_and(|package| matches!(package, "scala" | "scala/annotation"))
+                    && is_package_qualifier(file, &selection.qualifier, depth + 1)
+            }
+            Ok(StructuredTree::Reference(reference)) => {
+                matches!(reference.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG)
+                    && is_package_qualifier(file, &reference.qualifier, depth + 1)
+            }
+            _ => false,
+        }
+    }
+
+    let Ok(StructuredTree::Select(selection)) = tree.decode_structured() else {
+        return false;
+    };
+    selection.tag == dotty_tasty::tasty::SELECTTPT_TAG
+        && is_package_qualifier(file, &selection.qualifier, depth + 1)
 }
 
 /// Resolves a TASTy-local symbol address through its defining tree and owner
@@ -3358,10 +3441,10 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 34);
+        assert_eq!(current_unresolved_roots.len(), 22);
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            7
+            19
         );
         assert!(!recovered_roots.is_empty());
         assert_eq!(
@@ -3720,39 +3803,190 @@ mod tests {
     #[test]
     fn profiles_retains_cap_parent_references_through_apply_and_select_in() {
         let bytes = fixture_bytes("scala3-library/scala/annotation/retainsCap.tasty");
-        let error = decode_with_resolvers(
+        let decoded = decode_with_resolvers(
             &bytes,
             &BinaryName::from_internal("scala/annotation/retainsCap"),
             |_, _| None,
             |_, _| None,
         )
-        .expect_err("without classpath fallbacks, retainsCap must expose its parent profile");
-        let TastyDecodeError::UnresolvedSupertype(parent) = error else {
-            panic!("expected an unresolved parent profile, got {error:?}");
-        };
+        .expect("the package-owned Annotation parents are fully identifiable in TASTy");
+        assert_eq!(
+            decoded.super_class.as_internal(),
+            "scala/annotation/Annotation"
+        );
+        assert_eq!(
+            decoded.interfaces[0].as_internal(),
+            "scala/annotation/StaticAnnotation"
+        );
 
-        assert_eq!(parent.parent_index, 1);
-        assert!(parent.template_wire_address > 0, "profile: {parent:#?}");
-        assert!(parent.has_semantic_reference, "profile: {parent:#?}");
-        assert!(parent.has_reference_prefix, "profile: {parent:#?}");
+        let profiles = profile_parent_references(
+            &bytes,
+            &BinaryName::from_internal("scala/annotation/retainsCap"),
+            false,
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("the parent trees should retain their diagnostic evidence");
+        let parent = &profiles[1];
+
+        assert_eq!(parent.reference.parent_index, 1);
+        assert!(
+            parent.reference.template_wire_address > 0,
+            "profile: {parent:#?}"
+        );
+        assert!(
+            parent.reference.has_semantic_reference,
+            "profile: {parent:#?}"
+        );
+        assert!(
+            parent.reference.has_reference_prefix,
+            "profile: {parent:#?}"
+        );
         assert!(
             parent
+                .reference
                 .visible_names
                 .iter()
                 .any(|name| name == "StaticAnnotation")
         );
         assert!(
             parent
+                .reference
                 .visible_names
                 .iter()
                 .any(|name| name == "scala/annotation")
         );
-        assert_eq!(parent.shape, "selected-qualified", "profile: {parent:#?}");
-        assert_eq!(parent.reference_tag.as_deref(), Some("0x71"));
-        assert_eq!(parent.reference_name.as_deref(), Some("StaticAnnotation"));
-        assert_eq!(parent.reference_prefix.as_deref(), Some("scala/annotation"));
-        assert_eq!(parent.alias_owner.as_deref(), Some("scala/annotation"));
-        assert_eq!(parent.alias_name.as_deref(), Some("StaticAnnotation"));
+        assert_eq!(
+            parent.reference.shape, "selected-qualified",
+            "profile: {parent:#?}"
+        );
+        assert_eq!(parent.reference.reference_tag.as_deref(), Some("0x71"));
+        assert_eq!(
+            parent.reference.reference_name.as_deref(),
+            Some("StaticAnnotation")
+        );
+        assert_eq!(
+            parent.reference.reference_prefix.as_deref(),
+            Some("scala/annotation")
+        );
+        assert_eq!(
+            parent.reference.alias_owner.as_deref(),
+            Some("scala/annotation")
+        );
+        assert_eq!(
+            parent.reference.alias_name.as_deref(),
+            Some("StaticAnnotation")
+        );
+        assert_eq!(
+            parent.resolved_binary_name.as_deref(),
+            Some("scala/annotation/StaticAnnotation")
+        );
+    }
+
+    #[test]
+    fn pins_predef_parent_to_its_exact_same_package_identity() {
+        let bytes = fixture_bytes("scala3-library/scala/Predef.tasty");
+        let profiles = profile_parent_references(
+            &bytes,
+            &BinaryName::from_internal("scala/Predef$"),
+            true,
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("the pinned Scala 3.9 Predef TASTy should be structurally readable");
+        let parent = profiles.first().expect("Predef declares a parent");
+
+        assert_eq!(parent.reference.parent_index, 0);
+        assert_eq!(parent.reference.shape, "package-qualified");
+        assert_eq!(
+            parent.reference.reference_name.as_deref(),
+            Some("LowPriorityImplicits")
+        );
+        assert!(parent.reference.has_semantic_reference);
+        assert!(parent.reference.has_reference_prefix);
+        assert_eq!(parent.reference.reference_prefix.as_deref(), Some("scala"));
+        assert_eq!(
+            parent.resolution_stage,
+            "semantic-or-structural-reference-resolved"
+        );
+        assert_eq!(
+            parent.resolved_binary_name.as_deref(),
+            Some("scala/LowPriorityImplicits")
+        );
+
+        let decoded = decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal("scala/Predef$"),
+            |_, _| None,
+            |_, _| None,
+        )
+        .expect("Predef's TASTy hierarchy should decode without import fallback");
+        assert_eq!(
+            decoded.super_class.as_internal(),
+            "scala/LowPriorityImplicits"
+        );
+    }
+
+    #[test]
+    fn keeps_object_owned_selected_parent_unresolved() {
+        let error = decode(
+            &fixture_bytes("scala3-library/review/OwnerBaseChild.tasty"),
+            &BinaryName::from_internal("review/Child"),
+        )
+        .expect_err("an object-owned type path is not a package-qualified JVM name");
+
+        assert!(matches!(
+            &error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 1
+                    && parent.shape == "selected-qualified"
+                    && parent.reference_prefix.as_deref() == Some("Owner")
+        ));
+    }
+
+    #[test]
+    fn keeps_two_object_owned_selected_parent_unresolved() {
+        let error = decode(
+            &fixture_bytes("scala3-library/review/TwoOwnerBaseChild.tasty"),
+            &BinaryName::from_internal("review/TwoOwnersChild"),
+        )
+        .expect_err("nested object owners cannot be joined as package segments");
+
+        assert!(matches!(
+            &error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 1 && parent.shape == "selected-qualified"
+        ));
+    }
+
+    #[test]
+    fn keeps_fully_qualified_object_owned_selected_parent_unresolved() {
+        let error = decode(
+            &fixture_bytes("scala3-library/review/FullyQualifiedOwnerChild.tasty"),
+            &BinaryName::from_internal("review/FullyQualifiedOwnerChild"),
+        )
+        .expect_err("a fully qualified object path is not a package path");
+
+        assert!(matches!(
+            &error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 1 && parent.shape == "selected-qualified"
+        ));
+    }
+
+    #[test]
+    fn keeps_fully_qualified_nested_object_parent_unresolved() {
+        let error = decode(
+            &fixture_bytes("scala3-library/review/FullyQualifiedNestedChild.tasty"),
+            &BinaryName::from_internal("review/FullyQualifiedNestedChild"),
+        )
+        .expect_err("a fully qualified nested object path is not a package path");
+
+        assert!(matches!(
+            &error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 1 && parent.shape == "selected-qualified"
+        ));
     }
 
     #[test]
