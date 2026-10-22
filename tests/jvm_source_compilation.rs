@@ -4689,6 +4689,106 @@ fn emitted_method_code<'a>(class: &ClassFile<'a>, name: &str) -> &'a [u8] {
     code.code
 }
 
+fn code_max_locals(class: &ClassFile<'_>, name: &str) -> u16 {
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+        .unwrap_or_else(|| panic!("missing method {name}"));
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("{name} should have one Code attribute");
+    };
+    code.max_locals
+}
+
+fn code_max_stack(class: &ClassFile<'_>, name: &str) -> u16 {
+    let method = class
+        .methods
+        .iter()
+        .find(|method| class.constant_pool.utf8(method.name_index) == Ok(name))
+        .unwrap_or_else(|| panic!("missing method {name}"));
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("{name} should have one Code attribute");
+    };
+    code.max_stack
+}
+
+fn assert_reference_local_join_frame(
+    class: &ClassFile<'_>,
+    method: &str,
+    local_slot: usize,
+    loop_header: bool,
+) {
+    let code = emitted_method_code(class, method);
+    let frames = stack_map_frames(class, method);
+    let targets = decode_branch_targets(code);
+    if loop_header {
+        let header = targets
+            .iter()
+            .filter(|(offset, _, target)| target < offset)
+            .map(|(_, _, target)| *target)
+            .find(|target| {
+                targets
+                    .iter()
+                    .filter(|(_, _, candidate)| candidate == target)
+                    .count()
+                    >= 2
+            })
+            .unwrap_or_else(|| panic!("{method} has a loop header with a back-edge"));
+        let frame = frames
+            .iter()
+            .find(|frame| frame.pc == header)
+            .unwrap_or_else(|| panic!("{method} has no frame at loop header {header}"));
+        assert_eq!(
+            frame.locals.get(local_slot),
+            Some(&StackMapVerificationType::Object("Base".to_owned()))
+        );
+        assert_eq!(
+            frame.locals.get(local_slot + 1),
+            Some(&StackMapVerificationType::Integer),
+            "the primitive loop index keeps its neighboring slot"
+        );
+        let exit = targets
+            .iter()
+            .find_map(|(_, opcode, target)| (*opcode == 0x99).then_some(*target))
+            .expect("the while condition has a false exit edge");
+        assert!(
+            frames.iter().any(|frame| {
+                frame.pc == exit
+                    && frame.locals.get(local_slot)
+                        == Some(&StackMapVerificationType::Object("Base".to_owned()))
+            }),
+            "the zero-iteration exit keeps the initialized Base local"
+        );
+    } else {
+        assert!(
+            targets.iter().any(|(_, _, target)| {
+                frames.iter().any(|frame| {
+                    frame.pc == *target
+                        && frame.locals.get(local_slot)
+                            == Some(&StackMapVerificationType::Object("Base".to_owned()))
+                })
+            }),
+            "{method} has a CP-resolved Object(Base) local at a branch target"
+        );
+    }
+}
+
+fn assert_reference_stack_join_frame(class: &ClassFile<'_>, method: &str) {
+    let code = emitted_method_code(class, method);
+    let frames = stack_map_frames(class, method);
+    let targets = decode_branch_targets(code);
+    assert!(
+        targets.iter().any(|(_, _, target)| {
+            frames.iter().any(|frame| {
+                frame.pc == *target
+                    && frame.stack == [StackMapVerificationType::Object("Base".to_owned())]
+            })
+        }),
+        "{method} has a CP-resolved Object(Base) operand-stack join at a branch target"
+    );
+}
+
 fn has_stack_map_table(class: &ClassFile<'_>, method_name: &str) -> bool {
     let method = class
         .methods
@@ -10885,16 +10985,73 @@ fn initialized_mutable_reference_local_can_be_discarded_as_an_expression() {
 #[test]
 fn mutable_reference_issue_candidate_calls_dispatch_after_local_cfg_joins() {
     let source = fs::read_to_string(fixture_path("MutableReferenceLocals.scala"))
-        .expect("read the issue candidate fixture with bounded Base storage");
-    let output = TestOutputDirectory::new("mutable-reference-candidate-dispatch");
-    let artifacts = compile_source_batch(
+        .expect("read the real mutable-reference-local source fixture");
+    let output = TestOutputDirectory::new("mutable-reference-candidate-dispatch-first");
+    let second_output = TestOutputDirectory::new("mutable-reference-candidate-dispatch-second");
+    let mut observed_session = false;
+    let mut observed_methods = 0;
+    let artifacts = compile_source_batch_observed(
         &source,
         "MutableReferenceLocals.scala",
         output.path(),
         SourceId::from_index(1454),
         SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, definitions| {
+            observed_session = true;
+            let base = audit_class_named(unit, "Base");
+            let left = audit_class_named(unit, "Left");
+            let right = audit_class_named(unit, "Right");
+            let runner = audit_class_named(unit, "Runner");
+            assert_eq!(audit_class_parent(unit, base), definitions.object_class);
+            assert_eq!(audit_class_parent(unit, left), base);
+            assert_eq!(audit_class_parent(unit, right), base);
+            let value_method = audit_method_named(unit, base, "value").method;
+
+            for name in ["choose", "repeat", "initialize", "swap"] {
+                observed_methods += 1;
+                let method = audit_method_named(unit, runner, name);
+                let binding = method
+                    .locals
+                    .iter()
+                    .find(|binding| {
+                        binding.mutable
+                            && unit
+                                .store
+                                .names
+                                .resolve(unit.store.symbols.get(binding.symbol).name.text())
+                                == "current"
+                    })
+                    .unwrap_or_else(|| panic!("{name} has its canonical mutable current local"));
+                let symbol = unit.store.symbols.get(binding.symbol);
+                assert_eq!(symbol.kind, SymbolKind::Local);
+                assert_eq!(symbol.owner, Some(method.method));
+                assert!(symbol.flags.contains(SymbolFlags::MUTABLE));
+                let dotty_core::SymbolInfo::Complete(declared_type) = &symbol.info else {
+                    panic!("current has complete source type information")
+                };
+                assert_eq!(audit_type_symbol(unit, *declared_type), Some(base));
+                let layout = unit
+                    .local_layout(runner, method.method, definitions)
+                    .expect("all planned classes and locals share this typed session");
+                let slot = layout
+                    .local(binding.symbol)
+                    .expect("layout uses the canonical local SymbolId");
+                assert_eq!(slot.ty(), JvmType::Reference(base));
+                assert!(slot.is_mutable());
+                let body = method.body.expect("method has a typed body");
+                assert!(
+                    typed_tree_targets(unit, body).contains(&value_method),
+                    "{name} selects Base.value through the same typed symbol graph"
+                );
+            }
+            assert_eq!(observed_methods, 4);
+        }),
     )
     .expect("mutable local method calls compile through the JVM backend");
+    assert!(
+        observed_session,
+        "the complete frontend reached one typed session"
+    );
     assert_eq!(
         artifacts
             .iter()
@@ -10902,6 +11059,183 @@ fn mutable_reference_issue_candidate_calls_dispatch_after_local_cfg_joins() {
             .collect::<Vec<_>>(),
         ["Base", "Left", "Right", "Runner"]
     );
+    let second = compile_source_batch(
+        &source,
+        "MutableReferenceLocals.scala",
+        second_output.path(),
+        SourceId::from_index(1454),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh frontend session independently emits the same source batch");
+    assert_eq!(second.len(), artifacts.len());
+    assert_eq!(output.class_files().len(), 4);
+    assert_eq!(second_output.class_files().len(), 4);
+    for (first, second) in artifacts.iter().zip(&second) {
+        assert_eq!(first.class.internal_name(), second.class.internal_name());
+        assert_eq!(
+            first.class.bytes(),
+            second.class.bytes(),
+            "{} is byte-identical across independent frontend sessions",
+            first.class.internal_name()
+        );
+        assert_eq!(
+            fs::read(&first.path).expect("read first published class"),
+            first.class.bytes()
+        );
+        assert_eq!(
+            fs::read(&second.path).expect("read second published class"),
+            second.class.bytes()
+        );
+
+        let mut reader = Reader::new(first.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("decode every emitted class");
+        class
+            .validate_references()
+            .expect("every emitted class has valid constant-pool references");
+        assert_eq!(class.version.major, 65, "JVM 21 classfile version");
+        assert!(class.access_flags.is_public());
+        let expected_super = match first.class.internal_name() {
+            "Base" | "Runner" => "java/lang/Object",
+            "Left" | "Right" => "Base",
+            name => panic!("unexpected class in acceptance fixture: {name}"),
+        };
+        assert_eq!(
+            class
+                .constant_pool
+                .class_name(class.super_class.expect("source class superclass")),
+            Ok(expected_super),
+            "{} keeps its direct superclass",
+            first.class.internal_name()
+        );
+    }
+
+    let base_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Base")
+        .expect("Base is emitted");
+    let mut base_reader = Reader::new(base_artifact.class.bytes());
+    let base = ClassFile::decode(&mut base_reader).expect("decode Base");
+    assert_eq!(base.fields.len(), 1, "inherited fields are not copied");
+    let current = &base.fields[0];
+    assert_eq!(base.constant_pool.utf8(current.name_index), Ok("current"));
+    assert_eq!(base.constant_pool.utf8(current.descriptor_index), Ok("I"));
+    assert!(current.access_flags.is_private());
+    assert!(!current.access_flags.is_final(), "Base.current is mutable");
+    assert_eq!(
+        base.methods
+            .iter()
+            .filter(|method| base.constant_pool.utf8(method.name_index) == Ok("value"))
+            .count(),
+        1
+    );
+    let base_constructor = emitted_method_code(&base, "<init>");
+    assert_field_reference(&base, base_constructor, 0xb5, "Base", "current", "I");
+    assert_invocation_sequence(
+        &base,
+        base_constructor,
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_field_reference(
+        &base,
+        emitted_method_code(&base, "value"),
+        0xb4,
+        "Base",
+        "current",
+        "I",
+    );
+
+    for class_name in ["Left", "Right"] {
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == class_name)
+            .expect("subclass is emitted");
+        let mut reader = Reader::new(artifact.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("decode subclass");
+        assert!(
+            class.fields.is_empty(),
+            "{class_name} does not duplicate Base fields"
+        );
+        assert_invocation_sequence(
+            &class,
+            emitted_method_code(&class, "<init>"),
+            &[(0xb7, "Base", "<init>", "(I)V")],
+        );
+        assert_invocation_sequence(
+            &class,
+            emitted_method_code(&class, "value"),
+            &[(0xb7, "Base", "value", "()I")],
+        );
+    }
+
+    let runner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner is emitted");
+    let mut runner_reader = Reader::new(runner_artifact.class.bytes());
+    let runner_class = ClassFile::decode(&mut runner_reader).expect("decode Runner");
+    assert!(runner_class.fields.is_empty());
+    for method in ["choose", "repeat", "initialize", "swap"] {
+        let code = emitted_method_code(&runner_class, method);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .any(|(_, opcode)| *opcode == 0xb6),
+            "{method} invokes the canonical Base.value method virtually"
+        );
+        let expected = match method {
+            "choose" | "repeat" | "initialize" => vec![
+                (0xb7, "Left", "<init>", "(I)V"),
+                (0xb7, "Right", "<init>", "(I)V"),
+                (0xb6, "Base", "value", "()I"),
+            ],
+            "swap" => vec![
+                (0xb7, "Left", "<init>", "(I)V"),
+                (0xb7, "Right", "<init>", "(I)V"),
+                (0xb7, "Left", "<init>", "(I)V"),
+                (0xb6, "Base", "value", "()I"),
+            ],
+            _ => unreachable!(),
+        };
+        assert_invocation_sequence(&runner_class, code, &expected);
+        let stores = decode_subset_instructions(code)
+            .iter()
+            .filter(|(_, opcode)| *opcode == 0x4e)
+            .count();
+        let expected_stores = if method == "initialize" { 1 } else { 2 };
+        assert_eq!(
+            stores, expected_stores,
+            "{method} stores current in astore_3"
+        );
+        assert_eq!(
+            decode_subset_instructions(code)
+                .iter()
+                .filter(|(_, opcode)| *opcode == 0x2d)
+                .count(),
+            1,
+            "{method} reads current from aload_3 for the virtual call"
+        );
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xc0),
+            "{method} does not insert a narrowing checkcast"
+        );
+    }
+    assert_eq!(code_max_locals(&runner_class, "choose"), 4);
+    assert_eq!(code_max_locals(&runner_class, "repeat"), 5);
+    assert_eq!(code_max_locals(&runner_class, "initialize"), 4);
+    assert_eq!(code_max_locals(&runner_class, "swap"), 4);
+    for method in ["choose", "repeat", "initialize", "swap"] {
+        assert_eq!(
+            code_max_stack(&runner_class, method),
+            3,
+            "{method} max_stack"
+        );
+    }
+    assert_reference_local_join_frame(&runner_class, "choose", 3, false);
+    assert_reference_local_join_frame(&runner_class, "repeat", 3, true);
+    assert_reference_stack_join_frame(&runner_class, "initialize");
+    assert_reference_stack_join_frame(&runner_class, "swap");
 
     if require_jdk_or_skip() {
         let output_path = output.path().to_str().expect("UTF-8 output path");
@@ -10911,12 +11245,18 @@ fn mutable_reference_issue_candidate_calls_dispatch_after_local_cfg_joins() {
             r#"public final class MutableReferenceCandidateHarness {
   public static void main(String[] args) {
     Runner runner = new Runner();
-    if (runner.choose(false, 10) != 11 || runner.choose(true, 10) != 12)
-      throw new AssertionError("branch assignment dispatch");
-    if (runner.repeat(0, 10) != 11 || runner.repeat(1, 10) != 12 || runner.repeat(3, 10) != 12)
-      throw new AssertionError("loop assignment dispatch");
-    if (runner.initialize(true, 10) != 11 || runner.initialize(false, 10) != 12)
-      throw new AssertionError("initializer join dispatch");
+    for (int seed : new int[] {10, 0, -3}) {
+      int left = seed + 1;
+      int right = seed + 2;
+      if (runner.choose(false, seed) != left || runner.choose(true, seed) != right)
+        throw new AssertionError("branch assignment dispatch: " + seed);
+      if (runner.repeat(0, seed) != left || runner.repeat(1, seed) != right || runner.repeat(3, seed) != right)
+        throw new AssertionError("loop assignment dispatch: " + seed);
+      if (runner.initialize(true, seed) != left || runner.initialize(false, seed) != right)
+        throw new AssertionError("initializer join dispatch: " + seed);
+      if (runner.swap(false, seed) != left || runner.swap(true, seed) != right)
+        throw new AssertionError("assignment sibling join dispatch: " + seed);
+    }
   }
 }
 "#,
@@ -10948,6 +11288,31 @@ fn mutable_reference_issue_candidate_calls_dispatch_after_local_cfg_joins() {
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );
+
+        for class_name in ["Base", "Left", "Right", "Runner"] {
+            let javap = Command::new("javap")
+                .args(["-p", "-c", "-v", "-classpath", output_path, class_name])
+                .output()
+                .expect("start javap for acceptance class");
+            assert!(
+                javap.status.success(),
+                "javap -c -v rejected {class_name}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&javap.stdout),
+                String::from_utf8_lossy(&javap.stderr)
+            );
+            let text = String::from_utf8_lossy(&javap.stdout);
+            assert!(text.contains("major version: 65"));
+            if class_name == "Runner" {
+                assert!(text.contains("StackMapTable"));
+                assert!(text.contains("invokevirtual"));
+                assert!(text.contains("Method Base.value:()I"));
+            }
+            if class_name == "Base" {
+                assert!(text.contains("current;"));
+                assert!(text.contains("putfield"));
+                assert!(text.contains("getfield"));
+            }
+        }
     }
 }
 
