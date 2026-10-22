@@ -10147,6 +10147,247 @@ fn mutable_reference_locals_remain_rejected_without_publishing_classfiles() {
 }
 
 #[test]
+fn mutable_reference_issue_candidate_pins_the_current_source_frontend_blocker() {
+    let source = fs::read_to_string(fixture_path("MutableReferenceLocals.scala"))
+        .expect("read the exact issue candidate fixture");
+    let output = TestOutputDirectory::new("mutable-reference-local-candidate");
+    let result = compile_source_batch(
+        &source,
+        "MutableReferenceLocals.scala",
+        output.path(),
+        SourceId::from_index(1454),
+        SourceUnitCardinality::AtLeastTwo,
+    );
+    let Err(PipelineFailure::Typer(TyperError::TermNameNotFound {
+        source: error_source,
+        position,
+        ..
+    })) = result
+    else {
+        panic!("the exact issue candidate should fail at the unresolved constructor parameter");
+    };
+    assert_eq!(error_source, SourceId::from_index(1454));
+    let position = position.expect("the error should retain the unresolved seed span");
+    assert_eq!(position.source(), SourceId::from_index(1454));
+    let range = position.span().range();
+    assert_eq!(
+        &source[range.start() as usize..range.end() as usize],
+        "seed"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+fn walk_typed_subtree(
+    unit: &JvmCompilationUnit<'_>,
+    root: TreeId<Typed>,
+    visit: &mut impl FnMut(TreeId<Typed>),
+) {
+    let mut pending = vec![root];
+    while let Some(tree_id) = pending.pop() {
+        visit(tree_id);
+        match &unit.typed_ast.get(tree_id).kind {
+            TreeKind::Apply(application) => {
+                pending.push(application.function);
+                pending.extend(application.args.iter().copied());
+            }
+            TreeKind::Assign(assignment) => pending.extend([assignment.lhs, assignment.rhs]),
+            TreeKind::Block(block) => {
+                pending.extend(block.stats.iter().copied());
+                pending.push(block.expr);
+            }
+            TreeKind::If(if_tree) => {
+                pending.extend([if_tree.cond, if_tree.then_branch, if_tree.else_branch]);
+            }
+            TreeKind::New(new_tree) => pending.push(new_tree.tpt),
+            TreeKind::Select(select) => pending.push(select.qualifier),
+            TreeKind::Typed(typed) => pending.extend([typed.expr, typed.tpt]),
+            TreeKind::ValDef(definition) => {
+                pending.push(definition.tpt);
+                pending.extend(definition.rhs);
+            }
+            TreeKind::While(loop_tree) => pending.extend([loop_tree.cond, loop_tree.body]),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_plan_stage() {
+    let source = fs::read_to_string(fixture_path("MutableReferenceLocalsTyped.scala"))
+        .expect("read the source-backed mutable-reference-local audit fixture");
+    let output = TestOutputDirectory::new("mutable-reference-local-audit");
+    let mut observed = false;
+    let mut observed_locals = Vec::new();
+    let result = compile_source_batch_observed(
+        &source,
+        "MutableReferenceLocalsTyped.scala",
+        output.path(),
+        SourceId::from_index(1454),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, definitions| {
+            observed = true;
+            let base = audit_class_named(unit, "Base");
+            let left = audit_class_named(unit, "Left");
+            let right = audit_class_named(unit, "Right");
+            let runner = audit_class_named(unit, "Runner");
+            assert_eq!(audit_class_parent(unit, left), base);
+            assert_eq!(audit_class_parent(unit, right), base);
+            assert_eq!(audit_class_parent(unit, base), definitions.object_class);
+
+            for method_name in ["choose", "repeat", "initialize"] {
+                let method = audit_method_named(unit, runner, method_name);
+                let current = method
+                    .locals
+                    .iter()
+                    .find(|binding| {
+                        binding.mutable
+                            && unit
+                                .store
+                                .names
+                                .resolve(unit.store.symbols.get(binding.symbol).name.text())
+                                == "current"
+                    })
+                    .expect("each real source var has one canonical mutable local binding");
+                let symbol = unit.store.symbols.get(current.symbol);
+                assert_eq!(symbol.owner, Some(method.method));
+                assert!(symbol.flags.contains(SymbolFlags::MUTABLE));
+                assert_eq!(symbol.kind, SymbolKind::Local);
+                let dotty_core::SymbolInfo::Complete(declared_type) = &symbol.info else {
+                    panic!("current has complete canonical source type information")
+                };
+                assert_eq!(
+                    audit_type_symbol(unit, *declared_type),
+                    Some(base),
+                    "the declared local type remains Base"
+                );
+                let declaration = unit.typed_ast.get(current.declaration);
+                let TreeKind::ValDef(definition) = &declaration.kind else {
+                    panic!("the binding points at its canonical typed ValDef")
+                };
+                let initializer = definition.rhs.expect("current has a source initializer");
+                assert_eq!(
+                    audit_type_symbol(unit, unit.typed_ast.get(definition.tpt).ty),
+                    Some(base)
+                );
+                observed_locals.push((method_name, current.symbol, *declared_type));
+
+                let body = method.body.expect("each source method has a typed body");
+                let mut nodes = Vec::new();
+                walk_typed_subtree(unit, body, &mut |tree| nodes.push(tree));
+                let assignments_to_current = nodes
+                    .iter()
+                    .filter_map(|tree_id| {
+                        let TreeKind::Assign(assignment) = &unit.typed_ast.get(*tree_id).kind
+                        else {
+                            return None;
+                        };
+                        (term_type_target(unit, unit.typed_ast.get(assignment.lhs).ty)
+                            == Some(current.symbol))
+                        .then_some((*tree_id, assignment.rhs))
+                    })
+                    .collect::<Vec<_>>();
+
+                match method_name {
+                    "choose" => {
+                        assert_eq!(
+                            audit_type_symbol(unit, unit.typed_ast.get(initializer).ty),
+                            Some(left)
+                        );
+                        assert_eq!(assignments_to_current.len(), 1);
+                        let (_, assigned_value) = assignments_to_current[0];
+                        assert_eq!(
+                            audit_type_symbol(unit, unit.typed_ast.get(assigned_value).ty),
+                            Some(right)
+                        );
+                        let branch = nodes
+                            .iter()
+                            .find_map(|tree_id| {
+                                let tree = unit.typed_ast.get(*tree_id);
+                                matches!(tree.kind, TreeKind::If(_)).then_some(tree)
+                            })
+                            .expect("conditional reassignment remains a typed If");
+                        let TreeKind::If(if_tree) = &branch.kind else {
+                            unreachable!()
+                        };
+                        assert!(matches!(
+                            unit.typed_ast.get(if_tree.then_branch).kind,
+                            TreeKind::Assign(_)
+                        ));
+                    }
+                    "repeat" => {
+                        assert_eq!(
+                            audit_type_symbol(unit, unit.typed_ast.get(initializer).ty),
+                            Some(left)
+                        );
+                        assert_eq!(assignments_to_current.len(), 1);
+                        let loop_tree = nodes
+                            .iter()
+                            .find_map(|tree_id| {
+                                let tree = unit.typed_ast.get(*tree_id);
+                                matches!(tree.kind, TreeKind::While(_)).then_some(tree)
+                            })
+                            .expect("loop reassignment remains a typed While");
+                        let TreeKind::While(loop_body) = &loop_tree.kind else {
+                            unreachable!()
+                        };
+                        assert!(nodes.iter().any(|tree_id| {
+                            let tree = unit.typed_ast.get(*tree_id);
+                            matches!(tree.kind, TreeKind::Ident(_))
+                                && term_type_target(unit, tree.ty) == Some(current.symbol)
+                        }));
+                        assert!(
+                            loop_body.body != body,
+                            "loop body has its own typed subtree"
+                        );
+                    }
+                    "initialize" => {
+                        let Type::Or {
+                            left: left_arm,
+                            right: right_arm,
+                        } = unit.store.types.get(unit.typed_ast.get(initializer).ty)
+                        else {
+                            panic!("the contextual initializer retains the source sibling union")
+                        };
+                        let mut arms = [
+                            audit_type_symbol(unit, *left_arm)
+                                .expect("left union arm is canonical"),
+                            audit_type_symbol(unit, *right_arm)
+                                .expect("right union arm is canonical"),
+                        ];
+                        arms.sort_by_key(|arm| arm.index());
+                        let mut expected = [left, right];
+                        expected.sort_by_key(|arm| arm.index());
+                        assert_eq!(arms, expected);
+                        assert!(assignments_to_current.is_empty());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            assert_eq!(observed_locals.len(), 3);
+        }),
+    );
+    assert!(
+        observed,
+        "the complete source reached the typed audit observer: {result:?}"
+    );
+    let expected_first_local = observed_locals
+        .iter()
+        .find(|(method, ..)| *method == "choose")
+        .expect("conditional candidate was observed")
+        .1;
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::UnsupportedMutableReferenceLocal { symbol }
+        )) if symbol == expected_first_local
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "the audit must not publish classes while mutable references remain unsupported"
+    );
+}
+
+#[test]
 fn constructor_arguments_lower_strict_and_unary_boolean_intrinsics_from_source() {
     let output = TestOutputDirectory::new("boolean-constructor-arguments");
     let artifacts = compile_planned_constructor_source(
