@@ -117,6 +117,9 @@ impl Corpus {
 
     pub fn fixture_paths(&self) -> Vec<PathBuf> {
         let root = self.tasty_root_path();
+        // Adversarial review controls are stored beside some extracted
+        // corpora, but are not entries from the pinned source artifact.
+        let review_fixtures = root.join("review");
         let mut directories = vec![root];
         let mut fixtures = Vec::new();
 
@@ -140,7 +143,7 @@ impl Corpus {
                     panic!("failed to inspect corpus path {}: {error}", path.display())
                 });
 
-                if file_type.is_dir() {
+                if file_type.is_dir() && path != review_fixtures {
                     directories.push(path);
                 } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "tasty")
                 {
