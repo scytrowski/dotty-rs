@@ -157,6 +157,15 @@ above succeeds. The verifier rule does not choose a Scala conditional type and
 is not a reason to reinterpret arbitrary `Type::Or` values. Stack-map
 `Object(Base)` is about compatible verifier state, not source type inference.
 
+The `SiblingConstructors.scala` end-to-end gate exercises this boundary
+through the complete four-class source batch. It decodes the emitted classes,
+confirms that both `choose` and `reverseChoose` have a real branch target
+carrying the constant-pool-resolved `Base` frame, and verifies that neither
+method inserts a cast. Two independent frontend sessions must produce
+byte-identical output; the mandatory JDK 21+ harness checks both runtime
+branch orders, exact `Left`/`Right` class identity, and virtual dispatch under
+`-Xverify:all`.
+
 The Scala 3.9.0 revision is recorded as the compatibility target, but this
 environment did not have a Scala compiler/JDK available to execute the source
 through the pinned Scala oracle. The integration test is a dotty-rs frontend
