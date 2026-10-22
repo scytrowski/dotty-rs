@@ -1713,6 +1713,125 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
     );
 }
 
+fn reject_sibling_batch_with_observer(
+    source_index: u32,
+    mut observe: impl for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions),
+) -> PipelineFailure {
+    let source = fs::read_to_string(fixture_path("SiblingConstructors.scala"))
+        .expect("read source fixture for sibling rejection cases");
+    let output = TestOutputDirectory::new(&format!("sibling-rejection-{source_index}"));
+    let result = compile_source_batch_observed(
+        &source,
+        "SiblingConstructors.scala",
+        output.path(),
+        SourceId::from_index(source_index),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut observe),
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "invalid sibling batches must not publish a partial classfile set"
+    );
+    result.expect_err("the deliberately invalid sibling plans must be rejected")
+}
+
+#[test]
+fn sibling_constructor_plan_cannot_be_reused_by_its_sibling() {
+    let mut observed_constructors = None;
+    let error = reject_sibling_batch_with_observer(1440, |unit, _| {
+        let left = audit_class_named(unit, "Left");
+        let right = audit_class_named(unit, "Right");
+        let left_index = unit
+            .classes
+            .iter()
+            .position(|plan| plan.class == left)
+            .unwrap();
+        let right_index = unit
+            .classes
+            .iter()
+            .position(|plan| plan.class == right)
+            .unwrap();
+        let JvmClassInitializationPlan::PrimaryConstructor(right_constructor) =
+            &unit.classes[right_index].initialization
+        else {
+            panic!("Right has its own primary-constructor plan")
+        };
+        observed_constructors = Some((left, right, right_constructor.symbol()));
+        unit.classes[left_index].initialization = unit.classes[right_index].initialization.clone();
+    });
+    let (left, right, right_constructor) =
+        observed_constructors.expect("observer saw both siblings");
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::InvalidPrimaryConstructor {
+            constructor,
+            issue: dotty_jvm::JvmConstructorIssue::SourceIdentity,
+        }) if constructor == right_constructor
+    ));
+    assert_ne!(left, right);
+}
+
+#[test]
+fn sibling_method_plan_cannot_select_its_siblings_override_symbol() {
+    let mut observed_methods = None;
+    let error = reject_sibling_batch_with_observer(1441, |unit, _| {
+        let left = audit_class_named(unit, "Left");
+        let right = audit_class_named(unit, "Right");
+        let left_index = unit
+            .classes
+            .iter()
+            .position(|plan| plan.class == left)
+            .unwrap();
+        let right_value = audit_method_named(unit, right, "value").method;
+        let left_value_index = unit.classes[left_index]
+            .methods
+            .iter()
+            .position(|method| {
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(method.method).name.text())
+                    == "value"
+            })
+            .unwrap();
+        observed_methods = Some((left, right, right_value));
+        unit.classes[left_index].methods[left_value_index].method = right_value;
+    });
+    let (left, right, right_value) = observed_methods.expect("observer saw both overrides");
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::WrongOwner {
+            symbol,
+            expected,
+            actual: Some(actual),
+        }) if symbol == right_value && expected == left && actual == right
+    ));
+}
+
+#[test]
+fn sibling_batch_rejects_a_base_without_its_required_parent_constructor_proof() {
+    let mut observed_classes = None;
+    let error = reject_sibling_batch_with_observer(1442, |unit, _| {
+        let base = audit_class_named(unit, "Base");
+        let left = audit_class_named(unit, "Left");
+        let base_index = unit
+            .classes
+            .iter()
+            .position(|plan| plan.class == base)
+            .unwrap();
+        observed_classes = Some((base, left));
+        unit.classes[base_index].initialization = JvmClassInitializationPlan::Unsupported;
+    });
+    let (base, left) = observed_classes.expect("observer saw the base and child classes");
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: dotty_jvm::JvmSuperclassIssue::ParentConstructorUnavailable,
+        }) if class == left && parent == base
+    ));
+}
+
 fn audit_symbol_name(unit: &JvmCompilationUnit<'_>, symbol: SymbolId) -> String {
     let info = unit.store.symbols.get(symbol);
     let name = unit.store.names.resolve(info.name.text());
