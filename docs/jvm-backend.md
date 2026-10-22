@@ -782,7 +782,11 @@ class subset, sibling joins without an explicit checked expected parent,
 unrelated or `Object`-only class joins, arrays, null, mutable reference locals,
 and branched constructors remain deferred. Ancestor-related and proven sibling
 source-typed `If` results are supported only within the validated same-unit
-hierarchy and still require JVM frame verification.
+hierarchy and still require JVM frame verification. The exact `Left`/`Right`
+join under a declared `Base` result is covered end to end: both branch orders
+emit a CP-resolved `Object(Base)` frame, fresh frontend sessions produce
+identical class bytes, and the mandatory JDK 21+ harness verifies runtime class
+identity and virtual dispatch with `-Xverify:all`.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates

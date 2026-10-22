@@ -70,8 +70,8 @@ results by default, and explicitly proven subtype assignments when a
 `ClassHierarchy` is supplied. Source bytecode lowering supports planned
 reference parameters and results through `if`, `while`, and ordinary planned
 calls, plus the validated ancestor conversions listed above. Source lowering
-still rejects mutable reference locals, sibling result joins, arrays, null,
-and branched constructors.
+still rejects mutable reference locals, sibling result joins without an exact
+checked expected parent, arrays, null, and branched constructors.
 
 ## Bounded state model
 
@@ -272,7 +272,8 @@ straight-line builder methods.
 | `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner; virtual calls also check supported exact object arguments and results | Covered by classfile analyzer tests and JDK verifier gate |
 | Ancestor-related initialized classes at a stack join | Widen to the already-present ancestor and emit its `Object` frame entry | Classfile analyzer and builder regressions; JDK gate |
 | Real `Middle`/`Leaf` source branches returning `Middle` | Keep the canonical source result and encode `Object(Middle)` at both branch-order joins | `MultilevelInheritance.scala`, decoded `StackMapTable`, and mandatory JDK 21+ source gate |
-| Sibling initialized classes at a stack join | Join only at the nearest checked non-`Object` superclass; reject missing paths and an inferred `Object`-only intersection | Classfile analyzer and encoded-frame regressions |
+| Exact `Left`/`Right` source branches returning `Base` | Preserve the source `Type::Or`, then encode the checked `Object(Base)` frame at both branch-order joins; do not infer `Object` or insert a cast | `SiblingConstructors.scala`, decoded `StackMapTable` with CP-resolved `Base`, byte-identical fresh frontend sessions, and mandatory JDK 21+ `-Xverify:all` gate |
+| Other sibling initialized classes at a stack join | Join only at the nearest checked non-`Object` superclass; reject missing paths and inferred `Object`-only intersections | Classfile analyzer regressions; source lowering also requires the exact expected-parent proof |
 | Unrelated initialized classes at a stack join | Typed incompatible-stack reference error; do not infer a common class | Classfile analyzer regression tests |
 | Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
 | Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |

@@ -28,8 +28,7 @@ both branch orders using the source-typed `Middle` result. Decoded classfiles,
 deterministic independent sessions, `javap -c -v`, and the mandatory JDK 21+
 `java -Xverify:all` harness pin this composition. The class-file major version
 is 65. A fourth class on one ancestry path remains rejected; sibling
-subclasses are covered separately below, while sibling reference joins remain
-unsupported.
+subclasses and exact expected-`Base` sibling reference joins are covered below.
 
 `SiblingConstructors.scala` adds a four-class batch with two direct children
 of `Base`. Each child has its own `(I)V` constructor and canonical `seed`
@@ -37,10 +36,14 @@ parameter; both direct-super plans forward that child's parameter to the same
 `Base.<init>(I)V`. `Left.value` and `Right.value` keep distinct declaration
 symbols and effective dispatch entries, while `Base.doubled` remains inherited
 and invokes `Base.value` virtually. `Runner.fromLeft` and `fromRight` allocate
-the exact sibling class and call the common `Base`-typed evaluator. The test
-checks decoded class headers and method references, deterministic output after
-reversing class-plan order, and—when JDK 21+ is available—runtime results for
-positive and negative seeds under `java -Xverify:all`.
+the exact sibling class and call the common `Base`-typed evaluator.
+`Runner.choose` and `reverseChoose` return the exact `Left | Right` source
+union under an explicitly declared `Base` result; both branch orders encode a
+constant-pool-resolved `Object(Base)` stack-map entry without a cast. The test
+checks exact class/member shapes, decoded headers, descriptors and method
+references, byte-identical output from two fresh frontend sessions, and—when
+JDK 21+ is available—runtime dispatch and both branch orders under
+`java -Xverify:all`.
 
 ## Current pipeline and identity contracts
 
@@ -164,7 +167,7 @@ publish partial output.
 | `class Derived extends Base {}` | Source pipeline emits the batch when `Base` is a planned public no-arg class with Object as its parent | `Derived.super_class = Base`; constructor invokes `Base.<init>()V` exactly once before ordinary use | Covered by source-backed classfile regression and JDK verifier gate |
 | `def evaluate(base: Base) = base.doubled(); evaluate(new Leaf())` | Accepted when the validated `Leaf → Middle → Base` proof is present in the emission unit | `evaluate` keeps descriptor `Base`; `invokevirtual Base.doubled` accepts the `Base` receiver, and no cast or merge is emitted | Other subtype depths and external hierarchy facts remain unsupported |
 | `Inheritance.scala` end-to-end fixture | Real Scala frontend compiles `Base`, `Derived`, and `Runner`; two fresh sessions emit byte-identical batches | Decoded class metadata and method references are asserted; `javap -c -v` and a Java 21+ `-Xverify:all` harness validate descriptors, frames, constructors, and dynamic dispatch | Mandatory JDK 21+ CI gate; local JDK is optional |
-| `SiblingConstructors.scala` batch | Real source compiles `Base`, `Left`, `Right`, and `Runner`; child constructors forward distinct canonical parameters to the same parent constructor, and each override retains its own dispatch identity | The complete class batch is decoded; constructors use `invokespecial Base.<init>(I)V`, overrides use `invokespecial Base.value()I`, and `Base.doubled`/Runner use virtual calls; deterministic bytes survive reversed class-plan order; JDK 21+ runtime checks positive and negative seeds | Sibling subclasses and shared-base dispatch are supported; conditional sibling reference joins remain tracked separately in [the sibling reference join audit](jvm-sibling-reference-joins.md) |
+| `SiblingConstructors.scala` batch | Real source compiles `Base`, `Left`, `Right`, and `Runner`; child constructors forward distinct canonical parameters to the same parent constructor, overrides retain distinct symbols, and `choose`/`reverseChoose` preserve their exact union under a declared `Base` result | All classes and exact member shapes are decoded; constructors use `invokespecial Base.<init>(I)V`, overrides use `invokespecial Base.value()I`, and `Base.doubled`/Runner use virtual calls; both join orders have CP-resolved `Object(Base)` frames and no cast; two fresh frontend sessions emit identical bytes; JDK 21+ checks runtime identity and dispatch | Exact context-proven sibling joins are supported; inferred, mismatched, nested, and `Object`-only joins remain unsupported; see [the sibling reference join audit](jvm-sibling-reference-joins.md) |
 | Unknown/wrong parent type | If name/type resolution cannot resolve it, reject in the frontend; otherwise hierarchy validation rejects noncanonical or non-class parents | No class file should be produced | Source resolution and canonical hierarchy projection; never lower by name guess |
 | Parent cycle (`A extends B`, `B extends A`) | `JvmSuperclassIssue::InheritanceCycle` | No `super_class` chain is emitted | Validated hierarchy graph in `dotty-jvm`, keyed by canonical symbols |
 | Extending a `final` class | `JvmSuperclassIssue::ParentIsFinal` | JVMS forbids extending a final class | Parent flag validation in the `dotty-jvm` hierarchy check |
@@ -205,8 +208,9 @@ fixtures and their deterministic/bytecode/runtime checks remain unchanged.
 
 The validated hierarchy permits at most three planned user classes on one
 ancestry path; separate sibling branches may be included in the same batch.
-Hierarchy-aware reference joins, nested allocation arguments,
-arbitrary effectful pre-super evaluation,
+Exact sibling reference joins with a checked expected parent are supported as
+described above. General inferred hierarchy-aware reference joins, nested
+allocation arguments, arbitrary effectful pre-super evaluation,
 branched constructors, qualified/trait super, and Scala ABI/TASTy emission
 remain deferred. Invalid
 source/plan/verification inputs fail
