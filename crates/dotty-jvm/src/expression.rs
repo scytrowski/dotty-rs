@@ -433,6 +433,11 @@ fn lower_leaf(
                     });
                 }
                 if matches!(local.ty(), JvmType::Reference(_)) {
+                    if local.is_mutable() {
+                        return Err(JvmCodegenError::ReferenceLocalInstructionUnsupported {
+                            tree: tree_id,
+                        });
+                    }
                     code.aload(usize::from(local.slot())).map_err(|error| {
                         JvmCodegenError::CodeBuilder {
                             tree: tree_id,

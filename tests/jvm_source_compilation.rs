@@ -10207,6 +10207,50 @@ fn mutable_reference_local_initialization_uses_a_category_one_slot() {
 }
 
 #[test]
+fn mutable_reference_local_cannot_be_copied_into_an_immutable_local() {
+    let output = TestOutputDirectory::new("reference-var-copy-rejected");
+    let result = compile_planned_constructor_source(
+        "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    val saved = counter\n    42\n",
+        output.path(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::ReferenceLocalInstructionUnsupported { .. }
+            ))
+        ),
+        "copying a mutable reference local must remain an unsupported read"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "a failed source batch publishes no classes"
+    );
+}
+
+#[test]
+fn mutable_reference_local_cannot_be_discarded_as_an_expression() {
+    let output = TestOutputDirectory::new("reference-var-discard-rejected");
+    let result = compile_planned_constructor_source(
+        "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    counter\n    42\n",
+        output.path(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::ReferenceLocalInstructionUnsupported { .. }
+            ))
+        ),
+        "discarding a mutable reference local must remain an unsupported read"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "a failed source batch publishes no classes"
+    );
+}
+
+#[test]
 fn mutable_reference_issue_candidate_pins_the_current_source_frontend_blocker() {
     let source = fs::read_to_string(fixture_path("MutableReferenceLocals.scala"))
         .expect("read the exact issue candidate fixture");
