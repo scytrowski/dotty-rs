@@ -10337,6 +10337,226 @@ fn mutable_reference_local_assignment_accepts_a_checked_subtype_and_dispatches()
 }
 
 #[test]
+fn contextual_sibling_if_results_initialize_and_assign_declared_reference_locals() {
+    let output = TestOutputDirectory::new("contextual-sibling-if-local-values");
+    let source = "class Base(seed: Int):\n  private var stored: Int = seed\n  def value(): Int = stored\nclass Left(seed: Int) extends Base(seed):\n  override def value(): Int = super.value() + 1\nclass Right(seed: Int) extends Base(seed):\n  override def value(): Int = super.value() + 2\nclass Runner:\n  def init(flag: Boolean, seed: Int): Base =\n    var current: Base = if flag then new Left(seed) else new Right(seed)\n    current\n  def initReverse(flag: Boolean, seed: Int): Base =\n    var current: Base = if flag then new Right(seed) else new Left(seed)\n    current\n  def replace(flag: Boolean, seed: Int): Base =\n    var current: Base = new Left(seed)\n    current = if flag then new Right(seed) else new Left(seed)\n    current\n  def replaceNested(flag: Boolean, seed: Int): Base =\n    var current: Base = new Left(seed)\n    current = { if flag then new Right(seed) else new Left(seed) }\n    current\n";
+    let mut observed_methods = 0;
+    let artifacts = compile_source_batch_observed(
+        source,
+        "ContextualSiblingIf.scala",
+        output.path(),
+        SourceId::from_index(1458),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, definitions| {
+            let runner = audit_class_named(unit, "Runner");
+            let base = audit_class_named(unit, "Base");
+            for method_name in ["init", "initReverse", "replace", "replaceNested"] {
+                observed_methods += 1;
+                let method = audit_method_named(unit, runner, method_name);
+                let local = method
+                    .locals
+                    .iter()
+                    .find(|binding| {
+                        unit.store
+                            .names
+                            .resolve(unit.store.symbols.get(binding.symbol).name.text())
+                            == "current"
+                    })
+                    .expect("each contextual method declares current");
+                let dotty_core::SymbolInfo::Complete(declared_type) =
+                    unit.store.symbols.info(local.symbol)
+                else {
+                    panic!("current keeps its canonical declared source type")
+                };
+                assert_eq!(audit_type_symbol(unit, *declared_type), Some(base));
+                let body = method.body.expect("method has a typed body");
+                let mut nodes = Vec::new();
+                walk_typed_subtree(unit, body, &mut |tree| nodes.push(tree));
+                let conditionals = nodes
+                    .iter()
+                    .filter(|tree| matches!(unit.typed_ast.get(**tree).kind, TreeKind::If(_)))
+                    .copied()
+                    .collect::<Vec<_>>();
+                assert_eq!(conditionals.len(), 1, "{method_name} has one sibling If");
+                let conditional = conditionals[0];
+                assert!(
+                    matches!(
+                        unit.store.types.get(unit.typed_ast.get(conditional).ty),
+                        Type::Or { .. }
+                    ),
+                    "{method_name} retains the original source Type::Or"
+                );
+                let projection = unit
+                    .project_sibling_union_to_expected_type(
+                        unit.typed_ast.get(conditional).ty,
+                        *declared_type,
+                        definitions,
+                    )
+                    .expect("declared Base supplies the existing checked projection context");
+                assert_eq!(projection.representation(), JvmType::Reference(base));
+            }
+        }),
+    )
+    .expect("declared Base locals accept their checked sibling If values");
+    assert_eq!(observed_methods, 4);
+    let runner = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner class is emitted");
+    let mut reader = Reader::new(runner.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Runner class");
+    class
+        .validate_references()
+        .expect("Runner's classfile references are valid");
+
+    for method in ["init", "initReverse", "replace", "replaceNested"] {
+        let code = emitted_method_code(&class, method);
+        let expected_stores = usize::from(method.starts_with("replace")) + 1;
+        assert_eq!(
+            decode_subset_instructions(code)
+                .iter()
+                .filter(|(_, opcode)| matches!(opcode, 0x3a | 0x4b..=0x4e))
+                .count(),
+            expected_stores,
+            "{method} stores the initialized local once and adds one store only for reassignment"
+        );
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xc0),
+            "{method} projects the proven union to Base without checkcast"
+        );
+        assert!(
+            stack_map_frames(&class, method).iter().any(|frame| {
+                frame.stack == [StackMapVerificationType::Object("Base".to_owned())]
+            }),
+            "{method} merges the two branch values as Base on the operand stack"
+        );
+    }
+    assert_invocation_sequence(
+        &class,
+        emitted_method_code(&class, "init"),
+        &[
+            (0xb7, "Left", "<init>", "(I)V"),
+            (0xb7, "Right", "<init>", "(I)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &class,
+        emitted_method_code(&class, "initReverse"),
+        &[
+            (0xb7, "Right", "<init>", "(I)V"),
+            (0xb7, "Left", "<init>", "(I)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &class,
+        emitted_method_code(&class, "replace"),
+        &[
+            (0xb7, "Left", "<init>", "(I)V"),
+            (0xb7, "Right", "<init>", "(I)V"),
+            (0xb7, "Left", "<init>", "(I)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &class,
+        emitted_method_code(&class, "replaceNested"),
+        &[
+            (0xb7, "Left", "<init>", "(I)V"),
+            (0xb7, "Right", "<init>", "(I)V"),
+            (0xb7, "Left", "<init>", "(I)V"),
+        ],
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("ContextualSiblingIfHarness.java");
+        fs::write(
+            &harness,
+            "public final class ContextualSiblingIfHarness { private static void check(Base value, int expected) { if (value.value() != expected) throw new AssertionError(value.getClass() + \" -> \" + value.value()); } public static void main(String[] args) { Runner runner = new Runner(); check(runner.init(true, 10), 11); check(runner.init(false, 10), 12); check(runner.initReverse(true, 10), 12); check(runner.initReverse(false, 10), 11); check(runner.replace(true, 10), 12); check(runner.replace(false, 10), 11); check(runner.replaceNested(true, 10), 12); check(runner.replaceNested(false, 10), 11); } }\n",
+        )
+        .expect("write contextual sibling If harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected contextual sibling If harness\\nstdout:\\n{}\\nstderr:\\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "ContextualSiblingIfHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected contextual sibling If classes\\nstdout:\\n{}\\nstderr:\\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn contextual_sibling_if_projection_rejects_inferred_and_incompatible_targets() {
+    #[derive(Clone, Copy)]
+    enum ExpectedFailure {
+        UnsupportedReferenceType,
+        LocalValueTypeMismatch,
+    }
+
+    let cases = [
+        (
+            "inferred-sibling-if-local-rejected",
+            "class Base(seed: Int)\nclass Left(seed: Int) extends Base(seed)\nclass Right(seed: Int) extends Base(seed)\nclass Runner:\n  def infer(flag: Boolean, seed: Int): Int =\n    var current = if flag then new Left(seed) else new Right(seed)\n    42\n",
+            ExpectedFailure::UnsupportedReferenceType,
+        ),
+        (
+            "narrow-sibling-if-local-rejected",
+            "class Base(seed: Int)\nclass Left(seed: Int) extends Base(seed)\nclass Right(seed: Int) extends Base(seed)\nclass Runner:\n  def narrow(flag: Boolean, seed: Int): Int =\n    var current: Left = if flag then new Left(seed) else new Right(seed)\n    42\n",
+            ExpectedFailure::LocalValueTypeMismatch,
+        ),
+        (
+            "unrelated-sibling-if-local-rejected",
+            "class Base(seed: Int)\nclass Left(seed: Int) extends Base(seed)\nclass Other(seed: Int)\nclass Runner:\n  def unrelated(flag: Boolean, seed: Int): Int =\n    var current: Base = if flag then new Left(seed) else new Other(seed)\n    42\n",
+            ExpectedFailure::LocalValueTypeMismatch,
+        ),
+    ];
+
+    for (label, source, expected_failure) in cases {
+        let output = TestOutputDirectory::new(label);
+        let failure = compile_planned_constructor_source(source, output.path())
+            .expect_err("unsupported or incompatible sibling unions must fail closed");
+        let matches_expected = match expected_failure {
+            ExpectedFailure::UnsupportedReferenceType => matches!(
+                &failure,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmReferenceType { .. })
+            ),
+            ExpectedFailure::LocalValueTypeMismatch => matches!(
+                &failure,
+                PipelineFailure::Typer(TyperError::LocalValueTypeMismatch { .. })
+            ),
+        };
+        assert!(
+            matches_expected,
+            "{label} failed with an unexpected error: {failure:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} must not publish any class from a rejected source batch"
+        );
+    }
+}
+
+#[test]
 fn mutable_reference_local_assignment_remains_unsupported_in_if_and_while_bodies() {
     let sources = [
         (

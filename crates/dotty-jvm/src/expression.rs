@@ -706,6 +706,50 @@ fn local_reference_slot(
     Ok(Some(*local))
 }
 
+fn local_expected_source_type(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    local: JvmLocalSlot,
+) -> Result<Option<TypeId>, JvmCodegenError> {
+    if !matches!(local.ty(), JvmType::Reference(_)) {
+        return Ok(None);
+    }
+    let Some((unit, _, metadata)) = context.call_context else {
+        return Ok(None);
+    };
+    let semantic_type = match context.store.symbols.info(local.symbol()) {
+        SymbolInfo::Complete(ty) => *ty,
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo {
+                symbol: local.symbol(),
+            });
+        }
+        SymbolInfo::Error => {
+            return Err(JvmCodegenError::ErrorSemanticInfo {
+                symbol: local.symbol(),
+            });
+        }
+    };
+    let found = unit.local_value_type(
+        local.symbol(),
+        semantic_type,
+        context.definitions,
+        Some(metadata),
+    )?;
+    if found != local.ty() {
+        if let Some(error) = reference_type_mismatch(local.ty(), found) {
+            return Err(error);
+        }
+        return Err(JvmCodegenError::LocalReferenceTypeMismatch {
+            tree,
+            symbol: local.symbol(),
+            expected: local.ty(),
+            found: Some(found),
+        });
+    }
+    Ok(Some(semantic_type))
+}
+
 fn emit_expression(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
@@ -1038,7 +1082,8 @@ fn emit_assignment(
         });
     }
 
-    let flow = emit_expression(context, rhs, code, depth + 1)?;
+    let expected_type = local_expected_source_type(context, tree_id, local)?;
+    let flow = emit_expression_with_expected(context, rhs, expected_type, code, depth + 1)?;
     match flow {
         Flow::Diverges => Ok(Flow::Diverges),
         Flow::Value(found)
@@ -1404,7 +1449,8 @@ fn emit_local_declaration(
         declaration,
     })?;
 
-    let flow = emit_expression(context, rhs, code, depth + 1)?;
+    let expected_type = local_expected_source_type(context, declaration, local)?;
+    let flow = emit_expression_with_expected(context, rhs, expected_type, code, depth + 1)?;
     let assignable = match flow {
         Flow::Value(found) => flow_assignable(context, found, local.ty())?,
         Flow::Unit | Flow::Diverges => false,
