@@ -35,6 +35,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
             parent_rows = [
                 {
                     "requested_class_root": row["requested_class_root"],
+                    "template_wire_address": "100",
                     "parent_index": "0",
                     "shape": "simple",
                     "resolution_stage": "semantic",
@@ -51,6 +52,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
             historical_rows = [
                 {
                     "requested_class_root": row["requested_class_root"],
+                    "template_wire_address": "100",
                     "parent_index": "0",
                     "shape": "old-simple",
                     "resolution_stage": "unresolved",
@@ -90,7 +92,8 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
             self.assertEqual(rows[1][0], "compiler/Root0")
             self.assertEqual(rows[1][7], "2")
             self.assertEqual(rows[1][10], "0")
-            self.assertEqual(rows[1][11], "old-simple")
+            self.assertEqual(rows[1][11], "100")
+            self.assertEqual(rows[1][12], "old-simple")
             self.assertEqual(rows[1][8], "compiler/Foo.scala;compiler/Other.scala")
             self.assertTrue(rows[1][9].endswith("=2"))
             self.assertEqual(rows[-1][0], "compiler/NewRoot")
@@ -123,6 +126,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
                 [
                     {
                         "requested_class_root": row["requested_class_root"],
+                        "template_wire_address": "100",
                         "parent_index": "0",
                         "shape": "simple",
                         "resolution_stage": "unresolved",
@@ -138,6 +142,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
                 [
                     {
                         "requested_class_root": "root/0",
+                        "template_wire_address": "100",
                         "parent_index": "0",
                         "shape": "simple",
                         "resolution_stage": "unresolved",

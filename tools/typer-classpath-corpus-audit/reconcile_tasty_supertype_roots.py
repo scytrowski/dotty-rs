@@ -31,8 +31,8 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
     provenance_headers, provenance_rows = read_tsv(provenance_path)
     required = {
         baseline_path: {"requested_class_root", "weighted_observations", "resource_path", "artifact", "artifact_version", "artifact_sha256"},
-        historical_parent_path: {"requested_class_root", "parent_index", "resolution_stage", "resolved_binary_name", "standalone_decode_parent_index", "standalone_decode_cause"},
-        parent_path: {"requested_class_root", "parent_index", "shape", "resolution_stage", "resolved_binary_name", "deepest_typed_cause", "failing_binary_name"},
+        historical_parent_path: {"requested_class_root", "template_wire_address", "parent_index", "shape", "resolution_stage", "resolved_binary_name", "standalone_decode_parent_index", "standalone_decode_cause"},
+        parent_path: {"requested_class_root", "template_wire_address", "parent_index", "shape", "resolution_stage", "resolved_binary_name", "deepest_typed_cause", "failing_binary_name"},
         provenance_path: {"root_cause_key", "source_file", "observations"},
     }
     for path, columns in required.items():
@@ -101,11 +101,15 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
         "historical_resource_path", "historical_artifact", "historical_artifact_version",
         "historical_artifact_sha256", "current_source_audit_observations",
         "current_source_audit_files", "current_error_root_origins", "parent_index",
-        "original_parent_shape", "original_resolution_stage", "original_resolved_binary_name",
-        "original_unresolved_parent_index", "original_unresolved_cause", "parent_shape",
+        "original_template_wire_address", "original_parent_shape", "original_resolution_stage",
+        "original_resolved_binary_name", "original_unresolved_parent_index", "original_unresolved_cause",
+        "original_reference_tag", "original_reference_name", "original_reference_prefix", "original_raw_tree",
+        "current_template_wire_address", "parent_shape",
         "resolution_stage", "resolved_binary_name", "hierarchy_load_cause",
         "hierarchy_failing_binary_name", "current_parent_reference_tag", "current_parent_reference_name",
-        "current_parent_reference_prefix", "current_parent_raw_tree",
+        "current_parent_reference_prefix", "current_alias_owner", "current_alias_name",
+        "has_semantic_reference", "has_reference_prefix", "visible_names", "current_parent_raw_tree",
+        "member_lookup_in_root_profile",
     ]
     output: list[list[str]] = [header]
     for root in sorted(baseline):
@@ -121,22 +125,33 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
                 str(current_weights.get(root, 0)),
                 ";".join(sorted(files.get(root, set()))),
                 ";".join(f"{key}={value}" for key, value in sorted(origins.get(root, {}).items())),
-                parent["parent_index"], original.get("shape", ""),
+                parent["parent_index"], original.get("template_wire_address", ""), original.get("shape", ""),
                 original.get("resolution_stage", ""), original.get("resolved_binary_name", ""),
                 original.get("standalone_decode_parent_index", ""),
-                original.get("standalone_decode_cause", ""), parent["shape"], parent["resolution_stage"],
+                original.get("standalone_decode_cause", ""), original.get("reference_tag", ""),
+                original.get("reference_name", ""), original.get("reference_prefix", ""),
+                original.get("raw_tree", ""), parent["template_wire_address"], parent["shape"], parent["resolution_stage"],
                 parent["resolved_binary_name"], parent["deepest_typed_cause"],
                 parent["failing_binary_name"], parent.get("reference_tag", ""),
                 parent.get("reference_name", ""), parent.get("reference_prefix", ""),
-                parent.get("raw_tree", ""),
+                parent.get("alias_owner", ""), parent.get("alias_name", ""),
+                parent.get("has_semantic_reference", ""), parent.get("has_reference_prefix", ""),
+                parent.get("visible_names", ""), parent.get("raw_tree", ""),
+                "not-probed-by-root-profile",
             ])
     for root in sorted(new_roots):
         for origin, weight in sorted(origins[root].items()):
-            output.append([
-                root, "new-current-root", "", "", "", "", "", str(weight),
-                ";".join(sorted(files[root])), f"{origin}={weight}",
-                "", "", "", "", "", "", "not-profiled-frozen-root", "", "", "", "", "", "", "",
-            ])
+            new_row = dict.fromkeys(header, "")
+            new_row.update({
+                "requested_class_root": root,
+                "requested_identity": "new-current-root",
+                "current_source_audit_observations": str(weight),
+                "current_source_audit_files": ";".join(sorted(files[root])),
+                "current_error_root_origins": f"{origin}={weight}",
+                "resolution_stage": "not-profiled-frozen-root",
+                "member_lookup_in_root_profile": "not-probed-by-root-profile",
+            })
+            output.append([new_row[column] for column in header])
 
     baseline_weight = sum(int(row["weighted_observations"]) for row in baseline.values())
     provenance_weight = sum(current_weights.values())
@@ -153,6 +168,9 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
             current = next((row for row in parents[root] if int(row["parent_index"]) == index), None)
             if current is None:
                 raise ValueError(f"current profile is missing original failed parent {root}[{index}]")
+            original = old_rows[index]
+            if original["template_wire_address"] != current["template_wire_address"]:
+                raise ValueError(f"parent wire address changed for {root}[{index}]")
             if current["resolved_binary_name"]:
                 resolved_original_parents += 1
             else:
