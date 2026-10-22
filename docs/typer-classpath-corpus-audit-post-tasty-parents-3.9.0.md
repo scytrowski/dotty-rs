@@ -2,8 +2,9 @@
 
 **Status: incomplete; current full-corpus evidence has not been collected.**
 The pinned full audit is intentionally dispatched manually on a hosted runner;
-it has not been started for this checkpoint. Do not treat the historical values
-below as current results or as a completed Definition of Done.
+an attempted local run was stopped before completing its first source file. Do
+not treat the partial local observations or historical values below as current
+full-corpus results or as a completed Definition of Done.
 
 ## Inputs frozen by #1342
 
@@ -27,6 +28,21 @@ file or root. The current audit now emits and compares source provenance in the
 same sequential passes as its normalized reports. The reconciliation tool
 reports the historical weights and source observations separately and fails
 when any frozen root row is missing.
+
+## Incomplete local audit attempt
+
+On 2026-10-22, a local run used the pinned Scala checkout, verified Scala JAR
+hashes, Temurin JDK 21.0.8, one Cargo job, and one Rust test thread. It was
+stopped after 71m40s elapsed without completing the first of 1,236 source
+files (`audited 0/1236`); the latest progress line recorded 1,264,000 module
+identity resolver calls attributed to `GenericSignatures.scala`. The process
+reached a sampled RSS of 5,519,344 KiB and CPU temperature readings reached
+92°C. The run was paused intermittently to cool the mini PC, so this elapsed
+time is not a comparable full-audit runtime. Peak RSS was unavailable because
+`/usr/bin/time` is not installed. No report or sidecars were generated. This
+attempt is only evidence that the local full audit is impractical under the
+observed machine conditions; all current corpus results and DoD gates remain
+unverified.
 
 ## Focused regression inventory
 
