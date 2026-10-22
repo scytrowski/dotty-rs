@@ -987,7 +987,7 @@ impl SourceTyper<'_> {
 
     pub(in crate::typer) fn lookup_imported_symbols(
         &mut self,
-        source_import: SourceImport,
+        source_import: &SourceImport,
         wanted: dotty_core::Name,
         type_only: bool,
         selection: ImportSelection,
@@ -1481,9 +1481,10 @@ impl SourceTyper<'_> {
                 return Ok(Some(symbol));
             }
         }
+        let import_scopes = self.import_scopes(&contexts);
         for selection in [ImportSelection::Explicit, ImportSelection::Wildcard] {
-            let term_candidates = self.lookup_import_candidates(
-                &contexts,
+            let term_candidates = self.lookup_import_candidates_in_scopes(
+                &import_scopes,
                 name,
                 false,
                 selection,
@@ -1505,8 +1506,8 @@ impl SourceTyper<'_> {
             // being used as a qualifier, rather than in ordinary term import
             // lookup.
             let type_name = dotty_core::Name::new(name.text(), dotty_core::Namespace::Type);
-            let type_candidates = self.lookup_import_candidates(
-                &contexts,
+            let type_candidates = self.lookup_import_candidates_in_scopes(
+                &import_scopes,
                 type_name,
                 true,
                 selection,
@@ -1558,6 +1559,14 @@ impl SourceTyper<'_> {
         selection: ImportSelection,
         location: SourceTreeLocation,
     ) -> Result<Vec<SymbolId>, TyperError> {
+        let scopes = self.import_scopes(contexts);
+        self.lookup_import_candidates_in_scopes(&scopes, name, type_only, selection, location)
+    }
+
+    fn import_scopes(
+        &self,
+        contexts: &[SourceContextId],
+    ) -> Vec<(dotty_core::ScopeId, Vec<SourceImport>)> {
         let mut scopes: Vec<(dotty_core::ScopeId, Vec<SourceImport>)> = Vec::new();
         for context_id in contexts {
             let source_context = self.index.source_context(*context_id);
@@ -1581,6 +1590,17 @@ impl SourceTyper<'_> {
                 scopes.push((source_context.lexical_scope, vec![import]));
             }
         }
+        scopes
+    }
+
+    fn lookup_import_candidates_in_scopes(
+        &mut self,
+        scopes: &[(dotty_core::ScopeId, Vec<SourceImport>)],
+        name: dotty_core::Name,
+        type_only: bool,
+        selection: ImportSelection,
+        location: SourceTreeLocation,
+    ) -> Result<Vec<SymbolId>, TyperError> {
         for (_, imports) in scopes {
             let mut candidates = Vec::new();
             for source_import in imports {
@@ -1625,15 +1645,16 @@ impl SourceTyper<'_> {
                         tree_index: location.tree_index,
                         context_index: context.index(),
                     })?;
+            let source_import = SourceImport {
+                tree: *tree,
+                context,
+                parent: source_context.parent,
+                expression_context: Some(*expression_context),
+                local_import_scope: Some(import_scope),
+                preceding_local_imports: Some(imports[..import_index].to_vec()),
+            };
             candidates.extend(self.lookup_imported_symbols(
-                SourceImport {
-                    tree: *tree,
-                    context,
-                    parent: source_context.parent,
-                    expression_context: Some(*expression_context),
-                    local_import_scope: Some(import_scope),
-                    preceding_local_imports: Some(imports[..import_index].to_vec()),
-                },
+                &source_import,
                 name,
                 type_only,
                 selection,
