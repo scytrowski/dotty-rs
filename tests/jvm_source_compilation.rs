@@ -1022,7 +1022,7 @@ class Runner:
 }
 
 #[test]
-fn unrelated_source_branch_reaches_typed_or_then_fails_exact_jvm_join_policy() {
+fn sibling_source_branch_uses_its_exact_non_object_parent_join() {
     let source = r#"
 class Root
 class Left extends Root
@@ -1031,7 +1031,7 @@ class Branch:
   def choose(flag: Boolean): Root =
     if flag then new Left() else new Right()
 "#;
-    let output = TestOutputDirectory::new("unrelated-source-join-audit");
+    let output = TestOutputDirectory::new("sibling-source-parent-join");
     let mut observed = false;
     let result = compile_source_batch_observed(
         source,
@@ -1045,10 +1045,10 @@ class Branch:
             let choose = audit_method_named(unit, branch, "choose");
             let body = unit.typed_ast.get(choose.body.unwrap());
             let TreeKind::If(_) = body.kind else {
-                panic!("unrelated branch remains a canonical typed If");
+                panic!("sibling branch remains a canonical typed If");
             };
             let Type::Or { left, right } = unit.store.types.get(body.ty) else {
-                panic!("unrelated classes retain the typer's Or result");
+                panic!("sibling classes retain the typer's Or result");
             };
             let mut targets = [
                 audit_type_symbol(unit, *left).expect("left Or arm has a class identity"),
@@ -1064,16 +1064,24 @@ class Branch:
         }),
     );
     assert!(observed, "frontend pipeline stopped early: {result:?}");
-    assert!(
-        matches!(
-            result,
-            Err(PipelineFailure::Codegen(
-                JvmCodegenError::ReferenceTypeMismatch { .. }
-            ))
-        ),
-        "unexpected first backend rejection: {result:?}"
+    let artifacts = result.expect("Root is the exact nearest non-Object parent");
+    let branch = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Branch")
+        .expect("Branch artifact");
+    let branch = decode_emitted_class(branch);
+    assert_eq!(
+        methods_with_descriptors(&branch),
+        vec![
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("choose".to_owned(), "(Z)LRoot;".to_owned())
+        ]
     );
-    assert!(output.class_files().is_empty());
+    assert!(
+        stack_map_frames(&branch, "choose")
+            .iter()
+            .any(|frame| { frame.stack == [StackMapVerificationType::Object("Root".to_owned())] })
+    );
 }
 
 #[test]
@@ -1099,6 +1107,8 @@ class Runner:
     choose(flag, seed).doubled()
   def accept(value: Base): Int = value.doubled()
   def viaArgument(flag: Boolean, seed: Int): Int = accept(choose(flag, seed))
+  def acceptChoice(flag: Boolean, seed: Int): Int =
+    accept(if flag then new Left(seed) else new Right(seed))
   def chooseNested(first: Boolean, second: Boolean, seed: Int): Base =
     if first then new Left(seed)
     else if second then new Right(seed)
@@ -1259,16 +1269,47 @@ class Runner:
         observed,
         "the real source reaches the typed frontend observer: {result:?}"
     );
-    assert!(
-        matches!(
-            result,
-            Err(PipelineFailure::Codegen(
-                JvmCodegenError::ReferenceTypeMismatch { .. }
-            ))
-        ),
-        "the first current rejection remains the explicit JVM reference join policy: {result:?}"
+    let artifacts = result.expect("an explicit Base context authorizes each sibling If join");
+    assert_eq!(artifacts.len(), 4);
+    let runner = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner artifact");
+    let runner = decode_emitted_class(runner);
+    for method_name in ["choose", "chooseReverse", "chooseNested"] {
+        let descriptors = methods_with_descriptors(&runner);
+        let descriptor = if method_name == "chooseNested" {
+            "(ZZI)LBase;"
+        } else {
+            "(ZI)LBase;"
+        };
+        assert!(
+            descriptors.contains(&(method_name.to_owned(), descriptor.to_owned())),
+            "{method_name} descriptor missing from {descriptors:?}"
+        );
+        let code = emitted_method_code(&runner, method_name);
+        assert!(
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xc0),
+            "{method_name} lowers the proven join without a checkcast"
+        );
+        assert!(
+            stack_map_frames(&runner, method_name)
+                .iter()
+                .any(|frame| frame.stack == [StackMapVerificationType::Object("Base".to_owned())]),
+            "{method_name} uses the exact common Base verifier frame"
+        );
+    }
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "acceptChoice"),
+        &[
+            (0xb7, "Left", "<init>", "(I)V"),
+            (0xb7, "Right", "<init>", "(I)V"),
+            (0xb6, "Runner", "accept", "(LBase;)I"),
+        ],
     );
-    assert!(output.class_files().is_empty());
 }
 
 #[test]
@@ -1665,6 +1706,25 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
             ],
         );
     }
+    for method in ["choose", "reverseChoose"] {
+        assert!(
+            methods_with_descriptors(&runner)
+                .contains(&(method.to_owned(), "(ZI)LBase;".to_owned()))
+        );
+        assert!(
+            stack_map_frames(&runner, method).iter().any(|frame| {
+                frame.stack == [StackMapVerificationType::Object("Base".to_owned())]
+            })
+        );
+    }
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "run"),
+        &[
+            (0xb6, "Runner", "choose", "(ZI)LBase;"),
+            (0xb6, "Base", "doubled", "()I"),
+        ],
+    );
 
     if !require_jdk_or_skip() {
         return;
@@ -1678,7 +1738,14 @@ fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
         if (runner.fromLeft(10) != 22) throw new AssertionError("left dispatch");
         if (runner.fromRight(10) != 24) throw new AssertionError("right dispatch");
         if (runner.fromLeft(-3) != -4) throw new AssertionError("left negative seed");
-        if (runner.fromRight(-2) != 0) throw new AssertionError("right negative seed");
+        if (runner.fromRight(-3) != -2) throw new AssertionError("right negative seed");
+        if (runner.choose(true, 10).doubled() != 22) throw new AssertionError("left If result");
+        if (runner.choose(false, 10).doubled() != 24) throw new AssertionError("right If result");
+        if (runner.reverseChoose(true, 10).doubled() != 24) throw new AssertionError("reversed right If result");
+        if (runner.reverseChoose(false, 10).doubled() != 22) throw new AssertionError("reversed left If result");
+        if (runner.run(true, 10) != 22 || runner.run(false, 10) != 24) throw new AssertionError("Base receiver");
+        if (runner.acceptChoice(true, 10) != 22 || runner.acceptChoice(false, 10) != 24) throw new AssertionError("Base argument");
+        if (runner.run(true, -3) != -4 || runner.run(false, -3) != -2) throw new AssertionError("negative seeds");
     }
 }
 "#,
@@ -6872,7 +6939,7 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             ),
             "different-reference-if-result" => matches!(
                 &error,
-                PipelineFailure::Codegen(JvmCodegenError::ReferenceTypeMismatch { .. })
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedSiblingUnionProjection { .. })
             ),
             "reference-field" => matches!(
                 &error,

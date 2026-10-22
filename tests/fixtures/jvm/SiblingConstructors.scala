@@ -13,3 +13,10 @@ class Runner:
   def evaluate(base: Base): Int = base.doubled()
   def fromLeft(seed: Int): Int = evaluate(new Left(seed))
   def fromRight(seed: Int): Int = evaluate(new Right(seed))
+  def choose(flag: Boolean, seed: Int): Base =
+    if flag then new Left(seed) else new Right(seed)
+  def reverseChoose(flag: Boolean, seed: Int): Base =
+    if flag then new Right(seed) else new Left(seed)
+  def run(flag: Boolean, seed: Int): Int = choose(flag, seed).doubled()
+  def acceptChoice(flag: Boolean, seed: Int): Int =
+    evaluate(if flag then new Left(seed) else new Right(seed))
