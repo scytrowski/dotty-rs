@@ -6,7 +6,7 @@ use dotty_classfile::attribute::Attribute;
 use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader;
-use dotty_core::ast::{DefDef, Template, TreeKind, Typed, Untyped};
+use dotty_core::ast::{AstArena, DefDef, Template, TreeKind, Typed, Untyped};
 use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolKind,
@@ -30,6 +30,8 @@ const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
+type TyperFailureObserver<'observer> =
+    dyn for<'a> FnMut(&AstArena<Untyped>, &SourceTyper<'a>, &TyperError) + 'observer;
 
 #[derive(Debug)]
 #[allow(dead_code)] // Retain typed stage failures so test panics report the exact pipeline error.
@@ -227,7 +229,27 @@ fn compile_source_batch_observed(
     output_directory: &Path,
     source_id: SourceId,
     cardinality: SourceUnitCardinality,
+    observe: Option<&mut SourceBatchObserver<'_>>,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    compile_source_batch_with_typer_failure_observer(
+        source_text,
+        source_file_name,
+        output_directory,
+        source_id,
+        cardinality,
+        observe,
+        None,
+    )
+}
+
+fn compile_source_batch_with_typer_failure_observer(
+    source_text: &str,
+    source_file_name: &str,
+    output_directory: &Path,
+    source_id: SourceId,
+    cardinality: SourceUnitCardinality,
     mut observe: Option<&mut SourceBatchObserver<'_>>,
+    mut observe_typer_failure: Option<&mut TyperFailureObserver<'_>>,
 ) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
     let source = SourceText::new(source_text)
         .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
@@ -316,9 +338,12 @@ fn compile_source_batch_observed(
         &packages,
     );
     for class in &classes {
-        typer
-            .complete_symbol(class.class)
-            .map_err(PipelineFailure::Typer)?;
+        if let Err(error) = typer.complete_symbol(class.class) {
+            if let Some(observer) = observe_typer_failure.as_mut() {
+                observer(&parsed.ast, &typer, &error);
+            }
+            return Err(PipelineFailure::Typer(error));
+        }
     }
     for class in &classes {
         let constructor = index.symbol_at(source_id, class.constructor_tree).ok_or(
@@ -419,9 +444,12 @@ fn compile_source_batch_observed(
     }
     for class in &classes {
         for method in &class.methods {
-            typer
-                .complete_symbol(method.symbol)
-                .map_err(PipelineFailure::Typer)?;
+            if let Err(error) = typer.complete_symbol(method.symbol) {
+                if let Some(observer) = observe_typer_failure.as_mut() {
+                    observer(&parsed.ast, &typer, &error);
+                }
+                return Err(PipelineFailure::Typer(error));
+            }
         }
     }
 
@@ -484,14 +512,24 @@ fn compile_source_batch_observed(
         for source_method in class.methods {
             let body = match source_method.rhs {
                 Some(rhs) => {
-                    let context = typer
-                        .expression_context_for(source_method.symbol)
-                        .map_err(PipelineFailure::Typer)?;
-                    Some(
-                        typer
-                            .type_expression(rhs, context)
-                            .map_err(PipelineFailure::Typer)?,
-                    )
+                    let context = match typer.expression_context_for(source_method.symbol) {
+                        Ok(context) => context,
+                        Err(error) => {
+                            if let Some(observer) = observe_typer_failure.as_mut() {
+                                observer(&parsed.ast, &typer, &error);
+                            }
+                            return Err(PipelineFailure::Typer(error));
+                        }
+                    };
+                    match typer.type_expression(rhs, context) {
+                        Ok(body) => Some(body),
+                        Err(error) => {
+                            if let Some(observer) = observe_typer_failure.as_mut() {
+                                observer(&parsed.ast, &typer, &error);
+                            }
+                            return Err(PipelineFailure::Typer(error));
+                        }
+                    }
                 }
                 None => None,
             };
@@ -557,6 +595,25 @@ fn term_type_target(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> Op
         } => Some(*symbol),
         _ => None,
     }
+}
+
+fn source_with_only_runner_method(source: &str, method_name: &str) -> String {
+    let (shared_definitions, runner) = source
+        .split_once("class Runner:\n")
+        .expect("source fixture contains Runner");
+    let method_prefix = format!("  def {method_name}(");
+    let start = runner
+        .find(&method_prefix)
+        .unwrap_or_else(|| panic!("source fixture contains {method_name}"));
+    let method = &runner[start..];
+    let end = method[1..]
+        .find("\n  def ")
+        .map(|offset| offset + 1)
+        .unwrap_or(method.len());
+    format!(
+        "{shared_definitions}class Runner:\n{}",
+        method[..end].trim_end()
+    )
 }
 
 fn audit_type_symbol(unit: &JvmCompilationUnit<'_>, ty: dotty_core::TypeId) -> Option<SymbolId> {
@@ -10177,6 +10234,88 @@ fn mutable_reference_issue_candidate_pins_the_current_source_frontend_blocker() 
     assert!(output.class_files().is_empty());
 }
 
+#[test]
+fn mutable_reference_readback_candidates_pin_each_typer_prefix_failure() {
+    let source = fs::read_to_string(fixture_path("MutableReferenceLocalsReadback.scala"))
+        .expect("read the minimally adapted, readback-preserving fixture");
+    for method_name in ["choose", "repeat", "initialize"] {
+        let method_source = source_with_only_runner_method(&source, method_name);
+        let source_id = SourceId::from_index(1454);
+        let output = TestOutputDirectory::new(&format!("mutable-reference-readback-{method_name}"));
+        let mut failures = 0;
+        let result = compile_source_batch_with_typer_failure_observer(
+            &method_source,
+            "MutableReferenceLocalsReadback.scala",
+            output.path(),
+            source_id,
+            SourceUnitCardinality::AtLeastTwo,
+            None,
+            Some(&mut |untyped_ast, typer, error| {
+                failures += 1;
+                let TyperError::UnstableSelectionPrefix {
+                    source: error_source,
+                    tree_index,
+                    ..
+                } = error
+                else {
+                    panic!(
+                        "{method_name} should fail at unstable mutable-local selection: {error:?}"
+                    );
+                };
+                assert_eq!(*error_source, source_id);
+                let (selection_id, selection) = untyped_ast
+                    .iter()
+                    .find(|(id, _)| id.index() == *tree_index)
+                    .expect("the typer failure refers to a real source tree");
+                let TreeKind::Select(selection) = &selection.kind else {
+                    panic!("the failure tree is the current.value selection")
+                };
+                assert_eq!(typer.store().names.resolve(selection.name.text()), "value");
+                let selection_span = untyped_ast
+                    .get(selection_id)
+                    .position
+                    .expect("the source member selection keeps its span");
+                assert_eq!(selection_span.source(), source_id);
+                let range = selection_span.span().range();
+                let selected_source = &method_source[range.start() as usize..range.end() as usize];
+                assert!(
+                    selected_source.contains("current.value"),
+                    "selection span should cover current.value, got {selected_source:?}"
+                );
+
+                let TreeKind::Ident(qualifier) = &untyped_ast.get(selection.qualifier).kind else {
+                    panic!("current.value has the local current as its direct qualifier")
+                };
+                assert_eq!(
+                    typer.store().names.resolve(qualifier.name.text()),
+                    "current"
+                );
+                let qualifier_span = untyped_ast
+                    .get(selection.qualifier)
+                    .position
+                    .expect("the local receiver keeps its source span");
+                assert_eq!(qualifier_span.source(), source_id);
+                let range = qualifier_span.span().range();
+                assert_eq!(
+                    &method_source[range.start() as usize..range.end() as usize],
+                    "current"
+                );
+            }),
+        );
+        assert_eq!(
+            failures, 1,
+            "observe exactly the first typer error: {result:?}"
+        );
+        assert!(matches!(
+            result,
+            Err(PipelineFailure::Typer(
+                TyperError::UnstableSelectionPrefix { .. }
+            ))
+        ));
+        assert!(output.class_files().is_empty());
+    }
+}
+
 fn walk_typed_subtree(
     unit: &JvmCompilationUnit<'_>,
     root: TreeId<Typed>,
@@ -10293,12 +10432,6 @@ fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_pl
                             audit_type_symbol(unit, unit.typed_ast.get(initializer).ty),
                             Some(left)
                         );
-                        assert_eq!(assignments_to_current.len(), 1);
-                        let (_, assigned_value) = assignments_to_current[0];
-                        assert_eq!(
-                            audit_type_symbol(unit, unit.typed_ast.get(assigned_value).ty),
-                            Some(right)
-                        );
                         let branch = nodes
                             .iter()
                             .find_map(|tree_id| {
@@ -10309,17 +10442,36 @@ fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_pl
                         let TreeKind::If(if_tree) = &branch.kind else {
                             unreachable!()
                         };
-                        assert!(matches!(
-                            unit.typed_ast.get(if_tree.then_branch).kind,
-                            TreeKind::Assign(_)
-                        ));
+                        let mut then_nodes = Vec::new();
+                        walk_typed_subtree(unit, if_tree.then_branch, &mut |tree| {
+                            then_nodes.push(tree)
+                        });
+                        let then_assignments = then_nodes
+                            .iter()
+                            .filter_map(|tree_id| {
+                                let TreeKind::Assign(assignment) =
+                                    &unit.typed_ast.get(*tree_id).kind
+                                else {
+                                    return None;
+                                };
+                                (term_type_target(unit, unit.typed_ast.get(assignment.lhs).ty)
+                                    == Some(current.symbol))
+                                .then_some(assignment.rhs)
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(then_assignments.len(), 1);
+                        assert_eq!(
+                            audit_type_symbol(unit, unit.typed_ast.get(then_assignments[0]).ty),
+                            Some(right),
+                            "the assignment in the If then-branch stores Right"
+                        );
+                        assert_eq!(assignments_to_current.len(), 1);
                     }
                     "repeat" => {
                         assert_eq!(
                             audit_type_symbol(unit, unit.typed_ast.get(initializer).ty),
                             Some(left)
                         );
-                        assert_eq!(assignments_to_current.len(), 1);
                         let loop_tree = nodes
                             .iter()
                             .find_map(|tree_id| {
@@ -10330,15 +10482,30 @@ fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_pl
                         let TreeKind::While(loop_body) = &loop_tree.kind else {
                             unreachable!()
                         };
-                        assert!(nodes.iter().any(|tree_id| {
-                            let tree = unit.typed_ast.get(*tree_id);
-                            matches!(tree.kind, TreeKind::Ident(_))
-                                && term_type_target(unit, tree.ty) == Some(current.symbol)
-                        }));
-                        assert!(
-                            loop_body.body != body,
-                            "loop body has its own typed subtree"
+                        let mut loop_body_nodes = Vec::new();
+                        walk_typed_subtree(unit, loop_body.body, &mut |tree| {
+                            loop_body_nodes.push(tree)
+                        });
+                        let loop_assignments = loop_body_nodes
+                            .iter()
+                            .filter_map(|tree_id| {
+                                let TreeKind::Assign(assignment) =
+                                    &unit.typed_ast.get(*tree_id).kind
+                                else {
+                                    return None;
+                                };
+                                (term_type_target(unit, unit.typed_ast.get(assignment.lhs).ty)
+                                    == Some(current.symbol))
+                                .then_some(assignment.rhs)
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(loop_assignments.len(), 1);
+                        assert_eq!(
+                            audit_type_symbol(unit, unit.typed_ast.get(loop_assignments[0]).ty),
+                            Some(right),
+                            "the While body stores Right into current"
                         );
+                        assert_eq!(assignments_to_current.len(), 1);
                     }
                     "initialize" => {
                         let Type::Or {
@@ -10385,6 +10552,49 @@ fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_pl
         output.class_files().is_empty(),
         "the audit must not publish classes while mutable references remain unsupported"
     );
+}
+
+#[test]
+fn mutable_reference_layout_blocker_is_pinned_for_each_candidate() {
+    let source = fs::read_to_string(fixture_path("MutableReferenceLocalsTyped.scala"))
+        .expect("read the literal-result adapted audit fixture");
+    for method_name in ["choose", "repeat", "initialize"] {
+        let method_source = source_with_only_runner_method(&source, method_name);
+        let output = TestOutputDirectory::new(&format!("mutable-reference-layout-{method_name}"));
+        let mut expected_local = None;
+        let result = compile_source_batch_observed(
+            &method_source,
+            "MutableReferenceLocalsTyped.scala",
+            output.path(),
+            SourceId::from_index(1454),
+            SourceUnitCardinality::AtLeastTwo,
+            Some(&mut |unit, _| {
+                let runner = audit_class_named(unit, "Runner");
+                let method = audit_method_named(unit, runner, method_name);
+                let local = method
+                    .locals
+                    .iter()
+                    .find(|binding| {
+                        binding.mutable
+                            && unit
+                                .store
+                                .names
+                                .resolve(unit.store.symbols.get(binding.symbol).name.text())
+                                == "current"
+                    })
+                    .expect("the real source method has its canonical mutable current binding");
+                expected_local = Some(local.symbol);
+            }),
+        );
+        let expected_local = expected_local.expect("the source reached the typed observer");
+        assert!(matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::UnsupportedMutableReferenceLocal { symbol }
+            )) if symbol == expected_local
+        ));
+        assert!(output.class_files().is_empty());
+    }
 }
 
 #[test]
