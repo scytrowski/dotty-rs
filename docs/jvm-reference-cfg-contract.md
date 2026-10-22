@@ -69,10 +69,15 @@ because it does not track the transition from `uninitializedThis` to
 initialized `this`. Class-file analysis supports exact object parameters and
 results by default, and explicitly proven subtype assignments when a
 `ClassHierarchy` is supplied. Source bytecode lowering supports planned
-reference parameters and results through `if`, `while`, and ordinary planned
-calls, plus the validated ancestor conversions listed above. Source lowering
-still rejects mutable reference locals, sibling result joins without an exact
-checked expected parent, arrays, null, and branched constructors.
+reference parameters and results, initialized mutable reference locals
+reassigned in `If` branches and `While` bodies, and ordinary planned calls.
+Mutable-local source initialization is intersected across reachable `If` arms
+and restored to the pre-loop set after a `While`; the classfile analyzer
+independently joins compatible local classes to their checked nearest
+non-`Object` superclass. Source lowering still rejects uninitialized or
+maybe-initialized reads, writes in short-circuit operands or repeatedly
+evaluated `While` conditions, sibling result joins without an exact checked
+expected parent, arrays, null, and branched constructors.
 
 ## Bounded state model
 
