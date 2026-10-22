@@ -157,6 +157,7 @@ struct JvmLoweringContext<'a> {
         &'a JvmClassMetadata,
         &'a [crate::JvmClassMetadata],
     )>,
+    expected_expression_type: Option<TypeId>,
     node_visits: usize,
 }
 
@@ -175,6 +176,7 @@ impl<'a> JvmLoweringContext<'a> {
             local_layout: None,
             initialized_locals: HashSet::new(),
             call_context: None,
+            expected_expression_type: None,
             node_visits: 0,
         }
     }
@@ -298,7 +300,13 @@ pub(super) fn lower_planned_method_body(
     let mut context = JvmLoweringContext::new(unit.store, unit.typed_ast, definitions, method);
     context.local_layout = Some(&local_layout);
     context.call_context = Some((unit, class, &metadata));
-    let flow = emit_expression(&mut context, body, &mut code, 0)?;
+    let flow = emit_expression_with_expected(
+        &mut context,
+        body,
+        source_method_result_type(unit.store, method.symbol()),
+        &mut code,
+        0,
+    )?;
     append_method_return(Some(unit), definitions, method, body, flow, &mut code)?;
     // Branched references are checked after all symbolic references have been
     // staged in ClassFileBuilder. Its encode preflight analyzes CFG states and
@@ -702,6 +710,7 @@ fn emit_expression(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
+    let expected_type = context.expected_expression_type.take();
     context.visit(tree_id, depth)?;
     let shape = {
         let tree = context.tree(tree_id)?;
@@ -729,8 +738,8 @@ fn emit_expression(
                 emit_boolean_not(context, tree_id, code, depth)
             }
         }
-        ExpressionShape::Block => emit_block(context, tree_id, code, depth),
-        ExpressionShape::If => emit_if(context, tree_id, code, depth),
+        ExpressionShape::Block => emit_block(context, tree_id, expected_type, code, depth),
+        ExpressionShape::If => emit_if(context, tree_id, expected_type, code, depth),
         ExpressionShape::While => emit_while(context, tree_id, code, depth),
         ExpressionShape::Return => emit_return(context, tree_id, code, depth),
         ExpressionShape::Apply => emit_apply(context, tree_id, code, depth),
@@ -740,6 +749,46 @@ fn emit_expression(
             node,
         }),
     }
+}
+
+fn emit_expression_with_expected(
+    context: &mut JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    expected_type: Option<TypeId>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let previous = std::mem::replace(&mut context.expected_expression_type, expected_type);
+    let result = emit_expression(context, tree, code, depth);
+    context.expected_expression_type = previous;
+    result
+}
+
+fn source_method_type(
+    store: &SemanticStore,
+    method: SymbolId,
+) -> Option<&dotty_core::types::MethodType> {
+    let SymbolInfo::Complete(signature) = store.symbols.info(method) else {
+        return None;
+    };
+    match store.types.try_get(*signature) {
+        Some(Type::Method(signature)) => Some(signature),
+        _ => None,
+    }
+}
+
+fn source_method_result_type(store: &SemanticStore, method: SymbolId) -> Option<TypeId> {
+    source_method_type(store, method).map(|signature| signature.result)
+}
+
+fn source_method_parameter_type(
+    store: &SemanticStore,
+    method: SymbolId,
+    index: usize,
+) -> Option<TypeId> {
+    source_method_type(store, method)
+        .and_then(|signature| signature.params.get(index))
+        .map(|parameter| parameter.ty)
 }
 
 fn selected_field_symbol(
@@ -1214,6 +1263,7 @@ fn emit_field_assignment(
 fn emit_block(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
+    expected_type: Option<TypeId>,
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
@@ -1252,12 +1302,19 @@ fn emit_block(
     }
 
     let expression_type = context.tree(expr)?.ty;
-    let flow = emit_expression(context, expr, code, depth + 1)?;
+    let block_expected_type = expected_type.or(Some(declared_type));
+    let flow = emit_expression_with_expected(context, expr, block_expected_type, code, depth + 1)?;
     match flow {
         Flow::Value(value) => {
             let block_matches =
                 block_types_match(context, tree_id, expr, declared_type, expression_type)?;
-            let expected = block_value_type(context, tree_id, declared_type, Some(expr))?;
+            let expected = contextual_block_value_type(
+                context,
+                tree_id,
+                declared_type,
+                block_expected_type,
+                Some(expr),
+            )?;
             if block_matches
                 && let Some(expected) = expected
                 && flow_assignable(context, value, expected)?
@@ -1377,9 +1434,15 @@ fn block_types_match(
         return Ok(true);
     }
 
-    let declared = block_value_type(context, tree, declared, Some(expression_tree))?;
-    let expression = block_value_type(context, tree, expression, Some(expression_tree))?;
-    match (declared, expression) {
+    let declared_value_type = block_value_type(context, tree, declared, Some(expression_tree))?;
+    let expression = contextual_block_value_type(
+        context,
+        tree,
+        expression,
+        Some(declared),
+        Some(expression_tree),
+    )?;
+    match (declared_value_type, expression) {
         (Some(expected), Some(found)) => flow_assignable(context, found, expected),
         _ => Ok(false),
     }
@@ -1468,6 +1531,31 @@ fn block_value_type(
         return Ok(Some(metadata.value_type()));
     }
     parameter_value_type(context, tree, *symbol, *prefix).map(Some)
+}
+
+fn contextual_block_value_type(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    source_type: TypeId,
+    expected_type: Option<TypeId>,
+    intrinsic_expression: Option<TreeId<Typed>>,
+) -> Result<Option<JvmType>, JvmCodegenError> {
+    if matches!(
+        context.store.types.try_get(source_type),
+        Some(Type::Or { .. })
+    ) && let Some(expected_type) = expected_type
+    {
+        let Some((unit, _, _)) = context.call_context else {
+            return Err(JvmCodegenError::UnsupportedSiblingUnionProjection {
+                source_type,
+                expected_type,
+            });
+        };
+        return unit
+            .project_sibling_union_to_expected_type(source_type, expected_type, context.definitions)
+            .map(|projection| Some(projection.representation()));
+    }
+    block_value_type(context, tree, source_type, intrinsic_expression)
 }
 
 fn is_boolean_not_block_result(
@@ -1626,7 +1714,10 @@ fn emit_apply(
     }
 
     for (index, (argument, expected)) in arguments.into_iter().zip(parameters).enumerate() {
-        let flow = emit_expression(context, argument, code, depth + 1)?;
+        let source_expected =
+            source_method_parameter_type(context.store, target.method_symbol(), index);
+        let flow =
+            emit_expression_with_expected(context, argument, source_expected, code, depth + 1)?;
         if !call_argument_assignable(unit, flow, expected, context.definitions)? {
             return Err(JvmCodegenError::JvmCallArgumentMismatch {
                 tree: tree_id,
@@ -1739,7 +1830,10 @@ fn emit_direct_super_call(
             error,
         })?;
     for (index, (argument, expected)) in arguments.iter().copied().zip(parameters).enumerate() {
-        let flow = emit_expression(context, argument, code, depth + 1)?;
+        let source_expected =
+            source_method_parameter_type(context.store, target.method_symbol(), index);
+        let flow =
+            emit_expression_with_expected(context, argument, source_expected, code, depth + 1)?;
         if !call_argument_assignable(unit, flow, expected, context.definitions)? {
             return Err(JvmCodegenError::JvmCallArgumentMismatch {
                 tree: tree_id,
@@ -2391,15 +2485,17 @@ fn emit_int_intrinsic(
 fn emit_if(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
+    expected_type: Option<TypeId>,
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    emit_if_body(context, tree_id, code, depth)
+    emit_if_body(context, tree_id, expected_type, code, depth)
 }
 
 fn emit_if_body(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
+    expected_type: Option<TypeId>,
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
@@ -2441,7 +2537,8 @@ fn emit_if_body(
             error,
         })?;
     let initialized_before_branches = context.initialized_locals.clone();
-    let then_flow = emit_expression(context, then_branch, code, depth + 1)?;
+    let then_flow =
+        emit_expression_with_expected(context, then_branch, expected_type, code, depth + 1)?;
     let initialized_then = context.initialized_locals.clone();
     let join_label = if matches!(then_flow, Flow::Value(_) | Flow::Unit) {
         let join_label = code
@@ -2466,16 +2563,16 @@ fn emit_if_body(
             error,
         })?;
     context.initialized_locals = initialized_before_branches.clone();
-    let else_flow = emit_expression(context, else_branch, code, depth + 1)?;
+    let else_flow =
+        emit_expression_with_expected(context, else_branch, expected_type, code, depth + 1)?;
     let initialized_else = context.initialized_locals.clone();
     let flow = merge_if_flows(
         context,
         tree_id,
         result_ty,
-        then_branch,
-        then_flow,
-        else_branch,
-        else_flow,
+        (then_branch, then_flow),
+        (else_branch, else_flow),
+        expected_type,
     )?;
     context.initialized_locals = match (then_flow, else_flow) {
         (Flow::Value(_) | Flow::Unit, Flow::Value(_) | Flow::Unit) => initialized_then
@@ -2602,21 +2699,60 @@ fn merge_if_flows(
     context: &JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
     result_ty: TypeId,
-    then_tree: TreeId<Typed>,
-    then_flow: Flow,
-    else_tree: TreeId<Typed>,
-    else_flow: Flow,
+    then_branch: (TreeId<Typed>, Flow),
+    else_branch: (TreeId<Typed>, Flow),
+    expected_type: Option<TypeId>,
 ) -> Result<Flow, JvmCodegenError> {
+    let (then_tree, then_flow) = then_branch;
+    let (else_tree, else_flow) = else_branch;
     validate_branch(context, then_tree, then_flow)?;
     validate_branch(context, else_tree, else_flow)?;
-    let expected = block_value_type(context, tree, result_ty, None)?;
+    let expected = contextual_block_value_type(context, tree, result_ty, expected_type, None)?;
     let merged = match (then_flow, else_flow) {
         (Flow::Value(left), Flow::Value(right)) => {
             if left != right {
                 if matches!(left, JvmType::Reference(_)) && matches!(right, JvmType::Reference(_)) {
                     let ancestor_related = flow_assignable(context, left, right)?
                         || flow_assignable(context, right, left)?;
-                    if ancestor_related
+                    if !ancestor_related
+                        && matches!(
+                            context.store.types.try_get(result_ty),
+                            Some(Type::Or { .. })
+                        )
+                        && let Some(expected_type) = expected_type
+                    {
+                        let Some((unit, _, _)) = context.call_context else {
+                            return Err(JvmCodegenError::UnsupportedSiblingUnionProjection {
+                                source_type: result_ty,
+                                expected_type,
+                            });
+                        };
+                        let projection = unit.project_sibling_union_to_expected_type(
+                            result_ty,
+                            expected_type,
+                            context.definitions,
+                        )?;
+                        let JvmType::Reference(expected_class) = projection.representation() else {
+                            unreachable!("sibling projection has a reference representation");
+                        };
+                        let [first_arm, second_arm] = projection.source_arms();
+                        let expected = JvmType::Reference(expected_class);
+                        let exact_source_arms = (left == JvmType::Reference(first_arm)
+                            && right == JvmType::Reference(second_arm))
+                            || (left == JvmType::Reference(second_arm)
+                                && right == JvmType::Reference(first_arm));
+                        if exact_source_arms
+                            && flow_assignable(context, left, expected)?
+                            && flow_assignable(context, right, expected)?
+                        {
+                            Flow::Value(JvmType::Reference(expected_class))
+                        } else {
+                            return Err(JvmCodegenError::UnsupportedSiblingUnionProjection {
+                                source_type: result_ty,
+                                expected_type,
+                            });
+                        }
+                    } else if ancestor_related
                         && let Some(JvmType::Reference(result)) = expected
                         && flow_assignable(context, left, JvmType::Reference(result))?
                         && flow_assignable(context, right, JvmType::Reference(result))?
@@ -2740,7 +2876,13 @@ fn emit_return(
         return Err(JvmCodegenError::UnsupportedBottomFlow { tree: tree_id });
     }
     match (expr, context.method.descriptor().result()) {
-        (Some(value), expected) => match emit_expression(context, value, code, depth + 1)? {
+        (Some(value), expected) => match emit_expression_with_expected(
+            context,
+            value,
+            source_method_result_type(context.store, context.method.symbol()),
+            code,
+            depth + 1,
+        )? {
             Flow::Diverges => Ok(Flow::Diverges),
             Flow::Unit if expected == JvmReturnType::Void => {
                 code.return_void()

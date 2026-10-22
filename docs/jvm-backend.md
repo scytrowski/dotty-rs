@@ -245,9 +245,13 @@ an ancestor of the other and both are assignable to the `If` tree's canonical
 result class. The result stays that source-selected class, with no cast or
 guessed common parent. Sibling `Type::Or` results now have a separate checked
 projection proof when an explicit expected class is their nearest non-`Object`
-common ancestor; the source type stays unchanged, and expression/CFG lowering
-does not consume this proof yet (#1438). A local that is not initialized on
-every path becomes unusable, and a later read fails.
+common ancestor. Method results, block results, and call arguments consume the
+proof only when their canonical source signature supplies that expected type
+and the two actual branches match the exact union arms. The typed source union
+stays unchanged while expression lowering emits the proven common class for
+the CFG verifier. Inferred unions, `Object`-only joins, or mismatched arms
+remain unsupported. A local that is not initialized on every path becomes
+unusable, and a later read fails.
 
 Allocation may occur in a branch or loop body only as one complete
 `new`/`dup`/supported-argument/`invokespecial` sequence inside a basic block.
@@ -267,7 +271,7 @@ unsupported states remain typed build errors.
 | Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified ancestry relation of up to two edges; full allocation sequence remains in one basic block |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
 | Ancestor-related initialized references at a typed `If` join | Keep the canonical source result class | Both branch classes must be ancestor-related and assignable to that result; classfile frames verify the join |
-| Sibling union at a join | Checked projection evidence is available only for an exact two-arm planned-class `Type::Or` with an explicit expected nearest non-`Object` common ancestor; bytecode lowering remains unsupported until #1438 | No inferred target or AST rewrite; `Object`-only, forged, malformed, nested unsupported, and non-canonical cases fail |
+| Sibling union at a join | Emit the checked nearest non-`Object` ancestor for an exact two-arm planned-class `Type::Or` when a canonical method result, block result, or formal parameter supplies that expected type | Actual branch classes must match both union arms; no inferred target or AST rewrite; `Object`-only, forged, malformed, nested unsupported, and non-canonical cases fail |
 | Unrelated or non-canonical reference types at a join | No classfile emitted | Typed reference/branch error; no guessed superclass, `Object` widening, cast, or name-based projection |
 
 Object-construction typing, canonical constructor and receiver identity,
@@ -319,7 +323,8 @@ The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
 `DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the source integration test on JDK 21.
 Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
 arbitrary classpath classes, mutable reference locals, sibling/unrelated
-reference joins, arrays, null, and branching constructor bodies unsupported.
+reference joins without the exact expected-type proof, arrays, null, and
+branching constructor bodies unsupported.
 Reference operations remain restricted to exact planned classes and verified
 calls; ancestor joins are limited to the source-typed `If` result and validated
 same-unit hierarchy.
@@ -772,10 +777,12 @@ DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test --test jvm_source_compilation --locked
 
 Without the JDK it still runs structural and negative checks and explicitly
 skips Java verification. Reference method results outside the exact current
-source class subset, reference call arguments, sibling/unrelated class joins,
-arrays, null, mutable reference locals, and branched constructors remain
-deferred. Ancestor-related source-typed `If` results are supported only within
-the validated same-unit hierarchy and still require JVM frame verification.
+source class subset, reference call arguments outside the exact supported
+class subset, sibling joins without an explicit checked expected parent,
+unrelated or `Object`-only class joins, arrays, null, mutable reference locals,
+and branched constructors remain deferred. Ancestor-related and proven sibling
+source-typed `If` results are supported only within the validated same-unit
+hierarchy and still require JVM frame verification.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
@@ -939,7 +946,8 @@ The source/classfile negative tests retain typed rejection and empty source
 output batches; the existing publisher still stages only fully encoded batches.
 This increment extends hierarchy validation, transitive inherited method
 lookup, direct-parent `super` selection, and two-edge reference assignability
-through the bounded chain. Sibling/unrelated reference joins, nested allocation
-arguments, arbitrary effectful pre-super evaluation,
+through the bounded chain. Sibling joins without explicit checked context,
+unrelated/`Object`-only reference joins, nested allocation arguments, arbitrary
+effectful pre-super evaluation,
 branched constructors, qualified/trait super, and Scala ABI/TASTy emission also
 remain deferred.

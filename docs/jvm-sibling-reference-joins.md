@@ -1,8 +1,7 @@
-# JVM sibling reference joins audit
+# JVM sibling reference joins
 
-This document records the audit for issue #1433. It does not enable sibling
-reference joins or change emitted bytecode. The source-language reference is
-Scala 3.9.0 at pinned revision
+This document records the audit and bounded lowering behavior for issues
+#1433–#1438. The source-language reference is Scala 3.9.0 at pinned revision
 `777528f19a58e794c9954a42f433373472ec57f8`; the class-file contract is JVMS
 21.
 
@@ -55,18 +54,19 @@ allocation-order-dependent numeric IDs:
 
 The Scala source requests a `Base` result and both alternatives conform to
 that declared parent. The JVM method descriptor expected from that declaration
-is `Base`, and the two displayed concrete evaluations would produce 22 and 24
-for seed 10 if code generation supported the join. This audit does not run
-those evaluations or claim that dotty-rs emits them.
+is `Base`; the JDK-gated runtime test verifies the 22 and 24 results for seed
+10 when each override is dispatched through the generated join.
 
-## Current rejection and ownership
+## Lowering behavior and ownership
 
 The test's frontend observer runs after typing and before emission. It verifies
 the typed trees and canonical identities above, then the real compilation
-pipeline returns `JvmCodegenError::ReferenceTypeMismatch` during codegen and
-publishes no class files. This pins the first failing layer: the parser,
-namer, typer, and source signature construction accept and preserve the
-program; the JVM adapter refuses to lower the sibling-valued `If`.
+pipeline emits the classes. The generated `choose`, `chooseReverse`, and
+`chooseNested` methods keep their declared `Base` descriptors, join their
+initialized references at `Base`, and contain no inserted `checkcast`.
+`acceptChoice` verifies that an explicitly typed call formal also supplies the
+projection context. Runtime verification and the 22/24 dispatch results are
+covered by the fixture's JDK-gated test.
 
 A separate minimal inferred-result characterization confirms that an
 unannotated `choose` method keeps `Type::Or` in both the typed `If` and method
@@ -142,18 +142,20 @@ it is the exact canonical owner of the referenced class.
 source `TypeId`, arm `SymbolId`s in source order, and checked JVM reference
 representation. It does not edit the `TypedAst` or authorize a projection
 without an explicit expected type. The ordinary standalone `reference_type`
-path still rejects `Type::Or`; no control-flow bytecode consumes this proof
-yet. Issue #1438 owns using it for sibling-valued `if` emission and verifier
-stack-map joins.
+path still rejects `Type::Or`. Issue #1438 consumes this proof only when a
+source-backed expected result or formal parameter type is present, the actual
+two branch flows match the exact two source arms, and the expected class is
+their checked nearest non-`Object` ancestor. The proof authorizes the emitted
+join representation; it does not rewrite the typed AST or method signature.
 
 Independently, the JVMS 21 verifier permits a stack-map entry
 `Object(Base)` when both incoming initialized values are assignable to Base.
-The class-file analyzer currently supports joins only when one incoming class
-is the other class's proven ancestor; it rejects Left/Right even though both
-have the explicit edge to Base. The verifier rule does not choose a Scala
-conditional type and is not a reason to reinterpret arbitrary `Type::Or`
-values. Stack-map `Object(Base)` is about compatible verifier state, not
-source type inference.
+The class-file analyzer accepts a sibling join when the validated class
+hierarchy proves both incoming classes are assignable to the chosen `Base`;
+the source adapter supplies that hierarchy only after the checked projection
+above succeeds. The verifier rule does not choose a Scala conditional type and
+is not a reason to reinterpret arbitrary `Type::Or` values. Stack-map
+`Object(Base)` is about compatible verifier state, not source type inference.
 
 The Scala 3.9.0 revision is recorded as the compatibility target, but this
 environment did not have a Scala compiler/JDK available to execute the source
