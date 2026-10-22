@@ -150,12 +150,12 @@ join representation; it does not rewrite the typed AST or method signature.
 
 Independently, the JVMS 21 verifier permits a stack-map entry
 `Object(Base)` when both incoming initialized values are assignable to Base.
-The class-file analyzer currently supports joins only when one incoming class
-is the other class's proven ancestor; it rejects Left/Right even though both
-have the explicit edge to Base. The verifier rule does not choose a Scala
-conditional type and is not a reason to reinterpret arbitrary `Type::Or`
-values. Stack-map `Object(Base)` is about compatible verifier state, not
-source type inference.
+The class-file analyzer accepts a sibling join when the validated class
+hierarchy proves both incoming classes are assignable to the chosen `Base`;
+the source adapter supplies that hierarchy only after the checked projection
+above succeeds. The verifier rule does not choose a Scala conditional type and
+is not a reason to reinterpret arbitrary `Type::Or` values. Stack-map
+`Object(Base)` is about compatible verifier state, not source type inference.
 
 The Scala 3.9.0 revision is recorded as the compatibility target, but this
 environment did not have a Scala compiler/JDK available to execute the source
