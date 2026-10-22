@@ -1069,7 +1069,23 @@ impl SourceTyper<'_> {
         }
 
         let qualifier_context = source_import.parent.unwrap_or(source_import.context);
-        let qualifier_result = if let Some(expression_context) = source_import.expression_context {
+        let cache_key =
+            source_import
+                .expression_context
+                .is_none()
+                .then_some(ImportQualifierCacheKey {
+                    import_tree: source_import.tree.index(),
+                    qualifier_tree: import.expr.index(),
+                    source_context: source_import.context.index(),
+                    qualifier_context: qualifier_context.index(),
+                    location_tree: location.tree_index,
+                    position: location.position,
+                });
+        let cached_qualifier =
+            cache_key.and_then(|key| self.import_qualifier_cache.get(&key).copied());
+        let qualifier_result = if let Some(qualifier) = cached_qualifier {
+            Some(qualifier)
+        } else if let Some(expression_context) = source_import.expression_context {
             let saved_imports = source_import
                 .local_import_scope
                 .zip(source_import.preceding_local_imports.clone())
@@ -1106,6 +1122,9 @@ impl SourceTyper<'_> {
                 location.position,
             )?
         };
+        if let (Some(key), Some(qualifier)) = (cache_key, qualifier_result) {
+            self.import_qualifier_cache.insert(key, qualifier);
+        }
         let Some(qualifier) = qualifier_result else {
             return Err(TyperError::ImportQualifierNotFound {
                 source: self.source,

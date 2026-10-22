@@ -123,6 +123,8 @@ pub struct SourceTyper<'a> {
     inferred_field_types_in_progress: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     uninitialized_parent_receiver: Option<SymbolId>,
+    import_qualifier_cache: HashMap<ImportQualifierCacheKey, SymbolId>,
+    semantic_transaction_depth: usize,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     function_literals: expression::FunctionLiteralIndex,
@@ -164,6 +166,16 @@ impl TypedLocalBinding {
 #[derive(Clone, Copy)]
 struct SourceTreeLocation {
     tree_index: u32,
+    position: Option<SourceSpan>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ImportQualifierCacheKey {
+    import_tree: u32,
+    qualifier_tree: u32,
+    source_context: u32,
+    qualifier_context: u32,
+    location_tree: u32,
     position: Option<SourceSpan>,
 }
 
@@ -215,6 +227,8 @@ impl<'a> SourceTyper<'a> {
             inferred_field_types_in_progress: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             uninitialized_parent_receiver: None,
+            import_qualifier_cache: HashMap::new(),
+            semantic_transaction_depth: 0,
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
             function_literals: expression::FunctionLiteralIndex::default(),
@@ -9932,6 +9946,50 @@ mod tests {
                 .unwrap(),
             Some(module_class)
         );
+    }
+
+    #[test]
+    fn import_qualifier_cache_is_cleared_on_rollback_and_at_outer_commit() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object CacheScope { def value = 1 }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let key = ImportQualifierCacheKey {
+            import_tree: method.index(),
+            qualifier_tree: method.index(),
+            source_context: context.lexical.index(),
+            qualifier_context: context.lexical.index(),
+            location_tree: method.index(),
+            position: None,
+        };
+
+        let result: Result<(), TyperError> = typer.run_expression_transaction(|typer, _, _| {
+            typer.import_qualifier_cache.insert(key, method);
+            let nested: Result<(), TyperError> = typer.run_expression_transaction(|_, _, _| {
+                Err(TyperError::TreeOutsideArena {
+                    source,
+                    tree_index: u32::MAX,
+                })
+            });
+            assert!(nested.is_err());
+            assert!(typer.import_qualifier_cache.is_empty());
+
+            typer.import_qualifier_cache.insert(key, method);
+            typer.run_expression_transaction(|_, _, _| Ok(()))?;
+            assert!(typer.import_qualifier_cache.contains_key(&key));
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert!(typer.import_qualifier_cache.is_empty());
     }
 
     #[test]
