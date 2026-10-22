@@ -4158,7 +4158,15 @@ fn merge_flow_states_with_evidence(
                     classes.extend(incoming_local_evidence[index].iter().cloned());
                 }
                 let classes = classes.into_iter().collect::<Vec<_>>();
-                if let Some(joined) = hierarchy.nearest_common_ancestor(classes.iter(), false) {
+                // Exact equality remains valid even for java/lang/Object;
+                // only a join of distinct original inputs requires a checked
+                // non-Object ancestor.
+                let joined = if let [exact] = classes.as_slice() {
+                    Some(exact.clone())
+                } else {
+                    hierarchy.nearest_common_ancestor(classes.iter(), false)
+                };
+                if let Some(joined) = joined {
                     if !matches!(&*existing, FlowLocalState::Object(class) if class == &joined) {
                         *existing = FlowLocalState::Object(joined);
                         changed = true;
