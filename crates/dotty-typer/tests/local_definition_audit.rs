@@ -920,9 +920,19 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         {
             observation.transaction_state = "rolled_back";
         }
-        metrics
-            .module_operation_checkpoints
-            .retain(|token, _| *token <= checkpoint.token());
+        // Checkpoint tokens increase monotonically, so rollback only needs to
+        // discard the ordered suffix. `retain` scans every active checkpoint
+        // on every rollback, which made this audit bookkeeping quadratic for
+        // typer code that creates many nested checkpoints.
+        drop(
+            metrics
+                .module_operation_checkpoints
+                .split_off(&checkpoint.token()),
+        );
+        metrics.module_operation_checkpoints.insert(
+            checkpoint.token(),
+            (inner_checkpoint, operation_offset, member_offset),
+        );
     }
 
     fn resolve_member(
