@@ -5660,14 +5660,40 @@ fn unsupported_local_source_shapes_fail_at_their_pipeline_stage_without_artifact
     );
     assert_source_failure(
         "immutable-reference-local-assignment",
-        "class ImmutableReferenceAssignment(seed: Int):\n  def run(): Int =\n    val current: ImmutableReferenceAssignment = new ImmutableReferenceAssignment(seed)\n    current = new ImmutableReferenceAssignment(seed)\n    42\n",
-        |failure| matches!(failure, PipelineFailure::Typer(_)),
+        "class ImmutableReferenceAssignment(seed: Int):\n  def run(seed: Int): Int =\n    val current: ImmutableReferenceAssignment = new ImmutableReferenceAssignment(seed)\n    current = new ImmutableReferenceAssignment(seed)\n    42\n",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::AssignmentTargetImmutable {
+                    source,
+                    tree_index,
+                    target: _,
+                }) if *source == SourceId::from_index(1) && *tree_index > 0
+            )
+        },
     );
-    assert_source_failure(
-        "unrelated-reference-local-assignment",
-        "class UnrelatedReferenceAssignment(seed: Int):\n  def run(): Int =\n    var current: UnrelatedReferenceAssignment = new UnrelatedReferenceAssignment(seed)\n    current = \"other\"\n    42\n",
-        |failure| matches!(failure, PipelineFailure::Typer(_)),
+    let unrelated_reference_output =
+        TestOutputDirectory::new("unrelated-reference-local-assignment");
+    let unrelated_reference_error = compile_source_batch(
+        "class OtherReferenceAssignment(seed: Int)\nclass UnrelatedReferenceAssignment(seed: Int):\n  def run(seed: Int): Int =\n    var current: UnrelatedReferenceAssignment = new UnrelatedReferenceAssignment(seed)\n    current = new OtherReferenceAssignment(seed)\n    42\n",
+        "UnrelatedReferenceAssignment.scala",
+        unrelated_reference_output.path(),
+        SourceId::from_index(1),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect_err("an unrelated reference type must be rejected at assignment");
+    assert!(
+        matches!(
+            &unrelated_reference_error,
+            PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch {
+                source,
+                tree_index,
+                ..
+            }) if *source == SourceId::from_index(1) && *tree_index > 0
+        ),
+        "unrelated reference assignment must fail at its expected-type check: {unrelated_reference_error:?}"
     );
+    assert!(unrelated_reference_output.class_files().is_empty());
     assert_source_failure(
         "missing-local-reference",
         "class MissingLocal { def run(): Int = missing }\n",
@@ -10340,6 +10366,63 @@ fn mutable_reference_local_assignment_remains_unsupported_in_if_and_while_bodies
             "a failed source batch publishes no classes"
         );
     }
+}
+
+#[test]
+fn mutable_reference_local_assignment_is_rejected_in_while_conditions() {
+    let output = TestOutputDirectory::new("reference-var-while-condition-assignment-rejected");
+    let result = compile_planned_constructor_source(
+        "class Base(seed: Int)\nclass Leaf(seed: Int) extends Base(seed)\nclass Runner:\n  def change(flag: Boolean, seed: Int): Int =\n    var current: Base = new Leaf(seed)\n    while { current = new Leaf(seed); flag } do ()\n    42\n",
+        output.path(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. }
+            ))
+        ),
+        "assignments in a repeatedly evaluated while condition must be rejected"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn mutable_reference_local_assignment_is_rejected_in_short_circuit_and_rhs() {
+    let output = TestOutputDirectory::new("reference-var-short-circuit-and-assignment-rejected");
+    let result = compile_planned_constructor_source(
+        "class Base(seed: Int)\nclass Leaf(seed: Int) extends Base(seed)\nclass Runner:\n  def change(flag: Boolean, seed: Int): Int =\n    var current: Base = new Leaf(seed)\n    if flag && { current = new Leaf(seed); true } then 1 else 0\n",
+        output.path(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. }
+            ))
+        ),
+        "assignments in a conditionally evaluated && operand must be rejected"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn mutable_reference_local_assignment_is_rejected_in_short_circuit_or_rhs() {
+    let output = TestOutputDirectory::new("reference-var-short-circuit-or-assignment-rejected");
+    let result = compile_planned_constructor_source(
+        "class Base(seed: Int)\nclass Leaf(seed: Int) extends Base(seed)\nclass Runner:\n  def change(flag: Boolean, seed: Int): Int =\n    var current: Base = new Leaf(seed)\n    if flag || { current = new Leaf(seed); false } then 1 else 0\n",
+        output.path(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. }
+            ))
+        ),
+        "assignments in a conditionally evaluated || operand must be rejected"
+    );
+    assert!(output.class_files().is_empty());
 }
 
 #[test]

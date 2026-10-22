@@ -2211,7 +2211,9 @@ fn emit_short_circuit_boolean_intrinsic(
     })?;
 
     let initialized_on_skip = context.initialized_locals.clone();
+    context.reference_assignment_control_flow_depth += 1;
     let argument_flow = emit_expression(context, *argument, code, depth + 1)?;
+    context.reference_assignment_control_flow_depth -= 1;
     if argument_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
             tree: tree_id,
@@ -2674,7 +2676,9 @@ fn emit_while_body(
         })?;
 
     let initialized_before_loop = context.initialized_locals.clone();
+    context.reference_assignment_control_flow_depth += 1;
     let condition_flow = emit_expression(context, condition, code, depth + 1)?;
+    context.reference_assignment_control_flow_depth -= 1;
     if condition_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::InvalidWhileCondition {
             tree: condition,
