@@ -198,11 +198,6 @@ pub(super) fn method_local_layout_for_with_metadata(
             definitions,
             Some(all_metadata),
         )?;
-        if matches!(value_type, crate::JvmType::Reference(_)) && binding.mutable {
-            return Err(JvmCodegenError::UnsupportedMutableReferenceLocal {
-                symbol: binding.symbol,
-            });
-        }
         allocator.reserve(*binding, value_type)?;
     }
     allocator.finish()

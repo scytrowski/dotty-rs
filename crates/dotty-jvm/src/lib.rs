@@ -916,7 +916,9 @@ pub enum JvmCodegenError {
     },
     /// This reference-local operation is not in the supported immutable-val subset.
     ReferenceLocalInstructionUnsupported { tree: TreeId<Typed> },
-    /// Mutable local reference storage is not part of this compiler increment.
+    /// Reserved for compatibility; local layouts accept validated mutable
+    /// planned-class references. Unsupported reads and assignments use
+    /// `ReferenceLocalInstructionUnsupported`.
     UnsupportedMutableReferenceLocal { symbol: SymbolId },
     /// Reference local operations require reference-aware CFG analysis.
     ReferenceLocalInUnsupportedControlFlow {

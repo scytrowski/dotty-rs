@@ -1,9 +1,11 @@
 # Mutable reference locals: verifier and frontend audit
 
-This document records the audit for issue #1454. It does **not** enable
-mutable-reference-local code generation. The backend must continue to reject
-those locals until the separately owned verifier, metadata, assignment, and
-control-flow work is complete.
+This document records the audit for issue #1454 and the local-layout increment
+in #1456. A canonical mutable local of an exact planned reference class now has
+its declared class type and a deterministic category-one slot; its initializer
+is lowered once and stored with `astore`. Mutable reference-local reads,
+reassignments, and branch/loop composition remain unsupported pending their
+separately owned increments.
 
 ## Source evidence and current failure matrix
 
@@ -34,7 +36,7 @@ the source fixture, so the first failure is independently observable:
 | --- | --- | --- | --- | --- |
 | Exact issue source | `TermNameNotFound(seed)` in `Base.value` | Same earlier unit failure | Same earlier unit failure | Typer, before candidate method completion |
 | `MutableReferenceLocalsReadback.scala`, only `Base` storage adapted | `UnstableSelectionPrefix` at `current.value()` | Same | Same | Typer, before typed unit/JVM plan |
-| `MutableReferenceLocalsTyped.scala`, `current.value()` replaced by `42` | `UnsupportedMutableReferenceLocal` for canonical `choose.current` | Same for `repeat.current` | Same for `initialize.current` | `dotty-jvm` local layout, `method_local_layout` in `crates/dotty-jvm/src/locals.rs` |
+| `MutableReferenceLocalsTyped.scala`, `current.value()` replaced by `42` | Layout accepts canonical mutable `current: Base`; later assignment/control-flow lowering remains unsupported | Same | Sibling-union initializer layout is accepted; contextual union lowering remains unsupported | `dotty-jvm` local layout accepts the metadata; body lowering reports its own typed error |
 
 The readback test pins the error's source tree ID to the real `Select` node,
 the direct `current` `Ident` qualifier, and both source spans. The failed
@@ -47,7 +49,9 @@ that no classfile was published. None reaches classfile CFG analysis; the
 current classfile local join behavior below is established by code and its
 existing tests, not by these source failures.
 
-The literal-result typed observer pins these source-backed relationships:
+The literal-result typed observer pins these source-backed relationships and
+checks that each declared-`Base` mutable binding receives a `Base` slot while
+the typed unit remains intact:
 
 | Method | Initializer / assignment evidence | Typed control-flow shape |
 | --- | --- | --- |
@@ -189,7 +193,7 @@ local behavior must remain unchanged.
 | --- | --- | --- |
 | #1454 | Audit / cross-layer contract | Source evidence, current failure matrix, bounded verifier and source-write rules, exclusions, and ownership below. No codegen feature. |
 | #1455 | `dotty-classfile` | Scala-independent checked initialized-reference local joins and `StackMapTable` local frames; nearest unique non-Object superclass; absorbing `Top`; preserve receiver/constructor/allocation guards. |
-| #1456 | `dotty-jvm` | Canonical mutable planned-class local metadata and deterministic slot allocation using the declared class. Does not enable reads or writes. |
+| #1456 | `dotty-jvm` | Canonical mutable planned-class local metadata, deterministic slot allocation, and initialized declaration lowering to `astore` using the declared class. Does not enable reads or reassignment. |
 | #1457 | `dotty-jvm` | Straight-line checked mutable reference assignment and `astore`; `val` rejection, initialized `var`, one RHS evaluation, assignability, `Unit` result, no implicit narrowing/boxing. |
 | #1458 | `dotty-jvm` | Contextual sibling `If` result used for `Base`-typed local initialization/assignment, after the straight-line assignment contract. |
 | #1459 | `dotty-jvm` + classfile integration | Compose approved writes/reads through `If` and `While`, zero and positive loop counts, while preserving source definite initialization and verifier joins. Depends on #1455–#1458 and a separately tracked `dotty-typer` prerequisite for the observed `UnstableSelectionPrefix` on mutable local receivers. |
@@ -205,9 +209,11 @@ This audit records the blocker but does not change typer stability semantics.
 The pinned Scala 3.9.0 revision is
 `777528f19a58e794c9954a42f433373472ec57f8`. The author environment did not
 have the compiler available; the PR review reports an independent cached
-compiler run at the matching hash prefix, as noted above. This audit adds no
-executable mutable-reference classfile fixture because the backend correctly
-rejects the feature. No strict mutable-reference runtime or frame result is
-claimed. Any future executable characterization must use JDK 21+ with strict
+compiler run at the matching hash prefix, as noted above. Regressions now check
+the real frontend's declared-`Base` mutable slot, shadowed local identities,
+stable layouts across fresh sessions, and the emitted category-one initializer
+store. They do not claim mutable reads, reassignment, or branch/loop runtime
+support; no strict runtime result for those deferred operations is claimed. Any
+future executable characterization must use JDK 21+ with strict
 verification and must not use a passing verifier run to replace source-level
 semantic proof.

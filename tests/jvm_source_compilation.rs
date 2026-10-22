@@ -7189,9 +7189,6 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                 PipelineFailure::Codegen(
                     JvmCodegenError::JvmConstructorCallArgumentTypeMismatch { .. }
                 ) | PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch { .. })
-                    | PipelineFailure::Codegen(
-                        JvmCodegenError::UnsupportedMutableReferenceLocal { .. }
-                    )
             ),
             "reference-var-reassignment" => matches!(
                 &error,
@@ -10185,21 +10182,27 @@ fn locals_keep_distinct_planned_class_identities_in_one_method() {
 }
 
 #[test]
-fn mutable_reference_locals_remain_rejected_without_publishing_classfiles() {
+fn mutable_reference_local_initialization_uses_a_category_one_slot() {
     let output = TestOutputDirectory::new("reference-var");
-    let result = compile_planned_constructor_source(
+    let artifacts = compile_planned_constructor_source(
         "class Counter(seed: Int)\nclass Client:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    42\n",
         output.path(),
-    );
-    assert!(matches!(
-        result,
-        Err(PipelineFailure::Codegen(
-            JvmCodegenError::UnsupportedMutableReferenceLocal { .. }
-        ))
-    ));
+    )
+    .expect("a planned mutable reference local can be initialized");
     assert!(
-        output.class_files().is_empty(),
-        "failed reference-var compilation must not publish a partial classfile"
+        !artifacts.is_empty(),
+        "the successful source compilation returns its planned class batch"
+    );
+    let client = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client class is emitted");
+    let mut reader = Reader::new(client.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Client class");
+    let code = emitted_method_code(&class, "run");
+    assert!(
+        code.contains(&0x4d),
+        "the mutable Counter local is stored once in category-one slot 2: {code:?}"
     );
 }
 
@@ -10351,12 +10354,12 @@ fn walk_typed_subtree(
 }
 
 #[test]
-fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_plan_stage() {
+fn mutable_reference_local_audit_preserves_source_evidence_after_layout_acceptance() {
     let source = fs::read_to_string(fixture_path("MutableReferenceLocalsTyped.scala"))
         .expect("read the source-backed mutable-reference-local audit fixture");
     let output = TestOutputDirectory::new("mutable-reference-local-audit");
     let mut observed = false;
-    let mut observed_locals = Vec::new();
+    let mut observed_methods = 0;
     let result = compile_source_batch_observed(
         &source,
         "MutableReferenceLocalsTyped.scala",
@@ -10374,7 +10377,11 @@ fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_pl
             assert_eq!(audit_class_parent(unit, base), definitions.object_class);
 
             for method_name in ["choose", "repeat", "initialize"] {
+                observed_methods += 1;
                 let method = audit_method_named(unit, runner, method_name);
+                let layout = unit
+                    .local_layout(runner, method.method, definitions)
+                    .expect("the canonical mutable Base local has a valid slot layout");
                 let current = method
                     .locals
                     .iter()
@@ -10391,6 +10398,12 @@ fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_pl
                 assert_eq!(symbol.owner, Some(method.method));
                 assert!(symbol.flags.contains(SymbolFlags::MUTABLE));
                 assert_eq!(symbol.kind, SymbolKind::Local);
+                let slot = layout
+                    .local(current.symbol)
+                    .expect("the layout is keyed by the same canonical local symbol");
+                assert_eq!(slot.declaration(), current.declaration);
+                assert_eq!(slot.ty(), JvmType::Reference(base));
+                assert!(slot.is_mutable());
                 let dotty_core::SymbolInfo::Complete(declared_type) = &symbol.info else {
                     panic!("current has complete canonical source type information")
                 };
@@ -10408,8 +10421,6 @@ fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_pl
                     audit_type_symbol(unit, unit.typed_ast.get(definition.tpt).ty),
                     Some(base)
                 );
-                observed_locals.push((method_name, current.symbol, *declared_type));
-
                 let body = method.body.expect("each source method has a typed body");
                 let mut nodes = Vec::new();
                 walk_typed_subtree(unit, body, &mut |tree| nodes.push(tree));
@@ -10530,70 +10541,111 @@ fn mutable_reference_local_audit_preserves_source_evidence_and_rejects_at_jvm_pl
                     _ => unreachable!(),
                 }
             }
-            assert_eq!(observed_locals.len(), 3);
+            assert_eq!(observed_methods, 3);
         }),
     );
     assert!(
         observed,
         "the complete source reached the typed audit observer: {result:?}"
     );
-    let expected_first_local = observed_locals
-        .iter()
-        .find(|(method, ..)| *method == "choose")
-        .expect("conditional candidate was observed")
-        .1;
-    assert!(matches!(
-        result,
-        Err(PipelineFailure::Codegen(
-            JvmCodegenError::UnsupportedMutableReferenceLocal { symbol }
-        )) if symbol == expected_first_local
-    ));
+    assert!(
+        result.is_err(),
+        "unsupported body operations remain rejected: {result:?}"
+    );
     assert!(
         output.class_files().is_empty(),
-        "the audit must not publish classes while mutable references remain unsupported"
+        "a later unsupported mutable-reference operation must not publish partial classfiles"
     );
 }
 
 #[test]
-fn mutable_reference_layout_blocker_is_pinned_for_each_candidate() {
+fn mutable_reference_layout_preserves_canonical_types_and_shadowed_symbols() {
     let source = fs::read_to_string(fixture_path("MutableReferenceLocalsTyped.scala"))
         .expect("read the literal-result adapted audit fixture");
-    for method_name in ["choose", "repeat", "initialize"] {
+    for method_name in ["layout", "shadowed"] {
         let method_source = source_with_only_runner_method(&source, method_name);
-        let output = TestOutputDirectory::new(&format!("mutable-reference-layout-{method_name}"));
-        let mut expected_local = None;
-        let result = compile_source_batch_observed(
-            &method_source,
-            "MutableReferenceLocalsTyped.scala",
-            output.path(),
-            SourceId::from_index(1454),
-            SourceUnitCardinality::AtLeastTwo,
-            Some(&mut |unit, _| {
-                let runner = audit_class_named(unit, "Runner");
-                let method = audit_method_named(unit, runner, method_name);
-                let local = method
-                    .locals
-                    .iter()
-                    .find(|binding| {
-                        binding.mutable
-                            && unit
-                                .store
-                                .names
-                                .resolve(unit.store.symbols.get(binding.symbol).name.text())
-                                == "current"
-                    })
-                    .expect("the real source method has its canonical mutable current binding");
-                expected_local = Some(local.symbol);
-            }),
-        );
-        let expected_local = expected_local.expect("the source reached the typed observer");
-        assert!(matches!(
-            result,
-            Err(PipelineFailure::Codegen(
-                JvmCodegenError::UnsupportedMutableReferenceLocal { symbol }
-            )) if symbol == expected_local
-        ));
-        assert!(output.class_files().is_empty());
+        let mut session_layouts = Vec::new();
+        for source_index in [1456, 1457] {
+            let output = TestOutputDirectory::new(&format!(
+                "mutable-reference-layout-{method_name}-{source_index}"
+            ));
+            let mut observed_layout = None;
+            let result = compile_source_batch_observed(
+                &method_source,
+                "MutableReferenceLocalsTyped.scala",
+                output.path(),
+                SourceId::from_index(source_index),
+                SourceUnitCardinality::AtLeastTwo,
+                Some(&mut |unit, definitions| {
+                    let runner = audit_class_named(unit, "Runner");
+                    let method = audit_method_named(unit, runner, method_name);
+                    let base = audit_class_named(unit, "Base");
+                    let layout = unit
+                        .local_layout(runner, method.method, definitions)
+                        .expect("canonical mutable reference locals have a planned slot layout");
+                    let locals = method
+                        .locals
+                        .iter()
+                        .map(|binding| {
+                            let symbol = unit.store.symbols.get(binding.symbol);
+                            assert_eq!(symbol.kind, SymbolKind::Local);
+                            assert_eq!(symbol.owner, Some(method.method));
+                            assert_eq!(
+                                symbol.flags.contains(SymbolFlags::MUTABLE),
+                                binding.mutable
+                            );
+                            let name = unit.store.names.resolve(symbol.name.text()).to_owned();
+                            assert_eq!(name, "current");
+                            let dotty_core::symbols::SymbolInfo::Complete(declared_type) =
+                                unit.store.symbols.info(binding.symbol)
+                            else {
+                                panic!("the local keeps its completed declared type")
+                            };
+                            assert_eq!(audit_type_symbol(unit, *declared_type), Some(base));
+                            let slot = layout
+                                .local(binding.symbol)
+                                .expect("layout lookup uses the canonical local symbol");
+                            assert_eq!(slot.declaration(), binding.declaration);
+                            assert_eq!(slot.is_mutable(), binding.mutable);
+                            let JvmType::Reference(slot_class) = slot.ty() else {
+                                panic!("the local slot retains its declared reference type")
+                            };
+                            assert_eq!(slot_class, base);
+                            (name, slot.slot(), slot.is_mutable(), "Base".to_owned())
+                        })
+                        .collect::<Vec<_>>();
+                    match method_name {
+                        "layout" => {
+                            assert_eq!(locals.len(), 1);
+                            assert_eq!(locals[0].1, 2, "receiver and seed occupy slots 0 and 1");
+                            assert_eq!(layout.max_locals(), 3);
+                            assert!(locals[0].2);
+                        }
+                        "shadowed" => {
+                            assert_eq!(locals.len(), 2);
+                            assert_ne!(method.locals[0].symbol, method.locals[1].symbol);
+                            assert_eq!(locals[0].1, 3);
+                            assert_eq!(locals[1].1, 4);
+                            assert_eq!(layout.max_locals(), 5);
+                            assert_eq!(
+                                locals.iter().map(|local| local.2).collect::<Vec<_>>(),
+                                [true, false]
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
+                    observed_layout = Some((layout.max_locals(), locals));
+                }),
+            );
+            assert!(
+                result.is_ok(),
+                "initializing planned mutable locals without reading or assigning them is supported: {result:?}"
+            );
+            assert!(!output.class_files().is_empty());
+            session_layouts
+                .push(observed_layout.expect("the source-backed typed unit was observed"));
+        }
+        assert_eq!(session_layouts[0], session_layouts[1]);
     }
 }
 
