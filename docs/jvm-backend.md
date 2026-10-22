@@ -77,13 +77,17 @@ reachable path. Name-only references, foreign or unplanned locals, and reads bef
 initialization return typed errors. Reference slots support initialized
 immutable locals and mutable declarations of exact planned classes. An
 initialized mutable reference local can be read through its canonical slot;
-straight-line assignments evaluate the RHS once, prove exact or validated
-same-unit ancestor assignability, and emit one `astore` to that slot. These
-assignments return Unit. An explicit declared reference type supplies the
-checked expected type when a sibling-valued `If` initializes that local or is
-used as the RHS of a straight-line assignment. Assignments executed inside an
-enclosing `If` or `While` body remain rejected until source
-definite-initialization and verifier-local joins are integrated.
+assignments evaluate the RHS once, prove exact or validated same-unit ancestor
+assignability, and emit one `astore` to that slot. These assignments return
+Unit. An explicit declared reference type supplies the checked expected type
+when a sibling-valued `If` initializes that local or is used as the RHS of an
+assignment. An initialized mutable reference local may be reassigned in an
+`If` branch or `While` body; source definite-initialization remains an
+intersection across reachable `If` arms and reverts to the pre-loop set after a
+loop. The classfile CFG analyzer independently joins compatible initialized
+local values to their checked nearest non-`Object` superclass. Writes in
+short-circuit operands or repeatedly evaluated `While` conditions remain
+unsupported.
 Immutable reference reads may cross CFG edges when every read is definitely
 initialized and incoming values have the exact same class. The Scala-independent
 classfile analyzer can join initialized local references at their checked
@@ -556,12 +560,14 @@ Planned method lowering supports initialized primitive `ValDef` statements,
 reference `ValDef` statements with an explicit planned-class type and a
 validated object or contextual sibling-`If` initializer, assignments to
 initialized mutable primitive and reference locals (including a contextual
-sibling-`If` RHS), and typed `While` loops with Boolean conditions.
-Reference-local assignments executed inside `If` and `While` bodies are
-rejected until reference-local CFG state is integrated. A loop evaluates its
-condition at the symbolic header
+sibling-`If` RHS, branch assignments, and writes from typed `While` bodies with
+Boolean conditions). A loop evaluates its condition at the symbolic header
 on every iteration, branches to its exit when false, and emits a back-edge only
-when the body can fall through. Unit bodies leave the stack empty; Int/Boolean
+when the body can fall through. The source initialized-local set after an
+`If` includes only locals initialized on every reachable arm; after a loop it
+contains only locals initialized before entry. The classfile analyzer still
+tracks actual reference classes through branch and back-edge joins. Unit bodies
+leave the stack empty; Int/Boolean
 body values are discarded once. The condition and body share the existing
 depth/node budgets. Since a loop may execute
 zero times, initialization performed only in its body is not considered

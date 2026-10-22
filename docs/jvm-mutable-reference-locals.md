@@ -40,7 +40,7 @@ the source fixture, so the first failure is independently observable:
 | --- | --- | --- | --- | --- |
 | Exact issue source | `TermNameNotFound(seed)` in `Base.value` | Same earlier unit failure | Same earlier unit failure | Typer, before candidate method completion |
 | `MutableReferenceLocalsReadback.scala`, only `Base` storage adapted | `UnstableSelectionPrefix` at `current.value()` | Same | Same | Typer, before typed unit/JVM plan |
-| `MutableReferenceLocalsTyped.scala`, `current.value()` replaced by `42` | Layout accepts canonical mutable `current: Base`; straight-line assignment works, but branch/loop assignment remains unsupported | Same | An explicit `Base` local can consume a checked sibling-union initializer or straight-line assignment; branch/loop writes remain unsupported | Contextual sibling-union lowering is covered by focused source regressions; the full adapted candidate still reaches the deferred branch/loop limitation |
+| `MutableReferenceLocalsTyped.scala`, `current.value()` replaced by `42` | Canonical `current: Base` survives a one-arm branch assignment and is returned after the join | Canonical `current: Base` survives loop assignments and remains initialized for zero or more iterations | An explicit `Base` local consumes a checked sibling-union initializer | Backend; the adapted batch now compiles, while original member readback remains a separate typer prerequisite |
 
 The readback test pins the error's source tree ID to the real `Select` node,
 the direct `current` `Ident` qualifier, and both source spans. The failed
@@ -143,9 +143,12 @@ store:
 - Assignment has source type `Unit`; it does not yield the stored reference.
 - A checked `Child <: Base` assignment is accepted. No implicit downcast,
   narrowing, boxing, or conversion is inserted.
-- Reference reassignment inside `If` and `While` bodies is rejected with a
-  typed control-flow error until source initialization and verifier-local joins
-  are integrated.
+- An initialized reference local may be reassigned in an `If` branch or a
+  `While` body. The RHS is evaluated once on the executing path and stored to
+  the same canonical slot.
+- Assignments in a short-circuit operand or a `While` condition remain
+  rejected; those expressions have conditional or repeated evaluation rules
+  outside this increment.
 - Source definite initialization remains distinct from verifier type
   widening. An `If` intersection and the conservative pre-loop initialized
   set remain required; a verifier join cannot prove a source read safe by
@@ -156,8 +159,10 @@ must accept its initial `Left` and assigned `Right`. For `repeat`, the header
 must include initial `Left` (including zero iterations) and the `Right` written
 by a positive iteration; at exit, the local is definitely initialized because
 it was initialized before the loop, and its verifier state must accept either
-class. The contextual initializer has no subsequent store, but its two
-initializer paths still require the declared-target proof above.
+class. Reverse branch order, nested `If` writes, and a terminal branch exercise
+the same source-state and verifier-state separation. The contextual initializer
+has no subsequent store, but its two initializer paths still require the
+declared-target proof above.
 
 ## Current join and initialization behavior
 
@@ -173,9 +178,11 @@ remains Scala-independent.
 
 The source JVM emitter intersects initialized-local sets at reachable `If`
 branches. For `While`, it restores the pre-loop initialized-local set at the
-exit, conservatively covering zero iterations. These facts do not implement
-reference stores, loads, or local verifier-type propagation. Do not weaken
-them in this audit.
+exit, conservatively covering zero iterations. Reference assignments use
+those facts to permit writes only to locals initialized on the current path.
+The classfile analyzer separately propagates their actual stored classes,
+joining `Left`/`Right` to `Object(Base)` at branch joins and loop headers.
+Neither analysis substitutes for the other.
 
 ## Explicit exclusions
 
@@ -201,9 +208,9 @@ local behavior must remain unchanged.
 | #1454 | Audit / cross-layer contract | Source evidence, current failure matrix, bounded verifier and source-write rules, exclusions, and ownership below. No codegen feature. |
 | #1455 | `dotty-classfile` | Scala-independent checked initialized-reference local joins and `StackMapTable` local frames; nearest unique non-Object superclass; absorbing `Top`; preserve receiver/constructor/allocation guards. |
 | #1456 | `dotty-jvm` | Canonical mutable planned-class local metadata, deterministic slot allocation, and initialized declaration lowering to `astore` using the declared class. |
-| #1457 | `dotty-jvm` | Initialized mutable reference `aload`, straight-line checked assignment and `astore`; `val` rejection, one RHS evaluation, assignability, `Unit` result, no implicit narrowing/boxing. Branch/loop assignments remain rejected. |
+| #1457 | `dotty-jvm` | Initialized mutable reference `aload`, straight-line checked assignment and `astore`; `val` rejection, one RHS evaluation, assignability, `Unit` result, no implicit narrowing/boxing. |
 | #1458 | `dotty-jvm` | Contextual sibling `If` result used for `Base`-typed local initialization/assignment, after the straight-line assignment contract. Implemented by forwarding the canonical local symbol's completed declared type to the existing checked projection. |
-| #1459 | `dotty-jvm` + classfile integration | Compose approved writes/reads through `If` and `While`, zero and positive loop counts, while preserving source definite initialization and verifier joins. Depends on #1455–#1458 and a separately tracked `dotty-typer` prerequisite for the observed `UnstableSelectionPrefix` on mutable local receivers. |
+| #1459 | `dotty-jvm` + classfile integration | Compose approved writes/reads through `If` and `While`, zero and positive loop counts, while preserving source definite initialization and verifier joins. The separate typer prerequisite for `UnstableSelectionPrefix` on mutable local receivers remains out of scope. |
 | #1460 | End-to-end integration / CI | Real Scala source to JDK 21+ execution, decoded local frames, exact bytecode and runtime dispatch after #1455–#1459 and the typer prerequisite. |
 
 The existing #1455–#1460 issue set does not assign ownership for fixing the
