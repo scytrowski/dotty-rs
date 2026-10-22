@@ -2283,31 +2283,50 @@ fn resolve_reference_name_at_depth(
     }
 }
 
-/// Returns true only when this is one terminal type selection over package
-/// selections. A type selection inside its qualifier can encode a nested
-/// owner, whose JVM `$` identity cannot be recovered by joining segments.
+/// Returns true only when this is one terminal type selection whose qualifier
+/// is a chain of package references. Term references and selections can name
+/// objects or nested types; joining those names with `/` would lose the JVM
+/// `$` owner boundary.
 fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> bool {
-    fn count(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> Option<usize> {
+    fn is_package_qualifier(file: &TastyFile<'_>, tree: &RawTree<'_>, depth: usize) -> bool {
         const MAX_SELECTION_DEPTH: usize = 256;
         if depth >= MAX_SELECTION_DEPTH {
-            return None;
+            return false;
         }
         if let RawTree::Leaf(term) = tree
             && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
         {
-            let reference = term.ast_ref()?;
-            let target = decode_shared_tree(file, reference.address)?;
-            return count(file, &target, depth + 1);
+            let Some(reference) = term.ast_ref() else {
+                return false;
+            };
+            let Some(target) = decode_shared_tree(file, reference.address) else {
+                return false;
+            };
+            return is_package_qualifier(file, &target, depth + 1);
         }
-        match tree.decode_structured().ok()? {
-            StructuredTree::AstChild(child) => count(file, &child.child, depth + 1),
-            StructuredTree::Ident(ident) => count(file, &ident.type_tree, depth + 1),
-            StructuredTree::Select(selection) => {
-                let own = usize::from(selection.tag == dotty_tasty::tasty::SELECTTPT_TAG);
-                Some(own + count(file, &selection.qualifier, depth + 1)?)
+        if let RawTree::Leaf(term) = tree {
+            return matches!(term.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG)
+                && term
+                    .name_ref()
+                    .and_then(|name| resolve_qualified_name(file, name))
+                    .is_some();
+        }
+        match tree.decode_structured() {
+            Ok(StructuredTree::AstChild(child)) => {
+                is_package_qualifier(file, &child.child, depth + 1)
             }
-            StructuredTree::Reference(reference) => count(file, &reference.qualifier, depth + 1),
-            _ => Some(0),
+            Ok(StructuredTree::Ident(ident)) => {
+                is_package_qualifier(file, &ident.type_tree, depth + 1)
+            }
+            Ok(StructuredTree::Select(selection)) => {
+                selection.tag == dotty_tasty::tasty::SELECT_TAG
+                    && is_package_qualifier(file, &selection.qualifier, depth + 1)
+            }
+            Ok(StructuredTree::Reference(reference)) => {
+                matches!(reference.tag, TERMREFPKG_TAG | TYPEREFPKG_TAG)
+                    && is_package_qualifier(file, &reference.qualifier, depth + 1)
+            }
+            _ => false,
         }
     }
 
@@ -2315,7 +2334,7 @@ fn has_one_terminal_type_selection(file: &TastyFile<'_>, tree: &RawTree<'_>, dep
         return false;
     };
     selection.tag == dotty_tasty::tasty::SELECTTPT_TAG
-        && count(file, &selection.qualifier, depth + 1) == Some(0)
+        && is_package_qualifier(file, &selection.qualifier, depth + 1)
 }
 
 /// Resolves a TASTy-local symbol address through its defining tree and owner
@@ -3406,10 +3425,10 @@ mod tests {
         let recovered_weight = weighted_roots(&recovered_roots);
         let newly_unresolved_weight = weighted_roots(&newly_unresolved_roots);
         assert_eq!(historical_unresolved_roots.len(), 41);
-        assert_eq!(current_unresolved_roots.len(), 34);
+        assert_eq!(current_unresolved_roots.len(), 20);
         assert_eq!(
             historical_unresolved_roots.len() - current_unresolved_roots.len(),
-            7
+            21
         );
         assert!(!recovered_roots.is_empty());
         assert_eq!(
@@ -3890,6 +3909,38 @@ mod tests {
             decoded.super_class.as_internal(),
             "scala/LowPriorityImplicits"
         );
+    }
+
+    #[test]
+    fn keeps_object_owned_selected_parent_unresolved() {
+        let error = decode(
+            &fixture_bytes("scala3-library/review/OwnerBaseChild.tasty"),
+            &BinaryName::from_internal("review/Child"),
+        )
+        .expect_err("an object-owned type path is not a package-qualified JVM name");
+
+        assert!(matches!(
+            &error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 1
+                    && parent.shape == "selected-qualified"
+                    && parent.reference_prefix.as_deref() == Some("Owner")
+        ));
+    }
+
+    #[test]
+    fn keeps_two_object_owned_selected_parent_unresolved() {
+        let error = decode(
+            &fixture_bytes("scala3-library/review/TwoOwnerBaseChild.tasty"),
+            &BinaryName::from_internal("review/TwoOwnersChild"),
+        )
+        .expect_err("nested object owners cannot be joined as package segments");
+
+        assert!(matches!(
+            &error,
+            TastyDecodeError::UnresolvedSupertype(parent)
+                if parent.parent_index == 1 && parent.shape == "selected-qualified"
+        ));
     }
 
     #[test]
