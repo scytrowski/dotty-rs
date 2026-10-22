@@ -16,7 +16,7 @@ use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmFieldPlan, JvmFieldSourceVisibility, JvmLocalBinding,
     JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, JvmReturnType,
-    JvmType, UnsupportedJvmCallShapeKind, emit_class,
+    JvmType, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -7548,10 +7548,10 @@ fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
 }
 
 #[test]
-fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
+fn virtual_calls_use_validated_new_and_planned_local_receivers() {
     let output = TestOutputDirectory::new("planned-virtual-calls");
     let artifacts = compile_planned_constructor_source(
-        "class Counter(seed: Int):\n  def add(value: Int): Int = value + 1\n  def combine(left: Int, right: Int): Int = left * 10 + right\n  def get(): Int = 42\n  def enabled(): Boolean = true\n  def touch(): Unit = ()\n  private def hidden(): Int = 9\n  def privateCall(): Int = this.hidden()\n  def privateReceiver(seed: Int): Int = new Counter(seed).hidden()\nclass Other(seed: Int):\n  def get(): Int = 7\nclass Client:\n  def directGet(seed: Int): Int = new Counter(seed).get()\n  def fromNew(seed: Int): Int = new Counter(seed + 1).add(seed)\n  def ordered(seed: Int): Int = new Counter(seed).combine(seed + 1, seed + 2)\n  def booleanResult(seed: Int): Boolean = new Counter(seed).enabled()\n  def unitCall(seed: Int): Unit = new Counter(seed).touch()\n  def fromLocal(seed: Int): Int =\n    val counter = new Counter(seed)\n    counter.add(seed)\n  def fromOther(seed: Int): Int = new Other(seed).get()\n",
+        "class Counter(seed: Int):\n  def add(value: Int): Int = value + 1\n  def combine(left: Int, right: Int): Int = left * 10 + right\n  def get(): Int = 42\n  def enabled(): Boolean = true\n  def touch(): Unit = ()\n  private def hidden(): Int = 9\n  def privateCall(): Int = this.hidden()\n  def privateReceiver(seed: Int): Int = new Counter(seed).hidden()\nclass Other(seed: Int):\n  def get(): Int = 7\nclass Client:\n  def directGet(seed: Int): Int = new Counter(seed).get()\n  def fromNew(seed: Int): Int = new Counter(seed + 1).add(seed)\n  def ordered(seed: Int): Int = new Counter(seed).combine(seed + 1, seed + 2)\n  def booleanResult(seed: Int): Boolean = new Counter(seed).enabled()\n  def unitCall(seed: Int): Unit = new Counter(seed).touch()\n  def fromLocal(seed: Int): Int =\n    val counter = new Counter(seed)\n    counter.add(seed)\n  def fromMutableLocal(seed: Int): Int =\n    var counter: Counter = new Counter(seed)\n    counter.add(seed)\n  def fromOther(seed: Int): Int = new Other(seed).get()\n",
         output.path(),
     )
     .unwrap();
@@ -7589,6 +7589,11 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
         from_local,
         &[0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0x1b, 0xb6, 0xac],
     );
+    let from_mutable_local = emitted_method_code(&client, "fromMutableLocal");
+    assert_opcode_sequence(
+        from_mutable_local,
+        &[0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0x1b, 0xb6, 0xac],
+    );
     let from_other = emitted_method_code(&client, "fromOther");
     assert_opcode_sequence(from_other, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xac]);
 
@@ -7617,6 +7622,7 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
     assert_eq!(invocation_owner(&client, unit_call), "Counter");
     assert_eq!(invocation_owner(&client, direct_get), "Counter");
     assert_eq!(invocation_owner(&client, from_local), "Counter");
+    assert_eq!(invocation_owner(&client, from_mutable_local), "Counter");
     // Counter.get and Other.get share a spelling; the canonical selected
     // method and receiver class must keep the two owners distinct.
     assert_eq!(invocation_owner(&client, from_other), "Other");
@@ -7644,7 +7650,7 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
         let harness = output.path().join("VirtualCallHarness.java");
         fs::write(
             &harness,
-            "public final class VirtualCallHarness { public static void main(String[] args) { Client c = new Client(); if (c.directGet(1) != 42 || c.fromNew(3) != 4 || c.ordered(3) != 45 || !c.booleanResult(3) || c.fromLocal(3) != 4 || c.fromOther(3) != 7 || new Counter(1).privateCall() != 9 || new Counter(1).privateReceiver(2) != 9) throw new AssertionError(); c.unitCall(1); System.out.println(\"virtual calls ok\"); } }\n",
+            "public final class VirtualCallHarness { public static void main(String[] args) { Client c = new Client(); if (c.directGet(1) != 42 || c.fromNew(3) != 4 || c.ordered(3) != 45 || !c.booleanResult(3) || c.fromLocal(3) != 4 || c.fromMutableLocal(3) != 4 || c.fromOther(3) != 7 || new Counter(1).privateCall() != 9 || new Counter(1).privateReceiver(2) != 9) throw new AssertionError(); c.unitCall(1); System.out.println(\"virtual calls ok\"); } }\n",
         )
         .expect("write Java verification harness");
         let javac = Command::new("javac")
@@ -10908,33 +10914,71 @@ fn mutable_reference_issue_candidate_pins_the_current_source_frontend_blocker() 
 }
 
 #[test]
-fn mutable_reference_readback_candidates_pass_typer_and_reach_codegen() {
+fn mutable_reference_readback_calls_dispatch_after_local_cfg_joins() {
     let source = fs::read_to_string(fixture_path("MutableReferenceLocalsReadback.scala"))
         .expect("read the minimally adapted, readback-preserving fixture");
-    for method_name in ["choose", "repeat", "initialize"] {
-        let method_source = source_with_only_runner_method(&source, method_name);
-        let source_id = SourceId::from_index(1454);
-        let output = TestOutputDirectory::new(&format!("mutable-reference-readback-{method_name}"));
-        let result = compile_source_batch(
-            &method_source,
-            "MutableReferenceLocalsReadback.scala",
-            output.path(),
-            source_id,
-            SourceUnitCardinality::AtLeastTwo,
-        );
+    let output = TestOutputDirectory::new("mutable-reference-readback-dispatch");
+    let artifacts = compile_source_batch(
+        &source,
+        "MutableReferenceLocalsReadback.scala",
+        output.path(),
+        SourceId::from_index(1454),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("mutable local method calls compile through the JVM backend");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Left", "Right", "Runner"]
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("MutableReferenceReadbackHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class MutableReferenceReadbackHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    if (runner.choose(false, 10) != 11 || runner.choose(true, 10) != 12)
+      throw new AssertionError("branch assignment dispatch");
+    if (runner.repeat(0, 10) != 11 || runner.repeat(1, 10) != 12 || runner.repeat(3, 10) != 12)
+      throw new AssertionError("loop assignment dispatch");
+    if (runner.initialize(true, 10) != 11 || runner.initialize(false, 10) != 12)
+      throw new AssertionError("initializer join dispatch");
+  }
+}
+"#,
+        )
+        .expect("write mutable-reference readback harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
         assert!(
-            matches!(
-                result,
-                Err(PipelineFailure::Codegen(
-                    JvmCodegenError::UnsupportedJvmCallShape {
-                        kind: UnsupportedJvmCallShapeKind::MutableOrUnplannedReferenceReceiver,
-                        ..
-                    }
-                ))
-            ),
-            "the method call should pass Typer and reach the existing JVM receiver limitation: {result:?}"
+            javac.status.success(),
+            "javac rejected mutable-reference readback harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
         );
-        assert!(output.class_files().is_empty());
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "MutableReferenceReadbackHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected mutable-reference readback classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
     }
 }
 

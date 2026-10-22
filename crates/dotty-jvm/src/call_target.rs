@@ -694,12 +694,12 @@ fn resolve_receiver_class(
                     tree: receiver_id,
                     symbol: *local,
                 })?;
+            let symbol_is_mutable = symbol
+                .flags
+                .contains(dotty_core::symbols::SymbolFlags::MUTABLE);
             if symbol.kind != SymbolKind::Local
                 || symbol.owner != Some(caller_method)
-                || binding.mutable
-                || symbol
-                    .flags
-                    .contains(dotty_core::symbols::SymbolFlags::MUTABLE)
+                || binding.mutable != symbol_is_mutable
             {
                 return Err(unsupported_call(
                     receiver_id,
