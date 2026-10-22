@@ -367,6 +367,271 @@ fn sibling_references_join_to_their_checked_shared_ancestor() {
 }
 
 #[test]
+fn initialized_sibling_references_join_in_the_same_local_slot() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Left".to_owned(), "example/Base".to_owned()),
+        ("example/Right".to_owned(), "example/Base".to_owned()),
+    ])
+    .unwrap();
+
+    for left_on_fallthrough in [true, false] {
+        let mut sequence = CodeSequence::new();
+        let alternate = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(local(1)))
+            .branch(BranchInstruction::IfEq(alternate.clone()))
+            .instruction(Instruction::ALoad(local(if left_on_fallthrough {
+                2
+            } else {
+                3
+            })))
+            .instruction(Instruction::AStore(local(4)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(alternate)
+            .unwrap()
+            .instruction(Instruction::ALoad(local(if left_on_fallthrough {
+                3
+            } else {
+                2
+            })))
+            .instruction(Instruction::AStore(local(4)))
+            .bind(join.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(local(4)))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "localJoin",
+            "(ZLexample/Left;Lexample/Right;)V",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        )
+        .unwrap();
+        let join_state = flow
+            .entry_state(graph.block_for_label(&join).unwrap())
+            .unwrap();
+        assert!(matches!(
+            &join_state.locals[4],
+            FlowLocalState::Object(class) if class.internal_name() == "example/Base"
+        ));
+    }
+}
+
+#[test]
+fn local_reference_loop_header_widens_and_top_stays_unreadable() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Left".to_owned(), "example/Base".to_owned()),
+        ("example/Right".to_owned(), "example/Base".to_owned()),
+    ])
+    .unwrap();
+
+    let mut loop_sequence = CodeSequence::new();
+    let head = loop_sequence.new_label().unwrap();
+    let done = loop_sequence.new_label().unwrap();
+    loop_sequence
+        .instruction(Instruction::ALoad(local(2)))
+        .instruction(Instruction::AStore(local(4)))
+        .bind(head.clone())
+        .unwrap()
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(done.clone()))
+        .instruction(Instruction::ALoad(local(3)))
+        .instruction(Instruction::AStore(local(4)))
+        .branch(BranchInstruction::Goto(head.clone()))
+        .bind(done)
+        .unwrap()
+        .instruction(Instruction::ALoad(local(4)))
+        .instruction(Instruction::Pop)
+        .instruction(Instruction::Return);
+    let loop_graph = ControlFlowGraph::build(&loop_sequence).unwrap();
+    let loop_flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+        &loop_graph,
+        "loopLocalJoin",
+        "(ZLexample/Left;Lexample/Right;)V",
+        false,
+        &pool,
+        owner,
+        &hierarchy,
+    )
+    .unwrap();
+    let head_state = loop_flow
+        .entry_state(loop_graph.block_for_label(&head).unwrap())
+        .unwrap();
+    assert!(matches!(
+        &head_state.locals[4],
+        FlowLocalState::Object(class) if class.internal_name() == "example/Base"
+    ));
+
+    let mut partial_sequence = CodeSequence::new();
+    let unassigned = partial_sequence.new_label().unwrap();
+    let join = partial_sequence.new_label().unwrap();
+    partial_sequence
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(unassigned.clone()))
+        .instruction(Instruction::ALoad(local(2)))
+        .instruction(Instruction::AStore(local(4)))
+        .branch(BranchInstruction::Goto(join.clone()))
+        .bind(unassigned)
+        .unwrap()
+        .bind(join.clone())
+        .unwrap()
+        .instruction(Instruction::ALoad(local(4)))
+        .instruction(Instruction::Pop)
+        .instruction(Instruction::Return);
+    let partial_graph = ControlFlowGraph::build(&partial_sequence).unwrap();
+    let partial_result = CfgCodeAnalyzer::analyze_with_hierarchy(
+        &partial_graph,
+        "topLocalJoin",
+        "(ZLexample/Left;)V",
+        false,
+        &pool,
+        owner,
+        &hierarchy,
+    );
+    assert!(
+        matches!(
+            &partial_result,
+            Err(AnalysisError::UninitializedLocal {
+                index: 4,
+                instruction: 5
+            })
+        ),
+        "unexpected analysis result: {partial_result:?}"
+    );
+}
+
+#[test]
+fn missing_or_object_only_local_ancestry_does_not_create_a_join() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+    let hierarchies = [
+        ClassHierarchy::default(),
+        ClassHierarchy::from_edges([
+            ("example/Left".to_owned(), "java/lang/Object".to_owned()),
+            ("example/Right".to_owned(), "java/lang/Object".to_owned()),
+        ])
+        .unwrap(),
+    ];
+
+    for hierarchy in hierarchies {
+        let mut sequence = CodeSequence::new();
+        let alternate = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(local(1)))
+            .branch(BranchInstruction::IfEq(alternate.clone()))
+            .instruction(Instruction::ALoad(local(2)))
+            .instruction(Instruction::AStore(local(4)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(alternate)
+            .unwrap()
+            .instruction(Instruction::ALoad(local(3)))
+            .instruction(Instruction::AStore(local(4)))
+            .bind(join.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(local(4)))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let result = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "rejectUnprovenLocalJoin",
+            "(ZLexample/Left;Lexample/Right;)V",
+            false,
+            &pool,
+            owner,
+            &hierarchy,
+        );
+        assert!(matches!(
+            result,
+            Err(AnalysisError::UninitializedLocal { index: 4, .. })
+        ));
+    }
+}
+
+#[test]
+fn exact_object_locals_survive_diamonds_and_backedges_without_a_hierarchy() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+
+    let mut diamond = CodeSequence::new();
+    let alternate = diamond.new_label().unwrap();
+    let join = diamond.new_label().unwrap();
+    diamond
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(alternate.clone()))
+        .branch(BranchInstruction::Goto(join.clone()))
+        .bind(alternate)
+        .unwrap()
+        .branch(BranchInstruction::Goto(join.clone()))
+        .bind(join.clone())
+        .unwrap()
+        .instruction(Instruction::ALoad(local(2)))
+        .instruction(Instruction::AReturn);
+    let diamond_graph = ControlFlowGraph::build(&diamond).unwrap();
+    let diamond_flow = CfgCodeAnalyzer::analyze_with_current_class(
+        &diamond_graph,
+        "exactObjectDiamond",
+        "(ZLjava/lang/Object;)Ljava/lang/Object;",
+        false,
+        &pool,
+        owner,
+    )
+    .unwrap();
+    let diamond_join = diamond_flow
+        .entry_state(diamond_graph.block_for_label(&join).unwrap())
+        .unwrap();
+    assert!(matches!(
+        &diamond_join.locals[2],
+        FlowLocalState::Object(class) if class.internal_name() == "java/lang/Object"
+    ));
+
+    let mut loop_sequence = CodeSequence::new();
+    let head = loop_sequence.new_label().unwrap();
+    let done = loop_sequence.new_label().unwrap();
+    loop_sequence
+        .bind(head.clone())
+        .unwrap()
+        .instruction(Instruction::ILoad(local(1)))
+        .branch(BranchInstruction::IfEq(done.clone()))
+        .branch(BranchInstruction::Goto(head.clone()))
+        .bind(done)
+        .unwrap()
+        .instruction(Instruction::ALoad(local(2)))
+        .instruction(Instruction::AReturn);
+    let loop_graph = ControlFlowGraph::build(&loop_sequence).unwrap();
+    let loop_flow = CfgCodeAnalyzer::analyze_with_current_class(
+        &loop_graph,
+        "exactObjectBackedge",
+        "(ZLjava/lang/Object;)Ljava/lang/Object;",
+        false,
+        &pool,
+        owner,
+    )
+    .unwrap();
+    let loop_head = loop_flow
+        .entry_state(loop_graph.block_for_label(&head).unwrap())
+        .unwrap();
+    assert!(matches!(
+        &loop_head.locals[2],
+        FlowLocalState::Object(class) if class.internal_name() == "java/lang/Object"
+    ));
+}
+
+#[test]
 fn sibling_join_requires_a_checked_non_object_path_from_both_inputs() {
     let mut pool_builder = ConstantPoolBuilder::new();
     let owner = pool_builder.class("example/Client").unwrap();

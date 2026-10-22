@@ -607,8 +607,8 @@ pub(crate) fn frame_class_identities(flow: &FlowAnalysis) -> BTreeSet<ClassIdent
 mod tests {
     use super::*;
     use crate::bytecode::{
-        BranchInstruction, CfgCodeAnalyzer, CodeSequence, ControlFlowGraph, Instruction,
-        SmallIntConstant, assemble_labeled,
+        BranchInstruction, CfgCodeAnalyzer, ClassHierarchy, CodeSequence, ControlFlowGraph,
+        Instruction, SmallIntConstant, assemble_labeled,
     };
     use crate::constant_pool::ConstantPool;
     use crate::constant_pool_builder::ConstantPoolBuilder;
@@ -1204,6 +1204,85 @@ mod tests {
             ),
             Err(StackMapFrameGenerationError::WrongClassEntry { class, index, .. })
                 if class == "example/Alpha" && index == integer
+        ));
+    }
+
+    #[test]
+    fn local_reference_join_frame_names_the_checked_common_class() {
+        let mut builder = ConstantPoolBuilder::new();
+        let client = builder.class("example/Client").unwrap();
+        let left = builder.class("example/Left").unwrap();
+        let right = builder.class("example/Right").unwrap();
+        let base = builder.class("example/Base").unwrap();
+        let pool = builder.finish().unwrap();
+        let hierarchy = ClassHierarchy::from_edges([
+            ("example/Left".to_owned(), "example/Base".to_owned()),
+            ("example/Right".to_owned(), "example/Base".to_owned()),
+        ])
+        .unwrap();
+
+        let mut sequence = CodeSequence::new();
+        let alternate = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::ILoad(crate::bytecode::LocalIndex::new(1)))
+            .branch(BranchInstruction::IfEq(alternate.clone()))
+            .instruction(Instruction::ALoad(crate::bytecode::LocalIndex::new(2)))
+            .instruction(Instruction::AStore(crate::bytecode::LocalIndex::new(4)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(alternate)
+            .unwrap()
+            .instruction(Instruction::ALoad(crate::bytecode::LocalIndex::new(3)))
+            .instruction(Instruction::AStore(crate::bytecode::LocalIndex::new(4)))
+            .bind(join.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(crate::bytecode::LocalIndex::new(4)))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "localJoinFrame",
+            "(ZLexample/Left;Lexample/Right;)V",
+            false,
+            &pool,
+            client,
+            &hierarchy,
+        )
+        .unwrap();
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        let frame_classes = frame_class_identities(&flow)
+            .into_iter()
+            .map(|identity| {
+                let index = match identity.internal_name() {
+                    "example/Client" => client,
+                    "example/Left" => left,
+                    "example/Right" => right,
+                    "example/Base" => base,
+                    other => panic!("unexpected frame class {other}"),
+                };
+                (identity, index)
+            })
+            .collect::<BTreeMap<_, _>>();
+        let generated = generate_stack_map_frames_inner(
+            &flow,
+            &graph,
+            &assembled,
+            &pool,
+            Some(client),
+            &frame_classes,
+        )
+        .unwrap();
+        let join_offset = assembled.layout.label_offset(&join).unwrap();
+        let frame = generated
+            .frames
+            .iter()
+            .find(|frame| usize::try_from(frame.pc).ok() == Some(join_offset))
+            .unwrap();
+        assert_eq!(frame.locals[4], VerificationTypeInfo::Object(base));
+        assert!(matches!(
+            pool.get(base),
+            Some(crate::constant_pool::ConstantPoolEntry::Class { .. })
         ));
     }
 }

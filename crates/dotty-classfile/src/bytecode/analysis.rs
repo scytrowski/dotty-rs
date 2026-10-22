@@ -3,8 +3,9 @@
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
 //! [`CfgCodeAnalyzer`] propagates integer and initialized-class references
 //! across symbolic branches, including proven common-superclass operand-stack
-//! joins when given an explicit hierarchy, bounded field transfers, constructor
-//! arguments, primitive virtual calls, and in-block object initialization.
+//! and initialized-reference local joins when given an explicit hierarchy,
+//! bounded field transfers, constructor arguments, primitive virtual calls,
+//! and in-block object initialization.
 //! Neither analyzer is a full JVM
 //! verifier, and neither produces stack-map frames.
 
@@ -3172,7 +3173,7 @@ fn is_return(instruction: Instruction) -> bool {
 /// The local-variable lattice used by CFG analysis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowLocalState {
-    /// The slot is uninitialized or has incompatible predecessor values.
+    /// The slot is uninitialized or has predecessor values without a safe join.
     Top,
     /// The slot contains an int-like JVM value.
     Integer,
@@ -3273,15 +3274,16 @@ impl CfgCodeAnalyzer {
     /// Int-like parameters initialize integer locals. A receiver in an
     /// instance method is retained as an opaque compatibility placeholder.
     /// `if*` branches consume their comparison operands, `goto` preserves the
-    /// stack, and predecessor states are merged until stable. Locals merge to
-    /// `Top`; operand-stack heights and exact value types must agree without a
-    /// supplied hierarchy.
+    /// stack, and predecessor states are merged until stable. Without a
+    /// hierarchy, locals merge to `Top` on disagreement and operand-stack
+    /// heights and exact value types must agree.
     /// Unreachable blocks are retained by the CFG but have no entry state.
-    /// Locals only degrade to `Top`, while a hierarchy-aware stack value can
-    /// widen at most once per edge in the bounded superclass chain. The
-    /// worklist has a defensive finite bound based on graph size, local-state
-    /// width, observed stack width, and hierarchy depth. An incompatible stack
-    /// state fails explicitly instead of growing a cycle.
+    /// Local references and hierarchy-aware stack values widen only to a
+    /// checked common superclass in the bounded chain; other local
+    /// disagreements become absorbing `Top`. The worklist has a defensive
+    /// finite bound based on graph size, local-state width, observed stack
+    /// width, retained class evidence, and hierarchy depth. An incompatible
+    /// stack state fails explicitly instead of growing a cycle.
     ///
     /// This compatibility entry point supports integer constants, integer
     /// local loads/stores, `dup`, integer arithmetic/comparisons, gotos, and
@@ -3350,9 +3352,10 @@ impl CfgCodeAnalyzer {
 
     /// Analyzes reference transfers using an explicit, bounded superclass
     /// proof graph in addition to the exact initialized current-class type.
-    /// Initialized operand-stack values at a join may merge to their nearest
-    /// explicitly proven shared non-Object superclass; locals still degrade
-    /// to `Top` on any disagreement.
+    /// Initialized operand-stack values and local-slot references at a join
+    /// may merge to their nearest explicitly proven shared non-Object
+    /// superclass. Local `Top`, primitive/reference, receiver, or unsupported
+    /// disagreements remain unusable.
     pub fn analyze_with_hierarchy(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -3513,9 +3516,9 @@ impl CfgCodeAnalyzer {
                 limit: MAX_FLOW_STATE_SLOTS,
             });
         }
-        // Locals can degrade once to Top, stack values can widen along the
-        // bounded superclass chain, and retained class evidence can cause
-        // proof-only reprocessing as it reaches other blocks.
+        // Locals can widen along the bounded superclass chain or degrade once
+        // to Top. Stack values can also widen, and retained class evidence can
+        // cause proof-only reprocessing as it reaches other blocks.
         let mut block_entries = vec![None; block_count];
         let mut block_stack_join_evidence = vec![None; block_count];
         let mut block_local_join_evidence = vec![None; block_count];
@@ -4132,16 +4135,56 @@ fn merge_flow_states_with_evidence(
     for (index, (existing, incoming)) in
         existing.locals.iter_mut().zip(&incoming.locals).enumerate()
     {
-        if *existing != *incoming && *existing != FlowLocalState::Top {
-            *existing = FlowLocalState::Top;
-            local_evidence[index].clear();
-            changed = true;
-        } else if *existing == FlowLocalState::Top {
-            local_evidence[index].clear();
-        } else {
-            let previous_len = local_evidence[index].len();
-            local_evidence[index].extend(incoming_local_evidence[index].iter().cloned());
-            changed |= local_evidence[index].len() != previous_len;
+        match (&*existing, incoming) {
+            (FlowLocalState::Top, _) => local_evidence[index].clear(),
+            (_, FlowLocalState::Top) => {
+                *existing = FlowLocalState::Top;
+                local_evidence[index].clear();
+                changed = true;
+            }
+            (FlowLocalState::Object(_), FlowLocalState::Object(_)) => {
+                let previous_len = local_evidence[index].len();
+                let mut classes = local_evidence[index].clone();
+                if local_evidence[index].is_empty()
+                    && let FlowLocalState::Object(class) = &*existing
+                {
+                    classes.insert(class.clone());
+                }
+                if incoming_local_evidence[index].is_empty() {
+                    if let FlowLocalState::Object(class) = incoming {
+                        classes.insert(class.clone());
+                    }
+                } else {
+                    classes.extend(incoming_local_evidence[index].iter().cloned());
+                }
+                let classes = classes.into_iter().collect::<Vec<_>>();
+                // Exact equality remains valid even for java/lang/Object;
+                // only a join of distinct original inputs requires a checked
+                // non-Object ancestor.
+                let joined = if let [exact] = classes.as_slice() {
+                    Some(exact.clone())
+                } else {
+                    hierarchy.nearest_common_ancestor(classes.iter(), false)
+                };
+                if let Some(joined) = joined {
+                    if !matches!(&*existing, FlowLocalState::Object(class) if class == &joined) {
+                        *existing = FlowLocalState::Object(joined);
+                        changed = true;
+                    }
+                    local_evidence[index].extend(classes);
+                    changed |= local_evidence[index].len() != previous_len;
+                } else {
+                    *existing = FlowLocalState::Top;
+                    local_evidence[index].clear();
+                    changed = true;
+                }
+            }
+            (left, right) if left == right => {}
+            _ => {
+                *existing = FlowLocalState::Top;
+                local_evidence[index].clear();
+                changed = true;
+            }
         }
     }
     Ok(changed)
@@ -6184,7 +6227,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_sibling_reference_locals_degrade_to_top_and_cannot_be_loaded() {
+    fn sibling_reference_local_widens_to_checked_base_and_can_be_loaded() {
         let mut existing = BlockEntryState {
             locals: vec![FlowLocalState::Object(class_identity("example/Left"))],
             operand_stack: vec![],
@@ -6209,17 +6252,17 @@ mod tests {
             )
             .unwrap()
         );
-        assert_eq!(existing.locals, [FlowLocalState::Top]);
+        assert!(matches!(
+            existing.locals.as_slice(),
+            [FlowLocalState::Object(class)] if class.internal_name() == "example/Base"
+        ));
 
         let local_evidence = local_join_evidence(&existing);
         let mut frame = frame_from_state(&existing, &local_evidence);
-        assert_eq!(
-            frame.load_local(4, LocalIndex::new(0), ValueKind::Reference),
-            Err(AnalysisError::UninitializedLocal {
-                instruction: 4,
-                index: 0,
-            })
-        );
+        frame
+            .load_local(4, LocalIndex::new(0), ValueKind::Reference)
+            .unwrap();
+        assert_eq!(frame.stack_classes, [Some(class_identity("example/Base"))]);
     }
 
     #[test]
