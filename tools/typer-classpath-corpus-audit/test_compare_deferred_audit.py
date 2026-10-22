@@ -23,7 +23,7 @@ class DeferredAuditComparisonTests(unittest.TestCase):
         self.assertEqual(gate(report(), report()), (3, 8))
         with self.assertRaisesRegex(ValueError, 'lost'):
             gate(report(), report(name='C'))
-        for text in (report(depth=71), report(fanout=525)):
+        for text in (report(depth=7), report(fanout=17)):
             with self.assertRaisesRegex(ValueError, 'reduction'):
                 gate(report(), text)
 
@@ -33,8 +33,8 @@ class DeferredAuditComparisonTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'denominator'):
             gate(report(), report().replace('local_methods=3297', 'local_methods=3296'))
 
-    def test_boundary_reduction_is_accepted(self):
-        self.assertEqual(gate(report(), report(depth=70, fanout=524)), (70, 524))
+    def test_deferred_loading_hard_caps_are_inclusive(self):
+        self.assertEqual(gate(report(), report(depth=6, fanout=16)), (6, 16))
 
     def test_missing_or_duplicate_metrics_are_rejected(self):
         for text in ('', report() + 'dependency_load_profile:\n  p95_dependency_depth=3\n'):

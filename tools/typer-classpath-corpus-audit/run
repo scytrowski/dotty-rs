@@ -1307,7 +1307,7 @@ printf 'The #950 snapshot recommended the import/classpath resolution sprint. It
     printf '| Max distinct completed classes per request | 1048 | %s |\n' "$(report_field max_distinct_fully_completed_classes_per_request)"
     printf '| Max identities touched per request | 1048 | %s |\n' "$max_fanout"
     printf '| Max new identity shells per request | n/a | %s |\n\n' "$(report_field max_identity_shells_created_per_request)"
-    printf 'The automatic gate requires p95 <= 70, completed fanout <= 524, and no lost previously successful class target keys.\n\n```text\n'
+    printf 'The automatic gate requires completed dependency p95 <= 6, completed-class fanout <= 16, unchanged local-method denominator, and no lost previously successful class target keys.\n\n```text\n'
     cat "$tmp_dir/gate.txt"
     printf '```\n\n'
     printf '## Previous type projection snapshot\n\n'
