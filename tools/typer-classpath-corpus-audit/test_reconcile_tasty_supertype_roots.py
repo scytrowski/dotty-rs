@@ -72,6 +72,11 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
                         "observations": "1",
                     },
                     {
+                        "root_cause_key": "root_cause=InvalidTastyFile::requested=compiler/Root0::root=tasty.unresolved_supertype",
+                        "source_file": "compiler/Other.scala",
+                        "observations": "1",
+                    },
+                    {
                         "root_cause_key": "root_cause=InvalidTastyFile::requested=compiler/NewRoot::root=tasty.unresolved_supertype",
                         "source_file": "compiler/Bar.scala",
                         "observations": "3",
@@ -83,13 +88,15 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
 
             self.assertEqual(len(rows), 52)  # header + 50 frozen roots + one new root origin
             self.assertEqual(rows[1][0], "compiler/Root0")
-            self.assertEqual(rows[1][7], "1")
+            self.assertEqual(rows[1][7], "2")
             self.assertEqual(rows[1][10], "0")
             self.assertEqual(rows[1][11], "old-simple")
+            self.assertEqual(rows[1][8], "compiler/Foo.scala;compiler/Other.scala")
+            self.assertTrue(rows[1][9].endswith("=2"))
             self.assertEqual(rows[-1][0], "compiler/NewRoot")
             self.assertIn("frozen_weighted_observations=100", summary)
-            self.assertIn("current_frozen_root_source_observations=1", summary)
-            self.assertIn("historical_to_current_weight_delta=99", summary)
+            self.assertIn("current_frozen_root_source_observations=2", summary)
+            self.assertIn("historical_to_current_weight_delta=98", summary)
             self.assertIn("new_current_roots=1", summary)
 
     def test_fails_when_a_frozen_root_is_missing_from_current_profile(self) -> None:

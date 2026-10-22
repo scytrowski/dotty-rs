@@ -19,8 +19,8 @@ def read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         if reader.fieldnames is None:
             raise ValueError(f"missing TSV header: {path}")
         rows = list(reader)
-        if any(None in row for row in rows):
-            raise ValueError(f"row has more fields than header: {path}")
+        if any(None in row or any(value is None for value in row.values()) for row in rows):
+            raise ValueError(f"row field count does not match header: {path}")
         return reader.fieldnames, rows
 
 
@@ -92,7 +92,7 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
         observations = int(row["observations"])
         current_weights[root] += observations
         files[root].add(row["source_file"])
-        origins[root][row["root_cause_key"]] = observations
+        origins[root][row["root_cause_key"]] = origins[root].get(row["root_cause_key"], 0) + observations
         if root not in baseline:
             new_roots.add(root)
 
@@ -147,10 +147,12 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
         failed_indices = {
             int(row["standalone_decode_parent_index"])
             for row in old_rows.values()
-            if row["standalone_decode_parent_index"]
+            if row["standalone_decode_parent_index"] not in ("", "-")
         }
         for index in failed_indices:
-            current = next(row for row in parents[root] if int(row["parent_index"]) == index)
+            current = next((row for row in parents[root] if int(row["parent_index"]) == index), None)
+            if current is None:
+                raise ValueError(f"current profile is missing original failed parent {root}[{index}]")
             if current["resolved_binary_name"]:
                 resolved_original_parents += 1
             else:
@@ -168,7 +170,7 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
         f"new_current_root_names={';'.join(sorted(new_roots))}",
         f"frozen_roots_with_zero_current_source_observations={sum(1 for root in baseline if not current_weights.get(root, 0))}",
         f"historical_roots_fully_resolved={sum(1 for root, rows in parents.items() if all(row['deepest_typed_cause'] == 'none' for row in rows))}",
-        f"historical_roots_with_parent_resolution_progress={sum(1 for rows in parents.values() if any(row['resolved_binary_name'] for row in rows))}",
+        f"historical_roots_where_original_failed_parent_resolved={resolved_original_parents}",
         f"provenance_files={len(set().union(*files.values())) if files else 0}",
     ]
     return output, summary
