@@ -79,8 +79,11 @@ immutable locals and mutable declarations of exact planned classes. An
 initialized mutable reference local can be read through its canonical slot;
 straight-line assignments evaluate the RHS once, prove exact or validated
 same-unit ancestor assignability, and emit one `astore` to that slot. These
-assignments return Unit and remain rejected inside `If` and `While` bodies until
-source definite-initialization and verifier-local joins are integrated.
+assignments return Unit. An explicit declared reference type supplies the
+checked expected type when a sibling-valued `If` initializes that local or is
+used as the RHS of a straight-line assignment. Assignments executed inside an
+enclosing `If` or `While` body remain rejected until source
+definite-initialization and verifier-local joins are integrated.
 Immutable reference reads may cross CFG edges when every read is definitely
 initialized and incoming values have the exact same class. The Scala-independent
 classfile analyzer can join initialized local references at their checked
@@ -258,9 +261,10 @@ an ancestor of the other and both are assignable to the `If` tree's canonical
 result class. The result stays that source-selected class, with no cast or
 guessed common parent. Sibling `Type::Or` results now have a separate checked
 projection proof when an explicit expected class is their nearest non-`Object`
-common ancestor. Method results, block results, and call arguments consume the
-proof only when their canonical source signature supplies that expected type
-and the two actual branches match the exact union arms. The typed source union
+common ancestor. Method results, block results, call arguments, and explicitly
+declared local initializers and assignments consume the proof only when their
+canonical source signature or local symbol supplies that expected type and the
+two actual branches match the exact union arms. The typed source union
 stays unchanged while expression lowering emits the proven common class for
 the CFG verifier. Inferred unions, `Object`-only joins, or mismatched arms
 remain unsupported. A local that is not initialized on every path becomes
@@ -278,14 +282,14 @@ unsupported states remain typed build errors.
 | Source shape | Planned JVM lowering | CFG/verifier rule |
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
-| Mutable `var` of planned class `C`, initialized and reassigned in straight-line code | One canonical `astore` for each initialization or assignment; `aload` for an initialized read | Assignment RHS must be exact `C` or assignable by a validated same-unit ancestor path; reassignment inside `If`/`While` is rejected |
+| Mutable `var` of planned class `C`, initialized and reassigned in straight-line code | One canonical `astore` for each initialization or assignment; `aload` for an initialized read | RHS must be exact `C`, assignable through validated ancestry, or a checked sibling `If` whose nearest non-`Object` ancestor is declared `C`; assignment execution inside an enclosing `If`/`While` remains rejected |
 | Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and declared value descriptor; a field write may use up to two validated same-unit ancestry edges |
 | Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver owner is exact or a validated ancestor; arguments and results use exact types or the bounded two-edge assignment |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
 | Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified ancestry relation of up to two edges; full allocation sequence remains in one basic block |
 | Allocation in an `if` arm or loop body | Complete allocation and constructor call in one basic block | No uninitialized value may cross an edge, enter a local, or escape |
 | Ancestor-related initialized references at a typed `If` join | Keep the canonical source result class | Both branch classes must be ancestor-related and assignable to that result; classfile frames verify the join |
-| Sibling union at a join | Emit the checked nearest non-`Object` ancestor for an exact two-arm planned-class `Type::Or` when a canonical method result, block result, or formal parameter supplies that expected type | Actual branch classes must match both union arms; no inferred target or AST rewrite; `Object`-only, forged, malformed, nested unsupported, and non-canonical cases fail |
+| Sibling union at a join | Emit the checked nearest non-`Object` ancestor for an exact two-arm planned-class `Type::Or` when a canonical method result, block result, formal parameter, or explicitly declared local supplies that expected type | Actual branch classes must match both union arms; no inferred target or AST rewrite; `Object`-only, forged, malformed, nested unsupported, and non-canonical cases fail |
 | Unrelated or non-canonical reference types at a join | No classfile emitted | Typed reference/branch error; no guessed superclass, `Object` widening, cast, or name-based projection |
 
 Object-construction typing, canonical constructor and receiver identity,
@@ -549,11 +553,13 @@ suffix, so dead instructions do not reach CFG analysis. A normally completing
 Unit method receives one trailing `return`; explicit returns remain terminal.
 The block's declared type is checked against its final expression flow.
 Planned method lowering supports initialized primitive `ValDef` statements,
-immutable reference `ValDef` statements initialized by validated object
-creation, assignments to initialized mutable primitive and reference locals,
-and typed `While` loops with Boolean conditions. Reference-local assignments
-inside `If` and `While` bodies are rejected until reference-local CFG state is
-integrated. A loop evaluates its condition at the symbolic header
+reference `ValDef` statements with an explicit planned-class type and a
+validated object or contextual sibling-`If` initializer, assignments to
+initialized mutable primitive and reference locals (including a contextual
+sibling-`If` RHS), and typed `While` loops with Boolean conditions.
+Reference-local assignments executed inside `If` and `While` bodies are
+rejected until reference-local CFG state is integrated. A loop evaluates its
+condition at the symbolic header
 on every iteration, branches to its exit when false, and emits a back-edge only
 when the body can fall through. Unit bodies leave the stack empty; Int/Boolean
 body values are discarded once. The condition and body share the existing

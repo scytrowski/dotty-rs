@@ -147,6 +147,11 @@ source-backed expected result or formal parameter type is present, the actual
 two branch flows match the exact two source arms, and the expected class is
 their checked nearest non-`Object` ancestor. The proof authorizes the emitted
 join representation; it does not rewrite the typed AST or method signature.
+Issue #1458 also consumes the same proof when an explicitly declared local's
+canonical completed source type supplies the expected class for an initializer
+or straight-line assignment RHS. Inferred local unions still have no approved
+target, and assignments executed inside an enclosing `If` or `While` remain
+outside that increment.
 
 Independently, the JVMS 21 verifier permits a stack-map entry
 `Object(Base)` when both incoming initialized values are assignable to Base.
