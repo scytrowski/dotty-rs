@@ -886,6 +886,103 @@ fn ancestor_stack_joins_encode_the_verified_middle_class() {
 }
 
 #[test]
+fn sibling_stack_joins_encode_the_verified_common_superclass() {
+    let hierarchy = ClassHierarchy::from_edges([
+        ("example/Left".to_owned(), "example/Base".to_owned()),
+        ("example/Right".to_owned(), "example/Base".to_owned()),
+        ("example/Base".to_owned(), "java/lang/Object".to_owned()),
+    ])
+    .unwrap();
+    let mut builder = ClassFileBuilder::new(
+        "example/SiblingJoins",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder.set_verification_hierarchy(hierarchy);
+    for (name, left_on_fallthrough) in [("chooseLeft", true), ("chooseRight", false)] {
+        builder
+            .add_static_method(
+                name,
+                "(ZLexample/Left;Lexample/Right;)Lexample/Base;",
+                move |code| {
+                    let otherwise = code.new_label()?;
+                    let join = code.new_label()?;
+                    code.iload(0)?;
+                    code.ifeq(otherwise.clone())?;
+                    code.aload(if left_on_fallthrough { 1 } else { 2 })?;
+                    code.goto(join.clone())?;
+                    code.mark(otherwise)?;
+                    code.aload(if left_on_fallthrough { 2 } else { 1 })?;
+                    code.mark(join)?;
+                    code.areturn()?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+    }
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    let mut encoded_frames = Vec::new();
+    for name in ["chooseLeft", "chooseRight"] {
+        let code = code_attribute(method_named(&class_file, name));
+        assert_eq!((code.max_stack, code.max_locals), (1, 3));
+        let [Attribute::Other(stack_map)] = code.attributes.as_slice() else {
+            panic!("{name} should have one StackMapTable");
+        };
+        let payload = stack_map.bytes;
+        let frame_count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+        let mut cursor = 2;
+        let mut previous_pc = None;
+        let mut saw_base_join = false;
+        for _ in 0..frame_count {
+            assert_eq!(payload[cursor], 255, "frames are full_frame entries");
+            cursor += 1;
+            let offset_delta = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+            cursor += 2;
+            let pc = previous_pc.map_or(offset_delta, |previous| previous + offset_delta + 1);
+            previous_pc = Some(pc);
+            let locals = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+            cursor += 2;
+            for _ in 0..locals {
+                match payload[cursor] {
+                    1 => cursor += 1,
+                    7 => cursor += 3,
+                    tag => panic!("unexpected local verification tag {tag}"),
+                }
+            }
+            let stack = u16::from_be_bytes([payload[cursor], payload[cursor + 1]]) as usize;
+            cursor += 2;
+            if stack == 1 && payload[cursor] == 7 {
+                let base_index =
+                    dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+                        payload[cursor + 1],
+                        payload[cursor + 2],
+                    ]));
+                if class_file.constant_pool.class_name(base_index) == Ok("example/Base") {
+                    assert_eq!(pc, code.code.len() - 1, "frame points at the join target");
+                    saw_base_join = true;
+                }
+            }
+            for _ in 0..stack {
+                match payload[cursor] {
+                    1 => cursor += 1,
+                    7 => cursor += 3,
+                    tag => panic!("unexpected stack verification tag {tag}"),
+                }
+            }
+        }
+        assert_eq!(cursor, payload.len());
+        assert!(saw_base_join, "join frame must encode Object(Base)");
+        encoded_frames.push(payload.to_vec());
+    }
+    assert_eq!(encoded_frames[0], encoded_frames[1]);
+}
+
+#[test]
 fn exact_reference_method_parameters_seed_linear_and_cfg_frames() {
     let mut builder = ClassFileBuilder::new(
         "example/ReferenceMethods",

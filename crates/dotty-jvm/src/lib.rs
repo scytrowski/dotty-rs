@@ -228,6 +228,19 @@ pub struct JvmInternalNameHierarchyEdge {
     parent_internal_name: String,
 }
 
+/// A checked JVM reference representation for one exact source sibling union.
+///
+/// The original semantic union and expected source type remain available for
+/// auditing; this proof does not rewrite either type or enable bytecode
+/// lowering by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmSiblingUnionProjection {
+    source_type: TypeId,
+    expected_type: TypeId,
+    source_arms: [SymbolId; 2],
+    representation: JvmType,
+}
+
 /// One canonical parameter's JVM local-variable layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct JvmParameterLocal {
@@ -896,6 +909,11 @@ pub enum JvmCodegenError {
     ReferenceClassNotInJvmPlan { class: SymbolId },
     /// Two reference values identify different canonical classes.
     ReferenceTypeMismatch { expected: SymbolId, found: SymbolId },
+    /// A source union cannot be represented by the supplied checked expected class.
+    UnsupportedSiblingUnionProjection {
+        source_type: TypeId,
+        expected_type: TypeId,
+    },
     /// This reference-local operation is not in the supported immutable-val subset.
     ReferenceLocalInstructionUnsupported { tree: TreeId<Typed> },
     /// Mutable local reference storage is not part of this compiler increment.
@@ -1586,6 +1604,50 @@ impl JvmClassHierarchy {
         &self.superclasses
     }
 
+    /// Returns the nearest common planned ancestor of two planned classes.
+    ///
+    /// The validated hierarchy has one superclass per class, so the nearest
+    /// common ancestor is unique. The built-in `java/lang/Object` root is not
+    /// returned: if it is the only common class, or either input is not part
+    /// of this hierarchy snapshot, this returns `None`. The query uses only
+    /// canonical [`SymbolId`] edges; it does not compare printed names or
+    /// modify the hierarchy.
+    pub fn nearest_common_non_object_ancestor(
+        &self,
+        left: SymbolId,
+        right: SymbolId,
+    ) -> Option<SymbolId> {
+        let left_ancestors = self.planned_ancestors(left)?;
+        let right_ancestors = self.planned_ancestors(right)?;
+        left_ancestors
+            .into_iter()
+            .find(|candidate| right_ancestors.contains(candidate))
+    }
+
+    fn planned_ancestors(&self, class: SymbolId) -> Option<Vec<SymbolId>> {
+        let mut ancestors = Vec::new();
+        let mut current = class;
+        loop {
+            if ancestors.contains(&current) {
+                return None;
+            }
+            let edge = self
+                .superclasses
+                .iter()
+                .find(|edge| edge.class == current)?;
+            ancestors.push(current);
+            if !self
+                .superclasses
+                .iter()
+                .any(|candidate| candidate.class == edge.parent)
+            {
+                break;
+            }
+            current = edge.parent;
+        }
+        Some(ancestors)
+    }
+
     /// Returns the Scala-independent hierarchy edges for class-file consumers.
     pub fn internal_name_edges(&self) -> Vec<JvmInternalNameHierarchyEdge> {
         self.superclasses
@@ -1595,6 +1657,28 @@ impl JvmClassHierarchy {
                 parent_internal_name: parent.parent_internal_name.clone(),
             })
             .collect()
+    }
+}
+
+impl JvmSiblingUnionProjection {
+    /// Original source `Type::Or` identity; the semantic store is not changed.
+    pub const fn source_type(self) -> TypeId {
+        self.source_type
+    }
+
+    /// Canonical expected source type that authorized the projection.
+    pub const fn expected_type(self) -> TypeId {
+        self.expected_type
+    }
+
+    /// The two exact canonical source arm symbols, in their original order.
+    pub const fn source_arms(self) -> [SymbolId; 2] {
+        self.source_arms
+    }
+
+    /// Checked JVM representation of the expected common class.
+    pub const fn representation(self) -> JvmType {
+        self.representation
     }
 }
 
@@ -1969,6 +2053,27 @@ impl JvmCompilationUnit<'_> {
         definitions: &Definitions,
     ) -> Result<JvmType, JvmCodegenError> {
         reference::project_type(self, ty, definitions)
+    }
+
+    /// Proves that an exact two-arm sibling `Type::Or` can use an explicitly
+    /// expected planned class as its JVM reference representation.
+    ///
+    /// The expected class must be the nearest non-Object common ancestor of
+    /// both canonical planned arms. This only returns projection evidence; it
+    /// does not rewrite the typed AST, infer an expected type, or lower control
+    /// flow. Standalone unions remain unsupported by [`Self::reference_type`].
+    pub fn project_sibling_union_to_expected_type(
+        &self,
+        source_type: TypeId,
+        expected_type: TypeId,
+        definitions: &Definitions,
+    ) -> Result<JvmSiblingUnionProjection, JvmCodegenError> {
+        reference::project_sibling_union_to_expected_type(
+            self,
+            source_type,
+            expected_type,
+            definitions,
+        )
     }
 
     /// Projects a completed local value type to its exact primitive or

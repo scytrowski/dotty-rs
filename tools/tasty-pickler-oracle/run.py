@@ -236,6 +236,15 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
         )
         if not all(member in decompiled for member in expected_members):
             raise RuntimeError(f"fresh Mutable TASTy lost a field or method: {decompiled}")
+    if relative.as_posix() == "example/Counter.tasty":
+        expected_members = (
+            "private[this] var current: scala.Int = start",
+            "def get(): scala.Int = Counter.this.current",
+            "def set(value: scala.Int): scala.Unit = Counter.this.current = value",
+            "def increment(): scala.Int =",
+        )
+        if not all(member in decompiled for member in expected_members):
+            raise RuntimeError(f"fresh Counter TASTy lost its field or methods: {decompiled}")
     toolchain.compiler(["-from-tasty", "-d", compiled, staged])
     emitted = compiled / relative.with_suffix(".class")
     if not emitted.is_file() or emitted.stat().st_size == 0:
@@ -327,6 +336,17 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
   }
 }
 """, "Answer.value() = 42", 42,
+            ),
+            "example/Box.tasty": (
+                "example.Box", r"public int answer\(\)", "BoxRuntime.java",
+                """public final class BoxRuntime {
+  public static void main(String[] args) {
+    int actual = new example.Box(17).answer();
+    if (actual != 42) throw new AssertionError("Box.answer() = " + actual);
+    System.out.println("Box(17).answer() = " + actual);
+  }
+}
+""", "Box(17).answer() = 42", 42,
             ),
             "example/PrivateFields.tasty": (
                 "example.PrivateFields", r"public int seedValue\(\)",
@@ -554,18 +574,24 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 "example.Counter", r"public int increment\(\)", "CounterRuntime.java",
                 """public final class CounterRuntime {
   public static void main(String[] args) {
-    example.Counter counter = new example.Counter(5);
-    if (counter.get() != 5) throw new AssertionError("constructor field initializer");
-    counter.set(8);
-    if (counter.increment() != 9 || counter.get() != 9)
-      throw new AssertionError("mutating getter/setter/increment");
-    counter.set(-2);
-    if (counter.increment() != -1 || counter.get() != -1)
-      throw new AssertionError("negative mutable field state");
-    System.out.println("Counter = 5, 9, -1");
+    example.Counter a = new example.Counter(4);
+    example.Counter b = new example.Counter(10);
+    if (a.get() != 4 || b.get() != 10)
+      throw new AssertionError("constructor field initializer or independent instances");
+    a.set(8);
+    if (a.get() != 8 || b.get() != 10)
+      throw new AssertionError("setter changed the wrong instance");
+    if (a.increment() != 9 || a.get() != 9 || b.get() != 10)
+      throw new AssertionError("increment changed the wrong instance");
+    if (b.increment() != 11 || b.get() != 11 || a.get() != 9)
+      throw new AssertionError("instances do not retain independent state");
+    example.Counter negative = new example.Counter(-2);
+    if (negative.get() != -2)
+      throw new AssertionError("negative constructor input was not retained");
+    System.out.println("Counter = independent state, 9, 11, -2");
   }
 }
-""", "Counter = 5, 9, -1", 9,
+""", "Counter = independent state, 9, 11, -2", 9,
             ),
             "example/Loop.tasty": (
                 "example.Loop", r"public int sumTo\(int\)", "LoopRuntime.java",
@@ -615,6 +641,12 @@ def verify_candidate(toolchain: Toolchain, binary: Path, candidate: Path,
                 )
                 if not all(re.search(pattern, javap) for pattern in signatures):
                     raise RuntimeError(f"fresh Flags class has unexpected signatures: {javap}")
+            if relative.as_posix() == "example/Box.tasty":
+                signatures = (r"public example\.Box\(int\)", r"public int answer\(\)")
+                if not all(re.search(pattern, javap) for pattern in signatures):
+                    raise RuntimeError(f"fresh Box class has unexpected signatures: {javap}")
+                if re.search(r"public (?:final )?int start\(\)", javap):
+                    raise RuntimeError(f"plain constructor input became a public accessor: {javap}")
             if relative.as_posix() == "example/Conditionals.tasty":
                 signatures = (
                     r"public int choose\(boolean, int, int\)",

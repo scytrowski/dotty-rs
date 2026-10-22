@@ -345,6 +345,44 @@ fn loads_scala39_source_with_its_applied_iterator_alias_parent() {
 }
 
 #[test]
+fn loads_scala39_annotation_types_with_their_declared_parents() {
+    let mut store = SemanticStore::new();
+    let synthetic_jdk = TemporaryDirectory::new("published-scala39-retains-cap");
+    write_synthetic_object_class(synthetic_jdk.path());
+    let class_path = CompositeClassPath::new(vec![
+        Box::new(DirectoryClassPath::new(published_scala39_library_dir())),
+        Box::new(DirectoryClassPath::new(synthetic_jdk.path().clone())),
+    ]);
+    let mut loader = ClassLoader::new(class_path, &mut store);
+
+    let annotation_types = ["scala/annotation/retainsCap", "scala/annotation/switch"];
+    let loaded = annotation_types
+        .iter()
+        .map(|name| {
+            (
+                *name,
+                loader
+                    .load_class(&BinaryName::from_internal(*name))
+                    .unwrap_or_else(|error| panic!("{name} parents should resolve: {error:?}")),
+            )
+        })
+        .collect::<Vec<_>>();
+    drop(loader);
+
+    for (name, id) in loaded {
+        let parent_names = class_info(&store, id)
+            .parents
+            .iter()
+            .map(|parent| {
+                let symbol = store.types.get(*parent).reference_symbol().unwrap();
+                store.names.resolve(store.symbols.get(symbol).name.text())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(parent_names, ["Annotation", "StaticAnnotation"], "{name}");
+    }
+}
+
+#[test]
 fn enters_a_tasty_class_into_its_package_scope() {
     let mut store = SemanticStore::new();
     let (mut loader, _synthetic_jdk) =

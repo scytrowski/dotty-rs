@@ -22,8 +22,9 @@
 //! their typed initializers, bounded primary-constructor inputs and ordinary
 //! methods. [`ValidatedClassStatePlan::pickle`] emits the supported default-
 //! constructor class state, including private `val`/`var` declarations and
-//! their exact initializer trees. The class-state serializer currently accepts
-//! only a no-argument primary constructor; constructor inputs remain plan-only.
+//! their exact initializer trees. The separate [`PicklePlan`] method-only path
+//! also supports one primary-constructor clause of plain Int parameters,
+//! retaining the class-template and constructor-owned parameter identities.
 
 mod artifact_name;
 mod class_state_output;

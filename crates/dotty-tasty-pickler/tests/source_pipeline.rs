@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 const ANSWER: &str = include_str!("../../../tests/fixtures/tasty_pickler/Answer.scala");
+const BOX_WITH_METHOD: &str = include_str!("fixtures/Box.scala");
 const MULTI: &str = include_str!("../../../tests/fixtures/tasty_pickler/Multi.scala");
 const PARAMETERS: &str = include_str!("../../../tests/fixtures/tasty_pickler/Parameters.scala");
 const PARAMETER_DECL: &str =
@@ -49,6 +50,148 @@ fn supported_fixture_outputs_match_the_pre_refactor_bytes_exactly() {
     ] {
         let (_, output) = source_outputs_named(source, &format!("{name}.scala"), |_| {}).unwrap();
         assert_eq!(bytes_hex(output.bytes()), expected.trim(), "{name}");
+    }
+}
+
+#[test]
+fn plain_int_primary_constructor_preserves_both_parameter_identities_and_wire_shape() {
+    use dotty_tasty::tasty::*;
+
+    let (skeleton, output) = source_outputs_named(BOX_WITH_METHOD, "Box.scala", |plan| {
+        let constructor = plan.constructor.symbol;
+        let TreeKind::TypeDef(class) = &plan.source_ast.get(plan.class_tree).kind else {
+            panic!("class tree")
+        };
+        let TreeKind::Template(template) = &plan.source_ast.get(class.rhs).kind else {
+            panic!("class template")
+        };
+        let TreeKind::DefDef(definition) = &plan.source_ast.get(template.constructor).kind else {
+            panic!("primary constructor")
+        };
+        let parameter_tree = definition.value_param_clauses[0][0];
+        let template_parameter = plan
+            .source_index
+            .symbol_at(plan.source.id, parameter_tree)
+            .unwrap();
+        let constructor_parameter = plan.constructor.parameter_clauses[0][0];
+        assert_ne!(template_parameter, constructor_parameter);
+        assert_eq!(
+            plan.store.symbols.get(template_parameter).owner,
+            Some(plan.class)
+        );
+        assert_eq!(
+            plan.store.symbols.get(constructor_parameter).owner,
+            Some(constructor)
+        );
+    })
+    .unwrap();
+    assert_eq!(
+        output.bytes(),
+        source_outputs_named(BOX_WITH_METHOD, "Box.scala", |_| {})
+            .unwrap()
+            .1
+            .bytes()
+    );
+    assert_eq!(skeleton.declarations().len(), 5);
+    let [
+        class,
+        constructor,
+        answer,
+        template_parameter,
+        constructor_parameter,
+    ] = skeleton.declarations()
+    else {
+        panic!("class, constructor, method, template parameter and constructor parameter")
+    };
+    assert_eq!(template_parameter.owner, class.symbol);
+    assert_eq!(constructor_parameter.owner, constructor.symbol);
+    assert_eq!(constructor.owner, class.symbol);
+    assert_eq!(answer.owner, class.symbol);
+
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    let addresses = file.ast_address_index().unwrap();
+    let template_parameter_node = addresses.get(template_parameter.address).unwrap();
+    assert_eq!(template_parameter_node.tag, PARAM_TAG);
+    assert_eq!(
+        template_parameter_node
+            .decode_parameter()
+            .unwrap()
+            .decode_body()
+            .unwrap()
+            .tail,
+        [
+            DefinitionTail::Modifier(PRIVATE_TAG),
+            DefinitionTail::Modifier(LOCAL_TAG),
+        ]
+    );
+    assert_eq!(
+        file.render_name(template_parameter_node.decode_parameter().unwrap().name())
+            .unwrap(),
+        "start"
+    );
+    let constructor_node = addresses.get(constructor.address).unwrap();
+    let constructor = constructor_node.decode_defdef_body().unwrap();
+    assert_eq!(constructor.parameters.len(), 1);
+    assert_eq!(
+        file.render_name(constructor.parameters[0].name()).unwrap(),
+        "start"
+    );
+    assert!(constructor.rhs.is_none());
+    assert!(
+        constructor
+            .tail
+            .contains(&DefinitionTail::Modifier(STABLE_TAG))
+    );
+    let constructor_parameter_node = addresses.get(constructor_parameter.address).unwrap();
+    assert_eq!(constructor_parameter_node.tag, PARAM_TAG);
+    assert_eq!(
+        file.render_name(
+            constructor_parameter_node
+                .decode_parameter()
+                .unwrap()
+                .name()
+        )
+        .unwrap(),
+        "start"
+    );
+    let (_, repeated) = source_outputs_named(BOX_WITH_METHOD, "Box.scala", |_| {}).unwrap();
+    assert_eq!(output.bytes(), repeated.bytes());
+    if std::env::var_os(RUN_SCALA_ORACLE).is_some() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let candidate = root.join("target/issue-1394/generated/example/Box.tasty");
+        std::fs::create_dir_all(candidate.parent().unwrap()).unwrap();
+        std::fs::write(&candidate, output.bytes()).unwrap();
+        let temp = root.join("target/issue-1394/tmp");
+        std::fs::create_dir_all(&temp).unwrap();
+        let result = Command::new("python3")
+            .arg(root.join("tools/tasty-pickler-oracle/run.py"))
+            .arg("verify")
+            .arg(&candidate)
+            .arg("--runtime")
+            .env("TMPDIR", temp)
+            .status()
+            .expect("start explicitly requested Scala 3.9 constructor interoperability gate");
+        assert!(result.success(), "Box Scala interoperability gate failed");
+    }
+}
+
+#[test]
+fn primary_constructor_val_and_var_accessors_are_rejected() {
+    for source in [
+        "package example\nclass Box(val start: Int):\n  def answer(): Int = 42\n",
+        "package example\nclass Box(var start: Int):\n  def answer(): Int = 42\n",
+    ] {
+        let result = source_outputs_named(source, "Box.scala", |_| {});
+        assert!(
+            matches!(
+                result,
+                Err(PickleError::Unsupported {
+                    feature: UnsupportedFeature::PrimaryConstructorInput,
+                    ..
+                })
+            ),
+            "accessor parameter unexpectedly accepted: {result:?}"
+        );
     }
 }
 
@@ -1163,7 +1306,20 @@ fn source_outputs_named_with_tree_edits_and_pickle_limits(
         constructor: DefaultConstructorPlan {
             symbol: constructor,
             source_tree: template.constructor,
-            parameter_clauses: clauses(constructor_definition),
+            parameter_clauses: constructor_definition
+                .value_param_clauses
+                .iter()
+                .map(|clause| {
+                    clause
+                        .iter()
+                        .map(|tree| {
+                            index
+                                .derived_symbol_at(constructor, source, *tree)
+                                .expect("constructor-owned parameter identity")
+                        })
+                        .collect()
+                })
+                .collect(),
         },
         methods: &methods,
         local_values: &local_values,

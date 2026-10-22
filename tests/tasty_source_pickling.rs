@@ -18,6 +18,7 @@ const PARAMETERS: &str = include_str!("fixtures/tasty_pickler/Parameters.scala")
 const OPERATIONS: &str = include_str!("fixtures/tasty_pickler/Operations.scala");
 const DECISIONS: &str = include_str!("fixtures/tasty_pickler/Decisions.scala");
 const ALGORITHMS: &str = include_str!("fixtures/tasty_pickler/Algorithms.scala");
+const COUNTER: &str = include_str!("fixtures/tasty_pickler/Counter.scala");
 const RUN_SCALA_ORACLE: &str = "DOTTY_TASTY_PICKLER_RUN_SCALA_ORACLE";
 
 struct CanonicalIntResolver {
@@ -113,6 +114,412 @@ struct Product {
     bytes: Vec<u8>,
     output: PickledTasty,
     source_value: i32,
+}
+
+fn compile_counter() -> PickledTasty {
+    let source = SourceId::from_index(1396);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(COUNTER).unwrap();
+    assert!(scanner.diagnostics().is_empty());
+    let parsed = parse_compilation_unit(
+        SourceText::new(COUNTER).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = match name_compilation_unit_with_diagnostics(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "Counter.scala",
+        SourceParseStatus::Clean,
+        &mut store,
+        &mut packages,
+    )
+    .unwrap()
+    {
+        NamingOutcome::Named { index, diagnostics } if diagnostics.is_empty() => index,
+        outcome => panic!("namer rejected Counter fixture: {outcome:?}"),
+    };
+    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
+        panic!("expected package root")
+    };
+    let [class_tree] = package.stats.as_slice() else {
+        panic!("expected exactly the Counter source class")
+    };
+    let class = index.symbol_at(source, *class_tree).unwrap();
+    let TreeKind::TypeDef(class_def) = &parsed.ast.get(*class_tree).kind else {
+        panic!("expected Counter class definition")
+    };
+    let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
+        panic!("expected Counter template")
+    };
+    let constructor_tree = template.constructor;
+    let constructor = index.symbol_at(source, constructor_tree).unwrap();
+    let TreeKind::DefDef(constructor_def) = &parsed.ast.get(constructor_tree).kind else {
+        panic!("expected primary constructor")
+    };
+    let constructor_parameters = constructor_def
+        .value_param_clauses
+        .iter()
+        .map(|clause| {
+            clause
+                .iter()
+                .map(|tree| {
+                    index
+                        .derived_symbol_at(constructor, source, *tree)
+                        .expect("constructor-owned formal identity")
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    typer.complete_symbol(class).unwrap();
+    typer.complete_symbol(constructor).unwrap();
+    let mut members = Vec::with_capacity(template.body.len());
+    for &tree in &template.body {
+        match &parsed.ast.get(tree).kind {
+            TreeKind::ValDef(field) => {
+                let symbol = index.symbol_at(source, tree).unwrap();
+                typer.complete_symbol(symbol).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(symbol).info
+                else {
+                    panic!("Counter field type must complete")
+                };
+                let rhs = field.rhs.expect("Counter field initializer");
+                let context = typer.field_initializer_context_for(symbol).unwrap();
+                let typed_initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                assert_eq!(
+                    typer.source_typed_index().get(source, rhs),
+                    Some(typed_initializer)
+                );
+                members.push(ClassMemberPicklePlan::Field(ClassFieldPicklePlan {
+                    symbol,
+                    source_tree: tree,
+                    typed_initializer,
+                    declared_type: field_type,
+                }));
+            }
+            TreeKind::DefDef(definition) => {
+                let symbol = index.symbol_at(source, tree).unwrap();
+                typer.complete_symbol(symbol).unwrap();
+                let SymbolInfo::Complete(signature) = typer.store().symbols.get(symbol).info else {
+                    panic!("Counter method signature must complete")
+                };
+                let Type::Method(signature) = typer.store().types.get(signature) else {
+                    panic!("Counter methods have ordinary method signatures")
+                };
+                let result_type = signature.result;
+                let rhs = definition.rhs.expect("Counter method body");
+                let context = typer.expression_context_for(symbol).unwrap();
+                let typed_body = typer
+                    .type_expression_expected(rhs, context, result_type)
+                    .unwrap();
+                assert_eq!(
+                    typer.source_typed_index().get(source, rhs),
+                    Some(typed_body)
+                );
+                members.push(ClassMemberPicklePlan::Method {
+                    symbol,
+                    source_tree: tree,
+                });
+            }
+            _ => panic!("unexpected Counter class member"),
+        }
+    }
+    let typed_bindings = |source, tree| typer.source_typed_index().get(source, tree);
+    ClassStatePicklePlan {
+        store: typer.store(),
+        definitions: &definitions,
+        source_ast: &parsed.ast,
+        typed_ast: typer.typed_ast(),
+        source_index: &index,
+        typed_bindings: &typed_bindings,
+        source: SourceMetadata {
+            id: source,
+            name: "Counter.scala".into(),
+        },
+        class,
+        class_tree: *class_tree,
+        constructor: PrimaryConstructorInputPlan {
+            symbol: constructor,
+            source_tree: constructor_tree,
+            parameter_clauses: constructor_parameters,
+        },
+        members: &members,
+    }
+    .validate()
+    .unwrap()
+    .pickle()
+    .unwrap()
+}
+
+#[test]
+fn counter_source_has_semantic_unpickler_owner_and_signature_parity() {
+    let output = compile_counter();
+    let repeated = compile_counter();
+    assert_eq!(output.bytes(), repeated.bytes());
+    let file = TastyFile::parse_and_validate_scala_3_9(output.bytes()).unwrap();
+    assert_eq!(file.encode_validated().unwrap(), output.bytes());
+    let addresses = file.ast_address_index().unwrap();
+    let declaration_name = |declaration: &SkeletonDeclaration| {
+        let node = addresses.get(declaration.address).unwrap();
+        let name = match node.tag {
+            PARAM_TAG => node.decode_parameter().unwrap().name(),
+            DEFDEF_TAG => node.decode_defdef_body().unwrap().name,
+            VALDEF_TAG | TYPEDEF_TAG => match node.decode_definition_body().unwrap() {
+                DefinitionBody::ValDef { name, .. } | DefinitionBody::TypeDef { name, .. } => name,
+            },
+            tag => panic!("unexpected Counter declaration tag {tag}"),
+        };
+        file.render_name(name).unwrap()
+    };
+    let class = *output
+        .declarations()
+        .iter()
+        .find(|declaration| addresses.get(declaration.address).unwrap().tag == TYPEDEF_TAG)
+        .expect("Counter class declaration");
+    let constructor = *output
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            declaration.owner == class.symbol && declaration_name(declaration) == "<init>"
+        })
+        .expect("Counter primary constructor");
+    let template_parameter = *output
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            declaration.owner == class.symbol
+                && addresses.get(declaration.address).unwrap().tag == PARAM_TAG
+                && declaration_name(declaration) == "start"
+        })
+        .expect("class-owned template parameter");
+    let constructor_parameter = *output
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            declaration.owner == constructor.symbol
+                && addresses.get(declaration.address).unwrap().tag == PARAM_TAG
+                && declaration_name(declaration) == "start"
+        })
+        .expect("constructor-owned signature parameter");
+    assert_ne!(template_parameter.symbol, constructor_parameter.symbol);
+    let field = *output
+        .declarations()
+        .iter()
+        .find(|declaration| {
+            declaration.owner == class.symbol
+                && addresses.get(declaration.address).unwrap().tag == VALDEF_TAG
+                && declaration_name(declaration) == "current"
+        })
+        .expect("Counter current field");
+    let methods = ["get", "set", "increment"].map(|expected_name| {
+        *output
+            .declarations()
+            .iter()
+            .find(|declaration| {
+                declaration.owner == class.symbol
+                    && addresses.get(declaration.address).unwrap().tag == DEFDEF_TAG
+                    && declaration_name(declaration) == expected_name
+            })
+            .unwrap_or_else(|| panic!("Counter.{expected_name} declaration"))
+    });
+    let set_parameter_address = addresses
+        .children_of(methods[1].address)
+        .find(|node| node.tag == PARAM_TAG)
+        .expect("set(value: Int) parameter node")
+        .offset as u32;
+    let mut semantic_store = SemanticStore::new();
+    let semantic_definitions = Definitions::bootstrap(&mut semantic_store);
+    let builtin_symbols = [
+        semantic_definitions.byte,
+        semantic_definitions.char,
+        semantic_definitions.double,
+        semantic_definitions.float,
+        semantic_definitions.int,
+        semantic_definitions.long,
+        semantic_definitions.short,
+        semantic_definitions.boolean,
+        semantic_definitions.unit,
+        semantic_definitions.object_type,
+        semantic_definitions.any_type,
+        semantic_definitions.nothing_type,
+    ]
+    .into_iter()
+    .map(|ty| semantic_store.types.get(ty).reference_symbol().unwrap())
+    .collect();
+    let mut unpickler = TastyUnpickler::new(&file, &mut semantic_store, semantic_definitions)
+        .with_resolver(Box::new(CanonicalScalaResolver {
+            symbols: builtin_symbols,
+        }));
+    let semantic_index = unpickler.enter_symbols().unwrap().clone();
+    let semantic_class = semantic_index.symbol_at(class.address).unwrap();
+    let semantic_constructor = semantic_index.symbol_at(constructor.address).unwrap();
+    let semantic_template_parameter = semantic_index
+        .symbol_at(template_parameter.address)
+        .unwrap();
+    let semantic_constructor_parameter = semantic_index
+        .symbol_at(constructor_parameter.address)
+        .unwrap();
+    let semantic_field = semantic_index.symbol_at(field.address).unwrap();
+    let semantic_methods = methods.map(|declaration| {
+        (
+            declaration_name(&declaration),
+            semantic_index.symbol_at(declaration.address).unwrap(),
+            declaration,
+        )
+    });
+    let semantic_set_parameter = semantic_index.symbol_at(set_parameter_address).unwrap();
+    for address in [
+        constructor.address,
+        template_parameter.address,
+        constructor_parameter.address,
+        field.address,
+        methods[0].address,
+        methods[1].address,
+        methods[2].address,
+        set_parameter_address,
+    ] {
+        unpickler.complete_symbol(address).unwrap();
+    }
+    let _ = unpickler.into_parts();
+
+    assert_eq!(
+        semantic_store.symbols.get(semantic_class).kind,
+        SymbolKind::Class
+    );
+    assert_eq!(
+        semantic_store.symbols.get(semantic_constructor).kind,
+        SymbolKind::Constructor
+    );
+    assert_eq!(
+        semantic_store.symbols.get(semantic_constructor).owner,
+        Some(semantic_class)
+    );
+    assert_eq!(
+        semantic_store
+            .symbols
+            .get(semantic_template_parameter)
+            .owner,
+        Some(semantic_class)
+    );
+    assert_eq!(
+        semantic_store
+            .symbols
+            .get(semantic_constructor_parameter)
+            .owner,
+        Some(semantic_constructor)
+    );
+    assert_eq!(
+        semantic_store.symbols.get(semantic_field).owner,
+        Some(semantic_class)
+    );
+    assert_eq!(
+        semantic_store.symbols.get(semantic_field).visibility,
+        Visibility::Private
+    );
+    assert!(
+        semantic_store
+            .symbols
+            .get(semantic_field)
+            .flags
+            .contains(SymbolFlags::MUTABLE)
+    );
+    assert_eq!(
+        semantic_store.symbols.get(semantic_set_parameter).owner,
+        Some(semantic_methods[1].1)
+    );
+    assert_builtin_type(
+        &semantic_store,
+        match semantic_store.symbols.info(semantic_template_parameter) {
+            SymbolInfo::Complete(ty) => *ty,
+            info => panic!("template parameter has incomplete info: {info:?}"),
+        },
+        semantic_definitions.int,
+    );
+    assert_builtin_type(
+        &semantic_store,
+        match semantic_store.symbols.info(semantic_constructor_parameter) {
+            SymbolInfo::Complete(ty) => *ty,
+            info => panic!("constructor parameter has incomplete info: {info:?}"),
+        },
+        semantic_definitions.int,
+    );
+    assert_builtin_type(
+        &semantic_store,
+        match semantic_store.symbols.info(semantic_field) {
+            SymbolInfo::Complete(ty) => *ty,
+            info => panic!("Counter.current has incomplete info: {info:?}"),
+        },
+        semantic_definitions.int,
+    );
+    let SymbolInfo::Complete(constructor_type) = semantic_store.symbols.info(semantic_constructor)
+    else {
+        panic!("Counter constructor signature must be complete")
+    };
+    let Type::Method(constructor_method) = semantic_store.types.get(*constructor_type) else {
+        panic!("Counter constructor must retain its method type")
+    };
+    assert_eq!(constructor_method.params.len(), 1);
+    assert_builtin_type(
+        &semantic_store,
+        constructor_method.params[0].ty,
+        semantic_definitions.int,
+    );
+    assert_eq!(
+        semantic_store
+            .types
+            .get(constructor_method.result)
+            .reference_symbol(),
+        Some(semantic_class)
+    );
+    for (name, method, _) in semantic_methods {
+        assert_eq!(semantic_store.symbols.get(method).kind, SymbolKind::Method);
+        assert_eq!(
+            semantic_store.symbols.get(method).owner,
+            Some(semantic_class)
+        );
+        let SymbolInfo::Complete(signature) = semantic_store.symbols.info(method) else {
+            panic!("Counter.{name} signature must be complete")
+        };
+        let Type::Method(signature) = semantic_store.types.get(*signature) else {
+            panic!("Counter.{name} must retain its method type")
+        };
+        let (expected_parameters, expected_result) = match name.as_str() {
+            "get" => (&[][..], semantic_definitions.int),
+            "set" => (&[semantic_definitions.int][..], semantic_definitions.unit),
+            "increment" => (&[][..], semantic_definitions.int),
+            other => panic!("unexpected Counter method {other}"),
+        };
+        assert_eq!(signature.kind, MethodKind::Plain);
+        assert_eq!(signature.params.len(), expected_parameters.len());
+        for (parameter, expected) in signature.params.iter().zip(expected_parameters) {
+            assert_builtin_type(&semantic_store, parameter.ty, *expected);
+        }
+        assert_builtin_type(&semantic_store, signature.result, expected_result);
+    }
+    assert_builtin_type(
+        &semantic_store,
+        match semantic_store.symbols.info(semantic_set_parameter) {
+            SymbolInfo::Complete(ty) => *ty,
+            info => panic!("Counter.set parameter has incomplete info: {info:?}"),
+        },
+        semantic_definitions.int,
+    );
 }
 
 fn compile_source() -> Product {

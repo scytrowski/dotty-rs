@@ -18,6 +18,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
 
 jobs:
   checks:
@@ -36,7 +38,7 @@ jobs:
             ~/.cargo/git
             target/debug
             target/.rustc_info.json
-          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-debug-${{ hashFiles('**/Cargo.lock') }}-test-no-debug-no-incremental
           restore-keys: |
             ${{ runner.os }}-cargo-debug-
 
@@ -80,11 +82,29 @@ jobs:
       - name: Install stable Rust toolchain
         run: rustup toolchain install stable --profile minimal
 
+      - name: Record Rust version for cache key
+        id: rust-version
+        run: echo "version=$(rustc +stable --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache JVM gate build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-cargo-classfile-jvm-${{ hashFiles('**/Cargo.lock') }}-${{ steps.rust-version.outputs.version }}-test-no-debug-no-incremental
+          restore-keys: |
+            ${{ runner.os }}-cargo-classfile-jvm-${{ steps.rust-version.outputs.version }}-
+
       - name: Verify generated class files with the JVM
         env:
           DOTTY_CLASSFILE_REQUIRE_JDK: '1'
         run: |
-          cargo +stable test -p dotty-classfile --test classfile_jvm_encoder --locked -- --nocapture
-          cargo +stable test -p dotty-jvm --lib --locked -- --nocapture
-          cargo +stable test --test jvm_source_compilation --locked -- --nocapture
-          cargo +stable test --test jvm_stateful_class_contract --locked -- --nocapture
+          cargo +stable test \
+            -p dotty-classfile --test classfile_jvm_encoder \
+            -p dotty-jvm --lib \
+            -p dotty --test jvm_source_compilation \
+            --test jvm_stateful_class_contract \
+            --locked -- --nocapture

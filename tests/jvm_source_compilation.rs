@@ -15,7 +15,8 @@ use dotty_core::{
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmFieldPlan, JvmFieldSourceVisibility, JvmLocalBinding,
-    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, emit_class,
+    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, JvmReturnType,
+    JvmType, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -702,6 +703,18 @@ class Runner:
             assert_eq!(audit_class_parent(unit, middle), base);
             assert_eq!(audit_class_parent(unit, leaf), middle);
             assert_eq!(
+                hierarchy.nearest_common_non_object_ancestor(leaf, middle),
+                Some(middle)
+            );
+            assert_eq!(
+                hierarchy.nearest_common_non_object_ancestor(middle, base),
+                Some(base)
+            );
+            assert_eq!(
+                hierarchy.nearest_common_non_object_ancestor(leaf, leaf),
+                Some(leaf)
+            );
+            assert_eq!(
                 hierarchy
                     .superclasses()
                     .iter()
@@ -1061,6 +1074,762 @@ class Branch:
         "unexpected first backend rejection: {result:?}"
     );
     assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn sibling_reference_join_audit_uses_the_real_parameterized_source_program() {
+    let source = r#"
+class Base(seed: Int):
+  private var current: Int = seed
+  def value(): Int = current
+  def doubled(): Int = value() + value()
+
+class Left(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 1
+
+class Right(seed: Int) extends Base(seed):
+  override def value(): Int = super.value() + 2
+
+class Runner:
+  def choose(flag: Boolean, seed: Int): Base =
+    if flag then new Left(seed) else new Right(seed)
+  def chooseReverse(flag: Boolean, seed: Int): Base =
+    if flag then new Right(seed) else new Left(seed)
+  def run(flag: Boolean, seed: Int): Int =
+    choose(flag, seed).doubled()
+  def accept(value: Base): Int = value.doubled()
+  def viaArgument(flag: Boolean, seed: Int): Int = accept(choose(flag, seed))
+  def chooseNested(first: Boolean, second: Boolean, seed: Int): Base =
+    if first then new Left(seed)
+    else if second then new Right(seed)
+    else new Left(seed)
+"#;
+    let output = TestOutputDirectory::new("sibling-reference-join-audit");
+    let mut observed = false;
+    let result = compile_source_batch_observed(
+        source,
+        "SiblingReferenceJoinAudit.scala",
+        output.path(),
+        SourceId::from_index(1433),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, definitions| {
+            observed = true;
+            let base = audit_class_named(unit, "Base");
+            let left = audit_class_named(unit, "Left");
+            let right = audit_class_named(unit, "Right");
+            let runner = audit_class_named(unit, "Runner");
+            assert_eq!(audit_class_parent(unit, base), definitions.object_class);
+            assert_eq!(audit_class_parent(unit, left), base);
+            assert_eq!(audit_class_parent(unit, right), base);
+            let hierarchy = unit
+                .class_hierarchy(definitions)
+                .expect("the planned sibling classes retain their exact Base edges");
+            assert!(
+                hierarchy
+                    .superclasses()
+                    .iter()
+                    .any(|edge| edge.class() == left && edge.parent() == base)
+            );
+            assert!(
+                hierarchy
+                    .superclasses()
+                    .iter()
+                    .any(|edge| edge.class() == right && edge.parent() == base)
+            );
+
+            for method_name in ["choose", "chooseReverse", "chooseNested"] {
+                let method = audit_method_named(unit, runner, method_name);
+                let signature = match unit.store.symbols.info(method.method) {
+                    dotty_core::SymbolInfo::Complete(signature) => *signature,
+                    other => panic!("{method_name} has complete typed signature: {other:?}"),
+                };
+                let Type::Method(signature) = unit.store.types.get(signature) else {
+                    panic!("{method_name} has a plain method type")
+                };
+                assert_eq!(audit_type_symbol(unit, signature.result), Some(base));
+
+                let body = unit.typed_ast.get(method.body.expect("method has a body"));
+                let TreeKind::If(if_tree) = &body.kind else {
+                    panic!("{method_name} retains its source If at the typed root")
+                };
+                if method_name == "chooseNested" {
+                    let nested = unit.typed_ast.get(if_tree.else_branch);
+                    assert!(matches!(nested.kind, TreeKind::If(_)));
+                }
+                let Type::Or {
+                    left: then_ty,
+                    right: else_ty,
+                } = unit.store.types.get(body.ty)
+                else {
+                    panic!("{method_name} preserves the typer's sibling Or result")
+                };
+                let mut arms = [
+                    audit_type_symbol(unit, *then_ty).expect("left union arm has canonical class"),
+                    audit_type_symbol(unit, *else_ty).expect("right union arm has canonical class"),
+                ];
+                arms.sort_by_key(|symbol| symbol.index());
+                let mut expected = [left, right];
+                expected.sort_by_key(|symbol| symbol.index());
+                assert_eq!(
+                    arms, expected,
+                    "{method_name} retains the exact sibling symbols"
+                );
+                let projection = unit
+                    .project_sibling_union_to_expected_type(body.ty, signature.result, definitions)
+                    .expect("the declared Base result proves the audited sibling projection");
+                assert_eq!(projection.source_type(), body.ty);
+                assert_eq!(projection.expected_type(), signature.result);
+                assert_eq!(projection.representation(), JvmType::Reference(base));
+                let projected_arms = projection.source_arms();
+                assert_eq!(
+                    projected_arms,
+                    [
+                        audit_type_symbol(unit, *then_ty).unwrap(),
+                        audit_type_symbol(unit, *else_ty).unwrap(),
+                    ],
+                    "the checked projection keeps arm identity and source order"
+                );
+            }
+
+            let metadata = unit
+                .metadata(definitions)
+                .expect("the source declarations retain exact JVM signatures");
+            let choose_symbol = audit_method_named(unit, runner, "choose").method;
+            let choose_descriptor = metadata
+                .iter()
+                .find(|class| class.identity().symbol() == runner)
+                .and_then(|class| {
+                    class
+                        .methods()
+                        .iter()
+                        .find(|method| method.symbol() == choose_symbol)
+                })
+                .expect("choose has projected method metadata")
+                .descriptor();
+            assert_eq!(choose_descriptor.as_str(), "(ZI)LBase;");
+            assert_eq!(
+                choose_descriptor.result(),
+                JvmReturnType::Value(JvmType::Reference(base))
+            );
+
+            let base_doubled = audit_method_named(unit, base, "doubled").method;
+            let choose = audit_method_named(unit, runner, "choose").method;
+            let run = audit_method_named(unit, runner, "run");
+            let run_targets = typed_tree_targets(unit, run.body.expect("run has body"));
+            assert!(run_targets.contains(&choose));
+            assert!(run_targets.contains(&base_doubled));
+
+            let accept = audit_method_named(unit, runner, "accept");
+            let accept_signature = match unit.store.symbols.info(accept.method) {
+                dotty_core::SymbolInfo::Complete(signature) => *signature,
+                other => panic!("accept has complete typed signature: {other:?}"),
+            };
+            let Type::Method(accept_signature) = unit.store.types.get(accept_signature) else {
+                panic!("accept has a plain method type")
+            };
+            assert_eq!(
+                audit_type_symbol(unit, accept_signature.params[0].ty),
+                Some(base),
+                "the argument context is explicitly Base-typed"
+            );
+            let choose_body = unit.typed_ast.get(
+                audit_method_named(unit, runner, "choose")
+                    .body
+                    .expect("choose has body"),
+            );
+            let argument_context_projection = unit
+                .project_sibling_union_to_expected_type(
+                    choose_body.ty,
+                    accept_signature.params[0].ty,
+                    definitions,
+                )
+                .expect("the actual accept formal supplies the canonical Base expectation");
+            assert_eq!(
+                argument_context_projection.representation(),
+                JvmType::Reference(base)
+            );
+            let via_argument = audit_method_named(unit, runner, "viaArgument");
+            let argument_targets =
+                typed_tree_targets(unit, via_argument.body.expect("viaArgument has body"));
+            assert!(argument_targets.contains(&choose));
+            assert!(argument_targets.contains(&accept.method));
+        }),
+    );
+    assert!(
+        observed,
+        "the real source reaches the typed frontend observer: {result:?}"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::ReferenceTypeMismatch { .. }
+            ))
+        ),
+        "the first current rejection remains the explicit JVM reference join policy: {result:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn inferred_sibling_reference_join_audit_preserves_the_typed_union() {
+    let source = r#"
+class Base
+class Left extends Base
+class Right extends Base
+class Branch:
+  def choose(flag: Boolean) =
+    if flag then new Left() else new Right()
+"#;
+    let output = TestOutputDirectory::new("inferred-sibling-reference-join-audit");
+    let mut observed = false;
+    let result = compile_source_batch_observed(
+        source,
+        "InferredSiblingReferenceJoinAudit.scala",
+        output.path(),
+        SourceId::from_index(1434),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut |unit, _| {
+            observed = true;
+            let branch = audit_class_named(unit, "Branch");
+            let method = audit_method_named(unit, branch, "choose");
+            let signature = match unit.store.symbols.info(method.method) {
+                dotty_core::SymbolInfo::Complete(signature) => *signature,
+                other => panic!("choose has complete typed signature: {other:?}"),
+            };
+            let Type::Method(signature) = unit.store.types.get(signature) else {
+                panic!("choose has a plain method type")
+            };
+            assert!(matches!(
+                unit.store.types.get(signature.result),
+                Type::Or { .. }
+            ));
+            let body = unit.typed_ast.get(method.body.expect("choose has a body"));
+            assert!(matches!(body.kind, TreeKind::If(_)));
+            assert!(matches!(unit.store.types.get(body.ty), Type::Or { .. }));
+        }),
+    );
+    assert!(
+        observed,
+        "the inferred source reached the typed observer: {result:?}"
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::UnsupportedJvmType {
+                kind: dotty_jvm::UnsupportedJvmTypeKind::Union,
+                ..
+            }
+        ))
+    ));
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn sibling_source_hierarchy_proves_the_canonical_common_base_deterministically() {
+    let source = fs::read_to_string(fixture_path("SiblingConstructors.scala"))
+        .expect("read source fixture for sibling constructors and dispatch");
+    let mut baseline_classes: Option<Vec<(String, Vec<u8>)>> = None;
+    let mut baseline_edges = None;
+
+    for (session, reverse_plans) in [(0, false), (1, true)] {
+        let output = TestOutputDirectory::new(&format!("sibling-hierarchy-session-{session}"));
+        let mut observed_edges = None;
+        let artifacts = compile_source_batch_observed(
+            &source,
+            "SiblingConstructors.scala",
+            output.path(),
+            SourceId::from_index(1434 + session),
+            SourceUnitCardinality::AtLeastTwo,
+            Some(&mut |unit, definitions| {
+                let base = audit_class_named(unit, "Base");
+                let left = audit_class_named(unit, "Left");
+                let right = audit_class_named(unit, "Right");
+                assert_ne!(base, left);
+                assert_ne!(base, right);
+                assert_ne!(left, right);
+                assert_eq!(audit_class_parent(unit, left), base);
+                assert_eq!(audit_class_parent(unit, right), base);
+                assert_eq!(audit_class_parent(unit, base), definitions.object_class);
+
+                let primary_constructor = |class| {
+                    let plan = unit
+                        .classes
+                        .iter()
+                        .find(|plan| plan.class == class)
+                        .unwrap();
+                    let JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+                        &plan.initialization
+                    else {
+                        panic!("source class has a primary constructor plan")
+                    };
+                    constructor
+                };
+                let base_constructor = primary_constructor(base).symbol();
+                let mut sibling_parameters = Vec::new();
+                for child in [left, right] {
+                    let constructor = primary_constructor(child);
+                    let [seed] = constructor.parameters() else {
+                        panic!("sibling constructor has exactly one source parameter")
+                    };
+                    sibling_parameters.push(*seed);
+                    assert_eq!(
+                        unit.store.symbols.get(*seed).owner,
+                        Some(constructor.symbol())
+                    );
+                    let super_constructor = constructor
+                        .direct_super_constructor()
+                        .expect("sibling has an accessible direct-parent constructor");
+                    assert_eq!(super_constructor.parent_class(), base);
+                    assert_eq!(super_constructor.parent_constructor(), base_constructor);
+                    let [argument] = super_constructor.arguments() else {
+                        panic!("direct parent application forwards one argument")
+                    };
+                    assert_eq!(
+                        term_type_target(unit, unit.typed_ast.get(argument.typed).ty),
+                        Some(*seed),
+                        "each sibling forwards its own canonical seed parameter"
+                    );
+                }
+                assert_ne!(sibling_parameters[0], sibling_parameters[1]);
+
+                let metadata = unit
+                    .metadata(definitions)
+                    .expect("sibling class plans have valid dispatch metadata");
+                let metadata_for = |name: &str| {
+                    metadata
+                        .iter()
+                        .find(|class| class.identity().internal_name() == name)
+                        .unwrap_or_else(|| panic!("missing {name} class metadata"))
+                };
+                let base_metadata = metadata_for("Base");
+                let base_value = base_metadata
+                    .methods()
+                    .iter()
+                    .find(|method| method.name() == "value")
+                    .expect("Base declares value");
+                let base_doubled = base_metadata
+                    .methods()
+                    .iter()
+                    .find(|method| method.name() == "doubled")
+                    .expect("Base declares doubled");
+                let mut sibling_values = Vec::new();
+                for name in ["Left", "Right"] {
+                    let child_metadata = metadata_for(name);
+                    let child_value = child_metadata
+                        .methods()
+                        .iter()
+                        .find(|method| method.name() == "value")
+                        .expect("each sibling declares its override");
+                    sibling_values.push(child_value.symbol());
+                    assert_ne!(child_value.symbol(), base_value.symbol());
+                    let effective_value = child_metadata
+                        .dispatch_methods()
+                        .iter()
+                        .find(|method| method.name() == "value")
+                        .expect("sibling override is effective for its receiver");
+                    assert_eq!(effective_value.method(), child_value.symbol());
+                    assert_eq!(
+                        effective_value.declaring_class(),
+                        child_metadata.identity().symbol()
+                    );
+                    assert_eq!(
+                        effective_value.receiver_class(),
+                        child_metadata.identity().symbol()
+                    );
+                    let inherited_doubled = child_metadata
+                        .dispatch_methods()
+                        .iter()
+                        .find(|method| method.name() == "doubled")
+                        .expect("Base.doubled is inherited by each sibling");
+                    assert_eq!(inherited_doubled.method(), base_doubled.symbol());
+                    assert_eq!(
+                        inherited_doubled.declaring_class(),
+                        base_metadata.identity().symbol()
+                    );
+                    assert_eq!(
+                        inherited_doubled.receiver_class(),
+                        child_metadata.identity().symbol()
+                    );
+                    assert_eq!(child_metadata.methods().len(), 1);
+                }
+                assert_ne!(sibling_values[0], sibling_values[1]);
+                for child in [left, right] {
+                    let body = audit_method_named(unit, child, "value")
+                        .body
+                        .expect("sibling override has a body");
+                    let targets = typed_tree_targets(unit, body);
+                    assert!(!targets.is_empty());
+                    assert!(
+                        targets.contains(&base_value.symbol()),
+                        "super calls resolve to Base.value: {targets:?}"
+                    );
+                }
+
+                let hierarchy = unit
+                    .class_hierarchy(definitions)
+                    .expect("the real source sibling graph validates with both constructors");
+                assert_eq!(
+                    hierarchy.nearest_common_non_object_ancestor(left, right),
+                    Some(base)
+                );
+                assert_eq!(
+                    hierarchy.nearest_common_non_object_ancestor(right, left),
+                    Some(base)
+                );
+                assert_eq!(
+                    hierarchy.nearest_common_non_object_ancestor(left, left),
+                    Some(left)
+                );
+                assert_eq!(
+                    hierarchy.nearest_common_non_object_ancestor(left, base),
+                    Some(base)
+                );
+
+                for (child, expected_parent) in [(left, base), (right, base)] {
+                    let class_plan = unit
+                        .classes
+                        .iter()
+                        .find(|plan| plan.class == child)
+                        .unwrap();
+                    let JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+                        &class_plan.initialization
+                    else {
+                        panic!("source sibling has a primary constructor plan")
+                    };
+                    assert_eq!(constructor.parameters().len(), 1);
+                    assert_eq!(
+                        unit.store.symbols.get(constructor.parameters()[0]).owner,
+                        Some(constructor.symbol())
+                    );
+                    assert_eq!(
+                        constructor
+                            .direct_super_constructor()
+                            .expect("sibling has an accessible direct-parent constructor")
+                            .parent_class(),
+                        expected_parent
+                    );
+                }
+
+                let internal_edges = hierarchy.internal_name_edges();
+                let classfile_hierarchy = dotty_classfile::bytecode::ClassHierarchy::from_edges(
+                    internal_edges.iter().map(|edge| {
+                        (
+                            edge.child_internal_name().to_owned(),
+                            edge.parent_internal_name().to_owned(),
+                        )
+                    }),
+                )
+                .expect("canonical sibling edges project into the class-file hierarchy");
+                assert!(classfile_hierarchy.is_assignable("Left", "Base"));
+                assert!(classfile_hierarchy.is_assignable("Right", "Base"));
+
+                let mut normalized_edges = internal_edges
+                    .iter()
+                    .map(|edge| {
+                        (
+                            edge.child_internal_name().to_owned(),
+                            edge.parent_internal_name().to_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                normalized_edges.sort();
+                observed_edges = Some(normalized_edges);
+
+                if reverse_plans {
+                    unit.classes.reverse();
+                    let reordered = unit
+                        .class_hierarchy(definitions)
+                        .expect("permuting class plan order preserves the validated proof");
+                    assert_eq!(
+                        reordered.nearest_common_non_object_ancestor(left, right),
+                        Some(base)
+                    );
+                }
+            }),
+        )
+        .expect("hierarchy queries do not change sibling class emission");
+
+        let mut emitted = artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        emitted.sort_by(|left, right| left.0.cmp(&right.0));
+        let edges = observed_edges.expect("the source frontend ran the hierarchy observer");
+        if let Some(expected) = &baseline_classes {
+            assert_eq!(
+                &emitted, expected,
+                "fresh sessions emit identical class bytes"
+            );
+            assert_eq!(Some(&edges), baseline_edges.as_ref());
+        } else {
+            baseline_classes = Some(emitted);
+            baseline_edges = Some(edges);
+        }
+    }
+}
+
+#[test]
+fn sibling_constructor_dispatch_batch_verifies_and_runs_on_the_jvm() {
+    let output = TestOutputDirectory::new("sibling-constructors-runtime");
+    let artifacts = compile_fixture_classes("SiblingConstructors.scala", output.path())
+        .expect("emit the complete sibling constructor and dispatch batch");
+    assert_eq!(artifacts.len(), 4);
+    let decode_class = |name: &str| {
+        let artifact = artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("{name} class is emitted"));
+        decode_emitted_class(artifact)
+    };
+    let base = decode_class("Base");
+    let left = decode_class("Left");
+    let right = decode_class("Right");
+    let runner = decode_class("Runner");
+    assert_eq!(
+        base.constant_pool
+            .class_name(base.super_class.expect("Base has a superclass")),
+        Ok("java/lang/Object")
+    );
+    assert_eq!(
+        left.constant_pool
+            .class_name(left.super_class.expect("Left has a superclass")),
+        Ok("Base")
+    );
+    assert_eq!(
+        right
+            .constant_pool
+            .class_name(right.super_class.expect("Right has a superclass")),
+        Ok("Base")
+    );
+    assert_eq!(
+        runner
+            .constant_pool
+            .class_name(runner.super_class.expect("Runner has a superclass")),
+        Ok("java/lang/Object")
+    );
+    assert!(methods_with_descriptors(&base).contains(&("<init>".to_owned(), "(I)V".to_owned())));
+    assert_invocation_sequence(
+        &base,
+        emitted_method_code(&base, "<init>"),
+        &[(0xb7, "java/lang/Object", "<init>", "()V")],
+    );
+    assert_field_reference(
+        &base,
+        emitted_method_code(&base, "<init>"),
+        0xb5,
+        "Base",
+        "current",
+        "I",
+    );
+    for class in [&left, &right] {
+        assert!(
+            methods_with_descriptors(class).contains(&("<init>".to_owned(), "(I)V".to_owned()))
+        );
+        assert_invocation_sequence(
+            class,
+            emitted_method_code(class, "<init>"),
+            &[(0xb7, "Base", "<init>", "(I)V")],
+        );
+        assert_invocation_sequence(
+            class,
+            emitted_method_code(class, "value"),
+            &[(0xb7, "Base", "value", "()I")],
+        );
+    }
+    assert_invocation_sequence(
+        &base,
+        emitted_method_code(&base, "doubled"),
+        &[
+            (0xb6, "Base", "value", "()I"),
+            (0xb6, "Base", "value", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "evaluate"),
+        &[(0xb6, "Base", "doubled", "()I")],
+    );
+    for (method, child) in [("fromLeft", "Left"), ("fromRight", "Right")] {
+        assert_invocation_sequence(
+            &runner,
+            emitted_method_code(&runner, method),
+            &[
+                (0xb7, child, "<init>", "(I)V"),
+                (0xb6, "Runner", "evaluate", "(LBase;)I"),
+            ],
+        );
+    }
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let harness = output.path().join("SiblingConstructorsHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class SiblingConstructorsHarness {
+    public static void main(String[] args) {
+        Runner runner = new Runner();
+        if (runner.fromLeft(10) != 22) throw new AssertionError("left dispatch");
+        if (runner.fromRight(10) != 24) throw new AssertionError("right dispatch");
+        if (runner.fromLeft(-3) != -4) throw new AssertionError("left negative seed");
+        if (runner.fromRight(-2) != 0) throw new AssertionError("right negative seed");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let classpath = output.path().to_string_lossy().into_owned();
+    let javac = Command::new("javac")
+        .args(["-classpath", &classpath, "-d", &classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac for sibling runtime assertions");
+    assert!(
+        javac.status.success(),
+        "javac rejected sibling runtime harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            &classpath,
+            "SiblingConstructorsHarness",
+        ])
+        .output()
+        .expect("start java for sibling runtime assertions");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected sibling dispatch\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+}
+
+fn reject_sibling_batch_with_observer(
+    source_index: u32,
+    mut observe: impl for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions),
+) -> PipelineFailure {
+    let source = fs::read_to_string(fixture_path("SiblingConstructors.scala"))
+        .expect("read source fixture for sibling rejection cases");
+    let output = TestOutputDirectory::new(&format!("sibling-rejection-{source_index}"));
+    let result = compile_source_batch_observed(
+        &source,
+        "SiblingConstructors.scala",
+        output.path(),
+        SourceId::from_index(source_index),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut observe),
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "invalid sibling batches must not publish a partial classfile set"
+    );
+    result.expect_err("the deliberately invalid sibling plans must be rejected")
+}
+
+#[test]
+fn sibling_constructor_plan_cannot_be_reused_by_its_sibling() {
+    let mut observed_constructors = None;
+    let error = reject_sibling_batch_with_observer(1440, |unit, _| {
+        let left = audit_class_named(unit, "Left");
+        let right = audit_class_named(unit, "Right");
+        let left_index = unit
+            .classes
+            .iter()
+            .position(|plan| plan.class == left)
+            .unwrap();
+        let right_index = unit
+            .classes
+            .iter()
+            .position(|plan| plan.class == right)
+            .unwrap();
+        let JvmClassInitializationPlan::PrimaryConstructor(right_constructor) =
+            &unit.classes[right_index].initialization
+        else {
+            panic!("Right has its own primary-constructor plan")
+        };
+        observed_constructors = Some((left, right, right_constructor.symbol()));
+        unit.classes[left_index].initialization = unit.classes[right_index].initialization.clone();
+    });
+    let (left, right, right_constructor) =
+        observed_constructors.expect("observer saw both siblings");
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::InvalidPrimaryConstructor {
+            constructor,
+            issue: dotty_jvm::JvmConstructorIssue::SourceIdentity,
+        }) if constructor == right_constructor
+    ));
+    assert_ne!(left, right);
+}
+
+#[test]
+fn sibling_method_plan_cannot_select_its_siblings_override_symbol() {
+    let mut observed_methods = None;
+    let error = reject_sibling_batch_with_observer(1441, |unit, _| {
+        let left = audit_class_named(unit, "Left");
+        let right = audit_class_named(unit, "Right");
+        let left_index = unit
+            .classes
+            .iter()
+            .position(|plan| plan.class == left)
+            .unwrap();
+        let right_value = audit_method_named(unit, right, "value").method;
+        let left_value_index = unit.classes[left_index]
+            .methods
+            .iter()
+            .position(|method| {
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(method.method).name.text())
+                    == "value"
+            })
+            .unwrap();
+        observed_methods = Some((left, right, right_value));
+        unit.classes[left_index].methods[left_value_index].method = right_value;
+    });
+    let (left, right, right_value) = observed_methods.expect("observer saw both overrides");
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::WrongOwner {
+            symbol,
+            expected,
+            actual: Some(actual),
+        }) if symbol == right_value && expected == left && actual == right
+    ));
+}
+
+#[test]
+fn sibling_batch_rejects_a_base_without_its_required_parent_constructor_proof() {
+    let mut observed_classes = None;
+    let error = reject_sibling_batch_with_observer(1442, |unit, _| {
+        let base = audit_class_named(unit, "Base");
+        let left = audit_class_named(unit, "Left");
+        let base_index = unit
+            .classes
+            .iter()
+            .position(|plan| plan.class == base)
+            .unwrap();
+        observed_classes = Some((base, left));
+        unit.classes[base_index].initialization = JvmClassInitializationPlan::Unsupported;
+    });
+    let (base, left) = observed_classes.expect("observer saw the base and child classes");
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::InvalidJvmSuperclass {
+            class,
+            parent: Some(parent),
+            issue: dotty_jvm::JvmSuperclassIssue::ParentConstructorUnavailable,
+        }) if class == left && parent == base
+    ));
 }
 
 fn audit_symbol_name(unit: &JvmCompilationUnit<'_>, symbol: SymbolId) -> String {

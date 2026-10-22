@@ -115,6 +115,13 @@ return reference without a classpath resolver and does not reconstruct typed
 method bodies. Classfile-side TASTy linkage and richer source forms remain
 separate follow-up work.
 
+The #1394 constructor-input gate also passes on a fresh Rust-produced
+`example/Box.tasty` for `class Box(start: Int): def answer(): Int = 42`.
+Pinned Scala 3.9 decompiles and compiles it with `-from-tasty`; `javap`
+confirms `Box(int)` (`(I)V`), and a separately compiled Java caller verifies
+`new Box(17).answer() == 42`. The TASTy keeps the class-owned template
+parameter and constructor-owned signature parameter as distinct identities.
+
 ## Sprint 2 multi-method gate (issue #1244)
 
 The checked-in [`Operations.scala`](../tests/fixtures/tasty_pickler/Operations.scala)
@@ -325,3 +332,40 @@ The run used Scala 3.9.0 at source revision
 oracle also passed Rust wire validation, Scala decompilation, fresh
 `-from-tasty` compilation, `javap`, runtime profile `standard`, and Rust/Scala
 rejection of corrupt and truncated candidates.
+
+## Sprint 6: constructor-initialized mutable Counter (issue #1396)
+
+The final Sprint 5 gate uses the checked-in [`Counter.scala`](../tests/fixtures/tasty_pickler/Counter.scala) literally. The source frontend completes the canonical class, primary constructor, constructor-owned `start`, class-owned mutable `current`, and methods in source order. The field initializer is typed with `field_initializer_context_for` and `type_expression_expected`; methods are emitted from their exact typed roots. The test checks that the class template parameter and constructor signature parameter remain distinct, `current` retains its private/mutable metadata and direct reference to the constructor parameter, method order is `get`, `set`, `increment`, and validated TASTy re-encodes byte-for-byte.
+
+Run the focused producer and independent compiler/runtime gate with the pinned
+Scala 3.9.0 toolchain and JDK 21 or newer:
+
+```sh
+RUN_SCALA_ORACLE=1 \
+SCALA39_ROOT=/tmp/scala3-3.9.0 \
+JAVA_HOME=/home/vdrake6/.jdks/jdk-21 \
+COURSIER_MAVEN_ROOT=/tmp/dotty-coursier-cache/https/repo1.maven.org/maven2 \
+TMPDIR="$PWD/target/issue-1396/tmp" \
+cargo test -p dotty-tasty-pickler --test class_state_plan \
+  counter_constructor_parameter_initializes_its_own_mutable_field \
+  --locked -- --nocapture
+```
+
+The run used Scala 3.9.0 at revision
+`777528f19a58e794c9954a42f433373472ec57f8` and the pinned artifact hashes in
+[`provenance.json`](../tests/fixtures/tasty_pickler/provenance.json). Candidate
+SHA-256: `5fc66d1ae8d7dc7bdbe80c4e005396840a19ab2fece20d683e3be3470da9ae41`.
+The Scala decompiler retained the private mutable field and all three methods;
+`-from-tasty` produced a fresh class from the staged candidate alone. `javap`
+verified the `(I)V` constructor and public `get(): Int`, `set(Int): Unit`, and
+`increment(): Int` methods. The Java harness confirmed independent initial
+values for `Counter(4)` and `Counter(10)`, the `set(8)`/`increment() == 9`
+sequence on the first instance, `increment() == 11` on the second, and a fresh
+negative instance retaining `-2`. Rust and Scala both rejected corrupt-magic
+and truncated candidates. The separate Rust-produced `PrivateFields` runtime
+gate remains available through
+`class_state_lowers_implicit_and_explicit_private_primitive_field_reads`.
+
+This closes the Counter class-state interoperability profile for the exact
+fixture and supported method forms. It does not establish general Scala
+compatibility or JVM layout guarantees for private fields.

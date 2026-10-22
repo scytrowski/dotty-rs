@@ -30,9 +30,10 @@ an explicit, validated `ClassHierarchy`; their default remains exact and
 never guesses an ancestor, interface, `java/lang/Object`, or common
 superclass. The Scala adapter supplies only edges that its emission-unit
 validator proved. This bounded proof enables method arguments, reference field
-writes, constructor arguments, returns, and ancestor-only initialized
-reference joins on the operand stack. It does not infer the nearest shared
-ancestor of unrelated classes.
+writes, constructor arguments, returns, and initialized reference joins on the
+operand stack. A join can use the nearest shared non-`Object` superclass only
+when both bounded paths are explicitly present in the graph; this is a checked
+proof, not classpath inference or an `Object` fallback.
 
 ## Analysis boundaries
 
@@ -47,9 +48,9 @@ safety.
 `CfgCodeAnalyzer` tracks `Top`, integer, initialized class references,
 allocation-site-specific uninitialized references, and a bounded explicit
 class hierarchy for assignability checks and operand-stack joins. Stack joins
-may widen an initialized reference to the other incoming class only when the
-explicit hierarchy proves that it is an ancestor. Locals with different
-incoming states degrade to `Top`. Ordinary instance methods seed local 0 with the exact emitting class,
+may widen initialized references to the nearest shared, checked non-`Object`
+superclass. Locals with different incoming states degrade to `Top`. Ordinary
+instance methods seed local 0 with the exact emitting class,
 while branched constructors remain unsupported. The
 `StackMapFrameGenerator` maps every initialized class through a validated
 `CONSTANT_Class` index and emits `Object(index)` entries.
@@ -68,8 +69,8 @@ initialized `this`. Class-file analysis supports exact object parameters and
 results by default, and explicitly proven subtype assignments when a
 `ClassHierarchy` is supplied. Source bytecode lowering supports planned
 reference parameters and results through `if`, `while`, and ordinary planned
-calls, plus the validated ancestor conversions listed above. It still rejects
-mutable reference locals, sibling or unrelated hierarchy joins, arrays, null,
+calls, plus the validated ancestor conversions listed above. Source lowering
+still rejects mutable reference locals, sibling result joins, arrays, null,
 and branched constructors.
 
 ## Bounded state model
@@ -106,15 +107,19 @@ initialized `this`. Branched constructor flow remains unsupported.
 At each reachable block:
 
 1. Operand-stack heights must match. `Integer` joins only with `Integer`.
-   Equal initialized classes remain unchanged. For two different initialized
-   classes, the join is the already-present ancestor when the explicit
-   hierarchy proves one incoming class assignable to the other. Every incoming
-   class at a multiway join must remain pairwise ancestor-comparable, including
-   inputs accumulated before a widening and inputs arriving on backedges. This
-   join is commutative and idempotent; bounded ancestor chains converge
-   independently of predecessor order, and a widened state requeues dependent
-   blocks.
-   Siblings, unrelated classes, initialized/uninitialized mismatches,
+   Equal initialized classes remain unchanged. Different initialized classes
+   join at the nearest unique shared non-`Object` superclass proven by the
+   explicit, validated single-parent hierarchy. Every incoming class at a
+   multiway join must share that checked ancestor, including inputs accumulated
+   before widening and inputs arriving on backedges. This join is commutative
+   and idempotent; bounded chains converge independently of predecessor order,
+   and a widened state requeues dependent blocks. Missing paths, an `Object`-
+   only intersection without an actual `Object` input, and interfaces do not
+   provide a join proof. An actual `Object` input may join at `Object` only
+   when every other input has an explicit checked path to it. Eligibility is
+   decided from the complete converged input evidence, independent of
+   predecessor processing order.
+   Initialized/uninitialized mismatches,
    different allocation sites, primitive/reference mismatches, and different
    stack heights return typed analysis errors. Never infer a shared ancestor
    such as `java/lang/Object` from missing edges.
@@ -132,11 +137,17 @@ At each reachable block:
    hash-map order.
 
 These rules are intentionally narrower than JVMS assignment compatibility.
-Reference stack joins require one incoming class to be the other class's
-verified ancestor; siblings remain rejected even if they share a JVM
-superclass. Distinct local references become `Top` even when one is an ancestor
-of the other, so there is no hierarchy-based local promotion. A later read of
-that slot fails as uninitialized/unusable.
+Reference stack joins use only explicit superclass edges and never infer a
+classpath relationship. Distinct local references become `Top` even when one
+is an ancestor of the other or both share a checked superclass, so there is no
+hierarchy-based local promotion. A later read of that slot fails as
+uninitialized/unusable.
+
+The source-level `Base`-declared sibling case and its separate typer, method
+descriptor, and verifier questions are characterized in the [sibling
+reference joins audit](jvm-sibling-reference-joins.md). The audit keeps the
+current rejection and does not infer a source result from the verifier's
+ability to accept an explicit `Object(Base)` frame.
 
 ## Transfer and constant-pool checks
 
@@ -261,7 +272,8 @@ straight-line builder methods.
 | `getfield`, `putfield`, `invokevirtual` with exact owner | Validate CP operands and require exact receiver owner; virtual calls also check supported exact object arguments and results | Covered by classfile analyzer tests and JDK verifier gate |
 | Ancestor-related initialized classes at a stack join | Widen to the already-present ancestor and emit its `Object` frame entry | Classfile analyzer and builder regressions; JDK gate |
 | Real `Middle`/`Leaf` source branches returning `Middle` | Keep the canonical source result and encode `Object(Middle)` at both branch-order joins | `MultilevelInheritance.scala`, decoded `StackMapTable`, and mandatory JDK 21+ source gate |
-| Sibling or unrelated initialized classes at a stack join | Typed incompatible-stack reference error; do not merge to their common ancestor or `Object` | Classfile analyzer regression tests |
+| Sibling initialized classes at a stack join | Join only at the nearest checked non-`Object` superclass; reject missing paths and an inferred `Object`-only intersection | Classfile analyzer and encoded-frame regressions |
+| Unrelated initialized classes at a stack join | Typed incompatible-stack reference error; do not infer a common class | Classfile analyzer regression tests |
 | Different initialized classes or missing assignment at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
 | Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |
 | Uninitialized local read or uninitialized object escape | Typed uninitialized-use error; never emit the class | Classfile analyzer allocation regressions |
@@ -280,14 +292,14 @@ constructor-safety, hierarchy-join, and descriptor boundaries.
 ## Ownership for follow-up work
 
 - `dotty-classfile` owns JVM names, allocation sites, validated hierarchy
-  assignability, dataflow, constant pool checks, and frame encoding; it does
-  not depend on Scala symbols.
+  assignability and bounded checked superclass joins, dataflow, constant pool
+  checks, and frame encoding; it does not depend on Scala symbols.
 - `dotty-jvm` maps validated plan identities to classfile names and emits only
   the bounded source forms described above.
 - Branched `<init>` and `UninitializedThis` remain a separate constructor-flow
-  problem. General least-upper-bound inference, sibling joins, arrays, `null`,
-  interface inheritance, exception-flow joins, and arbitrary uninitialized
-  values remain out of scope. For source compilation, the adapter proves the
+  problem. General least-upper-bound inference beyond the explicitly checked
+  single-parent graph, arrays, `null`, interface inheritance, exception-flow
+  joins, and arbitrary uninitialized values remain out of scope. For source compilation, the adapter proves the
   bounded same-unit `Base -> Object`, `Middle -> Base`, and `Leaf -> Middle`
   chain; a source-typed `If` joins distinct initialized references only when
   they are ancestor-related and both fit its canonical result class.

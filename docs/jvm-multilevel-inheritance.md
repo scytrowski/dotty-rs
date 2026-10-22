@@ -80,6 +80,10 @@ be ancestor-related to each other as well as assignable to the canonical
 source result. The JVM backend does not infer a sibling LUB or project
 `Type::Or` to Root.
 
+The parameterized `Base`/`Left`/`Right` source, both branch orders, nested
+condition, receiver and argument contexts, and the exact pre-emission rejection
+are recorded in the [sibling reference joins audit](jvm-sibling-reference-joins.md).
+
 ## Projection and dispatch boundaries
 
 | Concern | Current behavior | Follow-up requirement |
@@ -87,7 +91,7 @@ source result. The JVM backend does not infer a sibling LUB or project
 | Unit hierarchy | `identity::unit_hierarchy` verifies canonical one-parent `ClassInfo`, planned/public parent, cycles, `final`, constructor access, and the bounded three-class source chain. | Keep the proof keyed by canonical symbols and bounded; validate every edge independently. |
 | Reference projection | Unit-aware `reference::project_type_with_metadata` consumes the validated hierarchy proof. Standalone projection still rejects class references it cannot prove locally. | Reuse the unit's ancestry proof; do not create a string- or name-driven second ancestor registry. |
 | Assignability | `reference::is_validated_subtype` accepts equality and up to two canonical parent edges from the validated unit graph. Method/constructor arguments, results, immutable locals, and approved field values retain their declared JVM descriptors without casts. | Preserve the two-edge bound and exact `SymbolId` identity; reference `If` joins also require an ancestor relationship and the actual typed result class. |
-| Typed joins | `join_expression_types` returns Middle for Middle/Leaf in either order. Unrelated sibling classes become `Type::Or`; `Or` remains a semantic union and is not silently projected as one JVM class. | Keep nominal join policy explicit: support only the planned ancestor relation; reject unrelated/sibling `Or` values unless a separate issue defines a safe policy. |
+| Typed joins | `join_expression_types` returns Middle for Middle/Leaf in either order. Unrelated sibling classes become `Type::Or`; a separate checked projection proof can represent the exact two-arm union as its explicitly expected nearest non-Object common ancestor. The source `Or` remains unchanged, and expression lowering does not yet consume this proof. | Keep nominal join policy explicit: reject sibling `Or` values without the exact expected-type and hierarchy proof; #1438 owns CFG lowering and verifier joins. |
 | If lowering | `merge_if_flows` returns the canonical typed result class only when two initialized branch references are ancestor-related and both assignable to that result. It adds no cast or inferred class. | Keep sibling, unrelated, union, unplanned, and uninitialized values rejected; preserve primitive, Unit, divergence, and conservative local rules. |
 | Override and dispatch | Effective metadata walks the validated ancestry. Override checks resolve the nearest inherited declaration, and final-method checks cover every ancestor, including unplanned final declarations. | Preserve canonical method identities and verify missing-override and final-ancestor errors without partial output. |
 | Direct `super` calls | Typer lookup starts at the immediate parent and can select a declaration inherited through it. Lowering retains the selected symbol but emits `invokespecial` with the immediate parent as the symbolic owner. | Preserve direct-parent selection start and verify the JVMS `ACC_SUPER` behavior. |

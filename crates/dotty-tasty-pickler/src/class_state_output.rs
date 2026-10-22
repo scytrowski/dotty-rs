@@ -159,15 +159,32 @@ impl ValidatedClassStatePlan<'_, '_> {
 
     fn assemble_class_state(&self, limits: PickleLimits) -> Result<Assembly, PickleError> {
         let p = self.plan();
-        if p.constructor
-            .parameter_clauses
-            .iter()
-            .any(|clause| !clause.is_empty())
-        {
-            return Err(PickleError::Unsupported {
-                feature: UnsupportedFeature::PrimaryConstructorInput,
-                symbol: Some(p.constructor.symbol),
+        let constructor_tree = p.source_ast.try_get(p.constructor.source_tree).ok_or(
+            PickleError::InvalidSourceTree {
+                tree: p.constructor.source_tree,
+            },
+        )?;
+        let TreeKind::DefDef(constructor_definition) = &constructor_tree.kind else {
+            return Err(PickleError::SourceShape {
+                tree: p.constructor.source_tree,
+                expected: crate::SourceRole::Constructor,
             });
+        };
+        let mut template_parameters = Vec::new();
+        let mut constructor_parameters = Vec::new();
+        for (source_clause, symbols) in constructor_definition
+            .value_param_clauses
+            .iter()
+            .zip(&p.constructor.parameter_clauses)
+        {
+            for (&tree, &parameter) in source_clause.iter().zip(symbols) {
+                let template_parameter = p
+                    .source_index
+                    .symbol_at(p.source.id, tree)
+                    .ok_or(PickleError::SourceDefinition { symbol: parameter })?;
+                template_parameters.push((template_parameter, parameter));
+                constructor_parameters.push(parameter);
+            }
         }
 
         let mut method_inputs = Vec::new();
@@ -199,6 +216,30 @@ impl ValidatedClassStatePlan<'_, '_> {
         )?;
         context.reserve_declaration(p.class)?;
         context.reserve_declaration(p.constructor.symbol)?;
+        for (source_clause, symbols) in constructor_definition
+            .value_param_clauses
+            .iter()
+            .zip(&p.constructor.parameter_clauses)
+        {
+            for (&tree, &parameter) in source_clause.iter().zip(symbols) {
+                let template_parameter = p
+                    .source_index
+                    .symbol_at(p.source.id, tree)
+                    .ok_or(PickleError::SourceDefinition { symbol: parameter })?;
+                context.reserve_template_parameter(
+                    template_parameter,
+                    p.class,
+                    p.source.id,
+                    tree,
+                )?;
+                context.reserve_primary_constructor_parameter(
+                    parameter,
+                    p.constructor.symbol,
+                    p.source.id,
+                    tree,
+                )?;
+            }
+        }
         let mut method_parameters = Vec::new();
         let mut method_local_symbols = Vec::new();
         for member in p.members {
@@ -277,19 +318,90 @@ impl ValidatedClassStatePlan<'_, '_> {
             fields: vec![AstField::Tree(select)],
         })?;
 
+        let mut template_parameter_labels = Vec::new();
+        let mut constructor_parameter_labels = Vec::new();
+        for (source_clause, symbols) in constructor_definition
+            .value_param_clauses
+            .iter()
+            .zip(&p.constructor.parameter_clauses)
+        {
+            for (&tree, &parameter) in source_clause.iter().zip(symbols) {
+                let template_parameter = p
+                    .source_index
+                    .symbol_at(p.source.id, tree)
+                    .ok_or(PickleError::SourceDefinition { symbol: parameter })?;
+                let template_record = p.store.symbols.get(template_parameter);
+                let template_name = context.intern_name(template_record.name)?;
+                let template_type = context.lower_type(p.definitions.int)?;
+                let private = marker(&mut context, PRIVATE_TAG)?;
+                let local = marker(&mut context, LOCAL_TAG)?;
+                context.bind_declaration(
+                    template_parameter,
+                    AstNode::Length {
+                        tag: PARAM_TAG,
+                        fields: vec![
+                            AstField::Nat(template_name),
+                            AstField::Tree(template_type),
+                            AstField::Tree(private),
+                            AstField::Tree(local),
+                        ],
+                    },
+                )?;
+                template_parameter_labels.push(
+                    context.declaration_label(template_parameter).ok_or(
+                        PickleError::Reference {
+                            symbol: template_parameter,
+                            reason: crate::ReferenceError::NotRegistered,
+                        },
+                    )?,
+                );
+
+                let parameter_record = p.store.symbols.get(parameter);
+                let parameter_name = context.intern_name(parameter_record.name)?;
+                let parameter_type =
+                    context.primitive_type_syntax(complete_type(p.store, parameter)?)?;
+                context.bind_declaration(
+                    parameter,
+                    AstNode::Length {
+                        tag: PARAM_TAG,
+                        fields: vec![
+                            AstField::Nat(parameter_name),
+                            AstField::Tree(parameter_type),
+                        ],
+                    },
+                )?;
+                constructor_parameter_labels.push(context.declaration_label(parameter).ok_or(
+                    PickleError::Reference {
+                        symbol: parameter,
+                        reason: crate::ReferenceError::NotRegistered,
+                    },
+                )?);
+            }
+        }
+
         let constructor_name =
             context.intern_name(p.store.symbols.get(p.constructor.symbol).name)?;
-        let empty_clause = marker(&mut context, EMPTYCLAUSE_TAG)?;
         let constructor_result = context.constructor_return_type()?;
+        let mut constructor_fields = vec![AstField::Nat(constructor_name)];
+        if constructor_parameter_labels.is_empty() {
+            constructor_fields.push(AstField::Tree(marker(&mut context, EMPTYCLAUSE_TAG)?));
+        } else {
+            constructor_fields.extend(
+                constructor_parameter_labels
+                    .iter()
+                    .copied()
+                    .map(AstField::Tree),
+            );
+        }
+        constructor_fields.push(AstField::Tree(constructor_result));
+        if !constructor_parameter_labels.is_empty() {
+            constructor_fields.push(AstField::Tree(marker(&mut context, STABLE_TAG)?));
+        }
         context.bind_declaration(
             p.constructor.symbol,
             AstNode::Length {
                 tag: DEFDEF_TAG,
-                fields: vec![
-                    AstField::Nat(constructor_name),
-                    AstField::Tree(empty_clause),
-                    AstField::Tree(constructor_result),
-                ],
+                fields: constructor_fields,
             },
         )?;
         let constructor_label =
@@ -299,10 +411,14 @@ impl ValidatedClassStatePlan<'_, '_> {
                     symbol: p.constructor.symbol,
                     reason: crate::ReferenceError::NotRegistered,
                 })?;
-        let mut stats = vec![
+        let mut stats = template_parameter_labels
+            .into_iter()
+            .map(AstField::Tree)
+            .collect::<Vec<_>>();
+        stats.extend([
             AstField::Tree(parent_application),
             AstField::Tree(constructor_label),
-        ];
+        ]);
         let mut bodies = Vec::new();
 
         for member in p.members {
@@ -321,7 +437,7 @@ impl ValidatedClassStatePlan<'_, '_> {
                         p.typed_ast,
                         field.typed_initializer,
                         field.symbol,
-                        &[],
+                        &constructor_parameters,
                         limits.projection,
                         &mut context,
                     )?;
@@ -566,6 +682,12 @@ impl ValidatedClassStatePlan<'_, '_> {
             }))
             .chain(method_parameters.iter().copied())
             .chain(method_local_symbols.iter().copied())
+            .chain(
+                template_parameters
+                    .iter()
+                    .map(|(template_parameter, _)| *template_parameter),
+            )
+            .chain(constructor_parameters.iter().copied())
         {
             let label = context
                 .declaration_label(id)
