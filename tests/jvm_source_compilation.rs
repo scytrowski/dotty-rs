@@ -16,7 +16,7 @@ use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmFieldPlan, JvmFieldSourceVisibility, JvmLocalBinding,
     JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, JvmReturnType,
-    JvmType, emit_class,
+    JvmType, UnsupportedJvmCallShapeKind, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
@@ -10908,83 +10908,32 @@ fn mutable_reference_issue_candidate_pins_the_current_source_frontend_blocker() 
 }
 
 #[test]
-fn mutable_reference_readback_candidates_pin_each_typer_prefix_failure() {
+fn mutable_reference_readback_candidates_pass_typer_and_reach_codegen() {
     let source = fs::read_to_string(fixture_path("MutableReferenceLocalsReadback.scala"))
         .expect("read the minimally adapted, readback-preserving fixture");
     for method_name in ["choose", "repeat", "initialize"] {
         let method_source = source_with_only_runner_method(&source, method_name);
         let source_id = SourceId::from_index(1454);
         let output = TestOutputDirectory::new(&format!("mutable-reference-readback-{method_name}"));
-        let mut failures = 0;
-        let result = compile_source_batch_with_typer_failure_observer(
+        let result = compile_source_batch(
             &method_source,
             "MutableReferenceLocalsReadback.scala",
             output.path(),
             source_id,
             SourceUnitCardinality::AtLeastTwo,
-            None,
-            Some(&mut |untyped_ast, typer, error| {
-                failures += 1;
-                let TyperError::UnstableSelectionPrefix {
-                    source: error_source,
-                    tree_index,
-                    ..
-                } = error
-                else {
-                    panic!(
-                        "{method_name} should fail at unstable mutable-local selection: {error:?}"
-                    );
-                };
-                assert_eq!(*error_source, source_id);
-                let (selection_id, selection) = untyped_ast
-                    .iter()
-                    .find(|(id, _)| id.index() == *tree_index)
-                    .expect("the typer failure refers to a real source tree");
-                let TreeKind::Select(selection) = &selection.kind else {
-                    panic!("the failure tree is the current.value selection")
-                };
-                assert_eq!(typer.store().names.resolve(selection.name.text()), "value");
-                let selection_span = untyped_ast
-                    .get(selection_id)
-                    .position
-                    .expect("the source member selection keeps its span");
-                assert_eq!(selection_span.source(), source_id);
-                let range = selection_span.span().range();
-                let selected_source = &method_source[range.start() as usize..range.end() as usize];
-                assert!(
-                    selected_source.contains("current.value"),
-                    "selection span should cover current.value, got {selected_source:?}"
-                );
-
-                let TreeKind::Ident(qualifier) = &untyped_ast.get(selection.qualifier).kind else {
-                    panic!("current.value has the local current as its direct qualifier")
-                };
-                assert_eq!(
-                    typer.store().names.resolve(qualifier.name.text()),
-                    "current"
-                );
-                let qualifier_span = untyped_ast
-                    .get(selection.qualifier)
-                    .position
-                    .expect("the local receiver keeps its source span");
-                assert_eq!(qualifier_span.source(), source_id);
-                let range = qualifier_span.span().range();
-                assert_eq!(
-                    &method_source[range.start() as usize..range.end() as usize],
-                    "current"
-                );
-            }),
         );
-        assert_eq!(
-            failures, 1,
-            "observe exactly the first typer error: {result:?}"
+        assert!(
+            matches!(
+                result,
+                Err(PipelineFailure::Codegen(
+                    JvmCodegenError::UnsupportedJvmCallShape {
+                        kind: UnsupportedJvmCallShapeKind::MutableOrUnplannedReferenceReceiver,
+                        ..
+                    }
+                ))
+            ),
+            "the method call should pass Typer and reach the existing JVM receiver limitation: {result:?}"
         );
-        assert!(matches!(
-            result,
-            Err(PipelineFailure::Typer(
-                TyperError::UnstableSelectionPrefix { .. }
-            ))
-        ));
         assert!(output.class_files().is_empty());
     }
 }

@@ -251,6 +251,33 @@ impl SourceTyper<'_> {
         }
     }
 
+    pub(in crate::typer) fn is_mutable_local_selection_receiver(
+        &self,
+        qualifier: TreeId<Typed>,
+        qualifier_type: TypeId,
+    ) -> bool {
+        if !self
+            .typed_arena
+            .try_get(qualifier)
+            .is_some_and(|tree| matches!(tree.kind, TreeKind::Ident(_)))
+        {
+            return false;
+        }
+        let Some(Type::TermRef {
+            target: TermRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(qualifier_type)
+        else {
+            return false;
+        };
+        if !self.store.symbols.contains(*symbol) {
+            return false;
+        }
+        let declaration = self.store.symbols.get(*symbol);
+        matches!(declaration.kind, SymbolKind::Local | SymbolKind::Variable)
+            && declaration.flags.contains(SymbolFlags::MUTABLE)
+    }
+
     fn is_direct_current_source_class_result(&self, qualifier_type: TypeId) -> bool {
         let Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
