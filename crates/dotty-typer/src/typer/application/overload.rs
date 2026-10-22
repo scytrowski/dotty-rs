@@ -9,6 +9,7 @@ enum ApplicationFunctionShape {
         selection: dotty_core::ast::Select<Untyped>,
         qualifier: TreeId<Typed>,
         receiver_type: TypeId,
+        allow_mutable_local_receiver: bool,
     },
 }
 
@@ -255,37 +256,48 @@ impl SourceTyper<'_> {
                     return Ok(None);
                 }
                 if members.len() == 1 {
-                    if self.store.symbols.get(members[0].symbol).kind == SymbolKind::Method {
-                        let applicability = self.single_member_application_applicability(
-                            &members[0],
-                            argument_trees,
-                            context,
-                            application_kind,
-                            info_journal,
-                            new_mappings,
-                        )?;
-                        if applicability == Some(false)
-                            && let Some(resolved) = self.resolve_local_extension_application(
-                                selection,
-                                qualifier,
+                    // Only a call to one already-applicable method may read
+                    // a mutable local receiver; selecting a member as a value
+                    // still requires the ordinary stable-prefix check.
+                    let mutable_local_method_call =
+                        if self.store.symbols.get(members[0].symbol).kind == SymbolKind::Method {
+                            let applicability = self.single_member_application_applicability(
+                                &members[0],
                                 argument_trees,
-                                application_kind,
                                 context,
-                                function_tree,
-                                application_tree_index,
+                                application_kind,
                                 info_journal,
                                 new_mappings,
-                            )?
-                        {
-                            return Ok(Some(resolved));
-                        }
+                            )?;
+                            if applicability == Some(false)
+                                && let Some(resolved) = self.resolve_local_extension_application(
+                                    selection,
+                                    qualifier,
+                                    argument_trees,
+                                    application_kind,
+                                    context,
+                                    function_tree,
+                                    application_tree_index,
+                                    info_journal,
+                                    new_mappings,
+                                )?
+                            {
+                                return Ok(Some(resolved));
+                            }
+                            applicability == Some(true)
+                                && self
+                                    .is_mutable_local_selection_receiver(qualifier, receiver_type)
+                        } else {
+                            false
+                        };
+                    if !mutable_local_method_call {
+                        self.require_stable_application_selection_prefix(
+                            qualifier,
+                            receiver_type,
+                            function_tree.index(),
+                        )?;
+                        return Ok(None);
                     }
-                    self.require_stable_application_selection_prefix(
-                        qualifier,
-                        receiver_type,
-                        function_tree.index(),
-                    )?;
-                    return Ok(None);
                 }
                 if members
                     .iter()
@@ -302,6 +314,8 @@ impl SourceTyper<'_> {
                         candidates: members.iter().map(|member| member.symbol).collect(),
                     });
                 }
+                let allow_mutable_local_receiver = members.len() == 1
+                    && self.is_mutable_local_selection_receiver(qualifier, receiver_type);
                 let candidates = members
                     .into_iter()
                     .map(|member| {
@@ -321,6 +335,7 @@ impl SourceTyper<'_> {
                         selection,
                         qualifier,
                         receiver_type,
+                        allow_mutable_local_receiver,
                     },
                 )
             }
@@ -471,12 +486,15 @@ impl SourceTyper<'_> {
                 selection,
                 qualifier,
                 receiver_type,
+                allow_mutable_local_receiver,
             } => {
-                self.require_stable_application_selection_prefix(
-                    qualifier,
-                    receiver_type,
-                    function_tree.index(),
-                )?;
+                if !allow_mutable_local_receiver {
+                    self.require_stable_application_selection_prefix(
+                        qualifier,
+                        receiver_type,
+                        function_tree.index(),
+                    )?;
+                }
                 if winner
                     .member
                     .is_some_and(|member| member.symbol != winner.symbol)

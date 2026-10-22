@@ -282,6 +282,8 @@ straight-line builder methods.
 | Other sibling initialized classes at a stack join | Join only at the nearest checked non-`Object` superclass; reject missing paths and inferred `Object`-only intersections | Classfile analyzer regressions; source lowering also requires the exact expected-parent proof |
 | Unrelated initialized classes at a stack join | Typed incompatible-stack reference error; do not infer a common class | Classfile analyzer regression tests |
 | Different initialized classes at a local join | Join only at their nearest checked non-`Object` superclass, using complete predecessor evidence | Classfile analyzer and local-frame regressions |
+| Initialized `Base` local assigned `Right` in only one `If` arm | Keep the local definitely initialized after the source arm intersection; encode `Object(Base)` at the verifier join | Source integration decodes the local frame and runs both branches with `java -Xverify:all` |
+| Initialized `Base` local assigned in a `While` body | Preserve the pre-loop source initialization proof for zero iterations; join preheader and back-edge classes to `Object(Base)` at the loop header | Source integration checks the Base and primitive-index frame entries and runs zero, one, and multiple iterations under `java -Xverify:all` |
 | Missing assignment or unproven ancestry at a local join | Merge to unusable `Top`; reject a later read | Classfile analyzer regression tests |
 | Wrong field/method/constructor owner | Typed owner mismatch before emission | Classfile analyzer and planned-target regressions |
 | Uninitialized local read or uninitialized object escape | Typed uninitialized-use error; never emit the class | Classfile analyzer allocation regressions |

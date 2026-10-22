@@ -7548,10 +7548,10 @@ fn typed_new_between_two_planned_source_classes_verifies_on_the_jvm() {
 }
 
 #[test]
-fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
+fn virtual_calls_use_validated_new_and_planned_local_receivers() {
     let output = TestOutputDirectory::new("planned-virtual-calls");
     let artifacts = compile_planned_constructor_source(
-        "class Counter(seed: Int):\n  def add(value: Int): Int = value + 1\n  def combine(left: Int, right: Int): Int = left * 10 + right\n  def get(): Int = 42\n  def enabled(): Boolean = true\n  def touch(): Unit = ()\n  private def hidden(): Int = 9\n  def privateCall(): Int = this.hidden()\n  def privateReceiver(seed: Int): Int = new Counter(seed).hidden()\nclass Other(seed: Int):\n  def get(): Int = 7\nclass Client:\n  def directGet(seed: Int): Int = new Counter(seed).get()\n  def fromNew(seed: Int): Int = new Counter(seed + 1).add(seed)\n  def ordered(seed: Int): Int = new Counter(seed).combine(seed + 1, seed + 2)\n  def booleanResult(seed: Int): Boolean = new Counter(seed).enabled()\n  def unitCall(seed: Int): Unit = new Counter(seed).touch()\n  def fromLocal(seed: Int): Int =\n    val counter = new Counter(seed)\n    counter.add(seed)\n  def fromOther(seed: Int): Int = new Other(seed).get()\n",
+        "class Counter(seed: Int):\n  def add(value: Int): Int = value + 1\n  def combine(left: Int, right: Int): Int = left * 10 + right\n  def get(): Int = 42\n  def enabled(): Boolean = true\n  def touch(): Unit = ()\n  private def hidden(): Int = 9\n  def privateCall(): Int = this.hidden()\n  def privateReceiver(seed: Int): Int = new Counter(seed).hidden()\nclass Other(seed: Int):\n  def get(): Int = 7\nclass Client:\n  def directGet(seed: Int): Int = new Counter(seed).get()\n  def fromNew(seed: Int): Int = new Counter(seed + 1).add(seed)\n  def ordered(seed: Int): Int = new Counter(seed).combine(seed + 1, seed + 2)\n  def booleanResult(seed: Int): Boolean = new Counter(seed).enabled()\n  def unitCall(seed: Int): Unit = new Counter(seed).touch()\n  def fromLocal(seed: Int): Int =\n    val counter = new Counter(seed)\n    counter.add(seed)\n  def fromMutableLocal(seed: Int): Int =\n    var counter: Counter = new Counter(seed)\n    counter.add(seed)\n  def fromOther(seed: Int): Int = new Other(seed).get()\n",
         output.path(),
     )
     .unwrap();
@@ -7589,6 +7589,11 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
         from_local,
         &[0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0x1b, 0xb6, 0xac],
     );
+    let from_mutable_local = emitted_method_code(&client, "fromMutableLocal");
+    assert_opcode_sequence(
+        from_mutable_local,
+        &[0xbb, 0x59, 0x1b, 0xb7, 0x4d, 0x2c, 0x1b, 0xb6, 0xac],
+    );
     let from_other = emitted_method_code(&client, "fromOther");
     assert_opcode_sequence(from_other, &[0xbb, 0x59, 0x1b, 0xb7, 0xb6, 0xac]);
 
@@ -7617,6 +7622,7 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
     assert_eq!(invocation_owner(&client, unit_call), "Counter");
     assert_eq!(invocation_owner(&client, direct_get), "Counter");
     assert_eq!(invocation_owner(&client, from_local), "Counter");
+    assert_eq!(invocation_owner(&client, from_mutable_local), "Counter");
     // Counter.get and Other.get share a spelling; the canonical selected
     // method and receiver class must keep the two owners distinct.
     assert_eq!(invocation_owner(&client, from_other), "Other");
@@ -7644,7 +7650,7 @@ fn virtual_calls_use_validated_new_and_immutable_local_receivers() {
         let harness = output.path().join("VirtualCallHarness.java");
         fs::write(
             &harness,
-            "public final class VirtualCallHarness { public static void main(String[] args) { Client c = new Client(); if (c.directGet(1) != 42 || c.fromNew(3) != 4 || c.ordered(3) != 45 || !c.booleanResult(3) || c.fromLocal(3) != 4 || c.fromOther(3) != 7 || new Counter(1).privateCall() != 9 || new Counter(1).privateReceiver(2) != 9) throw new AssertionError(); c.unitCall(1); System.out.println(\"virtual calls ok\"); } }\n",
+            "public final class VirtualCallHarness { public static void main(String[] args) { Client c = new Client(); if (c.directGet(1) != 42 || c.fromNew(3) != 4 || c.ordered(3) != 45 || !c.booleanResult(3) || c.fromLocal(3) != 4 || c.fromMutableLocal(3) != 4 || c.fromOther(3) != 7 || new Counter(1).privateCall() != 9 || new Counter(1).privateReceiver(2) != 9) throw new AssertionError(); c.unitCall(1); System.out.println(\"virtual calls ok\"); } }\n",
         )
         .expect("write Java verification harness");
         let javac = Command::new("javac")
@@ -10557,33 +10563,216 @@ fn contextual_sibling_if_projection_rejects_inferred_and_incompatible_targets() 
 }
 
 #[test]
-fn mutable_reference_local_assignment_remains_unsupported_in_if_and_while_bodies() {
-    let sources = [
-        (
-            "reference-var-if-assignment-rejected",
-            "class Base(seed: Int)\nclass Runner:\n  def change(flag: Boolean, seed: Int): Int =\n    var current: Base = new Base(seed)\n    if flag then current = new Base(seed) else current = new Base(seed)\n    42\n",
-        ),
-        (
-            "reference-var-while-assignment-rejected",
-            "class Base(seed: Int)\nclass Runner:\n  def change(flag: Boolean, seed: Int): Int =\n    var current: Base = new Base(seed)\n    while flag do current = new Base(seed)\n    42\n",
-        ),
-    ];
+fn mutable_reference_local_assignments_join_across_if_and_while_and_dispatch() {
+    let output = TestOutputDirectory::new("reference-var-if-while-joins");
+    let source = "class Base(seed: Int):\n  private val stored: Int = seed\n  def value(): Int = stored\nclass Left(seed: Int) extends Base(seed):\n  override def value(): Int = super.value() + 1\nclass Right(seed: Int) extends Base(seed):\n  override def value(): Int = super.value() + 2\nclass Runner:\n  def choose(flag: Boolean, seed: Int): Base =\n    var current: Base = new Left(seed)\n    if flag then current = new Right(seed)\n    current\n  def chooseReverse(flag: Boolean, seed: Int): Base =\n    var current: Base = new Right(seed)\n    if flag then current = new Left(seed)\n    current\n  def repeat(n: Int, seed: Int): Base =\n    var current: Base = new Left(seed)\n    var i = 0\n    while i < n do\n      current = new Right(seed)\n      i = i + 1\n    current\n  def nested(outer: Boolean, inner: Boolean, seed: Int): Base =\n    var current: Base = new Right(seed)\n    if outer then\n      if inner then current = new Left(seed) else current = new Right(seed)\n    else current = new Left(seed)\n    current\n";
+    let source = format!(
+        "{source}  def early(flag: Boolean, seed: Int): Base =\n    var current: Base = new Left(seed)\n    if flag then current = new Right(seed) else return current\n    current\n"
+    );
+    let artifacts = compile_planned_constructor_source(&source, output.path())
+        .expect("initialized mutable reference locals join across supported control flow");
+    let runner = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner class is emitted");
+    let mut reader = Reader::new(runner.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("decode Runner class");
+    class
+        .validate_references()
+        .expect("Runner's classfile references are valid");
 
-    for (directory, source) in sources {
-        let output = TestOutputDirectory::new(directory);
-        let result = compile_planned_constructor_source(source, output.path());
+    for (method, local_slot) in [
+        ("choose", 3),
+        ("chooseReverse", 3),
+        ("repeat", 3),
+        ("nested", 4),
+    ] {
+        let code = emitted_method_code(&class, method);
         assert!(
-            matches!(
-                result,
-                Err(PipelineFailure::Codegen(
-                    JvmCodegenError::ReferenceLocalInUnsupportedControlFlow { .. }
-                ))
-            ),
-            "mutable reference assignments in branch and loop bodies remain outside the straight-line increment"
+            decode_subset_instructions(code)
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xc0),
+            "{method} joins the local at its declared Base type without checkcast"
         );
         assert!(
-            output.class_files().is_empty(),
-            "a failed source batch publishes no classes"
+            stack_map_frames(&class, method).iter().any(|frame| {
+                frame.locals.get(local_slot)
+                    == Some(&StackMapVerificationType::Object("Base".to_owned()))
+            }),
+            "{method} encodes canonical local slot {local_slot} as Object(Base) at a CFG join"
+        );
+    }
+    for (method, local_slot) in [("choose", 3), ("chooseReverse", 3), ("nested", 4)] {
+        let code = emitted_method_code(&class, method);
+        let join_targets = decode_branch_targets(code)
+            .into_iter()
+            .filter_map(|(_, opcode, target)| (opcode == 0xa7).then_some(target))
+            .collect::<Vec<_>>();
+        let frames = stack_map_frames(&class, method);
+        assert!(
+            join_targets.iter().any(|target| {
+                frames.iter().any(|frame| {
+                    frame.pc == *target
+                        && frame.locals.get(local_slot)
+                            == Some(&StackMapVerificationType::Object("Base".to_owned()))
+                })
+            }),
+            "{method} has an Object(Base) local frame at a reachable branch join"
+        );
+    }
+    let repeat_code = emitted_method_code(&class, "repeat");
+    let repeat_targets = decode_branch_targets(repeat_code);
+    let goto_targets = repeat_targets
+        .iter()
+        .filter_map(|(_, opcode, target)| (*opcode == 0xa7).then_some(*target))
+        .collect::<Vec<_>>();
+    let loop_header = goto_targets
+        .iter()
+        .copied()
+        .find(|target| {
+            goto_targets
+                .iter()
+                .filter(|candidate| *candidate == target)
+                .count()
+                == 2
+        })
+        .expect("both loop entry and back-edge target the symbolic header");
+    let repeat_frames = stack_map_frames(&class, "repeat");
+    assert!(
+        repeat_frames.iter().any(|frame| {
+            frame.pc == loop_header
+                && frame.locals.get(3) == Some(&StackMapVerificationType::Object("Base".to_owned()))
+                && frame.locals.get(4) == Some(&StackMapVerificationType::Integer)
+        }),
+        "the loop-header frame retains the primitive index beside the joined Base local"
+    );
+    let loop_exit = repeat_targets
+        .iter()
+        .find_map(|(_, opcode, target)| (*opcode == 0x99).then_some(*target))
+        .expect("the false while-condition edge targets the loop exit");
+    assert!(
+        repeat_frames.iter().any(|frame| frame.pc == loop_exit
+            && frame.locals.get(3) == Some(&StackMapVerificationType::Object("Base".to_owned()))),
+        "the zero-iteration exit frame preserves the initialized Base local"
+    );
+    for (method, expected_stores) in [
+        ("choose", 2),
+        ("chooseReverse", 2),
+        ("repeat", 2),
+        ("nested", 4),
+        ("early", 2),
+    ] {
+        let stores = decode_subset_instructions(emitted_method_code(&class, method))
+            .iter()
+            .filter(|(_, opcode)| matches!(opcode, 0x3a | 0x4b..=0x4e))
+            .count();
+        assert_eq!(
+            stores, expected_stores,
+            "{method} emits each local store once"
+        );
+    }
+    for (method, expected_constructors) in [
+        (
+            "choose",
+            vec![
+                (0xb7, "Left", "<init>", "(I)V"),
+                (0xb7, "Right", "<init>", "(I)V"),
+            ],
+        ),
+        (
+            "chooseReverse",
+            vec![
+                (0xb7, "Right", "<init>", "(I)V"),
+                (0xb7, "Left", "<init>", "(I)V"),
+            ],
+        ),
+        (
+            "repeat",
+            vec![
+                (0xb7, "Left", "<init>", "(I)V"),
+                (0xb7, "Right", "<init>", "(I)V"),
+            ],
+        ),
+        (
+            "nested",
+            vec![
+                (0xb7, "Right", "<init>", "(I)V"),
+                (0xb7, "Left", "<init>", "(I)V"),
+                (0xb7, "Right", "<init>", "(I)V"),
+                (0xb7, "Left", "<init>", "(I)V"),
+            ],
+        ),
+        (
+            "early",
+            vec![
+                (0xb7, "Left", "<init>", "(I)V"),
+                (0xb7, "Right", "<init>", "(I)V"),
+            ],
+        ),
+    ] {
+        assert_invocation_sequence(
+            &class,
+            emitted_method_code(&class, method),
+            &expected_constructors,
+        );
+    }
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("MutableReferenceCfgHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class MutableReferenceCfgHarness {
+  private static void check(Base value, String type, int expected) {
+    if (!value.getClass().getSimpleName().equals(type) || value.value() != expected)
+      throw new AssertionError(value.getClass() + " -> " + value.value() + ", expected " + type + "/" + expected);
+  }
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    for (int seed : new int[] {10, 0, -3}) {
+      check(runner.choose(false, seed), "Left", seed + 1);
+      check(runner.choose(true, seed), "Right", seed + 2);
+      check(runner.chooseReverse(false, seed), "Right", seed + 2);
+      check(runner.chooseReverse(true, seed), "Left", seed + 1);
+      check(runner.repeat(0, seed), "Left", seed + 1);
+      check(runner.repeat(1, seed), "Right", seed + 2);
+      check(runner.repeat(3, seed), "Right", seed + 2);
+      check(runner.nested(false, true, seed), "Left", seed + 1);
+      check(runner.nested(true, false, seed), "Right", seed + 2);
+      check(runner.nested(true, true, seed), "Left", seed + 1);
+      check(runner.early(false, seed), "Left", seed + 1);
+      check(runner.early(true, seed), "Right", seed + 2);
+    }
+  }
+}
+"#,
+        )
+        .expect("write mutable-reference CFG harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected mutable-reference CFG harness\\nstdout:\\n{}\\nstderr:\\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "MutableReferenceCfgHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected mutable-reference CFG classes\\nstdout:\\n{}\\nstderr:\\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
         );
     }
 }
@@ -10694,115 +10883,71 @@ fn initialized_mutable_reference_local_can_be_discarded_as_an_expression() {
 }
 
 #[test]
-fn mutable_reference_issue_candidate_pins_the_current_source_frontend_blocker() {
+fn mutable_reference_issue_candidate_calls_dispatch_after_local_cfg_joins() {
     let source = fs::read_to_string(fixture_path("MutableReferenceLocals.scala"))
-        .expect("read the exact issue candidate fixture");
-    let output = TestOutputDirectory::new("mutable-reference-local-candidate");
-    let result = compile_source_batch(
+        .expect("read the issue candidate fixture with bounded Base storage");
+    let output = TestOutputDirectory::new("mutable-reference-candidate-dispatch");
+    let artifacts = compile_source_batch(
         &source,
         "MutableReferenceLocals.scala",
         output.path(),
         SourceId::from_index(1454),
         SourceUnitCardinality::AtLeastTwo,
-    );
-    let Err(PipelineFailure::Typer(TyperError::TermNameNotFound {
-        source: error_source,
-        position,
-        ..
-    })) = result
-    else {
-        panic!("the exact issue candidate should fail at the unresolved constructor parameter");
-    };
-    assert_eq!(error_source, SourceId::from_index(1454));
-    let position = position.expect("the error should retain the unresolved seed span");
-    assert_eq!(position.source(), SourceId::from_index(1454));
-    let range = position.span().range();
+    )
+    .expect("mutable local method calls compile through the JVM backend");
     assert_eq!(
-        &source[range.start() as usize..range.end() as usize],
-        "seed"
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Left", "Right", "Runner"]
     );
-    assert!(output.class_files().is_empty());
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output.path().join("MutableReferenceCandidateHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class MutableReferenceCandidateHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    if (runner.choose(false, 10) != 11 || runner.choose(true, 10) != 12)
+      throw new AssertionError("branch assignment dispatch");
+    if (runner.repeat(0, 10) != 11 || runner.repeat(1, 10) != 12 || runner.repeat(3, 10) != 12)
+      throw new AssertionError("loop assignment dispatch");
+    if (runner.initialize(true, 10) != 11 || runner.initialize(false, 10) != 12)
+      throw new AssertionError("initializer join dispatch");
+  }
 }
-
-#[test]
-fn mutable_reference_readback_candidates_pin_each_typer_prefix_failure() {
-    let source = fs::read_to_string(fixture_path("MutableReferenceLocalsReadback.scala"))
-        .expect("read the minimally adapted, readback-preserving fixture");
-    for method_name in ["choose", "repeat", "initialize"] {
-        let method_source = source_with_only_runner_method(&source, method_name);
-        let source_id = SourceId::from_index(1454);
-        let output = TestOutputDirectory::new(&format!("mutable-reference-readback-{method_name}"));
-        let mut failures = 0;
-        let result = compile_source_batch_with_typer_failure_observer(
-            &method_source,
-            "MutableReferenceLocalsReadback.scala",
-            output.path(),
-            source_id,
-            SourceUnitCardinality::AtLeastTwo,
-            None,
-            Some(&mut |untyped_ast, typer, error| {
-                failures += 1;
-                let TyperError::UnstableSelectionPrefix {
-                    source: error_source,
-                    tree_index,
-                    ..
-                } = error
-                else {
-                    panic!(
-                        "{method_name} should fail at unstable mutable-local selection: {error:?}"
-                    );
-                };
-                assert_eq!(*error_source, source_id);
-                let (selection_id, selection) = untyped_ast
-                    .iter()
-                    .find(|(id, _)| id.index() == *tree_index)
-                    .expect("the typer failure refers to a real source tree");
-                let TreeKind::Select(selection) = &selection.kind else {
-                    panic!("the failure tree is the current.value selection")
-                };
-                assert_eq!(typer.store().names.resolve(selection.name.text()), "value");
-                let selection_span = untyped_ast
-                    .get(selection_id)
-                    .position
-                    .expect("the source member selection keeps its span");
-                assert_eq!(selection_span.source(), source_id);
-                let range = selection_span.span().range();
-                let selected_source = &method_source[range.start() as usize..range.end() as usize];
-                assert!(
-                    selected_source.contains("current.value"),
-                    "selection span should cover current.value, got {selected_source:?}"
-                );
-
-                let TreeKind::Ident(qualifier) = &untyped_ast.get(selection.qualifier).kind else {
-                    panic!("current.value has the local current as its direct qualifier")
-                };
-                assert_eq!(
-                    typer.store().names.resolve(qualifier.name.text()),
-                    "current"
-                );
-                let qualifier_span = untyped_ast
-                    .get(selection.qualifier)
-                    .position
-                    .expect("the local receiver keeps its source span");
-                assert_eq!(qualifier_span.source(), source_id);
-                let range = qualifier_span.span().range();
-                assert_eq!(
-                    &method_source[range.start() as usize..range.end() as usize],
-                    "current"
-                );
-            }),
+"#,
+        )
+        .expect("write mutable-reference readback harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected mutable-reference readback harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
         );
-        assert_eq!(
-            failures, 1,
-            "observe exactly the first typer error: {result:?}"
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "MutableReferenceCandidateHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected mutable-reference readback classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
         );
-        assert!(matches!(
-            result,
-            Err(PipelineFailure::Typer(
-                TyperError::UnstableSelectionPrefix { .. }
-            ))
-        ));
-        assert!(output.class_files().is_empty());
     }
 }
 
@@ -11035,13 +11180,18 @@ fn mutable_reference_local_audit_preserves_source_evidence_after_layout_acceptan
         observed,
         "the complete source reached the typed audit observer: {result:?}"
     );
-    assert!(
-        result.is_err(),
-        "unsupported body operations remain rejected: {result:?}"
+    let artifacts = result.expect("branch and loop assignments lower after the source audit");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Base", "Left", "Right", "Runner"]
     );
-    assert!(
-        output.class_files().is_empty(),
-        "a later unsupported mutable-reference operation must not publish partial classfiles"
+    assert_eq!(
+        output.class_files().len(),
+        4,
+        "the completed source batch publishes all four planned classes"
     );
 }
 

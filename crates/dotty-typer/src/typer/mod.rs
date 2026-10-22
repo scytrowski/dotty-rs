@@ -23432,6 +23432,44 @@ mod tests {
     }
 
     #[test]
+    fn applicable_method_call_accepts_a_mutable_local_receiver() {
+        let (kind, _, _, widened_type, _) = type_method_rhs(
+            "class Box { def value(): Int = 1 }; class Use { def read(input: Box): Int = { var current: Box = input; current.value() } }",
+            "read",
+        )
+        .expect("an applicable method call can read a mutable local receiver");
+
+        assert!(matches!(kind, TreeKind::Block(_)));
+        assert!(matches!(widened_type, Type::TypeRef { .. }));
+    }
+
+    #[test]
+    fn bare_field_selection_on_a_mutable_local_still_requires_a_stable_prefix() {
+        let result = type_method_rhs(
+            "class Box { val field: Int = 1 }; class Use { def read(input: Box): Int = { var current: Box = input; current.field } }",
+            "read",
+        );
+
+        assert!(
+            matches!(result, Err(TyperError::UnstableSelectionPrefix { .. })),
+            "mutable-local field selection should remain outside the narrow allowance: {result:?}"
+        );
+    }
+
+    #[test]
+    fn overloaded_method_call_on_a_mutable_local_still_requires_a_stable_prefix() {
+        let result = type_method_rhs(
+            "class Text; class Box { def value(input: Int): Int = input; def value(input: Text): Int = 1 }; class Use { def read(input: Box): Int = { var current: Box = input; current.value(1) } }",
+            "read",
+        );
+
+        assert!(
+            matches!(result, Err(TyperError::UnstableSelectionPrefix { .. })),
+            "overloaded mutable-local call should remain outside the narrow allowance: {result:?}"
+        );
+    }
+
+    #[test]
     fn by_name_parameter_is_not_a_stable_selection_prefix() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "class Box { val value: Int = 1 }; class Use { def use(box: => Box): Int = box.value }",

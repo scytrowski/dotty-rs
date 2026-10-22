@@ -1414,7 +1414,7 @@ pub enum UnsupportedJvmCallShapeKind {
     NonThisReceiver,
     /// A receiver is not an immutable local or a validated direct constructor result.
     UnsupportedReferenceReceiver,
-    /// A local receiver is mutable or missing from the caller's immutable-local plan.
+    /// The receiver's mutability disagrees with its canonical local plan.
     MutableOrUnplannedReferenceReceiver,
     /// A selected member's `this` receiver is not the current class.
     NonCurrentThis,

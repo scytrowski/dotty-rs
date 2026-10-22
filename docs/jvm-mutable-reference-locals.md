@@ -13,13 +13,13 @@ increment.
 
 ## Source evidence and current failure matrix
 
-`tests/fixtures/jvm/MutableReferenceLocals.scala` preserves the issue's
-candidate source unchanged. The repository frontend currently stops while
-typing `Base.value`: the bare constructor parameter `seed` is reported as
-`TermNameNotFound` at the exact `seed` source span. No typed unit, JVM plan,
-lowering, or classfile analysis is reached for this exact source. This is a
-limitation of this repository's frontend, not evidence that the source is
-invalid Scala.
+`tests/fixtures/jvm/MutableReferenceLocals.scala` is the bounded integration
+fixture for this increment. It changes only `Base` storage: `seed` is copied
+into a supported private `currentSeed` field, and `Base.value` reads that
+field. This keeps the fixture focused on mutable reference locals and avoids
+adding plain constructor-parameter capture semantics to the frontend/backend.
+The original source shape (`def value(): Int = seed`) remains unsupported and
+is outside this increment.
 
 The PR review independently compiled the exact source with its cached Scala
 3.9.0 reference compiler; its reported compiler revision begins with the
@@ -29,29 +29,22 @@ assignments, `current.value()` selections, and contextual sibling union. This
 is reviewer-run compatibility evidence; the local environment used for this
 audit did not have that compiler available.
 
-The two checked-in adaptations isolate distinct current blockers. The first
-changes only `Base` to store `seed` in `currentSeed` while preserving all three
-`current.value()` reads. The second keeps that storage adaptation but returns
-an integer literal from candidate methods so the typed local shapes can reach
-the backend without member selection. Each candidate is compiled alone from
-the source fixture, so the first failure is independently observable:
+The typed fixture keeps the same `Base` storage adaptation but returns an
+integer literal from candidate methods, isolating local CFG behavior from
+virtual dispatch. The source candidate is therefore intentionally bounded to
+the frontend/backend features supported by this increment.
 
 | Input | `choose` | `repeat` | `initialize` | Reached stage |
 | --- | --- | --- | --- | --- |
-| Exact issue source | `TermNameNotFound(seed)` in `Base.value` | Same earlier unit failure | Same earlier unit failure | Typer, before candidate method completion |
-| `MutableReferenceLocalsReadback.scala`, only `Base` storage adapted | `UnstableSelectionPrefix` at `current.value()` | Same | Same | Typer, before typed unit/JVM plan |
-| `MutableReferenceLocalsTyped.scala`, `current.value()` replaced by `42` | Layout accepts canonical mutable `current: Base`; straight-line assignment works, but branch/loop assignment remains unsupported | Same | An explicit `Base` local can consume a checked sibling-union initializer or straight-line assignment; branch/loop writes remain unsupported | Contextual sibling-union lowering is covered by focused source regressions; the full adapted candidate still reaches the deferred branch/loop limitation |
+| `MutableReferenceLocals.scala`, `Base` storage adapted | Branch assignment selects `Right.value()` when true | Loop assignments select `Right.value()` after one or more iterations and `Left.value()` after zero iterations | Sibling-`If` initialization dispatches to the selected subtype | Source JVM pipeline; JDK 25 `-Xverify:all` execution |
+| `MutableReferenceLocalsTyped.scala`, `current.value()` replaced by `42` | Canonical `current: Base` survives a one-arm branch assignment and is returned after the join | Canonical `current: Base` survives loop assignments and remains initialized for zero or more iterations | An explicit `Base` local consumes a checked sibling-union initializer | Source JVM pipeline; branch and loop local-frame regressions |
 
-The readback test pins the error's source tree ID to the real `Select` node,
-the direct `current` `Ident` qualifier, and both source spans. The failed
-typer expression rolls back the local's temporary typed mappings and symbol,
-so no canonical local `SymbolId` survives that failure path to inspect. The
-literal-result fixture separately pins canonical local symbols, owners,
-mutability flags, declared types, typed initializer/assignment nodes, and
-class identities from a successful real typed unit. All failing runs assert
-that no classfile was published. None reaches classfile CFG analysis; the
-current classfile local join behavior below is established by code and its
-existing tests, not by these source failures.
+The candidate fixture test proves the mutable local reaches virtual invocation
+after branch, loop, and initializer joins, then runs those methods under
+`java -Xverify:all` and checks subtype-specific results. The literal-result
+fixture separately pins canonical local symbols, owners, mutability flags,
+declared types, typed initializer/assignment nodes, and class identities from a
+successful typed unit.
 
 The literal-result typed observer pins these source-backed relationships and
 checks that each declared-`Base` mutable binding receives a `Base` slot while
@@ -143,9 +136,12 @@ store:
 - Assignment has source type `Unit`; it does not yield the stored reference.
 - A checked `Child <: Base` assignment is accepted. No implicit downcast,
   narrowing, boxing, or conversion is inserted.
-- Reference reassignment inside `If` and `While` bodies is rejected with a
-  typed control-flow error until source initialization and verifier-local joins
-  are integrated.
+- An initialized reference local may be reassigned in an `If` branch or a
+  `While` body. The RHS is evaluated once on the executing path and stored to
+  the same canonical slot.
+- Assignments in a short-circuit operand or a `While` condition remain
+  rejected; those expressions have conditional or repeated evaluation rules
+  outside this increment.
 - Source definite initialization remains distinct from verifier type
   widening. An `If` intersection and the conservative pre-loop initialized
   set remain required; a verifier join cannot prove a source read safe by
@@ -156,8 +152,10 @@ must accept its initial `Left` and assigned `Right`. For `repeat`, the header
 must include initial `Left` (including zero iterations) and the `Right` written
 by a positive iteration; at exit, the local is definitely initialized because
 it was initialized before the loop, and its verifier state must accept either
-class. The contextual initializer has no subsequent store, but its two
-initializer paths still require the declared-target proof above.
+class. Reverse branch order, nested `If` writes, and a terminal branch exercise
+the same source-state and verifier-state separation. The contextual initializer
+has no subsequent store, but its two initializer paths still require the
+declared-target proof above.
 
 ## Current join and initialization behavior
 
@@ -173,9 +171,11 @@ remains Scala-independent.
 
 The source JVM emitter intersects initialized-local sets at reachable `If`
 branches. For `While`, it restores the pre-loop initialized-local set at the
-exit, conservatively covering zero iterations. These facts do not implement
-reference stores, loads, or local verifier-type propagation. Do not weaken
-them in this audit.
+exit, conservatively covering zero iterations. Reference assignments use
+those facts to permit writes only to locals initialized on the current path.
+The classfile analyzer separately propagates their actual stored classes,
+joining `Left`/`Right` to `Object(Base)` at branch joins and loop headers.
+Neither analysis substitutes for the other.
 
 ## Explicit exclusions
 
@@ -201,15 +201,15 @@ local behavior must remain unchanged.
 | #1454 | Audit / cross-layer contract | Source evidence, current failure matrix, bounded verifier and source-write rules, exclusions, and ownership below. No codegen feature. |
 | #1455 | `dotty-classfile` | Scala-independent checked initialized-reference local joins and `StackMapTable` local frames; nearest unique non-Object superclass; absorbing `Top`; preserve receiver/constructor/allocation guards. |
 | #1456 | `dotty-jvm` | Canonical mutable planned-class local metadata, deterministic slot allocation, and initialized declaration lowering to `astore` using the declared class. |
-| #1457 | `dotty-jvm` | Initialized mutable reference `aload`, straight-line checked assignment and `astore`; `val` rejection, one RHS evaluation, assignability, `Unit` result, no implicit narrowing/boxing. Branch/loop assignments remain rejected. |
+| #1457 | `dotty-jvm` | Initialized mutable reference `aload`, straight-line checked assignment and `astore`; `val` rejection, one RHS evaluation, assignability, `Unit` result, no implicit narrowing/boxing. |
 | #1458 | `dotty-jvm` | Contextual sibling `If` result used for `Base`-typed local initialization/assignment, after the straight-line assignment contract. Implemented by forwarding the canonical local symbol's completed declared type to the existing checked projection. |
-| #1459 | `dotty-jvm` + classfile integration | Compose approved writes/reads through `If` and `While`, zero and positive loop counts, while preserving source definite initialization and verifier joins. Depends on #1455–#1458 and a separately tracked `dotty-typer` prerequisite for the observed `UnstableSelectionPrefix` on mutable local receivers. |
-| #1460 | End-to-end integration / CI | Real Scala source to JDK 21+ execution, decoded local frames, exact bytecode and runtime dispatch after #1455–#1459 and the typer prerequisite. |
+| #1459 | `dotty-typer`, `dotty-jvm` + classfile integration | Permit direct applicable method calls on planned mutable local receivers, then compose reference writes and calls through `If` and `While` while preserving source definite initialization and verifier joins. Bare field selections and overloaded mutable-local calls keep the stable-prefix restriction. |
+| #1460 | End-to-end integration / CI | Real Scala source to JDK 21+ execution, decoded local frames, exact bytecode and runtime dispatch after #1455–#1459. |
 
-The existing #1455–#1460 issue set does not assign ownership for fixing the
-typer's unstable-prefix rule. Track that as a focused `dotty-typer` issue
-before claiming the source `current.value()` readback path in #1459/#1460.
-This audit records the blocker but does not change typer stability semantics.
+The candidate fixture exercises `current.value()` end to end. The original
+plain constructor-parameter read in `Base.value` remains a separate frontend
+and storage concern and is not covered by this mutable-reference-local
+increment.
 
 ## Compatibility and runtime validation
 
@@ -219,9 +219,9 @@ have the compiler available; the PR review reports an independent cached
 compiler run at the matching hash prefix, as noted above. Regressions now check
 the real frontend's declared-`Base` mutable slot, shadowed local identities,
 stable layouts across fresh sessions, initialized mutable-local loads,
-straight-line same-class and subtype assignments, and runtime virtual dispatch
-through returned references. Direct source selection such as
-`current.value()` still fails at the typer's `UnstableSelectionPrefix` stage;
-this increment leaves that typer rule unchanged. Branch/loop assignments
-remain deferred and rejected. Executable coverage uses JDK 21+ strict
-verification and does not replace source-level semantic proof.
+straight-line same-class and subtype assignments, branch/loop local joins, and
+runtime virtual dispatch through `current.value()`. The narrow Typer allowance
+applies only to a direct mutable local used by one applicable method call;
+field selections and overloaded calls remain rejected as unstable. Executable
+coverage uses JDK 21+ strict verification and does not replace source-level
+semantic proof.
