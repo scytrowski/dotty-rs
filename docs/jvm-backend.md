@@ -242,8 +242,12 @@ same-unit ancestry edges; the local and descriptor keep the declared class
 identity. Mutable locals of validated planned reference classes receive
 category-one slots while preserving their declared class and canonical local
 symbol. Initialized mutable reference locals may be loaded with `aload` and
-assigned in straight-line code with `astore`, after same-unit hierarchy checks;
-reference assignments inside branch and loop bodies fail with a typed error.
+assigned with `astore` in straight-line code, `If` branches, and `While` bodies,
+after same-unit hierarchy checks. Source definite-initialization is intersected
+across reachable `If` arms and reset to the pre-loop set after a `While`; the
+classfile CFG analyzer separately joins compatible initialized references to
+their checked nearest non-`Object` superclass. Writes in short-circuit operands
+and repeatedly evaluated loop conditions remain rejected.
 Reference values may be discarded as category-one block statements with `pop`.
 Planned reference parameters and results, plus
 reference virtual-call arguments and results, are supported. Primary
@@ -286,7 +290,7 @@ unsupported states remain typed build errors.
 | Source shape | Planned JVM lowering | CFG/verifier rule |
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
-| Mutable `var` of planned class `C`, initialized and reassigned in straight-line code | One canonical `astore` for each initialization or assignment; `aload` for an initialized read | RHS must be exact `C`, assignable through validated ancestry, or a checked sibling `If` whose nearest non-`Object` ancestor is declared `C`; assignment execution inside an enclosing `If`/`While` remains rejected |
+| Mutable `var` of planned class `C`, initialized before reads | One canonical `astore` for each initialization or assignment; `aload` for an initialized read | RHS must be exact `C`, assignable through validated ancestry, or a checked sibling `If` whose nearest non-`Object` ancestor is declared `C`; `If` joins intersect source initialization and CFG frames join compatible initialized local classes; `While` headers include preheader and back-edge values while exits preserve only pre-loop definite initialization |
 | Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and declared value descriptor; a field write may use up to two validated same-unit ancestry edges |
 | Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver owner is exact or a validated ancestor; arguments and results use exact types or the bounded two-edge assignment |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
@@ -344,7 +348,7 @@ and `independent() == 31` under `java -Xverify:all`.
 The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
 `DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the source integration test on JDK 21.
 Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
-arbitrary classpath classes, mutable reference reads and assignments,
+arbitrary classpath classes, unplanned mutable reference reads/assignments,
 sibling/unrelated reference joins without the exact expected-type proof,
 arrays, null, and branching constructor bodies unsupported.
 Reference operations remain restricted to exact planned classes and verified
@@ -781,17 +785,19 @@ order, call owners, and `Object(Holder)`/`Object(Counter)` frames. On JDK 21+
 the test also runs all three classes through `javap` and a Java identity and
 loop harness with `-Xverify:all`. The typer accepts a direct application
 returning a top-level class from the current source batch as a selection
-prefix; mutable reference-local selections such as `current.value()` remain
-rejected by the unstable-prefix rule. A mutable local can be returned as its
-declared planned reference type and used by a caller after straight-line
-reassignment.
+prefix. A direct call to one already-applicable method on a planned mutable
+reference local, such as `current.value()`, is supported; bare field selections
+and overloaded calls on mutable locals remain rejected by the unstable-prefix
+rule. A mutable local can be returned as its declared planned reference type
+and used by a caller after straight-line or supported CFG reassignment.
 
 These fixtures test the bounded emitted class shape. They do not establish
 Scala public accessor, bridge, or TASTy compatibility.
 
 CI sets `DOTTY_CLASSFILE_REQUIRE_JDK=1`, so missing JDK tools fail the gate.
 Negative source tests verify that field initialization, mutable reference
-assignments inside `If` and `While`, invalid while conditions, wrong exact reference call values, private
+assignments in short-circuit operands and `While` conditions, invalid while
+conditions, wrong exact reference call values, private
 construction, immutable-local assignment, missing local references, mismatched
 local initializers and assignments, Unit locals, deferred reference locals,
 pattern locals, and parser diagnostics fail at their actual pipeline stage
@@ -809,8 +815,9 @@ Without the JDK it still runs structural and negative checks and explicitly
 skips Java verification. Reference method results outside the exact current
 source class subset, reference call arguments outside the exact supported
 class subset, sibling joins without an explicit checked expected parent,
-unrelated or `Object`-only class joins, arrays, null, mutable reference
-assignments across branch/loop control flow, and branched constructors remain deferred. Ancestor-related
+unrelated or `Object`-only class joins, arrays, null, assignments in
+short-circuit operands or repeatedly evaluated loop conditions, and branched
+constructors remain deferred. Ancestor-related
 and proven sibling source-typed `If` results are supported only within the validated same-unit
 hierarchy and still require JVM frame verification. The exact `Left`/`Right`
 join under a declared `Base` result is covered end to end: both branch orders

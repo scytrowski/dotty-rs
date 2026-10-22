@@ -1,25 +1,24 @@
-# Mutable reference locals: verifier and frontend audit
+# Mutable reference locals: verifier and frontend contract
 
-This document records the audit for issue #1454, mutable local layout in
-#1456, straight-line assignment in #1457, and contextual sibling-`If` local
-values in #1458. A canonical mutable local of an exact planned reference class
-has its declared class type and a deterministic category-one slot. Its
-initializer and straight-line assignments are lowered once and stored with
-`astore`; initialized mutable locals can be read with `aload`. A declared local
-type may contextualize an exact sibling-valued `If` initializer or assignment
-RHS through the checked common-ancestor projection. Assignments executed inside
-branch and loop bodies remain unsupported pending the CFG integration
-increment.
+This document records the audit and implementation from #1454–#1459 and the
+end-to-end acceptance evidence for #1460. A canonical mutable local of an exact
+planned reference class keeps its declared class type and deterministic
+category-one slot. Its initializer and assignments are evaluated once and
+stored with `astore`; initialized mutable locals can be read with `aload`.
+Assignments are supported in straight-line code, `If` branches, and `While`
+bodies. Source definite-initialization uses the reachable-arm intersection for
+`If` and the pre-loop set after `While`; the classfile CFG analyzer separately
+joins compatible initialized local values to their checked nearest non-`Object`
+superclass. Contextual sibling-`If` values require an explicit declared target
+and retain the source `Type::Or` proof.
 
 ## Source evidence and current failure matrix
 
-`tests/fixtures/jvm/MutableReferenceLocals.scala` is the bounded integration
-fixture for this increment. It changes only `Base` storage: `seed` is copied
-into a supported private `currentSeed` field, and `Base.value` reads that
-field. This keeps the fixture focused on mutable reference locals and avoids
-adding plain constructor-parameter capture semantics to the frontend/backend.
-The original source shape (`def value(): Int = seed`) remains unsupported and
-is outside this increment.
+`tests/fixtures/jvm/MutableReferenceLocals.scala` is the real source fixture
+for this increment. `Base` stores its constructor argument in a private
+mutable `current: Int` field, and `Base.value` reads that field. The original
+plain constructor-parameter read (`def value(): Int = seed`) remains a separate
+frontend/storage concern and is outside this increment.
 
 The PR review independently compiled the exact source with its cached Scala
 3.9.0 reference compiler; its reported compiler revision begins with the
@@ -29,22 +28,25 @@ assignments, `current.value()` selections, and contextual sibling union. This
 is reviewer-run compatibility evidence; the local environment used for this
 audit did not have that compiler available.
 
-The typed fixture keeps the same `Base` storage adaptation but returns an
+The typed fixture retains the supported `Base` backing field but returns an
 integer literal from candidate methods, isolating local CFG behavior from
-virtual dispatch. The source candidate is therefore intentionally bounded to
-the frontend/backend features supported by this increment.
+virtual dispatch.
 
-| Input | `choose` | `repeat` | `initialize` | Reached stage |
+| Input | `choose` | `repeat` | `initialize` / `swap` | Reached stage |
 | --- | --- | --- | --- | --- |
-| `MutableReferenceLocals.scala`, `Base` storage adapted | Branch assignment selects `Right.value()` when true | Loop assignments select `Right.value()` after one or more iterations and `Left.value()` after zero iterations | Sibling-`If` initialization dispatches to the selected subtype | Source JVM pipeline; JDK 25 `-Xverify:all` execution |
+| `MutableReferenceLocals.scala` | Branch assignment selects `Right.value()` when true | Loop assignments select `Right.value()` after one or more iterations and `Left.value()` after zero iterations | Sibling-`If` initialization and assignment dispatch to the selected subtype | Source JVM pipeline, decoded classfiles and StackMapTable; JDK 25 `javac`, `javap`, and `java -Xverify:all` execution |
 | `MutableReferenceLocalsTyped.scala`, `current.value()` replaced by `42` | Canonical `current: Base` survives a one-arm branch assignment and is returned after the join | Canonical `current: Base` survives loop assignments and remains initialized for zero or more iterations | An explicit `Base` local consumes a checked sibling-union initializer | Source JVM pipeline; branch and loop local-frame regressions |
 
-The candidate fixture test proves the mutable local reaches virtual invocation
-after branch, loop, and initializer joins, then runs those methods under
-`java -Xverify:all` and checks subtype-specific results. The literal-result
-fixture separately pins canonical local symbols, owners, mutability flags,
-declared types, typed initializer/assignment nodes, and class identities from a
-successful typed unit.
+The acceptance test observes one real typed session and checks canonical
+`Base`/`Left`/`Right` identities, the mutable local owner and declared type,
+and the `Base` slot used by `choose`, `repeat`, `initialize`, and `swap`. It
+decodes all four classfiles, verifies exact superclass/field/constructor/method
+references and verifier frames, and compares complete class bytes from two
+fresh frontend sessions. Its JDK harness covers seeds `10`, `0`, and `-3`,
+both branch choices, zero/one/multiple loop iterations, sibling initializer
+joins, and sibling assignment joins. Separate source regressions cover
+reversed branch order, nested branches, early return, exact runtime subtype,
+and unsupported/maybe-initialized states.
 
 The literal-result typed observer pins these source-backed relationships and
 checks that each declared-`Base` mutable binding receives a `Base` slot while
@@ -64,8 +66,8 @@ as stable contracts.
 ## Bounded verifier-local lattice
 
 Local-slot joins and operand-stack joins are separate. For local slots, the
-future Scala-independent classfile analyzer should use only the verified JVM
-hierarchy supplied to it and these bounded states:
+Scala-independent classfile analysis uses only the verified JVM hierarchy
+supplied to it and these bounded states:
 
 | State | Meaning and join rule |
 | --- | --- |
