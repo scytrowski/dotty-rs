@@ -121,6 +121,7 @@ jobs:
             python3 tools/typer-classpath-corpus-audit/reconcile_tasty_supertype_roots.py \
               --baseline docs/typer-classpath-corpus-audit-post-compiler-modules-3.9.0-tasty-supertype-roots.tsv \
               --historical-parent-profile docs/classloader-unresolved-tasty-parent-profile-3.9.0.tsv \
+              --historical-source-provenance docs/classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv \
               --parent-profile "$SCALA39_PARENT_PROFILE_OUTPUT" \
               --source-provenance "$RUNNER_TEMP/typer-classpath-corpus-audit-post-tasty-parents-3.9.0-tasty-parent-source-provenance.tsv" \
               --rows "$RUNNER_TEMP/typer-audit-report/typer-classpath-corpus-audit-post-tasty-parents-3.9.0-tasty-supertype-roots.tsv" \

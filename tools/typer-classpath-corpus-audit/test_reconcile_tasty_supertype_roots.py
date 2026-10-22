@@ -20,6 +20,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
             baseline = root / "baseline.tsv"
             historical = root / "historical.tsv"
             parents = root / "parents.tsv"
+            historical_provenance = root / "historical-provenance.tsv"
             provenance = root / "provenance.tsv"
             baseline_rows = [
                 {
@@ -66,6 +67,16 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
             write_tsv(historical, historical_rows)
             write_tsv(parents, parent_rows)
             write_tsv(
+                historical_provenance,
+                [
+                    {
+                        "root_cause_key": "root_cause=InvalidTastyFile::requested=compiler/Root0::root=tasty.unresolved_supertype",
+                        "source_file": "compiler/Foo.scala",
+                        "observations": "1",
+                    }
+                ],
+            )
+            write_tsv(
                 provenance,
                 [
                     {
@@ -86,19 +97,23 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
                 ],
             )
 
-            rows, summary = reconcile(baseline, historical, parents, provenance)
+            rows, summary = reconcile(baseline, historical, parents, historical_provenance, provenance)
 
             self.assertEqual(len(rows), 52)  # header + 50 frozen roots + one new root origin
             self.assertTrue(all(len(row) == len(rows[0]) for row in rows))
             self.assertEqual(rows[1][0], "compiler/Root0")
-            self.assertEqual(rows[1][7], "2")
-            self.assertEqual(rows[1][10], "0")
-            self.assertEqual(rows[1][11], "100")
-            self.assertEqual(rows[1][12], "old-simple")
-            self.assertEqual(rows[1][8], "compiler/Foo.scala;compiler/Other.scala")
-            self.assertTrue(rows[1][9].endswith("=2"))
+            self.assertEqual(rows[1][7], "1")
+            self.assertEqual(rows[1][10], "2")
+            self.assertEqual(rows[1][13], "0")
+            self.assertEqual(rows[1][14], "100")
+            self.assertEqual(rows[1][15], "old-simple")
+            self.assertEqual(rows[1][8], "compiler/Foo.scala")
+            self.assertEqual(rows[1][11], "compiler/Foo.scala;compiler/Other.scala")
+            self.assertTrue(rows[1][12].endswith("=2"))
             self.assertEqual(rows[-1][0], "compiler/NewRoot")
             self.assertIn("frozen_weighted_observations=100", summary)
+            self.assertIn("historical_source_attribution_observations=1", summary)
+            self.assertIn("frozen_weight_to_historical_source_delta=99", summary)
             self.assertIn("current_frozen_root_source_observations=2", summary)
             self.assertIn("historical_to_current_weight_delta=98", summary)
             self.assertIn("new_current_roots=1", summary)
@@ -109,6 +124,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
             baseline = root / "baseline.tsv"
             historical = root / "historical.tsv"
             parents = root / "parents.tsv"
+            historical_provenance = root / "historical-provenance.tsv"
             provenance = root / "provenance.tsv"
             baseline_rows = [
                 {
@@ -138,6 +154,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
                     for row in baseline_rows
                 ],
             )
+            write_tsv(historical_provenance, [{"root_cause_key": "requested=root/0", "source_file": "A.scala", "observations": "1"}])
             write_tsv(
                 parents,
                 [
@@ -156,7 +173,7 @@ class ReconcileTastySupertypeRootsTests(unittest.TestCase):
             write_tsv(provenance, [{"root_cause_key": "requested=root/0", "source_file": "A.scala", "observations": "1"}])
 
             with self.assertRaisesRegex(ValueError, "dropped frozen roots"):
-                reconcile(baseline, historical, parents, provenance)
+                reconcile(baseline, historical, parents, historical_provenance, provenance)
 
 
 if __name__ == "__main__":

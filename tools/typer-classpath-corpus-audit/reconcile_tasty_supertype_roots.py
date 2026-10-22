@@ -24,20 +24,33 @@ def read_tsv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
         return reader.fieldnames, rows
 
 
-def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Path, provenance_path: Path):
+def reconcile(
+    baseline_path: Path,
+    historical_parent_path: Path,
+    parent_path: Path,
+    historical_provenance_path: Path,
+    provenance_path: Path,
+):
     baseline_headers, baseline_rows = read_tsv(baseline_path)
     historical_headers, historical_rows = read_tsv(historical_parent_path)
     parent_headers, parent_rows = read_tsv(parent_path)
+    historical_provenance_headers, historical_provenance_rows = read_tsv(historical_provenance_path)
     provenance_headers, provenance_rows = read_tsv(provenance_path)
     required = {
         baseline_path: {"requested_class_root", "weighted_observations", "resource_path", "artifact", "artifact_version", "artifact_sha256"},
         historical_parent_path: {"requested_class_root", "template_wire_address", "parent_index", "shape", "resolution_stage", "resolved_binary_name", "standalone_decode_parent_index", "standalone_decode_cause"},
         parent_path: {"requested_class_root", "template_wire_address", "parent_index", "shape", "resolution_stage", "resolved_binary_name", "deepest_typed_cause", "failing_binary_name"},
+        historical_provenance_path: {"root_cause_key", "source_file", "observations"},
         provenance_path: {"root_cause_key", "source_file", "observations"},
     }
     for path, columns in required.items():
-        headers = (baseline_headers if path == baseline_path else historical_headers if path == historical_parent_path
-                   else parent_headers if path == parent_path else provenance_headers)
+        headers = (
+            baseline_headers if path == baseline_path
+            else historical_headers if path == historical_parent_path
+            else parent_headers if path == parent_path
+            else historical_provenance_headers if path == historical_provenance_path
+            else provenance_headers
+        )
         missing = columns - set(headers)
         if missing:
             raise ValueError(f"{path} missing columns: {', '.join(sorted(missing))}")
@@ -80,6 +93,21 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
             raise ValueError(f"duplicate parent index for {root}")
         rows.sort(key=lambda row: int(row["parent_index"]))
 
+    historical_origins: dict[str, dict[str, int]] = defaultdict(dict)
+    historical_files: dict[str, set[str]] = defaultdict(set)
+    historical_weights: dict[str, int] = defaultdict(int)
+    for row in historical_provenance_rows:
+        match = ROOT_PATTERN.search(row["root_cause_key"])
+        if match is None:
+            raise ValueError(f"cannot extract requested root from historical key: {row['root_cause_key']}")
+        root = match.group(1)
+        observations = int(row["observations"])
+        historical_weights[root] += observations
+        historical_files[root].add(row["source_file"])
+        historical_origins[root][row["root_cause_key"]] = (
+            historical_origins[root].get(row["root_cause_key"], 0) + observations
+        )
+
     origins: dict[str, dict[str, int]] = defaultdict(dict)
     files: dict[str, set[str]] = defaultdict(set)
     current_weights: dict[str, int] = defaultdict(int)
@@ -99,8 +127,10 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
     header = [
         "requested_class_root", "requested_identity", "historical_weighted_observations",
         "historical_resource_path", "historical_artifact", "historical_artifact_version",
-        "historical_artifact_sha256", "current_source_audit_observations",
-        "current_source_audit_files", "current_error_root_origins", "parent_index",
+        "historical_artifact_sha256", "historical_source_audit_observations",
+        "historical_source_audit_files", "historical_error_root_origins",
+        "current_source_audit_observations", "current_source_audit_files",
+        "current_error_root_origins", "parent_index",
         "original_template_wire_address", "original_parent_shape", "original_resolution_stage",
         "original_resolved_binary_name", "original_unresolved_parent_index", "original_unresolved_cause",
         "original_reference_tag", "original_reference_name", "original_reference_prefix", "original_raw_tree",
@@ -122,6 +152,9 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
                 "ModuleClass" if root.endswith("$") else "Class",
                 old["weighted_observations"], old["resource_path"], old["artifact"],
                 old["artifact_version"], old["artifact_sha256"],
+                str(historical_weights.get(root, 0)),
+                ";".join(sorted(historical_files.get(root, set()))),
+                ";".join(f"{key}={value}" for key, value in sorted(historical_origins.get(root, {}).items())),
                 str(current_weights.get(root, 0)),
                 ";".join(sorted(files.get(root, set()))),
                 ";".join(f"{key}={value}" for key, value in sorted(origins.get(root, {}).items())),
@@ -154,6 +187,7 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
             output.append([new_row[column] for column in header])
 
     baseline_weight = sum(int(row["weighted_observations"]) for row in baseline.values())
+    historical_source_weight = sum(historical_weights.values())
     provenance_weight = sum(current_weights.values())
     frozen_provenance_weight = sum(current_weights.get(root, 0) for root in baseline)
     resolved_original_parents = 0
@@ -178,6 +212,8 @@ def reconcile(baseline_path: Path, historical_parent_path: Path, parent_path: Pa
     summary = [
         f"frozen_roots={len(baseline)}",
         f"frozen_weighted_observations={baseline_weight}",
+        f"historical_source_attribution_observations={historical_source_weight}",
+        f"frozen_weight_to_historical_source_delta={baseline_weight - historical_source_weight}",
         f"current_frozen_root_source_observations={frozen_provenance_weight}",
         f"historical_to_current_weight_delta={baseline_weight - frozen_provenance_weight}",
         f"exact_original_parent_references_resolved={resolved_original_parents}",
@@ -199,11 +235,18 @@ def main() -> None:
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--historical-parent-profile", type=Path, required=True)
     parser.add_argument("--parent-profile", type=Path, required=True)
+    parser.add_argument("--historical-source-provenance", type=Path, required=True)
     parser.add_argument("--source-provenance", type=Path, required=True)
     parser.add_argument("--rows", type=Path, required=True)
     parser.add_argument("--summary", type=Path, required=True)
     args = parser.parse_args()
-    rows, summary = reconcile(args.baseline, args.historical_parent_profile, args.parent_profile, args.source_provenance)
+    rows, summary = reconcile(
+        args.baseline,
+        args.historical_parent_profile,
+        args.parent_profile,
+        args.historical_source_provenance,
+        args.source_provenance,
+    )
     args.rows.parent.mkdir(parents=True, exist_ok=True)
     args.summary.parent.mkdir(parents=True, exist_ok=True)
     with args.rows.open("w", newline="", encoding="utf-8") as output_file:
