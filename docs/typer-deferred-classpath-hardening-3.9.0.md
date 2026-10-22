@@ -443,6 +443,7 @@ more than 153,000 resolver calls, so this checkpoint does not refresh the
 current completed-load depth or fanout limits. The prior p95 and fanout figures
 remain historical and must not be cited as measurements of the #1180 branch.
 See the [#1180 import report](typer-classpath-import-prefix-profile-1180-3.9.0.md).
+
 The follow-up targeted profile measured the first `tpd.scala` method at
 6,214 ms before and 3,546 ms after adding `LoadingSession` reverse indexes;
 member-lookup time fell from 4,939 ms to 2,797 ms for the same 512 requests.
@@ -452,6 +453,17 @@ after about 20 minutes and roughly 295,000 module-identity requests. The later
 normalized reports and deferred-cohort sidecars; p95 completion depth was 0
 and maximum completed fanout was 9, within the issue limits of 6 and 16. Fresh
 current blocker counts and direct origins are in the [#1180 blocker sidecar](typer-classpath-corpus-audit-1180-current-blockers.tsv).
+
+### #1417 current hardening gate
+
+The final TASTy-parent sprint tightens the current hard limits to completed
+dependency p95 <= 6 and maximum completed-class fanout <= 16. The comparison
+tool enforces these values and still rejects lost historical class targets or
+a changed 3,297-method denominator. This does not rewrite earlier checkpoint
+measurements: the lower limits apply to the current #1417 run. See the
+[#1417 checkpoint](typer-classpath-corpus-audit-post-tasty-parents-3.9.0.md)
+for status and the frozen-root attribution discrepancy that remains to be
+reconciled by the hosted full audit.
 
 ## Post-compiler-module audit checkpoint (#1342)
 

@@ -1796,3 +1796,15 @@ single evidence-based next-sprint recommendation. Its final closeout evidence
 maps the eight required rollback/atomicity cases to the focused production and
 `AuditResolver` regressions and records the successful workspace CI run. See
 [`the #1342 audit checkpoint`](typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md#final-closeout-evidence).
+
+### #1417 final TASTy-parent audit gate
+
+The final parent-resolution checkpoint preserves the #1342 root and cohort
+identities and records parent decoding separately from full class/module
+completion, selected-member resolution, and full local-method typing. The
+current audit requires two sequential, byte-identical full runs over 1,236
+files and the unchanged 3,297-method denominator. The hard deferred-loading
+limits are p95 depth <= 6 and completed-class fanout <= 16. The
+[checkpoint](typer-classpath-corpus-audit-post-tasty-parents-3.9.0.md) remains
+incomplete until the manually initiated hosted audit reconciles every frozen
+root and its source attribution.

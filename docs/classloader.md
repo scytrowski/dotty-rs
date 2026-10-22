@@ -910,3 +910,21 @@ Object identity remains grounded in semantic TASTy evidence; rolled-back
 completion or member attempts are not reported as successful completion.
 The checkpoint's final closeout table maps the module failure, caller rollback,
 source-owned identity, and same-session retry cases to their regression tests.
+
+## Final TASTy-parent corpus gate (#1417)
+
+The [checkpoint](typer-classpath-corpus-audit-post-tasty-parents-3.9.0.md)
+keeps the #1342 compiler/library roots frozen and adds a current parent and
+hierarchy profile. Its deterministic join retains the original failed parent
+index, current binary identity, complete hierarchy-load cause, source-file
+observations, and newly surfaced roots. A resolved parent name is not counted
+as a completed `ClassInfo`; module completion and selected-member outcomes
+remain separate evidence.
+
+The manual hosted workflow runs two serial full audits and compares the new
+root/file provenance sidecar with the normalized reports and historical cohort
+sidecars. The current hard limits are completed dependency p95 <= 6 and maximum
+completed-class fanout <= 16. The historic #1342 root weights total 8,949,
+while their separate source-attribution sidecar totals 8,948; this mismatch is
+explicitly retained pending the final reconciliation. No current full-corpus
+measurement or recommendation is claimed until that workflow succeeds.
