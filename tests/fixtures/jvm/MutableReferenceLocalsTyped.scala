@@ -9,6 +9,16 @@ class Right(seed: Int) extends Base(seed):
   override def value(): Int = super.value() + 2
 
 class Runner:
+  def layout(seed: Int): Int =
+    var current: Base = new Left(seed)
+    42
+
+  def shadowed(flag: Boolean, seed: Int): Int =
+    var current: Base = new Left(seed)
+    if flag then
+      val current: Base = new Right(seed)
+    42
+
   def choose(flag: Boolean, seed: Int): Int =
     var current: Base = new Left(seed)
     if flag then current = new Right(seed)

@@ -2819,7 +2819,7 @@ fn local_layout_reserves_exact_category_one_slots_for_planned_references() {
         name: Name::new(name, Namespace::Term),
         owner: Some(method),
         kind: SymbolKind::Local,
-        flags: SymbolFlags::EMPTY,
+        flags: SymbolFlags::MUTABLE,
         visibility: Visibility::Public,
         info: SymbolInfo::Complete(reference_type),
         origin: SymbolOrigin::Synthetic,
@@ -2849,7 +2849,7 @@ fn local_layout_reserves_exact_category_one_slots_for_planned_references() {
     let binding = JvmLocalBinding {
         declaration,
         symbol,
-        mutable: false,
+        mutable: true,
     };
     let mut unit = fixture.unit();
     unit.classes[0].methods[0].locals = vec![binding];
@@ -2864,6 +2864,7 @@ fn local_layout_reserves_exact_category_one_slots_for_planned_references() {
     );
     assert_eq!(layout.local(symbol).unwrap().slot(), 1);
     assert_eq!(layout.local(symbol).unwrap().ty().slot_width(), 1);
+    assert!(layout.local(symbol).unwrap().is_mutable());
     assert_eq!(
         unit.local_value_type(symbol, reference_type, &fixture.definitions, None),
         Ok(JvmType::Reference(class))

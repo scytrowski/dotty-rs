@@ -59,7 +59,8 @@ canonical `SymbolId`, typed declaration ID, exact value type, and mutability;
 lookup is by `SymbolId` only. Reserving a slot does not establish definite
 initialization. Planned method lowering accepts ordinary local `ValDef`
 statements with an initializer: it lowers the RHS once, checks the resulting
-primitive type, then emits one `istore` and marks that symbol initialized.
+supported primitive or exact planned-reference type, then emits one `istore`
+or `astore` and marks that symbol initialized.
 Assignments to already initialized mutable `Int` and `Boolean` locals inspect
 the exact local symbol without loading it, lower the RHS once, and emit one
 `istore`; the expression leaves Unit on the operand stack. Immutable locals,
@@ -73,11 +74,15 @@ local reads lower through the same canonical `SymbolId` lookup to one `iload`
 from the allocated slot. Local loads require the current method's validated
 layout, a completed supported semantic type, and a preceding store on every
 reachable path. Name-only references, foreign or unplanned locals, and reads before
-initialization return typed errors. Reference slots are supported only for
-initialized immutable locals of an exact planned class. Their states may cross
-CFG edges when every read is definitely initialized and each stack join has
-the exact same class. Mutable reference locals and hierarchy merges remain
-typed errors. The classfile verifier and mandatory JDK gate check these paths.
+initialization return typed errors. Reference slots support initialized
+immutable locals and mutable declarations of exact planned classes. Mutable
+reference-local reads and assignments remain unsupported and return typed
+errors. Immutable reference reads may cross CFG edges when every read is
+definitely initialized and incoming values have the exact same class. The
+Scala-independent classfile analyzer can join initialized local references at
+their checked common superclass; source lowering does not yet expose mutable
+reference values to those joins. The classfile verifier and mandatory JDK gate
+check these paths.
 
 The initial plan subset accepts `SymbolKind::Class`, `SymbolKind::Method`, and
 `SymbolKind::Parameter`; other kinds return a structured unsupported-kind
@@ -224,8 +229,10 @@ passed to virtual calls, used as call results or receivers, and discarded with
 `pop`. The local's checked class identity must match the initializer's
 `Flow::Value`, except for an assignment proved through up to two validated
 same-unit ancestry edges; the local and descriptor keep the declared class
-identity. Read-before-store and mutable reference locals fail
-with typed errors. Reference values may be discarded as category-one
+identity. Mutable locals of validated planned reference classes receive
+category-one slots while preserving their declared class and canonical local
+symbol. Reference reads and assignments remain unsupported and fail with typed
+errors. Reference values may be discarded as category-one
 block statements with `pop`. Planned reference parameters and results, plus
 reference virtual-call arguments and results, are supported. Primary
 constructor metadata retains exact parameter descriptors for classes in the
@@ -235,8 +242,9 @@ unqualified `this` when it is assignable to the constructor parameter by exact
 identity or up to two validated same-unit ancestry edges. These references may
 appear between primitive arguments; each is loaded once in source order as part of
 the `new`/`dup`/arguments/`invokespecial` sequence.
-Mutable reference locals, fields, nested allocations, method-call results, and
-branching expressions remain unsupported as constructor arguments. The
+Reads from mutable reference locals, fields, nested allocations, method-call
+results, and branching expressions remain unsupported as constructor
+arguments. The
 uninitialized object and argument evaluation must complete in one basic block.
 Exact initialized references may stay live through `if` joins and `while`
 headers/back-edges. A source-typed reference `if` may join two different
@@ -322,9 +330,9 @@ and `independent() == 31` under `java -Xverify:all`.
 The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
 `DOTTY_CLASSFILE_REQUIRE_JDK=1` and runs the source integration test on JDK 21.
 Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
-arbitrary classpath classes, mutable reference locals, sibling/unrelated
-reference joins without the exact expected-type proof, arrays, null, and
-branching constructor bodies unsupported.
+arbitrary classpath classes, mutable reference reads and assignments,
+sibling/unrelated reference joins without the exact expected-type proof,
+arrays, null, and branching constructor bodies unsupported.
 Reference operations remain restricted to exact planned classes and verified
 calls; ancestor joins are limited to the source-typed `If` result and validated
 same-unit hierarchy.
@@ -779,9 +787,9 @@ Without the JDK it still runs structural and negative checks and explicitly
 skips Java verification. Reference method results outside the exact current
 source class subset, reference call arguments outside the exact supported
 class subset, sibling joins without an explicit checked expected parent,
-unrelated or `Object`-only class joins, arrays, null, mutable reference locals,
-and branched constructors remain deferred. Ancestor-related and proven sibling
-source-typed `If` results are supported only within the validated same-unit
+unrelated or `Object`-only class joins, arrays, null, mutable reference reads
+and assignments, and branched constructors remain deferred. Ancestor-related
+and proven sibling source-typed `If` results are supported only within the validated same-unit
 hierarchy and still require JVM frame verification. The exact `Left`/`Right`
 join under a declared `Base` result is covered end to end: both branch orders
 emit a CP-resolved `Object(Base)` frame, fresh frontend sessions produce
