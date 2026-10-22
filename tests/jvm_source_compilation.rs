@@ -10938,7 +10938,7 @@ fn mutable_reference_issue_candidate_calls_dispatch_after_local_cfg_joins() {
                 "-Xverify:all",
                 "-classpath",
                 output_path,
-            "MutableReferenceCandidateHarness",
+                "MutableReferenceCandidateHarness",
             ])
             .output()
             .expect("start java verifier");
