@@ -574,6 +574,7 @@ fi
 for run in "${run_names[@]}"; do
     if ! (
         cd "$repo_root"
+        export DOTTY_AUDIT_TASTY_PARENT_PROVENANCE_OUTPUT="$tmp_dir/$run.tasty-parent-provenance.tsv"
         cargo test -p dotty-typer --test local_definition_audit --locked \
             pinned_scala39_local_definition_audit -- --ignored --nocapture
     ) >"$tmp_dir/$run.log" 2>&1; then
@@ -593,6 +594,19 @@ if [[ "$verify_determinism" == 1 ]] \
     && ! cmp -s "$tmp_dir/first.report" "$tmp_dir/second.report"; then
     diff -u "$tmp_dir/first.report" "$tmp_dir/second.report" >&2 || true
     printf 'normalized audit output was not deterministic\n' >&2
+    exit 1
+fi
+
+if [[ ! -s "$tmp_dir/first.tasty-parent-provenance.tsv" ]]; then
+    printf 'TASTy parent source provenance was not generated\n' >&2
+    exit 1
+fi
+if [[ "$verify_determinism" == 1 ]] \
+    && ! cmp -s "$tmp_dir/first.tasty-parent-provenance.tsv" \
+        "$tmp_dir/second.tasty-parent-provenance.tsv"; then
+    diff -u "$tmp_dir/first.tasty-parent-provenance.tsv" \
+        "$tmp_dir/second.tasty-parent-provenance.tsv" >&2 || true
+    printf 'TASTy parent source provenance was not deterministic\n' >&2
     exit 1
 fi
 
@@ -636,6 +650,8 @@ max_fanout="$(report_field max_distinct_classes_touched_by_one_request)"
 largest_root="$(awk -F'::' '/^    root=/ { sub(/^[[:space:]]*root=/, "", $1); print $1; exit }' "$tmp_dir/first.report")"
 
 mkdir -p "$(dirname -- "$output_path")"
+parent_provenance_path="${output_path%.md}-tasty-parent-source-provenance.tsv"
+cp "$tmp_dir/first.tasty-parent-provenance.tsv" "$parent_provenance_path"
 cohort_path="${output_path%.md}-deferred-cohorts.tsv"
 PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
     "$tmp_dir/first.report" --rows "$tmp_dir/cohorts.tsv" >"$tmp_dir/gate.txt"
