@@ -50,11 +50,13 @@ classes with the same `read` spelling and distinct `Int`/`Boolean` signatures;
 selection follows the receiver's class identity and preserves the matching
 result type.
 
-There is a current typer blocker for direct chaining: `new Counter(42, true).get()`
-fails in `SourceTyper` with `TyperError::UnstableSelectionPrefix`. The
-constructor application itself and a subsequent call on a local initialized
-from it type successfully. This issue records the blocker; it does not change
-selection stability rules or lower around the failed source typing step.
+Direct calls on an initialized application result are accepted by the source
+typer. Both `new Counter(42, true).get()` and `makeCounter(...).get()` retain
+their selected constructor/method identities and are covered by the source
+compilation regressions. The earlier `UnstableSelectionPrefix` observation
+applies to unstable mutable-field prefixes such as `current.get()`, not to a
+completed `new` or method application. See the
+[object graph construction audit](jvm-object-graph-construction.md).
 
 ## Source failure and access observations
 
@@ -67,7 +69,7 @@ planning:
 | `new C(true)` when `C` requires `Int` | Typer: `ApplicationArgumentTypeMismatch` |
 | `new C(1)` where `C` has a private primary constructor and the caller is another class | Currently accepted by the Typer; constructor candidate selection does not filter access |
 | Equal applicable constructor overloads | Typer: `AmbiguousConstructorApplication`; it does not guess |
-| Direct method call on `new C(...)` | Typer: `UnstableSelectionPrefix` before JVM planning |
+| Direct method call on a completed `new C(...)` result | Supported for the bounded planned class and method subset |
 
 When source typing has succeeded and a JVM plan reaches existing validation,
 the relevant typed backend failures include:
@@ -208,9 +210,13 @@ must run under JDK 21+ `java -Xverify:all`.
 | `val c = new C(args)`; discard or read `c` in a straight-line method | Supported with exact class identity, `astore`/`aload`, definite initialization, and category-one `pop` |
 | `val c = new C(args)` and later `c.method()` | Supported for an exact planned class and bounded primitive/Unit method signature |
 | Direct `new C(args).method()` | Supported after constructor initialization for the bounded method subset |
+| `new C(parameter)` or an exact immutable local constructor argument | Supported when the reference class and constructor are planned in the same unit |
+| `new C(this)` from a method of `C` | Supported for the exact current-class reference and planned constructor |
 | Method receiver when planned classes declare same-spelled methods | Selected method and receiver `SymbolId`/`TypeId` preserve the exact owner |
 | Private constructor call, wrong constructor arity/type, or missing external class metadata | Rejected at the originating Typer or backend stage; no artifact is published |
-| `var` reference local, reference method parameter/result, arbitrary classpath receiver | Unsupported; no descriptor fallback |
+| Mutable reference local, factory result, nested allocation, or null used as a constructor argument | Typer accepts the observed source forms; codegen currently reports `JvmConstructorCallArgumentTypeMismatch` |
+| Reference field initialized by `new` in the primary constructor | `UnsupportedJvmReferenceFieldInitializer` |
+| `var` reference local as a receiver, unsupported reference method descriptor, arbitrary classpath receiver | Unsupported; no descriptor fallback |
 | Generic, abstract, trait, external, secondary, or unplanned constructor | Unsupported for JVM emission |
 | Nested allocation or an uninitialized allocation crossing a branch/short-circuit CFG edge | Unsupported; initialized references can flow through the verifier-aware CFG |
 | Duplicate emitted internal class name | `JvmCompilationUnit` validation error |

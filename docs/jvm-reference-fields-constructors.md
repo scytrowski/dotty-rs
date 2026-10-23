@@ -19,8 +19,9 @@ visibility, types, and canonical `TermRef` targets.
 | `private[this] val own: Counter = initial` | Same semantic `Visibility::Private` and field ownership/type as `ref`; the source `VisibilitySyntax` retains the `this` qualifier. | Also a reference-field metadata/type blocker. Current field metadata additionally requires source visibility `PlainPrivate`, so the syntax distinction is not lost or silently accepted. |
 | `private var current: Counter = initial` | Mutable `Field` owned by `Holder`, private in the semantic model, exact `Counter` `TypeRef`, initialized from the exact constructor parameter symbol. Direct `current.get()` is rejected by the source typer with `UnstableSelectionPrefix`; direct reads and assignment in `value`/`replace` type. | Emits private mutable storage with exact `getfield`/`putfield` descriptors. A getter call result such as `value().get()` is supported; the mutable field itself is not a stable call prefix. |
 | `class Holder(initial: Counter)` | The source parameter symbol belongs to `Holder` and is private. The constructor-owned parameter is a distinct canonical `Parameter` symbol owned by `<init>`, public, and its constructor signature parameter type is a `TypeRef` to `Counter`. Both preserve the source range. | Planned source classes accept the exact reference descriptor and retain its canonical `SymbolId` through constructor metadata. |
-| `new Holder(c)` in `Client.wrap(c: Counter)` | The typed constructor selection is a `TermRef` to `Holder.<init>`, the result is `TypeRef` to `Holder`, and the argument is a `TermRef` to the exact canonical `Client.wrap` parameter. | Emits the exact `(LCounter;)V` constructor call. Nested allocation and arbitrary call expressions remain unsupported constructor arguments. |
-| `def read(): Int = ref.get()` | Types successfully. The selected method `TermRef` targets the canonical `Counter.get`; its qualifier is an `Ident` whose `TermRef` targets exactly `Holder.ref`. Result type is `Int`. | Source typing success is not JVM support: lowering cannot plan or emit a reference field load, and the reference field has no supported JVM field metadata. |
+| `new Holder(c)` in `Client.wrap(c: Counter)` | The typed constructor selection is a `TermRef` to `Holder.<init>`, the result is `TypeRef` to `Holder`, and the argument is a `TermRef` to the exact canonical `Client.wrap` parameter. | Emits the exact `(LCounter;)V` constructor call. |
+| `def read(): Int = ref.get()` | Types successfully. The selected method `TermRef` targets the canonical `Counter.get`; its qualifier is an `Ident` whose `TermRef` targets exactly `Holder.ref`. Result type is `Int`. | Supported when the exact field and target class are planned in the same unit; lowering emits the checked field read and virtual call. |
+| `private val inner: Counter = new Counter(seed)` | Types successfully as a constructor application using the exact constructor-owned `seed` parameter. | `UnsupportedJvmReferenceFieldInitializer`; reference field initializers currently accept only the bounded constructor-parameter copy form. |
 
 `Counter`, `Holder`, `MutableHolder`, and `Client` each retain a `ClassInfo`
 whose class identity matches its symbol, whose declarations scope is the scope
@@ -31,7 +32,7 @@ reference-field/constructor planning.
 `tests/fixtures/jvm/ReferenceHolder.scala` is a separate real-source backend
 fixture for the enabled exact class subset. It verifies immutable and mutable
 reference field metadata, constructor arguments, and calls such as
-`value().get()`. A direct application result whose type is a top-level class
+`ref.get()` and `value().get()`. A direct application result whose type is a top-level class
 declared in the current source batch may be a stable selection prefix. This
 does not make a mutable reference field stable: `current.get()` remains an
 `UnstableSelectionPrefix` negative case. Branch results and loop frames are
@@ -74,9 +75,11 @@ reference before the transition.
 
 The current constructor initializer planner accepts a bounded expression
 subset over primitive values and fields already initialized in source order.
-Reference RHS support must preserve this ordering and reject forward/self-field
-reads. It must also reject `this` escape, arbitrary `new` expressions in field
-initializers, branches in `<init>`, and calls until their initialization and
+Reference RHS support currently allows an exact constructor parameter copy;
+`new Counter(seed)` remains rejected with
+`UnsupportedJvmReferenceFieldInitializer`. Future reference RHS forms must
+preserve source ordering and reject forward/self-field reads. They must also
+reject `this` escape and branches in `<init>` until initialization and
 exception behavior have a verifier-backed plan. A failed lowering must leave
 semantic and plan state valid.
 
@@ -108,10 +111,13 @@ reference calls and tracks allocation-site initialization for a bounded
 straight-line `new; dup; arguments; invokespecial` shape. It has a single
 `pending_allocation` slot and rejects a second `new` before the first
 constructor completes. The supported `new Holder(existingRef)` form uses one
-exact reference parameter. Nested `new Holder(new Counter(...))` needs nested
-allocation tracking and is unsupported; `new Holder(factory())` needs an exact
-planned reference-return/argument composition and is unsupported. Neither case
-should be accepted through category-only linear analysis.
+exact reference parameter. Nested `new Holder(new Counter(...))` and
+`new Holder(factory())` currently reach codegen and fail with
+`JvmConstructorCallArgumentTypeMismatch`; both need an initialized exact
+reference argument contract, and the nested form additionally needs multiple
+live allocation identities. Category-only linear analysis cannot establish
+either proof. See the [object graph construction audit](jvm-object-graph-construction.md)
+for source observer evidence and the full state contract.
 
 The class-aware linear analyzer can validate straight-line exact descriptors,
 but cannot prove allocation-site alias transitions, branch joins, or
@@ -125,7 +131,7 @@ constructor is verifier-safe.
 | Stage | Current responsibility / boundary |
 | --- | --- |
 | `dotty-core` | Owns canonical symbols, `ClassInfo`, source scopes, types, and AST identity. No JVM lowering policy belongs here. |
-| `dotty-typer` | Accepts immutable `ref.get()`; rejects `current.get()` as `UnstableSelectionPrefix`. It does not emit bytecode. |
+| `dotty-typer` | Accepts immutable `ref.get()` and completed call-result receivers; rejects `current.get()` as `UnstableSelectionPrefix`. It does not emit bytecode. |
 | `dotty-jvm` | Owns source visibility checks, exact field/constructor descriptors, and field-initializer plans. These plans preserve canonical symbol identities and reject unsupported source shapes. |
 | `dotty-classfile` | Owns JVM descriptors, constant-pool reference validation, exact verifier values, allocation-site tracking, and stack-map frames. It must not depend on Scala symbols. |
 

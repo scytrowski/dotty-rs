@@ -352,3 +352,6 @@ This evidence does not broaden the verifier/source contract: nested allocation
 arguments, arbitrary effectful pre-super evaluation, branched constructors,
 qualified/trait-qualified `super`, explicit grandparent-qualified super,
 general reference LUB inference, and Scala ABI/TASTy emission remain deferred.
+The two-live-allocation state required by nested constructor arguments, and the
+Scala 3.9 source evidence for that boundary, are detailed in the
+[object graph construction audit](jvm-object-graph-construction.md).
