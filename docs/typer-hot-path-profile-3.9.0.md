@@ -1,12 +1,12 @@
 # Typer audit hot-path baseline (Scala 3.9.0)
 
-This is a bounded, serial profile for issue #1482, not a full-corpus estimate and not a measurement of successful Scala compilation. It measures the Typer audit's first-blocker method attempts and the audit postprocessing performed for the selected files. No language behavior or production code changed.
+This is a bounded, serial profile for issue #1482. It measures the audit's first-blocker root-method attempts and its separate match-selector/case-typing pass on four selected files. It is not a full-corpus estimate or a measurement of successful Scala compilation. No language behavior or production code changed.
 
 ## Reproduction
 
-The measured dotty-rs revision is `64e349ba2dc7df3f8b2509b5b6b455275daec963`. The Scala sources are pinned to `777528f19a58e794c9954a42f433373472ec57f8`; the manifest is [`typer-hot-path-profile-manifest-3.9.0.tsv`](typer-hot-path-profile-manifest-3.9.0.tsv). Runtime artifacts are Scala 3.9.0 and the JDK is Temurin 21.0.8. The host was an AMD Ryzen 9 7940HS with 29.2 GiB RAM. Rust/Cargo were 1.98.1; Cargo's `test` profile was used.
+The measured dotty-rs revision is `4a5f205b60074b678ee9b9eef80d3e7d757befd9`. Scala sources are pinned to `777528f19a58e794c9954a42f433373472ec57f8`; the manifest is [`typer-hot-path-profile-manifest-3.9.0.tsv`](typer-hot-path-profile-manifest-3.9.0.tsv). Runtime artifacts are Scala 3.9.0 and Temurin 21.0.8. The host was an AMD Ryzen 9 7940HS with 29.2 GiB RAM; Rust/Cargo were 1.98.1. Cargo and test concurrency were fixed at one.
 
-The worktree and target cache were warm. Before every sample, the runner read all selected Scala inputs, pinned Scala JARs, and JDK jmods, then checked 122,241,024 resident input bytes with `fincore`. Both detailed repetitions used `CARGO_BUILD_JOBS=1` and `RUST_TEST_THREADS=1`.
+The profile runner builds the exact `local_definition_audit` integration-test binary with `cargo test ... --no-run` before starting measured samples. It records prebuild duration/status in `prebuild.tsv`; each measured sample is rejected if Cargo output contains `Compiling`. Both detailed repetitions and the timing-only sample used the warm Cargo target cache. Input page-cache warmup read the selected Scala sources, pinned Scala JARs, and JDK jmods, with 122,241,024 resident bytes recorded after setup.
 
 ```sh
 SCALA39_ROOT=/path/to/scala39-source \
@@ -31,46 +31,39 @@ python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
   --output-dir target/issue-1482-timing-only
 ```
 
-Each sample runs `cargo test -p dotty-typer --test local_definition_audit --locked pinned_scala39_local_definition_audit -- --ignored --nocapture`. Detailed and timing-only profiles were run from the same dotty-rs commit and binary. The script rejected any difference in selected files, root-method identities, method outcomes, match-probe identities, or match-probe outcomes. Raw verbose logs remain under `target/issue-1482-release-{detailed,timing-only}/run-*.log`; the checked-in TSVs are the compact machine-readable record.
+The measured command is `cargo test -p dotty-typer --test local_definition_audit --locked pinned_scala39_local_definition_audit -- --ignored --nocapture`. The exact measured binary is prebuilt outside the sample interval. Timing-only and detailed runs were checked for matching selected files, method identities/outcomes, and match-probe identities/outcomes. Compact checked-in records are in [`typer-hot-path-profile-3.9.0/`](typer-hot-path-profile-3.9.0/); raw logs and the captured multi-megabyte detailed output remain under ignored `target/issue-1482-review-{detailed,timing-only}/` paths.
 
 ## Measurements
 
-The manifest selected four files. Two stable root-method trees were attempted per non-empty file (six roots per run), and one supported match probe was selected per non-empty file (three probes per run). `compileTimeOnly.scala` was the light control and had no local definitions. The exact method identities, source lines, outcomes, match probes, and phase data are in [`typer-hot-path-profile-3.9.0/`](typer-hot-path-profile-3.9.0/).
+The manifest selected four files, six root-method observations per run, and three match probes per run. `compileTimeOnly.scala` was the light control and had no local definitions. The detailed samples took 12,191 ms and 12,184 ms wall time (mean 12,187.5 ms); audit-internal wall time was 12,079 ms and 12,069 ms. The timing-only sample took 12,083 ms wall time and 12,018 ms audit-internal time. All measured runs used a warm Cargo cache and had no rebuild. The exact prebuilds took 32 ms (detailed) and 31 ms (timing-only), outside their measured intervals.
 
-Detailed runs took 13,392 ms and 12,078 ms wall time (mean 12,735 ms); audit-internal wall time was 12,311 ms and 12,011 ms. Timing-only took 11,981 ms wall time and 11,916 ms audit-internal time. This single timing-only sample was 754 ms (5.9%) faster than the detailed mean. Treat the delta as an observer-effect estimate, not a stable speedup claim: only one timing-only repetition was measured, and it skips both `AuditResolver` collection and classloader module/load profiling.
+Detailed samples emitted 3,763,527 log bytes each; timing-only emitted 8,864 bytes. Reading/saving the captured detailed log took 2/1 ms per sample. Child CPU averaged 10.75 s user and 1.35 s system in detailed mode, versus 10.69 s and 1.33 s in timing-only. Maximum sampled aggregate process-tree RSS was 109.3 MiB detailed and 99.2 MiB timing-only. This is one timing-only sample, so the difference is not a stable speedup estimate. RSS sums per-process resident sets and may double-count shared mappings; 100 ms sampling may miss shorter peaks.
 
-The detailed samples emitted 3,758,534 and 3,758,442 log bytes; timing-only emitted 8,196 bytes. Reading the detailed logs took 1–3 ms and saving them took 1–2 ms; timing-only read/write time rounded to 0 ms. Test-side diagnostic emission remains inside the measured process interval. Child CPU averaged 11.28 s user and 1.53 s system in detailed mode, versus 10.52 s and 1.39 s for timing-only. Maximum sampled aggregate process-tree RSS was 388.2 MiB detailed and 98.2 MiB timing-only; the detailed peak occurred in only one run and should be treated as a single-sample peak rather than a repeatable memory estimate. RSS is the sum of per-process resident sets, so shared mappings may be counted more than once; 100 ms sampling may miss shorter peaks. RSS is the sum of per-process resident sets, so shared mappings may be counted more than once; 100 ms sampling may miss a shorter peak.
+Across the two detailed repetitions, root-method typing took 11,950 ms total and the independent match pass took 11,581 ms total. Parse took 348 ms; true audit postprocessing took 26 ms. Thus the previously reported ~11.7 s “postprocess” was mostly match typing mislabeled under that phase; it is now independently timed and attributed. The match pass spent 11,511,424 µs in delegated member lookups across the two runs, while its measured AuditResolver wrapper-exclusive time was 47,050 µs. It made 5,434 member calls and 10,066 module-identity calls. Match-pass resolver and classpath rows are separate from root-method resolver rows in [`match-resolver.tsv`](typer-hot-path-profile-3.9.0/match-resolver.tsv) and [`match-resolver-wrappers.tsv`](typer-hot-path-profile-3.9.0/match-resolver-wrappers.tsv).
 
-Phase totals across the two detailed repetitions were 12,059 ms for method typing and 11,728 ms for post-typing audit accounting; parse took 348 ms, inventory 23 ms, namer 2 ms, and Typer setup 2 ms. Classpath/JDK setup took 64–66 ms per run. Cargo/test startup, process sampling, and log emission account for the remainder shown in `run-timings.tsv`.
+The first-blocker root methods remain dominated by delegated member resolution:
 
-## Three measured hot paths
+| Root method | Mean attempt | Member calls | Delegated member time | First blocker |
+| --- | ---: | ---: | ---: | --- |
+| `compiler/src/dotty/tools/dotc/ast/tpd.scala:262` `tpd$.DefDef` (tree 1790) | 2,063.5 ms | 470 | 2,056.7 ms | `TypeNameNotFound` |
+| `compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala:42` `GenericSignatures$.mayNeedSignature` (tree 204) | 1,874.0 ms | 570 | 1,864.5 ms | `TypeNameNotFound` |
+| `compiler/src/dotty/tools/dotc/core/Types.scala:284` `Types$.Type.derivesFrom` (tree 1031) | 1,866.5 ms | 1,687 | 1,843.7 ms | `MemberLookup` |
 
-These are ranked by mean inclusive time per method attempt. All attempts stop at their first typer blocker; none completed successfully. Delegated member-resolution time is nested within each method time and must not be added again.
+The delegated resolver duration is nested inside method time and must not be added again. Across these measured roots, AuditResolver wrapper-exclusive member lookup was about 47 ms total, so wrapper bookkeeping does not explain the multi-second attempts. The separate match pass also spends most of its observed time in delegated member lookup. Classpath `find_class` time was about 1.19 s across two match passes, and the classpath API reports logical resources/bytes rather than physical archive reads or decompressions.
 
-| Rank | Root method | Mean attempt | Member calls | Delegated member time | First blocker |
-| ---: | --- | ---: | ---: | ---: | --- |
-| 1 | `compiler/src/dotty/tools/dotc/ast/tpd.scala:262` `tpd$.DefDef` (tree 1790) | 2,074.5 ms | 470 | 2,067.2 ms | `TypeNameNotFound` |
-| 2 | `compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala:42` `GenericSignatures$.mayNeedSignature` (tree 204) | 1,896.0 ms | 570 | 1,885.4 ms | `TypeNameNotFound` |
-| 3 | `compiler/src/dotty/tools/dotc/core/Types.scala:284` `Types$.Type.derivesFrom` (tree 1031) | 1,886.0 ms | 1,687 | 1,856.2 ms | `MemberLookup` |
-
-Across the bounded sample, delegated `resolve_member` took 11,939 ms across the two detailed runs, against 12,059 ms total method-typing time. The measured `AuditResolver` exclusive member-lookup work was 65.7 ms across both runs (about 0.47% of delegated member time). Rollbacks totaled 772 calls; they covered 13,328 module-operation and 6,506 member observations. Checkpoint and rollback times were each below 1 ms per run.
-
-**Follow-up proposal:** focus the next bounded investigation on `ClasspathSymbolResolver::resolve_member` and `resolve_member_inner` in `crates/dotty-classloader/src/resolver.rs` (around lines 1351 and 797 at the measured revision). Split `prefix_target`, `resolve_target`, scope lookup, and class/module fallback time for the three roots above. Count repeated request keys before considering reuse; any candidate cache must be request-local to the current semantic store/loading session. The current data does not justify a cross-session semantic cache or a speedup estimate.
-
-Candidate optimizations to evaluate within that follow-up are: exact repeated prefix/name member-request reuse for `tpd$.DefDef`; exact prefix-target reuse for `GenericSignatures$.mayNeedSignature`; and repeated hierarchy/member-query reuse for `Types$.Type.derivesFrom`. These remain hypotheses until the resolver-internal profile demonstrates duplicate keys and confirms rollback-safe ownership. This issue does not claim that any candidate should be implemented.
+**Follow-up proposal:** profile resolver-internal work in `ClasspathSymbolResolver::resolve_member` / `resolve_member_inner` in `crates/dotty-classloader/src/resolver.rs`, separating prefix/package traversal, classpath lookup, and member selection for the measured roots and match pass. Count repeated request keys before considering reuse. These data do not justify a cross-session semantic cache or claim any optimization speedup.
 
 ## Attribution limits
 
-- Classpath counters cover the selected-file audit, including its separate match-probe pass; they are not assigned to individual method roots. They report logical `ClassResource` responses: per detailed run there were 15,480 positive and 81 negative inner lookups, 7,549 negative-cache hits, and 543,524,646 returned logical bytes. Those byte counts include repeated responses. The classloader API does not expose physical JAR reads or decompression counts, so they are not inferred.
-- Most resolver time is delegated `resolve_member`; class completion, TASTy completion, and module completion were not called in these selected attempts. Classpath I/O is not the dominant measured portion: `find_class` wall time was about 1.32 s per run.
-- The timing-only delta combines the removal of detailed `AuditResolver` observations and classloader load/module profiling. The wrapper table separates delegated resolver time from wrapper-exclusive work in detailed mode, but the current API does not split the classloader module-profile cost into subphases.
-- `postprocess_ms` is measured separately from per-method typing, but this issue does not yet attribute its time to individual accounting functions.
-- This four-file sample is intentionally bounded. It is not a full-corpus runtime estimate and makes no claim about successful compilation performance.
+- This four-file sample is intentionally bounded. It does not estimate full-corpus runtime or successful compilation performance.
+- Detailed resolver and classloader instrumentation produces multi-megabyte diagnostic output; timing-only omits those counters by design. The single timing-only comparison is an observer-effect estimate, not a performance claim.
+- Classpath counters report logical resource responses and returned bytes, not physical JAR reads/decompressions. Nested class/TASTy loading remains inclusive inside resolver calls.
+- The current implementation does not split classfile parsing, TASTy decoding, shell creation, and semantic completion into disjoint CPU intervals. Do not add inclusive timers together or infer safe cross-store caching from reuse counts.
 
 ## Checks
 
 - `cargo fmt --all -- --check`
 - `CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 cargo test -p dotty-typer --test local_definition_audit --locked`
 - `python3 -m unittest discover -s tools/typer-classpath-corpus-audit -p 'test_*.py'`
-- Both pinned-Scala profile variants completed and passed identity/outcome comparison.
+- Both pinned-Scala profile variants completed; exact identities and outcomes matched, and neither measured sample rebuilt the binary.
 - `git diff --check`
