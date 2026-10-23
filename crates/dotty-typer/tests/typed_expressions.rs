@@ -12,6 +12,7 @@ use dotty_typer::{ExpressionContext, SourceTyper, TyperError};
 
 const NULL_REFERENCE_IDENTITY_SOURCE: &str =
     include_str!("../../../tests/fixtures/jvm/NullReferenceIdentity.scala");
+const NULL_TYPING_SOURCE: &str = include_str!("fixtures/null-typing/NullTyping.scala");
 
 fn class_definition(
     parsed: &dotty_parser::ParseResult,
@@ -115,6 +116,70 @@ fn types_a_small_source_program_with_no_resolver_or_jdk_fixture() {
 }
 
 #[test]
+fn source_null_literal_uses_the_canonical_null_type() {
+    let source_text = NULL_TYPING_SOURCE;
+    let source = SourceId::from_index(1469);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "NullTyping.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let (method, result_tpt, rhs) = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "exact").then(|| {
+                (
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.tpt,
+                    definition.rhs.unwrap(),
+                )
+            })
+        })
+        .expect("fixture should contain the explicitly typed Null result");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+
+    let context = typer.expression_context_for(method).unwrap();
+    assert_eq!(
+        typer
+            .type_of_tpt(result_tpt, index.declaration_context_of(method).unwrap())
+            .unwrap(),
+        definitions.null_type
+    );
+    let typed_rhs = typer.type_expression(rhs, context).unwrap();
+    assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.null_type);
+    assert!(matches!(
+        typer.typed_ast().get(typed_rhs).kind,
+        TreeKind::Literal(_)
+    ));
+}
+
+#[test]
 fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
     let source_text = NULL_REFERENCE_IDENTITY_SOURCE;
     let source = SourceId::from_index(1468);
@@ -188,8 +253,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
                 if typer.store().names.resolve(name.text()) == "eq" => {}
             ("different", TyperError::MemberNotFound { name, .. })
                 if typer.store().names.resolve(name.text()) == "ne" => {}
-            ("choose", TyperError::NullLiteralTypingDeferred { source: actual, .. })
-                if actual == source => {}
+            ("choose", TyperError::IfBranchJoinUnsupported { .. }) => {}
             ("readOrDefault", TyperError::MemberNotFound { name, .. })
                 if typer.store().names.resolve(name.text()) == "eq" => {}
             (method, error) => panic!("unexpected first typing failure for {method}: {error:?}"),

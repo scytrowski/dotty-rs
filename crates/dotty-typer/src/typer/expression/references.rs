@@ -479,10 +479,7 @@ impl SourceTyper<'_> {
                     tree_index,
                 })
             }
-            Constant::Null => Err(TyperError::NullLiteralTypingDeferred {
-                source: self.source,
-                tree_index,
-            }),
+            Constant::Null => Ok(self.definitions.null_type),
             Constant::Class(_) => Err(TyperError::UnsupportedExpression {
                 source: self.source,
                 tree_index,
@@ -541,11 +538,14 @@ impl SourceTyper<'_> {
         literal: dotty_core::ast::Literal,
         position: Option<SourceSpan>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        self.literal_type(&literal.value, tree.index())?;
-        let ty = self
-            .store
-            .types
-            .alloc(Type::Constant(literal.value.clone()));
+        let widened_type = self.literal_type(&literal.value, tree.index())?;
+        let ty = if matches!(literal.value, dotty_core::Constant::Null) {
+            widened_type
+        } else {
+            self.store
+                .types
+                .alloc(Type::Constant(literal.value.clone()))
+        };
         Ok(
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).literal(
                 literal.value,
