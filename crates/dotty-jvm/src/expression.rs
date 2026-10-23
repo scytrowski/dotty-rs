@@ -778,6 +778,16 @@ fn emit_expression(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
+    emit_expression_with_identity_context(context, tree_id, false, code, depth)
+}
+
+fn emit_expression_with_identity_context(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    identity_reference_context: bool,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
     let expected_type = context.expected_expression_type.take();
     context.visit(tree_id, depth)?;
     let shape = {
@@ -800,7 +810,13 @@ fn emit_expression(
                 &context.tree(tree_id)?.kind,
                 TreeKind::Literal(literal) if literal.value == Constant::Null
             ) {
-                emit_null_literal(context, tree_id, expected_type, code)
+                emit_null_literal(
+                    context,
+                    tree_id,
+                    expected_type,
+                    identity_reference_context,
+                    code,
+                )
             } else {
                 lower_leaf(context, tree_id, code)
             }
@@ -815,8 +831,22 @@ fn emit_expression(
                 emit_boolean_not(context, tree_id, code, depth)
             }
         }
-        ExpressionShape::Block => emit_block(context, tree_id, expected_type, code, depth),
-        ExpressionShape::If => emit_if(context, tree_id, expected_type, code, depth),
+        ExpressionShape::Block => emit_block(
+            context,
+            tree_id,
+            expected_type,
+            identity_reference_context,
+            code,
+            depth,
+        ),
+        ExpressionShape::If => emit_if(
+            context,
+            tree_id,
+            expected_type,
+            identity_reference_context,
+            code,
+            depth,
+        ),
         ExpressionShape::While => emit_while(context, tree_id, code, depth),
         ExpressionShape::Return => emit_return(context, tree_id, code, depth),
         ExpressionShape::Apply => emit_apply(context, tree_id, code, depth),
@@ -832,6 +862,7 @@ fn emit_null_literal(
     context: &mut JvmLoweringContext<'_>,
     tree: TreeId<Typed>,
     expected_type: Option<TypeId>,
+    identity_reference_context: bool,
     code: &mut CodeBuilder,
 ) -> Result<Flow, JvmCodegenError> {
     let tree_type = context.tree(tree)?.ty;
@@ -840,6 +871,17 @@ fn emit_null_literal(
             tree,
             node: "null literal without the canonical source Null type",
         });
+    }
+    if identity_reference_context {
+        if context.call_context.is_none() {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree,
+                node: "identity null literal outside a validated planned reference context",
+            });
+        }
+        code.aconst_null()
+            .map_err(|error| JvmCodegenError::CodeBuilder { tree, error })?;
+        return Ok(Flow::Null);
     }
     let Some(expected_type) = expected_type else {
         return Err(JvmCodegenError::UnsupportedTypedExpression {
@@ -911,6 +953,26 @@ fn emit_expression_with_expected(
 ) -> Result<Flow, JvmCodegenError> {
     let previous = std::mem::replace(&mut context.expected_expression_type, expected_type);
     let result = emit_expression(context, tree, code, depth);
+    context.expected_expression_type = previous;
+    result
+}
+
+fn emit_expression_with_expected_and_identity(
+    context: &mut JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    expected_type: Option<TypeId>,
+    identity_reference_context: bool,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let previous = std::mem::replace(&mut context.expected_expression_type, expected_type);
+    let result = emit_expression_with_identity_context(
+        context,
+        tree,
+        identity_reference_context,
+        code,
+        depth,
+    );
     context.expected_expression_type = previous;
     result
 }
@@ -1445,6 +1507,7 @@ fn emit_block(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
     expected_type: Option<TypeId>,
+    identity_reference_context: bool,
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
@@ -1487,8 +1550,20 @@ fn emit_block(
     }
 
     let expression_type = context.tree(expr)?.ty;
-    let block_expected_type = expected_type.or(Some(declared_type));
-    let flow = emit_expression_with_expected(context, expr, block_expected_type, code, depth + 1)?;
+    let block_expected_type =
+        if identity_reference_context && declared_type == context.definitions.null_type {
+            None
+        } else {
+            expected_type.or(Some(declared_type))
+        };
+    let flow = emit_expression_with_expected_and_identity(
+        context,
+        expr,
+        block_expected_type,
+        identity_reference_context,
+        code,
+        depth + 1,
+    )?;
     match flow {
         Flow::Value(value) => {
             let block_matches = block_types_match(
@@ -1528,21 +1603,29 @@ fn emit_block(
                 expression_type,
                 block_expected_type,
             )?;
-            let expected = contextual_block_value_type(
-                context,
-                tree_id,
-                declared_type,
-                block_expected_type,
-                Some(expr),
-            )?;
-            if block_matches && matches!(expected, Some(JvmType::Reference(_))) {
-                Ok(Flow::Value(expected.expect("checked Some above")))
+            if identity_reference_context
+                && declared_type == context.definitions.null_type
+                && expression_type == context.definitions.null_type
+                && block_matches
+            {
+                Ok(Flow::Null)
             } else {
-                Err(JvmCodegenError::BlockResultTypeMismatch {
-                    tree: tree_id,
-                    declared: declared_type,
-                    found: public_flow(flow),
-                })
+                let expected = contextual_block_value_type(
+                    context,
+                    tree_id,
+                    declared_type,
+                    block_expected_type,
+                    Some(expr),
+                )?;
+                if block_matches && matches!(expected, Some(JvmType::Reference(_))) {
+                    Ok(Flow::Value(expected.expect("checked Some above")))
+                } else {
+                    Err(JvmCodegenError::BlockResultTypeMismatch {
+                        tree: tree_id,
+                        declared: declared_type,
+                        found: public_flow(flow),
+                    })
+                }
             }
         }
         Flow::Unit
@@ -1867,6 +1950,22 @@ fn emit_apply(
 
     if is_direct_super_selection(context, function)? {
         return emit_direct_super_call(context, tree_id, function, &arguments, code, depth);
+    }
+
+    let reference_identity = crate::resolve_reference_identity_operator(
+        context.store,
+        context.typed_ast,
+        tree_id,
+        context.definitions,
+    )
+    .map_err(|error| JvmCodegenError::ReferenceIdentityResolution {
+        tree: tree_id,
+        error,
+    })?;
+    if let Some(operator) = reference_identity {
+        return emit_reference_identity(
+            context, tree_id, function, &arguments, operator, code, depth,
+        );
     }
 
     let intrinsic = crate::resolve_boolean_intrinsic(
@@ -2632,6 +2731,96 @@ fn emit_boolean_intrinsic(
     Ok(Flow::Value(JvmType::Boolean))
 }
 
+fn emit_reference_identity(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    function: TreeId<Typed>,
+    arguments: &[TreeId<Typed>],
+    operator: crate::JvmReferenceIdentityOperator,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let receiver = match &context.tree(function)?.kind {
+        TreeKind::Select(select) => select.qualifier,
+        _ => {
+            return Err(JvmCodegenError::ReferenceIdentityResolution {
+                tree: tree_id,
+                error: crate::JvmReferenceIdentityError::UnsupportedFunctionShape {
+                    tree: function,
+                },
+            });
+        }
+    };
+    let [argument] = arguments else {
+        return Err(JvmCodegenError::ReferenceIdentityResolution {
+            tree: tree_id,
+            error: crate::JvmReferenceIdentityError::WrongArity {
+                tree: tree_id,
+                found: arguments.len(),
+            },
+        });
+    };
+
+    for (index, operand) in [receiver, *argument].into_iter().enumerate() {
+        let flow = emit_identity_operand(context, operand, code, depth + 1)?;
+        if !matches!(flow, Flow::Null | Flow::Value(JvmType::Reference(_))) {
+            return Err(JvmCodegenError::ReferenceIdentityOperandFlowMismatch {
+                tree: tree_id,
+                operand,
+                index,
+                found: public_flow(flow),
+            });
+        }
+    }
+
+    let truthy = code
+        .new_label()
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    let end = code
+        .new_label()
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    match operator {
+        crate::JvmReferenceIdentityOperator::Eq => code.if_acmpeq(truthy.clone()),
+        crate::JvmReferenceIdentityOperator::Ne => code.if_acmpne(truthy.clone()),
+    }
+    .map_err(|error| JvmCodegenError::CodeBuilder {
+        tree: tree_id,
+        error,
+    })?;
+    code.iconst(0)
+        .and_then(|code| code.goto(end.clone()))
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    code.mark(truthy)
+        .and_then(|code| code.iconst(1))
+        .and_then(|code| code.mark(end))
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    Ok(Flow::Value(JvmType::Boolean))
+}
+
+fn emit_identity_operand(
+    context: &mut JvmLoweringContext<'_>,
+    operand: TreeId<Typed>,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    // The resolved canonical AnyRef.eq/ne method supplies the checked identity
+    // context. Nested Blocks and Ifs carry it only along their value branches;
+    // the final lowered flow still has to be a planned reference or Null.
+    emit_expression_with_identity_context(context, operand, true, code, depth)
+}
+
 fn emit_int_intrinsic(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
@@ -2745,16 +2934,25 @@ fn emit_if(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
     expected_type: Option<TypeId>,
+    identity_reference_context: bool,
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    emit_if_body(context, tree_id, expected_type, code, depth)
+    emit_if_body(
+        context,
+        tree_id,
+        expected_type,
+        identity_reference_context,
+        code,
+        depth,
+    )
 }
 
 fn emit_if_body(
     context: &mut JvmLoweringContext<'_>,
     tree_id: TreeId<Typed>,
     expected_type: Option<TypeId>,
+    identity_reference_context: bool,
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
@@ -2797,8 +2995,14 @@ fn emit_if_body(
             error,
         })?;
     let initialized_before_branches = context.initialized_locals.clone();
-    let then_flow =
-        emit_expression_with_expected(context, then_branch, expected_type, code, depth + 1)?;
+    let then_flow = emit_expression_with_expected_and_identity(
+        context,
+        then_branch,
+        expected_type,
+        identity_reference_context,
+        code,
+        depth + 1,
+    )?;
     let initialized_then = context.initialized_locals.clone();
     let join_label = if matches!(then_flow, Flow::Value(_) | Flow::Null | Flow::Unit) {
         let join_label = code
@@ -2823,8 +3027,14 @@ fn emit_if_body(
             error,
         })?;
     context.initialized_locals = initialized_before_branches.clone();
-    let else_flow =
-        emit_expression_with_expected(context, else_branch, expected_type, code, depth + 1)?;
+    let else_flow = emit_expression_with_expected_and_identity(
+        context,
+        else_branch,
+        expected_type,
+        identity_reference_context,
+        code,
+        depth + 1,
+    )?;
     let initialized_else = context.initialized_locals.clone();
     let flow = merge_if_flows(
         context,
@@ -2833,6 +3043,7 @@ fn emit_if_body(
         (then_branch, then_flow),
         (else_branch, else_flow),
         expected_type,
+        identity_reference_context,
     )?;
     context.initialized_locals = match (then_flow, else_flow) {
         (Flow::Value(_) | Flow::Null | Flow::Unit, Flow::Value(_) | Flow::Null | Flow::Unit) => {
@@ -2973,6 +3184,7 @@ fn merge_if_flows(
     then_branch: (TreeId<Typed>, Flow),
     else_branch: (TreeId<Typed>, Flow),
     expected_type: Option<TypeId>,
+    identity_reference_context: bool,
 ) -> Result<Flow, JvmCodegenError> {
     let (then_tree, then_flow) = then_branch;
     let (else_tree, else_flow) = else_branch;
@@ -3061,7 +3273,10 @@ fn merge_if_flows(
         (Flow::Null, Flow::Diverges) | (Flow::Diverges, Flow::Null) => Flow::Null,
         (Flow::Null, Flow::Null) => Flow::Null,
         (Flow::Null, Flow::Value(value)) | (Flow::Value(value), Flow::Null) => {
-            let Some(expected @ JvmType::Reference(_)) = expected else {
+            let Some(expected @ JvmType::Reference(_)) = expected.or_else(|| {
+                (identity_reference_context && matches!(value, JvmType::Reference(_)))
+                    .then_some(value)
+            }) else {
                 return Err(JvmCodegenError::IfResultTypeMismatch {
                     tree,
                     expected,
@@ -3109,6 +3324,7 @@ fn merge_if_flows(
         Flow::Null if matches!(expected, Some(JvmType::Reference(_))) => {
             Ok(Flow::Value(expected.expect("checked Some above")))
         }
+        Flow::Null if identity_reference_context => Ok(Flow::Null),
         Flow::Unit if is_unit_type(context.store, result_ty, context.definitions) => Ok(Flow::Unit),
         Flow::Diverges => Ok(Flow::Diverges),
         found => Err(JvmCodegenError::IfResultTypeMismatch {
