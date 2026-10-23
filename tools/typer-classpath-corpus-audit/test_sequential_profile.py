@@ -106,6 +106,52 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["load_roots"][0]["root"], "scala/Function1")
         self.assertEqual(parsed["load_roots"][0]["distinct_classes"], 7)
 
+    def test_new_rollback_producer_fields_reach_report_with_exact_counts(self):
+        log = """AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=10
+AUDIT_ROLLBACK count=350 checkpoint_count=727 checkpoint_max_depth=0 operation_appended=1444 member_appended=722 operation_rollback_coverage=1444 member_rollback_coverage=722 operation_rows_scanned=1444 member_rows_scanned=722 operation_status_changes=1444 member_status_changes=0
+AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=10 timing_mode=full
+"""
+        run = sequential_profile.parse_run(log)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sequential_profile.write_report(
+                Path(temporary), [run], [10], ["warm"],
+                [{"mode": "warm-read-through", "before_bytes": 0}], [], "0" * 40,
+                Path(temporary), Path(temporary), "21.0.8", Path(temporary), 0,
+            )
+
+            rollback = (Path(temporary) / "rollback.tsv").read_text()
+
+        self.assertEqual(
+            rollback,
+            "run\tcount\tcheckpoint_count\tcheckpoint_max_depth\toperation_appended\tmember_appended\t"
+            "operation_observations\tmember_observations\toperation_rows_scanned\tmember_rows_scanned\t"
+            "operation_status_changes\tmember_status_changes\n"
+            "1\t350\t727\t0\t1444\t722\t1444\t722\t1444\t722\t1444\t0\n",
+        )
+
+    def test_legacy_rollback_producer_marks_new_metrics_unavailable(self):
+        log = """AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=10
+AUDIT_ROLLBACK count=350 operation_observations=1444 member_observations=722
+AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=10 timing_mode=full
+"""
+        run = sequential_profile.parse_run(log)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sequential_profile.write_report(
+                Path(temporary), [run], [10], ["warm"],
+                [{"mode": "warm-read-through", "before_bytes": 0}], [], "0" * 40,
+                Path(temporary), Path(temporary), "21.0.8", Path(temporary), 0,
+            )
+
+            rollback = (Path(temporary) / "rollback.tsv").read_text().splitlines()
+
+        self.assertEqual(
+            rollback[1],
+            "1\t350\tnot_captured\tnot_captured\tnot_captured\tnot_captured\t"
+            "1444\t722\tnot_captured\tnot_captured\tnot_captured\tnot_captured",
+        )
+
     def test_cheap_match_counters_sum_all_files_independent_of_order(self):
         blocks = [
             "AUDIT_CHEAP_RESOLVER scope=match operation=member_lookup calls=560 wall_us=1000 delegated_us=900 exclusive_us=100",

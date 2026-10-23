@@ -546,11 +546,28 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         for operation, values in sorted(run.get("wrappers", {}).items())
     ]
     (out_dir / "audit-wrapper.tsv").write_text("\n".join(wrapper_rows) + "\n", encoding="utf-8")
-    rollback_rows = ["run\tcount\toperation_observations\tmember_observations"] + [
-        f"{run_index}\t{run.get('rollback', {}).get('count', 0)}\t"
-        f"{run.get('rollback', {}).get('operation_observations', 0)}\t{run.get('rollback', {}).get('member_observations', 0)}"
-        for run_index, run in enumerate(runs, 1)
+    rollback_rows = [
+        "run\tcount\tcheckpoint_count\tcheckpoint_max_depth\toperation_appended\tmember_appended\t"
+        "operation_observations\tmember_observations\toperation_rows_scanned\tmember_rows_scanned\t"
+        "operation_status_changes\tmember_status_changes"
     ]
+    for run_index, run in enumerate(runs, 1):
+        rollback = run.get("rollback", {})
+        # Keep the established TSV observation column names for downstream consumers,
+        # while accepting both the old producer fields and the newer coverage fields.
+        operation_observations = rollback.get(
+            "operation_rollback_coverage", rollback.get("operation_observations", "not_captured")
+        )
+        member_observations = rollback.get(
+            "member_rollback_coverage", rollback.get("member_observations", "not_captured")
+        )
+        rollback_rows.append("\t".join(str(value) for value in (
+            run_index, rollback.get("count", "not_captured"), rollback.get("checkpoint_count", "not_captured"),
+            rollback.get("checkpoint_max_depth", "not_captured"), rollback.get("operation_appended", "not_captured"),
+            rollback.get("member_appended", "not_captured"), operation_observations, member_observations,
+            rollback.get("operation_rows_scanned", "not_captured"), rollback.get("member_rows_scanned", "not_captured"),
+            rollback.get("operation_status_changes", "not_captured"), rollback.get("member_status_changes", "not_captured"),
+        )))
     (out_dir / "rollback.tsv").write_text("\n".join(rollback_rows) + "\n", encoding="utf-8")
     classpath_rows = ["run\trequests\tinner_calls\tpositive\tnegative\terrors\tnegative_cache_hits\treturned_bytes\tinner_wall_us"] + [
         f"{run_index}\t" + "\t".join(run.get("classpath_resources", {}).get(name, "unknown") for name in (

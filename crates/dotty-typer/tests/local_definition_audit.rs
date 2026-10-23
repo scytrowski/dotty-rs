@@ -35,6 +35,16 @@ struct ResolverMetrics {
     rollback_count: usize,
     rollback_operation_observations: usize,
     rollback_member_observations: usize,
+    rollback_operation_rows_scanned: usize,
+    rollback_member_rows_scanned: usize,
+    rollback_operation_status_changes: usize,
+    rollback_member_status_changes: usize,
+    resolver_checkpoint_count: usize,
+    resolver_checkpoint_max_depth: usize,
+    module_operation_observations_appended: usize,
+    module_member_observations_appended: usize,
+    rolled_back_operation_ranges: RollbackObservationRanges,
+    rolled_back_member_ranges: RollbackObservationRanges,
     profiled_root_method_attempts: usize,
     current_file: String,
     current_method: String,
@@ -117,6 +127,253 @@ struct ResolverMetrics {
     class_member_prefixes: BTreeSet<String>,
     class_member_keys: BTreeSet<String>,
     module_resolution: ModuleResolutionProfile,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct RollbackObservationRanges {
+    ranges: Vec<(usize, usize)>,
+}
+
+impl RollbackObservationRanges {
+    fn clear(&mut self) {
+        self.ranges.clear();
+    }
+
+    /// Add a half-open range and visit only the portions not covered before
+    /// this call. The callback avoids allocating a temporary range vector on
+    /// the common append-only path.
+    fn mark_new(
+        &mut self,
+        start: usize,
+        end: usize,
+        mut visit_new: impl FnMut(usize, usize),
+    ) -> usize {
+        if start >= end {
+            return 0;
+        }
+
+        if let Some((last_start, last_end)) = self.ranges.last_mut() {
+            if start >= *last_end {
+                if start == *last_end {
+                    *last_end = end;
+                } else {
+                    self.ranges.push((start, end));
+                }
+                visit_new(start, end);
+                return end - start;
+            }
+            if start >= *last_start && end >= *last_end {
+                let newly_covered = (*last_end < end).then_some((*last_end, end));
+                *last_end = end;
+                if let Some((new_start, new_end)) = newly_covered {
+                    visit_new(new_start, new_end);
+                    return new_end - new_start;
+                }
+                return 0;
+            }
+        }
+
+        let first = self
+            .ranges
+            .partition_point(|(_, range_end)| *range_end < start);
+        let mut newly_covered_rows = 0;
+        let mut cursor = start;
+        let mut merged_start = start;
+        let mut merged_end = end;
+        let mut last = first;
+        while let Some(&(range_start, range_end)) = self.ranges.get(last) {
+            if range_start > merged_end {
+                break;
+            }
+            if range_start > cursor {
+                let new_end = range_start.min(end);
+                visit_new(cursor, new_end);
+                newly_covered_rows += new_end - cursor;
+            }
+            cursor = cursor.max(range_end.min(end));
+            merged_start = merged_start.min(range_start);
+            merged_end = merged_end.max(range_end);
+            last += 1;
+        }
+        if cursor < end {
+            visit_new(cursor, end);
+            newly_covered_rows += end - cursor;
+        }
+
+        self.ranges
+            .splice(first..last, [(merged_start, merged_end)]);
+        newly_covered_rows
+    }
+}
+
+fn rollback_new_ranges(
+    ranges: &mut RollbackObservationRanges,
+    start: usize,
+    end: usize,
+) -> Vec<(usize, usize)> {
+    let mut newly_covered = Vec::new();
+    ranges.mark_new(start, end, |new_start, new_end| {
+        newly_covered.push((new_start, new_end));
+    });
+    newly_covered
+}
+
+#[test]
+fn rollback_observation_ranges_skip_rows_already_transitioned() {
+    let mut ranges = RollbackObservationRanges::default();
+
+    assert_eq!(rollback_new_ranges(&mut ranges, 0, 100), vec![(0, 100)]);
+    assert_eq!(rollback_new_ranges(&mut ranges, 0, 120), vec![(100, 120)]);
+    assert!(rollback_new_ranges(&mut ranges, 0, 120).is_empty());
+    assert_eq!(ranges.ranges, vec![(0, 120)]);
+}
+
+#[test]
+fn rollback_observation_ranges_preserve_gaps_and_merge_nested_coverage() {
+    let mut ranges = RollbackObservationRanges::default();
+
+    assert_eq!(rollback_new_ranges(&mut ranges, 5, 10), vec![(5, 10)]);
+    assert_eq!(rollback_new_ranges(&mut ranges, 12, 15), vec![(12, 15)]);
+    assert_eq!(
+        rollback_new_ranges(&mut ranges, 8, 18),
+        vec![(10, 12), (15, 18)]
+    );
+    assert_eq!(
+        rollback_new_ranges(&mut ranges, 0, 20),
+        vec![(0, 5), (18, 20)]
+    );
+    assert_eq!(ranges.ranges, vec![(0, 20)]);
+    assert!(rollback_new_ranges(&mut ranges, 7, 7).is_empty());
+}
+
+#[test]
+fn rollback_observation_ranges_keep_disjoint_attempt_suffixes() {
+    let mut ranges = RollbackObservationRanges::default();
+
+    assert_eq!(rollback_new_ranges(&mut ranges, 0, 3), vec![(0, 3)]);
+    // No rollback covers rows 3..5 between these attempts.
+    assert_eq!(rollback_new_ranges(&mut ranges, 5, 8), vec![(5, 8)]);
+    assert_eq!(ranges.ranges, vec![(0, 3), (5, 8)]);
+}
+
+#[test]
+fn rollback_observation_ranges_reset_at_method_commit_boundary() {
+    let mut ranges = RollbackObservationRanges::default();
+    assert_eq!(rollback_new_ranges(&mut ranges, 0, 3), vec![(0, 3)]);
+
+    ranges.clear();
+    assert_eq!(rollback_new_ranges(&mut ranges, 3, 6), vec![(3, 6)]);
+    assert_eq!(ranges.ranges, vec![(3, 6)]);
+}
+
+#[test]
+fn rollback_observation_ranges_match_a_bitmap_for_mixed_ranges() {
+    let mut ranges = RollbackObservationRanges::default();
+    let mut expected = [false; 256];
+    let mut seed = 0x1485_u64;
+
+    for _ in 0..512 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let start = (seed as usize) % expected.len();
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let end = start + ((seed as usize) % (expected.len() - start + 1));
+
+        let expected_new = (start..end)
+            .filter(|index| !expected[*index])
+            .collect::<Vec<_>>();
+        let mut actual_new = Vec::new();
+        ranges.mark_new(start, end, |range_start, range_end| {
+            actual_new.extend(range_start..range_end);
+        });
+        assert_eq!(actual_new, expected_new);
+        for status in &mut expected[start..end] {
+            *status = true;
+        }
+
+        let mut indexed = [false; 256];
+        for &(range_start, range_end) in &ranges.ranges {
+            indexed[range_start..range_end].fill(true);
+        }
+        assert_eq!(indexed, expected);
+        assert!(ranges.ranges.windows(2).all(|pair| pair[0].1 < pair[1].0));
+    }
+}
+
+#[test]
+#[ignore = "bounded synthetic rollback scaling benchmark; run with --ignored --nocapture"]
+fn synthetic_rollback_observation_scaling_benchmark() {
+    fn patterns(event_count: usize) -> [(&'static str, Vec<(usize, usize)>); 3] {
+        let batch = (event_count / 100).max(1);
+        let mut repeated_parent = Vec::new();
+        let mut end = batch;
+        while end <= event_count {
+            repeated_parent.push((0, end));
+            end += batch;
+        }
+        if repeated_parent
+            .last()
+            .is_none_or(|(_, last)| *last != event_count)
+        {
+            repeated_parent.push((0, event_count));
+        }
+        let alternating_child = (0..event_count)
+            .step_by(2)
+            .filter_map(|committed| {
+                (committed + 1 < event_count).then_some((committed + 1, committed + 2))
+            })
+            .collect();
+        [
+            ("single", vec![(0, event_count)]),
+            ("repeated_parent", repeated_parent),
+            ("alternating_child_rollback", alternating_child),
+        ]
+    }
+
+    println!(
+        "events\tpattern\trollbacks\tlegacy_scanned\tinterval_scanned\tlegacy_ns_per_run\tinterval_ns_per_run"
+    );
+    const SAMPLES: u128 = 1_000;
+    for event_count in [100, 1_000, 10_000] {
+        for (pattern, rollbacks) in patterns(event_count) {
+            let mut legacy_elapsed = Duration::ZERO;
+            let mut interval_elapsed = Duration::ZERO;
+            let mut legacy_scanned = 0;
+            let mut interval_scanned = 0;
+            for _ in 0..SAMPLES {
+                let started = Instant::now();
+                let mut legacy_status = vec![false; event_count];
+                for &(start, end) in &rollbacks {
+                    legacy_scanned += end - start;
+                    for status in &mut legacy_status[start..end] {
+                        *status = true;
+                    }
+                }
+                legacy_elapsed += started.elapsed();
+
+                let started = Instant::now();
+                let mut interval_status = vec![false; event_count];
+                let mut ranges = RollbackObservationRanges::default();
+                for &(start, end) in &rollbacks {
+                    ranges.mark_new(start, end, |new_start, new_end| {
+                        interval_scanned += new_end - new_start;
+                        for status in &mut interval_status[new_start..new_end] {
+                            *status = true;
+                        }
+                    });
+                }
+                interval_elapsed += started.elapsed();
+                assert_eq!(interval_status, legacy_status);
+            }
+            println!(
+                "{event_count}\t{pattern}\t{}\t{}\t{}\t{}\t{}",
+                rollbacks.len() as u128 * SAMPLES,
+                legacy_scanned as u128 / SAMPLES,
+                interval_scanned as u128 / SAMPLES,
+                legacy_elapsed.as_nanos() / SAMPLES,
+                interval_elapsed.as_nanos() / SAMPLES
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1494,6 +1751,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 transaction_state: "observed",
                 error_category,
             });
+        metrics.module_operation_observations_appended += 1;
         drop(metrics);
         record_audit_stage(&self.metrics, "observation_collection", collection_started);
         record_audit_wrapper_timing(
@@ -1583,6 +1841,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     transaction_state: "observed",
                     error_category,
                 });
+            metrics.module_operation_observations_appended += 1;
         }
         drop(metrics);
         record_audit_stage(&self.metrics, "observation_collection", collection_started);
@@ -1683,6 +1942,10 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         metrics
             .module_operation_checkpoints
             .insert(token, (inner_checkpoint, offsets.0, offsets.1));
+        metrics.resolver_checkpoint_count += 1;
+        metrics.resolver_checkpoint_max_depth = metrics
+            .resolver_checkpoint_max_depth
+            .max(metrics.module_operation_checkpoints.len());
         drop(metrics);
         record_audit_stage(&self.metrics, "checkpoint_bookkeeping", bookkeeping_started);
         record_audit_wrapper_timing(
@@ -1721,20 +1984,36 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         metrics.rollback_count += 1;
         metrics.rollback_operation_observations += rolled_back_operations;
         metrics.rollback_member_observations += rolled_back_members;
-        for observation in metrics
-            .module_operation_observations
-            .iter_mut()
-            .skip(operation_offset)
-        {
-            observation.transaction_state = "rolled_back";
-        }
-        for observation in metrics
-            .module_member_observations
-            .iter_mut()
-            .skip(member_offset)
-        {
-            observation.transaction_state = "rolled_back";
-        }
+        let operation_end = metrics.module_operation_observations.len();
+        let member_end = metrics.module_member_observations.len();
+        let operation_rows_scanned = {
+            let ResolverMetrics {
+                rolled_back_operation_ranges,
+                module_operation_observations,
+                ..
+            } = &mut *metrics;
+            rolled_back_operation_ranges.mark_new(operation_offset, operation_end, |start, end| {
+                for observation in &mut module_operation_observations[start..end] {
+                    observation.transaction_state = "rolled_back";
+                }
+            })
+        };
+        metrics.rollback_operation_rows_scanned += operation_rows_scanned;
+        metrics.rollback_operation_status_changes += operation_rows_scanned;
+        let member_rows_scanned = {
+            let ResolverMetrics {
+                rolled_back_member_ranges,
+                module_member_observations,
+                ..
+            } = &mut *metrics;
+            rolled_back_member_ranges.mark_new(member_offset, member_end, |start, end| {
+                for observation in &mut module_member_observations[start..end] {
+                    observation.transaction_state = "rolled_back";
+                }
+            })
+        };
+        metrics.rollback_member_rows_scanned += member_rows_scanned;
+        metrics.rollback_member_status_changes += member_rows_scanned;
         // Checkpoint tokens increase monotonically, so rollback only needs to
         // discard the ordered suffix. `retain` scans every active checkpoint
         // on every rollback, which made this audit bookkeeping quadratic for
@@ -1999,6 +2278,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     }),
                     transaction_state: "observed",
                 });
+            metrics.module_member_observations_appended += 1;
         }
         merge_module_resolution_profile(&mut metrics.module_resolution, module_profile);
         if prefix.target_kind == "Package"
@@ -12537,6 +12817,8 @@ fn audit_source_inner_filtered(
             // Any checkpoint not rolled back during this method attempt has
             // reached the method's commit boundary.
             metrics.module_operation_checkpoints.clear();
+            metrics.rolled_back_operation_ranges.clear();
+            metrics.rolled_back_member_ranges.clear();
         }
         if let Err(error) = outcome {
             let failure = classify_typer_error(
@@ -14040,10 +14322,18 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         metrics.tasty_completion_inner_time.as_micros()
     );
     println!(
-        "AUDIT_ROLLBACK count={} operation_observations={} member_observations={}",
+        "AUDIT_ROLLBACK count={} checkpoint_count={} checkpoint_max_depth={} operation_appended={} member_appended={} operation_rollback_coverage={} member_rollback_coverage={} operation_rows_scanned={} member_rows_scanned={} operation_status_changes={} member_status_changes={}",
         metrics.rollback_count,
+        metrics.resolver_checkpoint_count,
+        metrics.resolver_checkpoint_max_depth,
+        metrics.module_operation_observations_appended,
+        metrics.module_member_observations_appended,
         metrics.rollback_operation_observations,
-        metrics.rollback_member_observations
+        metrics.rollback_member_observations,
+        metrics.rollback_operation_rows_scanned,
+        metrics.rollback_member_rows_scanned,
+        metrics.rollback_operation_status_changes,
+        metrics.rollback_member_status_changes
     );
     for (operation, timing) in &metrics.audit_wrapper_timings {
         let wall_us = timing.wall_time.as_micros();
