@@ -825,6 +825,13 @@ emit a CP-resolved `Object(Base)` frame, fresh frontend sessions produce
 identical class bytes, and the mandatory JDK 21+ harness verifies runtime class
 identity and virtual dispatch with `-Xverify:all`.
 
+The audit of Scala 3.9 default-null and `AnyRef.eq/ne` semantics, plus the
+separate JVMS 21 null-verifier state, is recorded in the
+[null and reference identity audit](jvm-null-reference-identity.md). It freezes
+the current Typer and CFG rejection points; it does not enable null lowering,
+reference comparison branches, explicit-nulls typing, or flow-sensitive
+narrowing.
+
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
 only the explicitly supported frontend and JVM subset; the class has no
