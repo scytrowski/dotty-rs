@@ -141,12 +141,21 @@ chained calls, and same-class `this`.
 ## Two-live-allocation verifier contract
 
 JVMS 21 assigns each `new` instruction its own `uninitialized(offset)` type.
-`dup` creates another alias of that same allocation identity. The current
-class-aware CFG analyzer stores only one
+`dup` creates another alias of that same allocation identity. The accepted
+follow-up contract is bounded to **at most two simultaneously uninitialized
+allocation sites in one straight-line basic block**. A third `new` while two
+sites are still pending must fail at that instruction; another allocation is
+allowed only after an earlier site's constructor has completed and its aliases
+have become initialized. This is a concurrent-live-site limit, not a total
+allocation-count limit.
+
+The current class-aware CFG analyzer stores only one
 `pending_allocation: Option<UninitializedAllocation { site, class }>` in a
 frame. Its existing regression rejects a second `new` while the first
 allocation is pending, reporting the second instruction and first allocation
-site. That single slot cannot validate the nested sequence above.
+site. That single slot cannot validate the nested sequence above. The
+two-site bound is a follow-up target, not a claim about current dotty-rs
+acceptance.
 
 A verifier that supports the sequence needs allocation-site identities in
 each local and operand-stack value, rather than one frame-wide pending slot.
@@ -165,19 +174,47 @@ For the nested example its state progression is:
 
 For the factory form, a verifier must permit a call on an already initialized
 receiver and accept its initialized exact result while the distinct
-`Holder` allocation remains pending below it on the operand stack. It must
-still reject using, storing, returning, branching on, or passing an
-uninitialized allocation as an ordinary value. Constructor invocation must
-match both the receiver allocation site and its class. Failed or exceptional
-constructor flow must not mark aliases initialized.
+`Holder` allocation remains pending below it on the operand stack. Control
+transfer has an explicit exclusion: while any allocation site is pending, no
+conditional branch, unconditional jump, or basic-block exit may carry that
+site to another block. This rejects a jump even when its condition is an
+unrelated initialized Boolean and rejects fallthrough across a CFG edge. The
+method must complete initialization of every pending site before any outgoing
+normal edge.
 
-The state must also define joins and exception edges, multiple aliases in
-locals and stack positions, repeated allocations, and `UninitializedThis`
-inside constructors. In particular, a frame-wide list of pending class names
-is insufficient: identity is the bytecode allocation site, and each
-`invokespecial <init>` initializes only aliases of its receiver site. #1493
-owns this classfile verifier extension. #1496 and #1495 own the emitter and
-argument integration that can consume the verifier contract.
+Exception handlers have a similarly explicit boundary. A handler entry must
+not contain an uninitialized allocation alias in its locals or operand stack;
+the JVM handler stack contains the exception value, so pending aliases on the
+protected instruction's operand stack do not flow into that entry. A handler
+edge with a pending alias retained in a local is rejected. General
+uninitialized joins and exception-flow merging are outside this subset, rather
+than open design questions. The current `ControlFlowGraph` does not model
+exception-table edges, so #1493 must add focused handler-edge rejection
+coverage before admitting that flow.
+
+The verifier still rejects using, storing, returning, comparing, branching on,
+or passing an uninitialized allocation as an ordinary value. Constructor
+invocation must match both the receiver allocation site and its class. Only
+normal completion rewrites aliases of that site; a failed constructor never
+marks them initialized. Constructor branching before the direct-super call,
+including any branch carrying `UninitializedThis`, remains excluded.
+
+These boundaries map to focused checks as follows:
+
+| Boundary | Characterization or required regression |
+| --- | --- |
+| Second live site | Existing `cfg_validates_constructor_descriptor_and_rejects_nested_allocations` currently asserts rejection at the second `new`; #1493 must replace that expectation with a passing two-site sequence. |
+| Third concurrently live site | #1493 must add a three-deep sequence that accepts the first two sites and rejects the third `new` at its instruction, then retain a separate case proving a later allocation is allowed after initialization. |
+| Uninitialized ordinary use and owner mismatch | Existing `cfg_rejects_uninitialized_reference_escapes_and_invalid_constructor_calls` covers storing, field use, missing initialization, duplicate initialization, and wrong constructor owner. |
+| Pending site across `goto` | Existing `cfg_rejects_uninitialized_reference_escapes_and_invalid_constructor_calls` asserts a `goto` is rejected while an allocation is pending. |
+| Pending site across a branch on an initialized value | The same focused test now covers `ifeq` on an integer constant while the allocation remains pending; #1493 must preserve the prohibition for every conditional opcode. |
+| Pending alias at an exception-handler entry | #1493 must add a handler-edge negative fixture with an uninitialized alias in a local; current CFG analysis has no exception-table transfer to exercise this case. |
+| Branching constructor before super | Existing `rejects_branched_constructors_without_uninitialized_this_flow` remains the constructor-specific negative case. |
+
+In particular, the branch guard applies to outgoing frame state, not just to
+whether the uninitialized value is itself a branch operand. #1493 owns this
+classfile verifier extension. #1496 and #1495 own the emitter and argument
+integration that consume the verified contract.
 
 ## Follow-up ownership
 

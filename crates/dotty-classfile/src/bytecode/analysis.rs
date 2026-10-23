@@ -7052,6 +7052,28 @@ mod tests {
             })
         );
 
+        let mut branch_on_initialized_condition = CodeSequence::new();
+        let target = branch_on_initialized_condition.new_label().unwrap();
+        branch_on_initialized_condition
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .branch(BranchInstruction::IfEq(target.clone()))
+            .bind(target)
+            .unwrap()
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        assert_eq!(
+            analyze_sequence(&branch_on_initialized_condition),
+            Err(AnalysisError::UninitializedReferenceUse {
+                instruction: 3,
+                allocation_site: 0,
+            })
+        );
+
         let mut wrong_owner = CodeSequence::new();
         wrong_owner
             .instruction(Instruction::New(ClassReference::new(operand(class))))
