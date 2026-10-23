@@ -3,8 +3,9 @@
 This is an audit checkpoint for Scala 3.9.0 default-null semantics and the
 Java SE 21 verifier contract. It records current source and classfile boundaries
 and successor ownership. Source `Null` typing (#1469), low-level reference
-branch support (#1471), and bounded source `AnyRef.eq/ne` selection (#1472)
-are implemented. Bytecode lowering and runtime identity behavior remain
+branch support (#1471), bounded source `AnyRef.eq/ne` selection (#1472), and
+source-typed null lowering in checked planned-reference contexts (#1473) are
+implemented. Identity bytecode lowering and runtime identity behavior remain
 separate work.
 
 ## Reference evidence
@@ -85,15 +86,19 @@ rewritten to `eq`. No code generation is attempted by this source-semantic
 increment.
 
 In default Scala 3.9 semantics, `null` has source type `Null` and conforms to
-reference types. This increment supports explicit `Null` results, inferred bare
-`null` results, local values annotated with an ordinary source class, and `If`
-joins between `null` and a non-generic top-level class from the current source
-unit (in either branch order). It also supports `Object`; it does not add
-general union erasure, generic or external-class conformance, parameter or
-field adaptation, or flow-sensitive narrowing. The verifier's permission to
-store or return a null reference does not imply JVM lowering support.
-Dereference has ordinary runtime null behavior; the compiler must not silently
-add a guard. `-Yexplicit-nulls` remains excluded.
+reference types. The JVM backend emits the real `aconst_null` value only when
+the typed source context proves a reference-valued target: a planned-class
+method result or formal, an explicitly typed planned-class local, a compatible
+mutable local assignment, or an `If` whose planned-class result is explicit.
+The source literal keeps `Definitions.null_type`; its JVM flow remains verifier
+`Null` until a validated reference target or CFG join accepts it. `Null` is
+never rewritten to `Object(Box)` or `Top`, and no cast or allocation is added.
+The emitted class retains the declared `LBox;`-style descriptor. Inferred bare
+`null` signatures and unsupported contexts remain rejected. This does not add
+general union erasure, generic or external-class conformance, field adaptation,
+or flow-sensitive narrowing. Dereference has ordinary runtime null behavior;
+the compiler must not silently add a guard. `-Yexplicit-nulls` remains
+excluded.
 
 ## Current implementation boundary
 
@@ -141,9 +146,13 @@ At the classfile layer:
   reference comparison branch contract below, not `invokevirtual` or
   universal `equals` semantics.
 
-The classfile CFG and stack-map frame generator now project `Null` directly to
-the existing `VerificationTypeInfo::Null` tag 5 without interning a class.
-This does not imply source lowering or flow-sensitive null narrowing.
+The classfile CFG and stack-map frame generator project `Null` directly to the
+existing `VerificationTypeInfo::Null` tag 5 without interning a class. The JVM
+source backend emits one `aconst_null` for each accepted canonical source Null
+literal. `Null` stays in local frames when all incoming paths remain null and
+joins to the checked `Object(Box)` frame when a planned Box reference reaches
+the same local or operand-stack join. This does not add flow-sensitive null
+narrowing.
 
 ## Required verifier contract for successor work
 
@@ -191,7 +200,7 @@ claims.
 | #1470 | `dotty-classfile`: Scala-independent `Null` verifier flow, joins, and stack-map generation | This audit; may run alongside #1469 |
 | #1471 | `dotty-classfile`: reference compare/null branch instructions, symbolic assembly, and CFG transfer | Implemented with #1470 Null flow available |
 | #1472 | `dotty-core`/`dotty-typer`: canonical `AnyRef.eq/ne` IDs and bounded source Typer selection | Implemented; uses the pinned source audit, #1469 Null, and #1471 branch contract |
-| #1473 | `dotty-jvm`: source-typed null lowering in explicit reference contexts | #1469 and #1470 |
+| #1473 | `dotty-jvm`: source-typed null lowering in explicit planned-reference contexts | #1469, #1470, #1457–#1459 |
 | #1474 | `dotty-jvm`: identity-only `eq/ne` lowering and Boolean materialization | #1471, #1472, and #1473 (therefore #1470) |
 | #1475 | Real source/JDK 21+ end-to-end acceptance, verifier frames, deterministic classes, and negative first-stage diagnostics | #1469–#1474 |
 
