@@ -188,8 +188,22 @@ fn descriptor_for_with_references(
 
     // JVMS §4.3.3 counts `this` for an instance method. Parameter widths are
     // semantic-type dependent, so enforce the unit limit after canonical type
-    // projection and before producing descriptor metadata.
+    // projection and before producing descriptor metadata. Since every
+    // parameter uses at least one slot, this lower bound also keeps the output
+    // allocation bounded before any per-parameter projection work.
     let receiver_slots = usize::from(!method.flags.contains(SymbolFlags::STATIC));
+    let minimum_slots = method_type.params.len().checked_add(receiver_slots).ok_or(
+        JvmCodegenError::TooManyParameterSlots {
+            method: plan.method,
+            slots: usize::MAX,
+        },
+    )?;
+    if minimum_slots > crate::JVM_MAX_PARAMETER_SLOTS {
+        return Err(JvmCodegenError::TooManyParameterSlots {
+            method: plan.method,
+            slots: minimum_slots,
+        });
+    }
 
     let primitive_symbols = PrimitiveSymbols {
         int: builtin_symbol(store, definitions.int, PrimitiveBuiltin::Int)?,
