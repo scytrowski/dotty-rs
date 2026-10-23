@@ -6,9 +6,10 @@
 infrastructure in Rust. It is under active development and is not a complete
 Scala compiler or a drop-in replacement for `scalac`.
 
-The repository is developed incrementally. The assigned GitHub issue defines
-the scope of an implementation increment; avoid turning a focused issue into a
-general compiler refactor or implementing adjacent roadmap items speculatively.
+The repository is developed incrementally. The assigned GitHub issue or explicit
+user request defines the scope of an implementation increment; avoid turning a
+focused issue into a general compiler refactor or implementing adjacent roadmap
+items speculatively.
 
 For source-language and TASTy compatibility work, Scala 3.9.0 is the current
 reference unless an issue explicitly changes that target. The repository's
@@ -18,6 +19,27 @@ from a newer Scala release.
 
 The project is pre-1.0. APIs and internal architecture may evolve, but changes
 should still preserve existing invariants and avoid unnecessary churn.
+
+## Current implementation status
+
+The workspace includes a source frontend (lexer, parser, namer, and typer),
+structural TASTy and class-file codecs, semantic TASTy unpickling and pickling,
+classpath/JDK metadata loading, and a bounded JVM backend. The typer completes
+signatures and selected expressions; it is no longer only a signature milestone.
+These components remain incomplete Scala subsets with explicit unsupported cases.
+
+`tests/jvm_source_compilation.rs` assembles the real frontend and backend in one
+session and tests generated classes, including state, control flow, bounded
+inheritance, reference joins, nested construction, and chained call receivers.
+That assembly and artifact publication are test infrastructure, not a public
+source compiler/session API or CLI. JVM class emission and semantic TASTy
+pickling are separate output paths; do not assume combined Scala ABI emission.
+
+The semantic pickler emits TASTy 28.9.0. Existing binary fixture manifests may
+record older compatible minor versions. The current JVM backend emits class-file
+major version 65 (Java 21); class-file decoding and JDK metadata support have
+separate compatibility surfaces. Do not infer one component's support from
+another's successful fixture.
 
 ## Workspace architecture
 
@@ -41,11 +63,20 @@ one-way dependency boundaries:
 - `dotty-tasty` owns structural/lossless TASTy decoding and encoding.
 - `dotty-tasty-unpickler` projects decoded TASTy into the shared
   `dotty-core` semantic model.
-- `dotty-classfile` owns JVM class-file decoding and encoding.
+- `dotty-tasty-pickler` validates borrowed source/typed semantic plans and emits
+  a bounded subset of TASTy through `dotty-tasty`. It depends in production only
+  on `dotty-core` and `dotty-tasty`; source frontend dependencies are test-only.
+- `dotty-classfile` owns JVM class-file decoding and encoding, symbolic bytecode
+  construction, and class-file verification analysis.
 - `dotty-classloader` owns classpath and binary loading concerns and combines
   TASTy/class-file information without moving those responsibilities into the
   source frontend.
-- the root `dotty` crate is the public facade over the compiler libraries.
+- `dotty-jvm` validates already-typed compilation plans and lowers supported
+  semantics to class files. Its production dependencies are `dotty-core` and
+  `dotty-classfile`; it must not assemble or rerun the source frontend.
+- the root `dotty` crate exposes selected compiler libraries and hosts
+  cross-component integration tests. It does not re-export every workspace
+  crate; the lexer, namer, JVM backend, and semantic pickler are used directly.
 - `tools/` contains compatibility, corpus, oracle, and diagnostic tooling. It
   is part of the validation infrastructure, not production compiler logic.
 
@@ -55,20 +86,33 @@ Preserve these boundaries unless the issue explicitly requires an architectural
 change:
 
 1. `dotty-core` must remain foundational. It must not depend on the lexer,
-   parser, TASTy, class-file, classloader, namer, or typer implementations.
+   parser, TASTy codecs/adapters, class-file, classloader, namer, typer, or JVM
+   backend implementations.
 2. The parser must remain independent of the concrete lexer. Use the shared
    `TokenSource` contract.
 3. The namer must consume the shared AST/semantic model rather than parser
    internals.
 4. The typer must not parse source or decode TASTy/class files. Those are
    separate frontend/adapter responsibilities. It may consume source
-   definitions from `dotty-core`, but must not depend on `dotty-namer`.
+   definitions and the target-independent `SymbolResolver` contract from
+   `dotty-core`, but must not depend in production on `dotty-namer`.
 5. TASTy and class-file crates must not invent parallel symbol/type models when
    the information belongs in `dotty-core`.
 6. Prefer extending an existing shared abstraction over introducing a second
    representation for the same compiler concept.
 7. Do not introduce reverse dependencies merely to reuse a convenience helper.
    Move genuinely shared logic to the lowest appropriate crate instead.
+8. The production/build dependency closures of core, lexer, parser, namer, and
+   typer must remain independent of `dotty-classfile`, `dotty-classloader`, and
+   `dotty-jvm`. Platform details such as descriptors, JMOD paths, bytecode, and
+   JVM internal names belong in adapters, not frontend contracts. Test-only
+   adapter dependencies are allowed. `tools/check-frontend-boundaries.py`
+   enforces this direction using Cargo metadata with all features enabled.
+9. Backend and pickler plans borrow canonical session stores and exact typed
+   roots. Preserve source-to-typed bindings and explicit parameter/member order;
+   do not reconstruct identity from spelling or allocation order. Validation
+   cannot authenticate foreign same-slot arena IDs, so callers must preserve
+   the single-session invariant.
 
 ## Sources of truth
 
@@ -85,6 +129,17 @@ Useful project documents include:
 - `docs/tasty-format-3.9.0.md`
 - `docs/tasty-semantic-unpickler.md`
 - `docs/classloader.md`
+- `docs/frontend-platform-boundaries.md`
+- `docs/classfile-encoder.md`
+- `docs/jvm-backend.md` and the focused `docs/jvm-*.md` contracts
+- `docs/tasty-pickler-design.md`
+- `docs/tasty-pickler-class-state-contract.md`
+- `docs/tasty-pickler-oracle.md`
+- `docs/testing-strategy.md` (TASTy decoder/fixture coverage)
+
+Compatibility reports and profiling documents are revision-specific evidence,
+not current coverage percentages. Read their recorded revisions and scopes;
+prefer focused contracts and current regression tests for newly added behavior.
 
 Some design documents record an earlier development stage and can lag behind
 the implementation. When prose conflicts with current code and regression
@@ -182,6 +237,16 @@ Every behavior change must have regression coverage at the lowest useful layer.
   byte-for-byte, structural, or semantic.
 - Class-file/classloader changes should use focused binary fixtures and test
   malformed inputs and origin/resolution behavior when applicable.
+- JVM backend changes should cover canonical plan validation, exact descriptors,
+  instructions and stack-map frames where relevant, deterministic output, and
+  typed rejection without partial artifacts. Use the real source pipeline and
+  mandatory JDK verification/execution gate for supported code generation.
+- Semantic pickler changes should cover read-only validation, exact source/typed
+  bindings, declaration/reference identity, deterministic output, limits, and
+  failure without partial artifacts. A parseable Rust round trip is not Scala
+  interoperability: use the pinned pickler oracle for changed producer shapes.
+  Distinguish incomplete declaration skeletons from complete `PickledTasty`
+  output and Scala-generated oracle fixtures from Rust-produced artifacts.
 
 Corpus and compatibility metrics are evidence, not substitutes for focused
 tests. A lower diagnostic count alone does not prove a parser change is
@@ -193,10 +258,16 @@ reviewable behavior change.
 
 ## Required checks
 
-The repository CI currently enforces:
+Use the toolchain pinned by `rust-toolchain.toml` (currently Rust 1.98.1 with
+rustfmt and Clippy) for local checks. The general Rust CI job currently installs
+stable; the JVM job explicitly invokes `+stable`. Python 3 is required for the
+frontend boundary guard.
+
+The general CI job in `.github/workflows/ci.yml` enforces:
 
 ```text
 cargo fmt --all -- --check
+python3 tools/check-frontend-boundaries.py
 cargo clippy --workspace --all-targets --locked -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 cargo test --workspace --all-targets --locked
@@ -206,13 +277,32 @@ git diff --check
 Run targeted crate/tests while iterating, then run the complete relevant checks
 before considering the change finished.
 
-Compatibility/oracle workflows under `.github/workflows/` may perform
-additional validation for lexer, parser, or TASTy changes. Use the corresponding
+CI also has a separate mandatory JDK 21 gate. Put `java`, `javac`, and `javap`
+on `PATH` and reproduce it locally with:
+
+```sh
+DOTTY_CLASSFILE_REQUIRE_JDK=1 cargo test \
+  -p dotty-classfile --test classfile_jvm_encoder \
+  -p dotty-jvm --lib \
+  -p dotty --test jvm_source_compilation \
+  --test jvm_stateful_class_contract \
+  --locked -- --nocapture
+```
+
+Without that environment variable, JDK-backed tests may skip external checks
+when tools are missing. Passing ordinary Rust tests alone does not establish
+that the JVM gate ran. Ordinary fixture tests need no Scala rebuild; explicit
+Scala oracle runs require the checkout, JDK, and cached dependencies documented
+by the corresponding tool.
+
+Compatibility/oracle workflows under `.github/workflows/` perform additional
+lexer, parser, TASTy, and full typer corpus validation. Use the corresponding
 workflow/tooling when the issue touches those compatibility surfaces.
 
 ## Change workflow
 
-1. Read the assigned issue and inspect the affected implementation and tests.
+1. Read the assigned issue or user request and inspect the affected implementation
+   and tests.
 2. Identify the owning crate and verify that the change respects dependency
    boundaries.
 3. Reproduce the missing behavior or bug with the smallest useful test.
