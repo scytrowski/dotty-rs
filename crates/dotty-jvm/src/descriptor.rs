@@ -5,7 +5,7 @@ use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
+use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
 use dotty_core::types::{Constant, MethodKind, Type, TypeRefTarget};
 use std::collections::HashSet;
 
@@ -208,7 +208,7 @@ fn descriptor_for_with_references(
     let primitive_symbols = PrimitiveSymbols {
         int: builtin_symbol(store, definitions.int, PrimitiveBuiltin::Int)?,
         boolean: builtin_symbol(store, definitions.boolean, PrimitiveBuiltin::Boolean)?,
-        long: builtin_symbol(store, definitions.long, PrimitiveBuiltin::Long)?,
+        long: long_builtin_symbol(store, definitions.long, definitions.no_prefix)?,
         unit: builtin_symbol(store, definitions.unit, PrimitiveBuiltin::Unit)?,
     };
 
@@ -431,6 +431,50 @@ fn builtin_symbol(
     }
 }
 
+fn long_builtin_symbol(
+    store: &SemanticStore,
+    ty: TypeId,
+    no_prefix: TypeId,
+) -> Result<SymbolId, JvmCodegenError> {
+    let invalid = || JvmCodegenError::InvalidBuiltinDefinition {
+        builtin: PrimitiveBuiltin::Long,
+        ty,
+    };
+    let Some(Type::TypeRef { prefix, target }) = store.types.try_get(ty) else {
+        return Err(invalid());
+    };
+    let TypeRefTarget::Symbol(symbol) = target else {
+        return Err(invalid());
+    };
+    if *prefix != no_prefix || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) {
+        return Err(invalid());
+    }
+    if !store.symbols.contains(*symbol) {
+        return Err(invalid());
+    }
+    let builtin = store.symbols.get(*symbol);
+    let valid_info = match builtin.info {
+        SymbolInfo::Missing => true,
+        SymbolInfo::Complete(info) => {
+            matches!(store.types.try_get(info), Some(Type::ClassInfo(class_info)) if class_info.class == *symbol)
+        }
+        SymbolInfo::Deferred(_) | SymbolInfo::Error => false,
+    };
+    if builtin.name.namespace() != dotty_core::Namespace::Type
+        || store.names.resolve(builtin.name.text()) != "Long"
+        || builtin.kind != SymbolKind::Class
+        || builtin.owner.is_some()
+        || builtin.flags != SymbolFlags::EMPTY
+        || builtin.visibility != Visibility::Public
+        || builtin.origin != SymbolOrigin::Builtin
+        || !builtin.annotations.is_empty()
+        || !valid_info
+    {
+        return Err(invalid());
+    }
+    Ok(*symbol)
+}
+
 fn primitive_value_type(
     store: &SemanticStore,
     ty: TypeId,
@@ -454,9 +498,21 @@ fn primitive_value_type(
             ..
         }) if *target == primitives.boolean => Ok(JvmType::Boolean),
         Some(Type::TypeRef {
+            prefix,
             target: TypeRefTarget::Symbol(target),
-            ..
-        }) if *target == primitives.long => Ok(JvmType::Long),
+        }) if *target == primitives.long => {
+            if *prefix != definitions.no_prefix
+                || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix))
+            {
+                return Err(JvmCodegenError::InvalidPrimitiveTypePrefix {
+                    symbol,
+                    ty,
+                    prefix: *prefix,
+                    builtin: PrimitiveBuiltin::Long,
+                });
+            }
+            Ok(JvmType::Long)
+        }
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..

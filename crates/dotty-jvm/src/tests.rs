@@ -29,8 +29,8 @@ use crate::{
     InvalidJvmClassInfoKind, InvalidTypeReason, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmExpressionFlow, JvmFieldPlan, JvmIntIntrinsic,
     JvmIntIntrinsicError, JvmInvocationKind, JvmLocalBinding, JvmMethodPlan, JvmNameKind,
-    JvmPrimaryConstructorPlan, JvmReturnType, JvmType, JvmValueCategory, SymbolRole,
-    UnsupportedJvmCallShapeKind, UnsupportedJvmClassKind, UnsupportedJvmLocalFlag,
+    JvmPrimaryConstructorPlan, JvmReturnType, JvmType, JvmValueCategory, PrimitiveBuiltin,
+    SymbolRole, UnsupportedJvmCallShapeKind, UnsupportedJvmClassKind, UnsupportedJvmLocalFlag,
     UnsupportedJvmSymbolFlag, UnsupportedJvmTypeKind, UnsupportedMethodShapeKind, emit_class,
     resolve_int_intrinsic,
 };
@@ -4094,6 +4094,84 @@ fn projects_primitive_method_signatures_to_valid_descriptors() {
     assert_eq!(noop.result(), JvmReturnType::Void);
     assert_eq!(noop.result().category(), None);
     assert_eq!(noop.parsed().return_type, None);
+}
+
+#[test]
+fn long_descriptor_projection_rejects_a_noncanonical_type_prefix() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let long_symbol = store
+        .types
+        .get(definitions.long)
+        .reference_symbol()
+        .expect("Long definition has a canonical symbol");
+    let invalid_prefix = store.types.alloc(Type::NoType);
+    let malformed_long = store
+        .types
+        .alloc(Type::type_ref(invalid_prefix, long_symbol));
+    let fixture = SignatureFixture::from_store(
+        store,
+        definitions,
+        &[malformed_long],
+        malformed_long,
+        SymbolFlags::EMPTY,
+        MethodKind::Plain,
+    );
+
+    assert!(matches!(
+        fixture.descriptor(),
+        Err(JvmCodegenError::InvalidPrimitiveTypePrefix {
+            symbol,
+            ty,
+            prefix,
+            builtin: PrimitiveBuiltin::Long,
+        }) if symbol == fixture.parameters[0]
+            && ty == malformed_long
+            && prefix == invalid_prefix
+    ));
+}
+
+#[test]
+fn long_descriptor_projection_rejects_invalid_builtin_symbols() {
+    for corrupt_symbol in ["kind", "info", "prefix"] {
+        let mut store = SemanticStore::new();
+        let mut definitions = Definitions::bootstrap(&mut store);
+        let long_symbol = store
+            .types
+            .get(definitions.long)
+            .reference_symbol()
+            .expect("Long definition has a canonical symbol");
+        match corrupt_symbol {
+            "kind" => store.symbols.get_mut(long_symbol).kind = SymbolKind::Parameter,
+            "info" => store.symbols.set_info(long_symbol, SymbolInfo::Error),
+            "prefix" => {
+                let invalid_prefix = store.types.alloc(Type::NoType);
+                definitions.long = store
+                    .types
+                    .alloc(Type::type_ref(invalid_prefix, long_symbol));
+            }
+            _ => unreachable!(),
+        }
+        let fixture = SignatureFixture::from_store(
+            store,
+            definitions,
+            &[definitions.long],
+            definitions.long,
+            SymbolFlags::EMPTY,
+            MethodKind::Plain,
+        );
+
+        assert!(
+            matches!(
+                fixture.descriptor(),
+                Err(JvmCodegenError::InvalidBuiltinDefinition {
+                    builtin: PrimitiveBuiltin::Long,
+                    ty,
+                }) if ty == definitions.long
+            ),
+            "corrupted Long builtin {corrupt_symbol} was accepted"
+        );
+    }
 }
 
 #[test]

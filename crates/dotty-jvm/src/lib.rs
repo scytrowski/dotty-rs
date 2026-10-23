@@ -1186,6 +1186,14 @@ pub enum JvmCodegenError {
         builtin: PrimitiveBuiltin,
         ty: TypeId,
     },
+    /// A canonical primitive `TypeRef` has a prefix other than the exact
+    /// shared `NoPrefix` type required by the supported descriptor slice.
+    InvalidPrimitiveTypePrefix {
+        symbol: SymbolId,
+        ty: TypeId,
+        prefix: TypeId,
+        builtin: PrimitiveBuiltin,
+    },
     /// The symbol owner is not part of the supported package-only class path.
     UnsupportedOwnerKind {
         class: SymbolId,
