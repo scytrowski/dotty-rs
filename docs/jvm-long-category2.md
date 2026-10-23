@@ -1,7 +1,7 @@
 # Scala `Long` and JVM category-two audit
 
-This audit records the existing support boundary for Scala `Long` in the JVM
-backend. It does not enable `Long` code generation or change Typer behavior.
+This document records the bounded Scala `Long` support in the JVM backend.
+It does not change Typer behavior.
 The source compatibility reference is Scala 3.9.0 at repository-pinned
 revision `777528f19a58e794c9954a42f433373472ec57f8`.
 
@@ -10,12 +10,17 @@ revision `777528f19a58e794c9954a42f433373472ec57f8`.
 | Layer | Existing behavior |
 | --- | --- |
 | `dotty-core` / Typer | Canonical `Definitions.long` and `Constant::Long` exist. The source fixture below parses, names, and types, retaining `Long` parameter/result/local types and the exact `9000000000L` literal. |
-| `dotty-jvm` projection | Method and constructor metadata project canonical `Definitions.long` as `JvmType::Long`, descriptor `J`, and width two. Instance parameter layouts account for the receiver and each parameter's actual width. Long expression, field, local allocation, and code emission remain unsupported. |
+| `dotty-jvm` projection | Method and constructor metadata project canonical `Definitions.long` as `JvmType::Long`, descriptor `J`, and width two. Instance parameter layouts account for receiver and parameter widths. #1516 lowers canonical Long literals, parameter reads, immutable/mutable local allocation and access, assignment, and method returns in straight-line bodies. |
 | Class-file descriptors | The descriptor parser accepts `J`; the linear bytecode analyzer already counts `Long` parameters/values as two slots and tracks the unusable second local slot. |
 | Stack-map wire model | `VerificationTypeInfo::Long` uses verification tag 4 and has a two-slot local width. A stack-map frame stores one verification entry for a `Long`, not two entries. |
 | CFG analyzer | Supports `Long` parameters, constants, local loads/stores, `lreturn`, branch joins, loop backedges, physical slot accounting, and StackMapTable projection. Long arithmetic, category-two stack manipulation, fields, and calls remain outside this increment. |
 
-The source characterization test is `scala_long_source_reaches_typed_plans_before_backend_rejects_it` in `tests/jvm_source_compilation.rs`. Its observer runs after successful parsing, naming, typing, and JVM plan construction. All checked source signatures and `saved` locals use canonical `Definitions.long`; the `constant` body retains `Constant::Long(9_000_000_000)` and a source position. The focused `LongDescriptors.scala` regression verifies same-session metadata for `(J)V`, `(J)J`, and mixed `(ZIJI)J` signatures, including constructor and method local slots. Emission still fails with a typed unsupported-expression error and publishes no class file. Metadata projection is implemented while value lowering remains a later increment.
+`LongValues.scala` exercises the emitted subset through the real source pipeline; its `Runner` methods include zero/one/nontrivial literals, mixed-width parameters, immutable and mutable locals, assignment, and explicit/implicit Long returns. The JDK gate checks decoded instructions and `max_locals`/`max_stack`, inspects the class with `javap`, and runs signed 64-bit values with `java -Xverify:all`. `LongCategoryTwo.scala` remains an audit fixture for fields and branching cases that are deliberately outside this issue.
+
+The current source frontend cannot reach backend validation for Long arithmetic:
+`value + 1L` stops in `SourceTyper` with `MemberLookupError::ClassInfoUnavailable`
+for `scala.Long`. #1516 records this frontend blocker and leaves `dotty-typer`
+unchanged.
 
 ## Scala 3.9.0 oracle fixture
 
@@ -128,7 +133,7 @@ verification tag.
 The JVM Backend issues split implementation into descriptors and slot
 allocation (#1514), CFG category-two state (#1515), literal/local/return
 lowering (#1516), fields and constructors (#1517), calls and `If`/`While`
-control flow (#1518), and end-to-end execution (#1519). Descriptor and
-parameter-width metadata from #1514 is implemented; this increment implements
-the bounded CFG transfer described above. It does not implement `dup2`/`pop2`,
-general numeric verifier joins, Long arithmetic, or source Typer changes.
+control flow (#1518), and end-to-end execution (#1519). Issues #1514–#1516
+provide the descriptor, CFG, and straight-line value foundation. Long fields,
+method calls, arithmetic, category-two stack manipulation, and Long-aware
+control-flow expressions remain follow-up work; Typer is unchanged.
