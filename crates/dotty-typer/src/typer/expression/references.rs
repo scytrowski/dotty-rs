@@ -1050,6 +1050,36 @@ impl SourceTyper<'_> {
         matches!(self.store.names.resolve(name.text()), "eq" | "ne")
     }
 
+    pub(in crate::typer) fn is_any_ref_identity_symbol(&self, symbol: SymbolId) -> bool {
+        let Some(operators) = self
+            .definitions
+            .any_ref_identity_operator_symbols(self.store)
+        else {
+            return false;
+        };
+        symbol == operators.eq || symbol == operators.ne
+    }
+
+    /// Produces the nominal view used only for checking a `this` value against
+    /// the canonical AnyRef identity parameter. The typed tree keeps its
+    /// original ThisType and source identity.
+    pub(in crate::typer) fn any_ref_identity_argument_view(
+        &mut self,
+        ty: TypeId,
+    ) -> Option<TypeId> {
+        let Some(Type::ThisType { class }) = self.store.types.try_get(ty).cloned() else {
+            return None;
+        };
+        if !self.is_supported_any_ref_identity_receiver(ty) {
+            return None;
+        }
+        let prefix = self.type_symbol_prefix(class);
+        Some(self.store.types.alloc(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        }))
+    }
+
     pub(in crate::typer) fn any_ref_identity_symbol_for_receiver(
         &self,
         receiver: TypeId,
@@ -1080,13 +1110,15 @@ impl SourceTyper<'_> {
                 let Some(owner) = self.store.symbols.get(*class).owner else {
                     return false;
                 };
-                if !matches!(
-                    self.store.types.try_get(*prefix),
-                    Some(Type::TypeRef {
-                        prefix: package_prefix,
-                        target: TypeRefTarget::Symbol(package),
-                    }) if *package_prefix == self.definitions.no_prefix && *package == owner
-                ) {
+                if *prefix != self.definitions.no_prefix
+                    && !matches!(
+                        self.store.types.try_get(*prefix),
+                        Some(Type::TypeRef {
+                            prefix: package_prefix,
+                            target: TypeRefTarget::Symbol(package),
+                        }) if *package_prefix == self.definitions.no_prefix && *package == owner
+                    )
+                {
                     return false;
                 }
                 *class

@@ -348,10 +348,16 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
             matches!(
                 name,
                 "same"
+                    | "sameDot"
                     | "selfSame"
                     | "sameLocal"
                     | "different"
+                    | "differentDot"
                     | "isMissing"
+                    | "newSame"
+                    | "newLocalSame"
+                    | "sameThis"
+                    | "differentThis"
                     | "choose"
                     | "readOrDefault"
             )
@@ -366,7 +372,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
         .collect::<Vec<_>>();
     assert_eq!(
         methods.len(),
-        7,
+        13,
         "the candidate source shape must be parsed"
     );
     let infix_operands = parsed
@@ -394,6 +400,8 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
     );
     let box_class = class_definition(&parsed, typer.store(), &index, source, "Box").0;
     typer.complete_symbol(box_class).unwrap();
+    let runner_class = class_definition(&parsed, typer.store(), &index, source, "Runner").0;
+    typer.complete_symbol(runner_class).unwrap();
     let mut typed_methods = Vec::new();
     for (name, method, rhs) in methods {
         let context = typer.expression_context_for(method).unwrap();
@@ -438,7 +446,18 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
     for (name, root) in typed_methods {
         if !matches!(
             name.as_str(),
-            "same" | "selfSame" | "sameLocal" | "different" | "isMissing" | "readOrDefault"
+            "same"
+                | "sameDot"
+                | "selfSame"
+                | "sameLocal"
+                | "different"
+                | "differentDot"
+                | "isMissing"
+                | "newSame"
+                | "newLocalSame"
+                | "sameThis"
+                | "differentThis"
+                | "readOrDefault"
         ) {
             continue;
         }
@@ -476,7 +495,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
     }
     assert!(selected.iter().any(|(symbol, _)| *symbol == operators.eq));
     assert!(selected.iter().any(|(symbol, _)| *symbol == operators.ne));
-    assert_eq!(selected.len(), 6, "all source calls retain canonical IDs");
+    assert_eq!(selected.len(), 12, "all source calls retain canonical IDs");
     for symbol in operators.all() {
         assert_eq!(
             typer.store().symbols.get(symbol).owner,
@@ -485,7 +504,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
     }
     assert!(selected.iter().all(|(_, qualifier)| matches!(
         typer.typed_ast().get(*qualifier).kind,
-        TreeKind::Ident(_) | TreeKind::Select(_)
+        TreeKind::Ident(_) | TreeKind::This(_) | TreeKind::Select(_) | TreeKind::Apply(_)
     )));
     let mut same_parameter_on_both_sides = false;
     for (source_tree, source_left, source_right) in infix_operands {
@@ -552,7 +571,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
 
 #[test]
 fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
-    let source_text = "class Box:\n  def eq(other: Box): Boolean = true\nclass WrongArity:\n  def eq(): Boolean = true\nclass Generic[A]\ntrait Marker\nclass Runner:\n  def foreign(a: Box, b: Box): Boolean = a eq b\n  def wrongArity(a: WrongArity, b: WrongArity): Boolean = a eq b\n  def primitive(a: Int, b: Int): Boolean = a eq b\n  def incompatible(a: Box, b: Int): Boolean = a eq b\n  def traitRef(a: Marker, b: Marker): Boolean = a eq b\n  def generic(a: Generic[Int], b: Generic[Int]): Boolean = a eq b\n  def objectRef(a: Object, b: Object): Boolean = a eq b\n  def universal(a: Box, b: Box): Boolean = a == b\n";
+    let source_text = "class Box:\n  def eq(other: Box): Boolean = true\nclass Overloaded:\n  def eq(other: Overloaded): Boolean = true\n  def eq(other: Int): Boolean = false\nclass WrongArity:\n  def eq(): Boolean = true\nclass Generic[A]\ntrait Marker\nclass Runner:\n  def foreign(a: Box, b: Box): Boolean = a eq b\n  def overloadedInfix(a: Overloaded, b: Overloaded): Boolean = a eq b\n  def overloadedDot(a: Overloaded, b: Overloaded): Boolean = a.eq(b)\n  def wrongArity(a: WrongArity, b: WrongArity): Boolean = a eq b\n  def primitive(a: Int, b: Int): Boolean = a eq b\n  def incompatible(a: Box, b: Int): Boolean = a eq b\n  def traitRef(a: Marker, b: Marker): Boolean = a eq b\n  def generic(a: Generic[Int], b: Generic[Int]): Boolean = a eq b\n  def objectRef(a: Object, b: Object): Boolean = a eq b\n  def universal(a: Box, b: Box): Boolean = a == b\n";
     let source = SourceId::from_index(1472);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -585,6 +604,8 @@ fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
             matches!(
                 name,
                 "foreign"
+                    | "overloadedInfix"
+                    | "overloadedDot"
                     | "wrongArity"
                     | "primitive"
                     | "incompatible"
@@ -602,7 +623,7 @@ fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
             })
         })
         .collect::<Vec<_>>();
-    assert_eq!(methods.len(), 8);
+    assert_eq!(methods.len(), 10);
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
