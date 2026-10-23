@@ -510,6 +510,15 @@ pub enum AnalysisError {
         /// Allocation instruction that created the reference.
         allocation_site: usize,
     },
+    /// A third allocation was created before one of the two live allocations was initialized.
+    TooManyLiveAllocations {
+        /// Zero-based instruction position of the rejected `new`.
+        instruction: usize,
+        /// Maximum number of simultaneously live allocation sites.
+        limit: usize,
+        /// Earliest still-live allocation instruction.
+        allocation_site: usize,
+    },
     /// A constructor call did not use an uninitialized allocation receiver.
     ConstructorReceiverNotUninitialized {
         /// Zero-based instruction position.
@@ -985,6 +994,14 @@ impl fmt::Display for AnalysisError {
             } => write!(
                 formatter,
                 "instruction {instruction} uses uninitialized allocation from instruction {allocation_site}"
+            ),
+            Self::TooManyLiveAllocations {
+                instruction,
+                limit,
+                allocation_site,
+            } => write!(
+                formatter,
+                "instruction {instruction} exceeds the limit of {limit} live allocations while allocation from instruction {allocation_site} remains uninitialized"
             ),
             Self::ConstructorReceiverNotUninitialized { instruction } => write!(
                 formatter,
@@ -1720,7 +1737,7 @@ struct Frame {
     stack_join_evidence: Vec<std::collections::BTreeSet<ClassIdentity>>,
     stack_allocation_sites: Vec<Option<usize>>,
     stack_slots: usize,
-    pending_allocation: Option<UninitializedAllocation>,
+    pending_allocations: Vec<UninitializedAllocation>,
     locals: Vec<Option<LocalSlot>>,
     local_join_evidence: Vec<std::collections::BTreeSet<ClassIdentity>>,
     max_stack: usize,
@@ -1732,6 +1749,8 @@ struct UninitializedAllocation {
     site: usize,
     class: ClassIdentity,
 }
+
+const MAX_PENDING_ALLOCATIONS: usize = 2;
 
 impl Frame {
     fn new(
@@ -1787,7 +1806,7 @@ impl Frame {
             stack_join_evidence: Vec::new(),
             stack_allocation_sites: Vec::new(),
             stack_slots: 0,
-            pending_allocation: None,
+            pending_allocations: Vec::new(),
             locals,
             local_join_evidence,
             max_stack: 0,
@@ -1991,7 +2010,6 @@ impl Frame {
             }
             Instruction::InvokeVirtual(reference) => {
                 if flow_current_class.is_some() {
-                    self.ensure_no_pending_allocation(instruction_index)?;
                     let (owner, name, descriptor) =
                         self.virtual_method(instruction_index, reference, pool)?;
                     validate_flow_virtual_signature(
@@ -2033,14 +2051,16 @@ impl Frame {
             }
             Instruction::New(reference) => {
                 if flow_current_class.is_some() {
-                    if let Some(allocation) = &self.pending_allocation {
-                        return Err(AnalysisError::UninitializedReferenceUse {
+                    let class = self.allocation_class(instruction_index, reference, pool)?;
+                    if self.pending_allocations.len() >= MAX_PENDING_ALLOCATIONS {
+                        let allocation_site = self.pending_allocations[0].site;
+                        return Err(AnalysisError::TooManyLiveAllocations {
                             instruction: instruction_index,
-                            allocation_site: allocation.site,
+                            limit: MAX_PENDING_ALLOCATIONS,
+                            allocation_site,
                         });
                     }
-                    let class = self.allocation_class(instruction_index, reference, pool)?;
-                    self.pending_allocation = Some(UninitializedAllocation {
+                    self.pending_allocations.push(UninitializedAllocation {
                         site: instruction_index,
                         class: class.clone(),
                     });
@@ -2825,8 +2845,8 @@ impl Frame {
             });
         }
         let matches_pending = self
-            .pending_allocation
-            .as_ref()
+            .pending_allocations
+            .last()
             .is_some_and(|allocation| allocation.site == site && allocation.class == allocated);
         if !matches_pending {
             return Err(AnalysisError::ConstructorReceiverNotUninitialized { instruction });
@@ -2838,7 +2858,7 @@ impl Frame {
         self.stack_join_evidence.pop();
         self.stack_allocation_sites.pop();
         self.stack_slots -= 1;
-        self.pending_allocation = None;
+        self.pending_allocations.pop();
         for (class, allocation_site) in self
             .stack_classes
             .iter_mut()
@@ -2853,7 +2873,7 @@ impl Frame {
     }
 
     fn ensure_no_pending_allocation(&self, instruction: usize) -> Result<(), AnalysisError> {
-        if let Some(allocation) = &self.pending_allocation {
+        if let Some(allocation) = self.pending_allocations.first() {
             Err(AnalysisError::UninitializedReferenceUse {
                 instruction,
                 allocation_site: allocation.site,
@@ -3378,12 +3398,16 @@ impl CfgCodeAnalyzer {
     /// assignable to a supported reference type. No other hierarchy
     /// conversions are inferred by this entry point. Use
     /// [`Self::analyze_with_hierarchy`] to provide explicit superclass proofs.
-    /// It also supports in-block `new; dup;
-    /// primitive arguments; invokespecial <init>` with an exact allocation
-    /// class and owner match. Uninitialized values may not escape to locals,
-    /// ordinary operations, branches, or block boundaries. Field owners must
-    /// match the exact receiver. Other invocation kinds, reference fields,
-    /// arrays, and category-two method types remain unsupported.
+    /// It also supports up to two simultaneously live allocation sites in a
+    /// single basic block. Each `new` gets an instruction-site identity, and
+    /// matching `invokespecial <init>` calls initialize sites in last-in,
+    /// first-out order. Only aliases of the initialized site become ordinary
+    /// references. An initialized virtual receiver and initialized arguments
+    /// may be evaluated while a different allocation remains pending.
+    /// Uninitialized values may not escape to locals, ordinary operands,
+    /// branches, or block boundaries. Field owners must match the exact
+    /// receiver. Other invocation kinds, reference fields, arrays, and
+    /// category-two method types remain unsupported.
     pub fn analyze_with_current_class(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -4110,7 +4134,7 @@ fn frame_from_state(
             .collect(),
         stack_allocation_sites: vec![None; stack_slots],
         stack_slots,
-        pending_allocation: None,
+        pending_allocations: Vec::new(),
         locals,
         local_join_evidence: local_join_evidence.to_vec(),
         max_stack: stack_slots,
@@ -6897,6 +6921,197 @@ mod tests {
     }
 
     #[test]
+    fn cfg_initializes_nested_allocations_by_distinct_sites() {
+        let mut builder = ConstantPoolBuilder::new();
+        let runner = builder.class("example/Runner").unwrap();
+        let holder = builder.class("example/Holder").unwrap();
+        let counter = builder.class("example/Counter").unwrap();
+        let counter_constructor = builder
+            .method_ref("example/Counter", "<init>", "(I)V")
+            .unwrap();
+        let holder_constructor = builder
+            .method_ref("example/Holder", "<init>", "(Lexample/Counter;)V")
+            .unwrap();
+        let holder_primitive_constructor = builder
+            .method_ref("example/Holder", "<init>", "(I)V")
+            .unwrap();
+        let counter_holder_constructor = builder
+            .method_ref("example/Counter", "<init>", "(Lexample/Holder;)V")
+            .unwrap();
+        let factory = builder
+            .method_ref("example/Runner", "makeCounter", "(I)Lexample/Counter;")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+        let hierarchy = ClassHierarchy::from_edges([
+            ("example/Runner".to_owned(), "java/lang/Object".to_owned()),
+            ("example/Holder".to_owned(), "java/lang/Object".to_owned()),
+            ("example/Counter".to_owned(), "java/lang/Object".to_owned()),
+        ])
+        .unwrap();
+        let mut sequence = CodeSequence::new();
+        sequence
+            .instruction(Instruction::New(ClassReference::new(operand(holder))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::New(ClassReference::new(operand(counter))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(counter_constructor),
+            )))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(holder_constructor),
+            )))
+            .instruction(Instruction::AReturn);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "create",
+            "(I)Lexample/Holder;",
+            false,
+            &pool,
+            runner,
+            &hierarchy,
+        )
+        .unwrap();
+
+        assert_eq!(flow.max_stack, 5);
+        assert_eq!(flow.max_locals, 2);
+
+        let mut factory_sequence = CodeSequence::new();
+        factory_sequence
+            .instruction(Instruction::New(ClassReference::new(operand(holder))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(factory),
+            )))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(holder_constructor),
+            )))
+            .instruction(Instruction::AReturn);
+        let factory_graph = ControlFlowGraph::build(&factory_sequence).unwrap();
+        let factory_flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &factory_graph,
+            "createFromFactory",
+            "(I)Lexample/Holder;",
+            false,
+            &pool,
+            runner,
+            &hierarchy,
+        )
+        .unwrap();
+        assert_eq!(factory_flow.max_stack, 4);
+        assert_eq!(factory_flow.max_locals, 2);
+
+        let mut reversed_sequence = CodeSequence::new();
+        reversed_sequence
+            .instruction(Instruction::New(ClassReference::new(operand(counter))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::New(ClassReference::new(operand(holder))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(holder_primitive_constructor),
+            )))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(counter_holder_constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let reversed_graph = ControlFlowGraph::build(&reversed_sequence).unwrap();
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &reversed_graph,
+            "createReversed",
+            "(I)V",
+            false,
+            &pool,
+            runner,
+            &hierarchy,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cfg_distinguishes_same_class_allocation_sites_and_allows_reuse_after_init() {
+        let mut builder = ConstantPoolBuilder::new();
+        let current = builder.class("example/Node").unwrap();
+        let constructor = builder
+            .method_ref("example/Node", "<init>", "(I)V")
+            .unwrap();
+        let parent_constructor = builder
+            .method_ref("example/Node", "<init>", "(Lexample/Node;)V")
+            .unwrap();
+        let hierarchy = ClassHierarchy::from_edges([(
+            "example/Node".to_owned(),
+            "java/lang/Object".to_owned(),
+        )])
+        .unwrap();
+        let pool = builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        sequence
+            .instruction(Instruction::New(ClassReference::new(operand(current))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::New(ClassReference::new(operand(current))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(parent_constructor),
+            )))
+            .instruction(Instruction::AReturn);
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_hierarchy(
+            &graph,
+            "nestedNode",
+            "()Lexample/Node;",
+            false,
+            &pool,
+            current,
+            &hierarchy,
+        )
+        .unwrap();
+        assert_eq!(flow.max_stack, 5);
+
+        let mut repeated = CodeSequence::new();
+        repeated
+            .instruction(Instruction::New(ClassReference::new(operand(current))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::New(ClassReference::new(operand(current))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(parent_constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::New(ClassReference::new(operand(current))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let repeated_graph = ControlFlowGraph::build(&repeated).unwrap();
+        CfgCodeAnalyzer::analyze_with_hierarchy(
+            &repeated_graph,
+            "repeatedNodes",
+            "()V",
+            false,
+            &pool,
+            current,
+            &hierarchy,
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn cfg_allows_distinct_initialized_allocations_to_join_and_reinitialize_in_loops() {
         let mut builder = ConstantPoolBuilder::new();
         let class = builder.class("example/Counter").unwrap();
@@ -7155,7 +7370,7 @@ mod tests {
     }
 
     #[test]
-    fn cfg_validates_constructor_descriptor_and_rejects_nested_allocations() {
+    fn cfg_validates_constructor_descriptors_and_rejects_third_nested_allocation() {
         let mut builder = ConstantPoolBuilder::new();
         let class = builder.class("example/Counter").unwrap();
         let int_constructor = builder
@@ -7287,12 +7502,14 @@ mod tests {
             .instruction(Instruction::New(ClassReference::new(operand(class))))
             .instruction(Instruction::Dup)
             .instruction(Instruction::New(ClassReference::new(operand(class))))
-            .instruction(Instruction::Pop)
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::New(ClassReference::new(operand(class))))
             .instruction(Instruction::Return);
         assert_eq!(
             analyze_sequence(&nested),
-            Err(AnalysisError::UninitializedReferenceUse {
-                instruction: 2,
+            Err(AnalysisError::TooManyLiveAllocations {
+                instruction: 4,
+                limit: 2,
                 allocation_site: 0,
             })
         );

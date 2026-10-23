@@ -106,18 +106,18 @@ compiler's bounded subset:
   `Object(Holder)` after the direct-super call, and the stored value is exact
   initialized `Object(Counter)` from the constructor parameter.
 
-Current class-aware CFG analysis already records exact identities for ordinary
-reference calls and tracks allocation-site initialization for a bounded
-straight-line `new; dup; arguments; invokespecial` shape. It has a single
-`pending_allocation` slot and rejects a second `new` before the first
-constructor completes. The supported `new Holder(existingRef)` form uses one
-exact reference parameter. Nested `new Holder(new Counter(...))` and
-`new Holder(factory())` currently reach codegen and fail with
-`JvmConstructorCallArgumentTypeMismatch`; both need an initialized exact
-reference argument contract, and the nested form additionally needs multiple
-live allocation identities. Category-only linear analysis cannot establish
-either proof. See the [object graph construction audit](jvm-object-graph-construction.md)
-for source observer evidence and the full state contract.
+Current class-aware CFG analysis records exact identities for ordinary
+reference calls and tracks up to two allocation-site identities in a bounded
+straight-line basic block. It permits exact LIFO initialization and lets a
+checked call on a separate initialized receiver return an exact initialized
+reference while an outer allocation remains pending. The supported source
+form `new Holder(existingRef)` uses one exact reference parameter. Nested
+`new Holder(new Counter(...))` and `new Holder(factory())` still reach source
+codegen and fail with `JvmConstructorCallArgumentTypeMismatch`; the verifier
+capability does not itself lower source constructor arguments. Category-only
+linear analysis cannot establish allocation-site alias transitions. See the
+[object graph construction audit](jvm-object-graph-construction.md) for source
+observer evidence and the full state contract.
 
 The class-aware linear analyzer can validate straight-line exact descriptors,
 but cannot prove allocation-site alias transitions, branch joins, or

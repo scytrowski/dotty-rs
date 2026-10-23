@@ -173,11 +173,11 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | Instruction family | Transfer/check in the supported subset |
 | --- | --- |
 | `aload` / `astore` | Load only an initialized exact-class local. Stores preserve the exact initialized class; reject unusable or uninitialized values. |
-| `dup` / `pop` | Preserve or discard the same abstract value; `dup` must retain one allocation-site identity, not initialize it. |
+| `dup` / `pop` | Preserve or discard the same abstract value; `dup` retains its allocation-site identity without initializing it. |
 | `getfield` / `putfield` | Validate the fieldref and descriptor. Receiver must be initialized and assignable to the field owner using the explicit hierarchy; a reference value must be assignable to the declared field class. |
-| `invokevirtual` | Validate methodref and descriptor. Pop supported arguments right-to-left; each object argument and receiver must be assignable to its declared class/owner using the explicit hierarchy. Push the exact object result or int-like result. Arrays and category-two types remain unsupported. |
-| `new` | Validate the `CONSTANT_Class`; push a fresh uninitialized allocation-site identity. |
-| `invokespecial <init>` | The constructor owner must equal the uninitialized allocation class; constructor arguments use explicit hierarchy assignability. On normal completion rewrite all aliases of that allocation to `Initialized(owner)`. |
+| `invokevirtual` | Validate methodref and descriptor. Pop supported arguments right-to-left; each object argument and receiver must be initialized and assignable to its declared class/owner using the explicit hierarchy. This call may execute while a distinct allocation remains pending lower on the stack. Push the exact initialized object result or int-like result. Arrays and category-two types remain unsupported. |
+| `new` | Validate the `CONSTANT_Class`; push a fresh instruction-site identity. Keep at most two live sites. A third `new` before an earlier constructor completes fails with `TooManyLiveAllocations`. |
+| `invokespecial <init>` | The top active uninitialized receiver's site and class must match the constructor owner; constructor arguments use explicit hierarchy assignability and must be initialized. Initialize in last-in, first-out order and rewrite only aliases of that site to `Initialized(owner)`. |
 | `invokespecial DirectParent.method` | Require the `Methodref` owner to equal the validated direct parent and the receiver to be exactly the initialized emitting class. Validate the supported descriptor arguments, then push its exact reference or int-like result. The class-file builder requires `ACC_SUPER`; constructors keep their separate allocation transfer. |
 | Conditional branches | `ifeq`/`ifne` pop one integer; `if_icmp*` pop two integers; `if_acmpeq`/`if_acmpne` pop two initialized references or nulls; `ifnull`/`ifnonnull` pop one initialized reference or null. Branches do not push a result. Uninitialized allocations are rejected as ordinary branch operands. |
 | Returns | Preserve primitive/void checks; `areturn` requires an initialized reference assignable to the planned result class using the explicit hierarchy. |
@@ -191,21 +191,35 @@ errors, not guessed names.
 
 ## Allocation and constructor boundary
 
-Allow only this bounded sequence wholly inside one basic block:
+Allow one or two nested sequences wholly inside one straight-line basic block:
 
 ```text
-new C
+new Outer
+dup
+new Inner
 dup
 primitive argument evaluation
-invokespecial C.<init>(descriptor)
+invokespecial Inner.<init>(descriptor)
+invokespecial Outer.<init>(LInner;)
 ```
 
-Before the matching constructor completes normally, the uninitialized value
-must not be stored in a local, returned, passed to another call, used for a
-field operation, used as an ordinary receiver, or cross a branch edge. The
-constructor owner must equal the allocation class. `dup` aliases must all be
-rewritten to initialized `C` after the matching call. No uninitialized value
-may appear in a merge state or emitted branch-target frame.
+Allocation identity is the `new` instruction position, even when two sites
+allocate the same class. Each `invokespecial <init>` consumes the most recently
+created still-pending site and must name that site's exact class. Normal
+completion rewrites only that site's aliases; the older enclosing site stays
+uninitialized until its own matching constructor completes. A third
+simultaneously live site is rejected, but a later `new` is allowed after
+initialization frees a slot.
+
+Before a matching constructor completes normally, an uninitialized alias may
+not be stored in a local, returned, passed as a method argument, used as a
+field receiver, used as an ordinary receiver, or cross a branch edge. Calls
+on a separate initialized receiver with initialized arguments may run while
+an enclosing site remains pending; their initialized results can be consumed
+as constructor arguments. No uninitialized value may appear in a merge state
+or emitted branch-target frame. Branches and block exits with any pending
+site remain rejected; exception-table edges are not modeled by this CFG
+contract.
 
 Branched `<init>` methods remain unsupported: the current linear class-file
 builder validates the `UninitializedThis` to initialized-`this` transition
