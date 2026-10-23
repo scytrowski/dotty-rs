@@ -2024,6 +2024,46 @@ mod tests {
     }
 
     #[test]
+    fn null_conformance_preserves_failed_and_malformed_target_class_info() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box; class Runner");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let box_type = nominal_type_ref(&mut store, definitions, box_class);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.store.symbols.set_info(box_class, SymbolInfo::Error);
+        assert!(matches!(
+            typer.is_subtype(definitions.null_type, box_type),
+            Err(TypeRelationError::ClassInfoUnavailable {
+                symbol,
+                state: crate::types::SymbolInfoState::Error,
+            }) if symbol == box_class
+        ));
+        assert_eq!(
+            *typer.store.symbols.info(box_class),
+            SymbolInfo::Error,
+            "the relation does not repair or complete an errored class"
+        );
+
+        typer
+            .store
+            .symbols
+            .set_info(box_class, SymbolInfo::Complete(definitions.int));
+        assert!(matches!(
+            typer.is_subtype(definitions.null_type, box_type),
+            Err(TypeRelationError::ClassInfoNotClassInfo { symbol, info })
+                if symbol == box_class && info == definitions.int
+        ));
+    }
+
+    #[test]
     fn inheritance_cycles_are_reported_for_unrelated_targets() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class A extends B; class B extends A; class C");

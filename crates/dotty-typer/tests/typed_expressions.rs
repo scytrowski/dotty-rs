@@ -166,6 +166,10 @@ fn source_null_literal_uses_the_canonical_null_type() {
         definitions,
         &packages,
     );
+    let generic_class = class_definition(&parsed, typer.store(), &index, source, "Generic").0;
+    let box_class = class_definition(&parsed, typer.store(), &index, source, "Box").0;
+    typer.complete_symbol(generic_class).unwrap();
+    typer.complete_symbol(box_class).unwrap();
 
     let find_method = |name: &str| {
         methods
@@ -264,6 +268,33 @@ fn source_null_literal_uses_the_canonical_null_type() {
         assert!(typer.source_typed_index().get(source, rhs).is_none());
     }
 
+    let (bad_generic, generic_tpt, generic_rhs) = find_method("badRawGeneric");
+    let expected = typer
+        .type_of_tpt(
+            generic_tpt,
+            index.declaration_context_of(bad_generic).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        typer.store().types.get(expected).reference_symbol(),
+        Some(generic_class)
+    );
+    let context = typer.expression_context_for(bad_generic).unwrap();
+    assert!(matches!(
+        typer.type_expression_expected(generic_rhs, context, expected),
+        Err(TyperError::ExpectedExpressionTypeMismatch {
+            actual,
+            expected: actual_expected,
+            ..
+        }) if actual == definitions.null_type && actual_expected == expected
+    ));
+    assert!(
+        typer
+            .source_typed_index()
+            .get(source, generic_rhs)
+            .is_none()
+    );
+
     let null_literals = typer
         .typed_ast()
         .iter()
@@ -338,6 +369,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
         &packages,
     );
     let box_class = class_definition(&parsed, typer.store(), &index, source, "Box").0;
+    typer.complete_symbol(box_class).unwrap();
     let mut failures = Vec::new();
     for (name, method, rhs) in methods {
         let context = typer.expression_context_for(method).unwrap();

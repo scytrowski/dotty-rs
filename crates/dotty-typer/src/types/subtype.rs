@@ -44,6 +44,17 @@ pub enum TypeRelationError {
     },
     /// ClassInfo points at a declaration scope outside the scope arena.
     InvalidDeclarationScope { symbol: SymbolId, scope: ScopeId },
+    /// A current source class's completed info does not use its named scope.
+    MalformedClassInfoDeclarations {
+        symbol: SymbolId,
+        declarations: ScopeId,
+        expected: Option<ScopeId>,
+    },
+    /// A class declaration scope contains a symbol outside the symbol arena.
+    InvalidClassDeclarationSymbol {
+        symbol: SymbolId,
+        declaration: SymbolId,
+    },
     /// A parent entry does not designate a class-like type.
     MalformedParentType { ty: TypeId },
     /// A source class's parent view could not be instantiated.
@@ -268,7 +279,36 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         {
             return Ok(false);
         }
-        self.is_canonical_top_level_class_prefix(*class, *prefix)
+        if !self.is_canonical_top_level_class_prefix(*class, *prefix)? {
+            return Ok(false);
+        }
+
+        let info = self.class_info(*class)?;
+        let expected_declarations = self.typer.index.scope_of(*class);
+        if expected_declarations != Some(info.declarations) {
+            return Err(TypeRelationError::MalformedClassInfoDeclarations {
+                symbol: *class,
+                declarations: info.declarations,
+                expected: expected_declarations,
+            });
+        }
+        let declarations = self.typer.store.scopes.get(info.declarations);
+        for declaration in declarations.entered_symbols() {
+            if !self.typer.store.symbols.contains(declaration) {
+                return Err(TypeRelationError::InvalidClassDeclarationSymbol {
+                    symbol: *class,
+                    declaration,
+                });
+            }
+            let declaration = self.typer.store.symbols.get(declaration);
+            if declaration.kind == SymbolKind::TypeParameter {
+                // The current increment does not model raw generic class
+                // types. Conservatively keep `Null` conformance inside the
+                // explicitly supported non-generic class slice.
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn this_type_reference_prefix_matches(

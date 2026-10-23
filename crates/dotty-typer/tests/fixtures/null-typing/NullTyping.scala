@@ -1,4 +1,5 @@
 class Box
+class Generic[A]
 
 class Runner:
   def exact(): Null = null
@@ -12,3 +13,4 @@ class Runner:
     box
   def badInt(): Int = null
   def badBoolean(): Boolean = null
+  def badRawGeneric(): Generic = null
