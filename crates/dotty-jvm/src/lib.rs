@@ -39,12 +39,16 @@ mod identity;
 mod locals;
 mod primitive_ops;
 mod reference;
+mod reference_identity;
 
 pub use boolean_ops::{
     JvmBooleanIntrinsic, JvmBooleanIntrinsicError, JvmBooleanRhsEvaluation,
     resolve_boolean_intrinsic,
 };
 pub use primitive_ops::{JvmIntIntrinsic, JvmIntIntrinsicError, resolve_int_intrinsic};
+pub use reference_identity::{
+    JvmReferenceIdentityError, JvmReferenceIdentityOperator, resolve_reference_identity_operator,
+};
 
 /// Maximum number of nested typed expression nodes visited by JVM lowering.
 pub const JVM_EXPRESSION_DEPTH_LIMIT: usize = 64;
@@ -1002,6 +1006,18 @@ pub enum JvmCodegenError {
     },
     /// A resolved Boolean operand did not lower to one JVM Boolean value.
     BooleanIntrinsicOperandFlowMismatch {
+        tree: TreeId<Typed>,
+        operand: TreeId<Typed>,
+        index: usize,
+        found: JvmExpressionFlow,
+    },
+    /// A typed application that selects canonical AnyRef identity has inconsistent semantics.
+    ReferenceIdentityResolution {
+        tree: TreeId<Typed>,
+        error: JvmReferenceIdentityError,
+    },
+    /// A reference identity operand did not lower to a planned reference or canonical Null.
+    ReferenceIdentityOperandFlowMismatch {
         tree: TreeId<Typed>,
         operand: TreeId<Typed>,
         index: usize,

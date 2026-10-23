@@ -4897,7 +4897,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0xb0
             | 0xb1 => 1,
             0x10 | 0x12 | 0x15 | 0x19 | 0x36 | 0x3a => 2,
-            0x13 | 0x14 | 0x99..=0x9a | 0x9f..=0xa4 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
+            0x13 | 0x14 | 0x99..=0x9a | 0x9f..=0xa6 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };
         assert!(
@@ -4913,7 +4913,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
 fn decode_branch_targets(code: &[u8]) -> Vec<(usize, u8, usize)> {
     decode_subset_instructions(code)
         .into_iter()
-        .filter(|(_, opcode)| matches!(*opcode, 0x99..=0x9a | 0x9f..=0xa4 | 0xa7))
+        .filter(|(_, opcode)| matches!(*opcode, 0x99..=0x9a | 0x9f..=0xa6 | 0xa7))
         .map(|(offset, opcode)| {
             let displacement = i16::from_be_bytes([code[offset + 1], code[offset + 2]]);
             let target = offset as isize + isize::from(displacement);
@@ -7540,6 +7540,152 @@ fn typed_null_reference_flows_emit_verifiable_null_values() {
         assert!(
             java.status.success(),
             "java -Xverify:all rejected typed-null classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn anyref_identity_uses_reference_branches_and_verifies_runtime_behavior() {
+    let output = TestOutputDirectory::new("anyref-identity");
+    let artifacts = compile_fixture_classes("AnyRefIdentity.scala", output.path())
+        .expect("real canonical AnyRef.eq/ne calls compile");
+    let box_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Box")
+        .expect("Box class is emitted");
+    let runner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner class is emitted");
+    let mut box_reader = Reader::new(box_artifact.class.bytes());
+    let boxed = ClassFile::decode(&mut box_reader).expect("decode Box class");
+    let mut runner_reader = Reader::new(runner_artifact.class.bytes());
+    let runner = ClassFile::decode(&mut runner_reader).expect("decode Runner class");
+    runner
+        .validate_references()
+        .expect("identity bytecode has valid constant-pool references");
+
+    for (method_name, descriptor, opcode) in [
+        ("same", "(LBox;LBox;)Z", 0xa5),
+        ("different", "(LBox;LBox;)Z", 0xa6),
+        ("missing", "(LBox;)Z", 0xa5),
+        ("present", "(LBox;)Z", 0xa6),
+    ] {
+        let method = runner
+            .methods
+            .iter()
+            .find(|method| runner.constant_pool.utf8(method.name_index) == Ok(method_name))
+            .unwrap_or_else(|| panic!("missing {method_name} method"));
+        assert_eq!(
+            runner.constant_pool.utf8(method.descriptor_index),
+            Ok(descriptor),
+            "{method_name} retains its Boolean source descriptor"
+        );
+        let code = emitted_method_code(&runner, method_name);
+        let instructions = decode_subset_instructions(code);
+        if matches!(method_name, "same" | "different") {
+            assert_eq!(
+                instructions
+                    .iter()
+                    .take(2)
+                    .map(|(_, opcode)| *opcode)
+                    .collect::<Vec<_>>(),
+                [0x2b, 0x2c],
+                "{method_name} loads its receiver before its argument, once each"
+            );
+            assert_eq!(
+                instructions
+                    .iter()
+                    .filter(|(_, opcode)| matches!(*opcode, 0x2b | 0x2c))
+                    .count(),
+                2,
+                "{method_name} evaluates each parameter exactly once"
+            );
+        }
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|(_, found)| *found == opcode)
+                .count(),
+            1,
+            "{method_name} uses the corresponding reference identity branch"
+        );
+        assert!(
+            !instructions.iter().any(|(_, found)| *found == 0xb6),
+            "{method_name} does not dispatch identity through invokevirtual"
+        );
+        let targets = decode_branch_targets(code);
+        assert!(targets.iter().all(|(_, _, target)| {
+            stack_map_frames(&runner, method_name)
+                .iter()
+                .any(|frame| frame.pc == *target)
+        }));
+    }
+
+    let box_value = boxed
+        .methods
+        .iter()
+        .find(|method| boxed.constant_pool.utf8(method.name_index) == Ok("value"))
+        .expect("Box.value method exists");
+    assert_eq!(
+        boxed.constant_pool.utf8(box_value.descriptor_index),
+        Ok("()I")
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 test path");
+        let harness = output.path().join("AnyRefIdentityHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class AnyRefIdentityHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    Box first = new Box(10);
+    Box second = new Box(10);
+    if (!runner.same(first, first) || runner.same(first, second))
+      throw new AssertionError("eq must use object identity");
+    if (first.value() != 10 || second.value() != 10)
+      throw new AssertionError("distinct boxes carry equal values");
+    if (!runner.different(first, second) || runner.different(first, first))
+      throw new AssertionError("ne must use object identity");
+    if (runner.missing(first) || !runner.missing(null))
+      throw new AssertionError("eq with null");
+    if (!runner.present(first) || runner.present(null))
+      throw new AssertionError("ne with null");
+    if (!runner.choose(true, first, first) || runner.choose(false, first, first))
+      throw new AssertionError("identity result is usable as an If condition");
+    if (!runner.clearUntilNull(first) || runner.clearUntilNull(null) != true)
+      throw new AssertionError("identity result is usable as a While condition");
+  }
+}
+"#,
+        )
+        .expect("write AnyRef identity harness");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for AnyRef identity harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected AnyRef identity harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "AnyRefIdentityHarness",
+            ])
+            .output()
+            .expect("start Java verifier for AnyRef identity classes");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected AnyRef identity classes\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );

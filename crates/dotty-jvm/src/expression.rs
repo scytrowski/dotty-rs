@@ -1869,6 +1869,22 @@ fn emit_apply(
         return emit_direct_super_call(context, tree_id, function, &arguments, code, depth);
     }
 
+    let reference_identity = crate::resolve_reference_identity_operator(
+        context.store,
+        context.typed_ast,
+        tree_id,
+        context.definitions,
+    )
+    .map_err(|error| JvmCodegenError::ReferenceIdentityResolution {
+        tree: tree_id,
+        error,
+    })?;
+    if let Some(operator) = reference_identity {
+        return emit_reference_identity(
+            context, tree_id, function, &arguments, operator, code, depth,
+        );
+    }
+
     let intrinsic = crate::resolve_boolean_intrinsic(
         context.store,
         context.typed_ast,
@@ -2630,6 +2646,125 @@ fn emit_boolean_intrinsic(
         error,
     })?;
     Ok(Flow::Value(JvmType::Boolean))
+}
+
+fn emit_reference_identity(
+    context: &mut JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    function: TreeId<Typed>,
+    arguments: &[TreeId<Typed>],
+    operator: crate::JvmReferenceIdentityOperator,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let receiver = match &context.tree(function)?.kind {
+        TreeKind::Select(select) => select.qualifier,
+        _ => {
+            return Err(JvmCodegenError::ReferenceIdentityResolution {
+                tree: tree_id,
+                error: crate::JvmReferenceIdentityError::UnsupportedFunctionShape {
+                    tree: function,
+                },
+            });
+        }
+    };
+    let [argument] = arguments else {
+        return Err(JvmCodegenError::ReferenceIdentityResolution {
+            tree: tree_id,
+            error: crate::JvmReferenceIdentityError::WrongArity {
+                tree: tree_id,
+                found: arguments.len(),
+            },
+        });
+    };
+
+    for (index, operand) in [receiver, *argument].into_iter().enumerate() {
+        let flow = emit_identity_operand(context, tree_id, operand, index, code, depth + 1)?;
+        if !matches!(flow, Flow::Null | Flow::Value(JvmType::Reference(_))) {
+            return Err(JvmCodegenError::ReferenceIdentityOperandFlowMismatch {
+                tree: tree_id,
+                operand,
+                index,
+                found: public_flow(flow),
+            });
+        }
+    }
+
+    let truthy = code
+        .new_label()
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    let end = code
+        .new_label()
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    match operator {
+        crate::JvmReferenceIdentityOperator::Eq => code.if_acmpeq(truthy.clone()),
+        crate::JvmReferenceIdentityOperator::Ne => code.if_acmpne(truthy.clone()),
+    }
+    .map_err(|error| JvmCodegenError::CodeBuilder {
+        tree: tree_id,
+        error,
+    })?;
+    code.iconst(0)
+        .and_then(|code| code.goto(end.clone()))
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    code.mark(truthy)
+        .and_then(|code| code.iconst(1))
+        .and_then(|code| code.mark(end))
+        .map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: tree_id,
+            error,
+        })?;
+    Ok(Flow::Value(JvmType::Boolean))
+}
+
+fn emit_identity_operand(
+    context: &mut JvmLoweringContext<'_>,
+    comparison: TreeId<Typed>,
+    operand: TreeId<Typed>,
+    index: usize,
+    code: &mut CodeBuilder,
+    depth: usize,
+) -> Result<Flow, JvmCodegenError> {
+    let (is_null_literal, tree_type) = {
+        let tree = context.tree(operand)?;
+        (
+            matches!(
+                &tree.kind,
+                TreeKind::Literal(literal) if literal.value == Constant::Null
+            ),
+            tree.ty,
+        )
+    };
+    if is_null_literal {
+        // The verified AnyRef.eq/ne selection itself supplies this checked
+        // reference context; general expression lowering still requires an
+        // explicit planned class target for a Null literal.
+        context.visit(operand, depth)?;
+        if tree_type != context.definitions.null_type {
+            return Err(JvmCodegenError::ReferenceIdentityOperandFlowMismatch {
+                tree: comparison,
+                operand,
+                index,
+                found: JvmExpressionFlow::Null,
+            });
+        }
+        code.aconst_null()
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: operand,
+                error,
+            })?;
+        return Ok(Flow::Null);
+    }
+    emit_expression(context, operand, code, depth)
 }
 
 fn emit_int_intrinsic(

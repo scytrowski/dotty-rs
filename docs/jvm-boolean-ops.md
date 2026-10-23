@@ -58,6 +58,12 @@ because the compiler would not build. The typed call shape alone therefore
 does not encode whether the RHS is conditional; the selected canonical method
 identity supplies that meaning.
 
+The Boolean overloads of `==` and `!=` remain integer-like Boolean
+comparisons. Source `AnyRef.eq/ne` on planned references are separate
+identity operations: the JVM backend recognizes their canonical selected
+`SymbolId`s and emits `if_acmpeq`/`if_acmpne`. It does not rewrite universal
+`Any.==`/`Any.!=` or invoke a Java `Object` equality method.
+
 `unary_!` is parameterless: Scala declares `def unary_! : Boolean`, with no
 argument clause. It is not `def unary_!(): Boolean`, which the pinned Scala
 oracle rejects for prefix syntax with E100 (`method unary_! ... must be called

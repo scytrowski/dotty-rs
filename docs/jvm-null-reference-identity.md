@@ -5,8 +5,9 @@ Java SE 21 verifier contract. It records current source and classfile boundaries
 and successor ownership. Source `Null` typing (#1469), low-level reference
 branch support (#1471), bounded source `AnyRef.eq/ne` selection (#1472), and
 source-typed null lowering in checked planned-reference contexts (#1473) are
-implemented. Identity bytecode lowering and runtime identity behavior remain
-separate work.
+implemented. Issue #1474 adds identity-only JVM lowering for the selected
+canonical `AnyRef.eq/ne` members; the limits below still exclude universal
+equality and unsupported source reference shapes.
 
 ## Reference evidence
 
@@ -77,13 +78,14 @@ Lexing, parsing, naming, and the supported identity expressions succeed:
 | `choose(flag, value)` | Returns `Box`; the `null` branch retains canonical source `Null` |
 | `readOrDefault(flag, value)` | Types the `eq null` check and `value()` call; this adds no flow-sensitive narrowing |
 
-The fixture also checks identity selection through a local receiver and the
-same parameter on both sides. The negative Typer regression rejects a foreign
+The Typer-only fixture also checks identity selection through a local receiver
+and the same parameter on both sides. The negative Typer regression rejects a foreign
 same-spelled method, a wrong-arity declaration, primitive and trait receivers,
 a generic receiver, an incompatible operand, and builtin `Object`. A
 `Box == Box` expression remains a separate unresolved member and is not
-rewritten to `eq`. No code generation is attempted by this source-semantic
-increment.
+rewritten to `eq`. The separate JVM fixture
+[`AnyRefIdentity.scala`](../tests/fixtures/jvm/AnyRefIdentity.scala) exercises
+the subset that is now lowered and verified end to end.
 
 In default Scala 3.9 semantics, `null` has source type `Null` and conforms to
 reference types. The JVM backend emits the real `aconst_null` value only when
@@ -146,6 +148,24 @@ At the classfile layer:
   reference comparison branch contract below, not `invokevirtual` or
   universal `equals` semantics.
 
+The JVM backend recognizes only the exact method `SymbolId` selected by the
+Typer and registered in `Definitions`. It evaluates the receiver before the
+argument, accepts planned reference flows and canonical `Null`, emits
+`if_acmpeq` for `eq` or `if_acmpne` for `ne`, then materializes a Boolean with
+`iconst_0`/`iconst_1`. Null literals in these operands retain verifier `Null`;
+they do not acquire an `Object` class identity. The executable fixture covers
+parameter and mutable-local operands, null arguments, Boolean returns, `If`
+conditions, and a `While` condition. JDK 21 `java -Xverify:all` passes its
+same-object, distinct-object, null, and loop checks. Comparison operands are
+lowered once each in source order, and no `Object.eq`, `Object.ne`, or
+`equals` invocation is emitted.
+
+This does not add source `null` as a receiver selection: the current Typer
+does not select `AnyRef.eq` for a literal `null` receiver. The supported null
+case is a reference-typed receiver whose runtime value may be null, compared
+with a canonical null argument. It also does not add flow-sensitive
+narrowing.
+
 The classfile CFG and stack-map frame generator project `Null` directly to the
 existing `VerificationTypeInfo::Null` tag 5 without interning a class. The JVM
 source backend emits one `aconst_null` for each accepted canonical source Null
@@ -201,7 +221,7 @@ claims.
 | #1471 | `dotty-classfile`: reference compare/null branch instructions, symbolic assembly, and CFG transfer | Implemented with #1470 Null flow available |
 | #1472 | `dotty-core`/`dotty-typer`: canonical `AnyRef.eq/ne` IDs and bounded source Typer selection | Implemented; uses the pinned source audit, #1469 Null, and #1471 branch contract |
 | #1473 | `dotty-jvm`: source-typed null lowering in explicit planned-reference contexts | #1469, #1470, #1457–#1459 |
-| #1474 | `dotty-jvm`: identity-only `eq/ne` lowering and Boolean materialization | #1471, #1472, and #1473 (therefore #1470) |
+| #1474 | `dotty-jvm`: identity-only `eq/ne` lowering and Boolean materialization | Implemented; #1471, #1472, and #1473 (therefore #1470) |
 | #1475 | Real source/JDK 21+ end-to-end acceptance, verifier frames, deterministic classes, and negative first-stage diagnostics | #1469–#1474 |
 
 `dotty-classfile` remains Scala-independent; source identities stay in

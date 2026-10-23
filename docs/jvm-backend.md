@@ -837,10 +837,12 @@ identity and virtual dispatch with `-Xverify:all`.
 
 The audit of Scala 3.9 default-null and `AnyRef.eq/ne` semantics, plus the
 separate JVMS 21 null-verifier state, is recorded in the
-[null and reference identity audit](jvm-null-reference-identity.md). The
-classfile layer now exposes reference identity/null branches; this does not
-enable source `eq`/`ne` lowering, null lowering, explicit-nulls typing, or
-flow-sensitive narrowing.
+[null and reference identity audit](jvm-null-reference-identity.md). The JVM
+backend lowers only Typer-selected canonical `AnyRef.eq/ne` calls on supported
+planned references, using `if_acmpeq`/`if_acmpne` and Boolean materialization.
+The null and source identity fixture runs with `java -Xverify:all`. Universal
+`==`/`!=`, explicit-nulls typing, flow-sensitive narrowing, and literal-null
+receivers remain outside this subset.
 
 This path targets the repository's pinned Scala 3.9.0 source compatibility
 reference at revision `777528f19a58e794c9954a42f433373472ec57f8`. It demonstrates
