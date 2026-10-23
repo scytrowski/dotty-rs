@@ -79,7 +79,7 @@ those values are excluded because that binary's build provenance is
 uncertain. Focused CI records per-sample wall/phase timing and process-tree RSS
 without enforcing a single-run latency threshold.
 
-## Full-corpus DoD status: local run completed; gates fail
+## Full-corpus DoD status: local run completed; regression gates fail
 
 At the user's request, the full audit was run locally against the pinned Scala
 3.9.0 artifacts with one Cargo job and one Rust test thread. Two sequential
@@ -91,19 +91,32 @@ was unavailable because `/usr/bin/time` is not installed. The raw report is
 678 MB and remains in the local temporary audit directory; it is not checked
 into the repository.
 
-The corpus gate correctly rejected this run. It found 22 previously successful
-type-target keys missing from the current success set, and the maximum eager
-completed-class fanout is 29, above the required 16. The p95 dependency depth
-is 0 (limit 6), with maximum depth 8 and 63 distinct classes touched by the
-worst request. External class-symbol successes rose from 358 to 18,138, but
-that aggregate increase does not erase the 22 missing target keys. In
-particular, `dotty.tools.io.AbstractFile` has current type-request errors.
-These results are evidence of incomplete DoD, not a passing audit.
+The first local comparison used the historical #976 report and found 22
+missing target keys. That is not the sprint-start comparison required by this
+issue. Comparing instead with the report committed at sprint-start SHA
+`4025adf3092cfe4a0e51597acdfc91fcf5359746` finds 77 missing successful target
+keys: 65 of 142 sprint-start keys remain successful, while the current report
+has 157 distinct successes. The set movement needs semantic investigation;
+the larger aggregate count does not establish that old targets were preserved.
+The full audit also reports a maximum completed-class fanout of 29 (limit 16),
+above the required safety gate. Its p95 depth is 0 (limit 6), and maximum depth
+is 8. `dotty.tools.io.AbstractFile` has current type-request errors. Exact
+frozen cohort rows and these counters are retained in the machine-readable
+sidecars linked below. The regression gates therefore fail; the audit does not
+prove the required semantic invariants.
 
-The audit runner stopped before assembling its final Markdown and cohort
-sidecars because the gate failed. The comparison tool now reads report sections
-incrementally instead of materializing millions of lines; on the retained raw
-report, the gate comparison took 1.96 s and reported the same failures.
+The original audit runner stopped before assembling its final Markdown and
+cohort sidecars because the gate failed. It now keeps collecting evidence,
+assembles the report and writes sidecars, then exits nonzero to preserve the
+failed gate status. On the retained raw report, comparison against the
+sprint-start snapshot took 13.5 s and emitted 120 frozen-cohort rows, including
+the current first blocker and resolver provenance for each row. The raw report
+is 678 MB, so it remains a local audit artifact rather than a checked-in file.
+The compact metrics and cohort reconciliation are checked in as
+[`typer-performance-full-audit-3.9.0.tsv`](typer-performance-full-audit-3.9.0.tsv)
+and [`typer-performance-sprint-cohorts-3.9.0.tsv`](typer-performance-sprint-cohorts-3.9.0.tsv).
+The full target-by-target outcome movement is in
+[`typer-performance-target-movement-3.9.0.tsv`](typer-performance-target-movement-3.9.0.tsv).
 
 The opt-in frozen TASTy profile also ran locally. Its stale assertions were
 updated to the observed result: 7 unresolved roots / 17 weighted observations,
@@ -116,10 +129,10 @@ the two corpus-gate failures above.
 | --- | --- | --- |
 | Paired measurements and sprint comparison | Partial | Existing bounded before/after profiles collated above; historical host metadata is incomplete for some pairs. |
 | Deterministic focused CI gate and tooling tests | Implemented; CI pending | New workflow verifies pinned inputs, two-pass determinism, normalized baseline, timing/RSS artifacts and audit-tool tests. |
-| Two complete full-corpus passes and deterministic output | **Local evidence complete** | 1,236 files / 3,297 methods per pass; hashes match. Temporary raw reports are not repository artifacts. |
-| No lost successful targets and completed-class fanout <=16 | **Failed** | 22 missing successful type-target keys; maximum fanout 29. |
+| Two complete full-corpus passes and deterministic output | **Local evidence complete; hosted run pending** | 1,236 files / 3,297 methods per pass; hashes match. The designated hosted/manual workflow has not run. |
+| No lost successful targets and completed-class fanout <=16 | **Failed** | Against sprint-start `4025adf`, 77 of 142 target keys are absent; maximum fanout is 29. |
 | Current TASTy parent profile and provenance reconciliation | **Local evidence complete** | Profile and reconciliation passed after refreshing stale frozen assertions. |
-| Measured residual hotspot and bounded next step | Partial | The full-corpus evidence now identifies eager hierarchy fanout (`List` reaches 29 completed classes) and missing successful type targets. Resolve those semantic causes before proposing another audit-speed optimization. |
+| Measured residual hotspot and bounded next step | Partial | The full-corpus evidence identifies eager hierarchy fanout and target-set movement, but does not yet establish whether each movement reflects semantics or changed audit coverage. Next step: inspect the 77 target movements and 29-class `List` completion trace, then fix the responsible semantic path in a separate issue. |
 
 ### Reproduction
 
@@ -138,3 +151,11 @@ CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
   tools/typer-classpath-corpus-audit/run --verify-determinism \
   <runner-output-path>/typer-classpath-corpus-audit-performance.md
 ```
+
+The local raw normalized report was generated at dotty-rs commit
+`2f67951133` on 2026-10-23. This is the requested local execution evidence; it
+does not substitute for the hosted/manual gate specified by the issue. The
+workflow-dispatch capability is unavailable in this environment, and this
+local run does not pass the target-retention or fanout assertions, so the issue
+must remain open until those blockers are resolved and a suitable hosted run
+passes.

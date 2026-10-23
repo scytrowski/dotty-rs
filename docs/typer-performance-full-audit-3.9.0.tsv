@@ -1,0 +1,24 @@
+metric	value	notes
+sprint_start_sha	4025adf3092cfe4a0e51597acdfc91fcf5359746	Pinned pre-optimization audit report
+local_audit_sha	2f67951133	Commit reported by local audit run
+scala_source_sha	777528f19a58e794c9954a42f433373472ec57f8	Pinned Scala source checkout
+source_files	1236	Each local pass
+local_method_denominator	3297	Sprint start and current
+typed_local_methods_start	0	Baseline
+typed_local_methods_current	0	Current
+external_class_symbol_successes_start	18169	Baseline
+external_class_symbol_successes_current	18138	Current
+successful_target_keys_start	142	Baseline distinct keys
+successful_target_keys_current	157	Current distinct keys
+successful_target_keys_retained	65	Intersection
+successful_target_keys_missing	77	Baseline minus current
+dependency_p95_depth_start	3	Safety limit 6
+dependency_p95_depth_current	0	Safety limit 6
+max_completed_fanout_start	9	Safety limit 16
+max_completed_fanout_current	29	Safety limit 16
+max_dependency_depth_current	8	Observed current maximum depth
+run_1_elapsed_seconds	1739.42	Local full serial pass
+run_2_elapsed_seconds	1733.53	Local full serial pass
+normalized_report_sha256	0794c286758fc84ac7f3eea618ffd4455b4c0aa867012fe0bacdeb88d09db645	Both passes identical
+peak_rss_bytes	unavailable	/usr/bin/time absent on local host
+overall_gate	failed	Target retention and completed-class fanout assertions fail
