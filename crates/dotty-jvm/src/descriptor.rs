@@ -19,6 +19,7 @@ use crate::{
 struct PrimitiveSymbols {
     int: SymbolId,
     boolean: SymbolId,
+    long: SymbolId,
     unit: SymbolId,
 }
 
@@ -185,25 +186,20 @@ fn descriptor_for_with_references(
         });
     }
 
-    // JVMS §4.3.3 counts `this` for an instance method. Every supported
-    // parameter occupies one slot. Bound this before allocating or converting
-    // the output parameter vector.
+    // JVMS §4.3.3 counts `this` for an instance method. Parameter widths are
+    // semantic-type dependent, so enforce the unit limit after canonical type
+    // projection and before producing descriptor metadata.
     let receiver_slots = usize::from(!method.flags.contains(SymbolFlags::STATIC));
-    let slots = method_type.params.len() + receiver_slots;
-    if slots > crate::JVM_MAX_PARAMETER_SLOTS {
-        return Err(JvmCodegenError::TooManyParameterSlots {
-            method: plan.method,
-            slots,
-        });
-    }
 
     let primitive_symbols = PrimitiveSymbols {
         int: builtin_symbol(store, definitions.int, PrimitiveBuiltin::Int)?,
         boolean: builtin_symbol(store, definitions.boolean, PrimitiveBuiltin::Boolean)?,
+        long: builtin_symbol(store, definitions.long, PrimitiveBuiltin::Long)?,
         unit: builtin_symbol(store, definitions.unit, PrimitiveBuiltin::Unit)?,
     };
 
     let mut parameters = Vec::with_capacity(method_type.params.len());
+    let mut parameter_slots = receiver_slots;
     let mut seen_parameters = HashSet::new();
     for (index, (method_param, parameter_id)) in
         method_type.params.iter().zip(&plan.parameters).enumerate()
@@ -278,6 +274,18 @@ fn descriptor_for_with_references(
                 symbol_info: symbol_type,
             });
         }
+        parameter_slots = parameter_slots
+            .checked_add(usize::from(symbol_value_type.slot_width()))
+            .ok_or(JvmCodegenError::TooManyParameterSlots {
+                method: plan.method,
+                slots: usize::MAX,
+            })?;
+        if parameter_slots > crate::JVM_MAX_PARAMETER_SLOTS {
+            return Err(JvmCodegenError::TooManyParameterSlots {
+                method: plan.method,
+                slots: parameter_slots,
+            });
+        }
         parameters.push(symbol_value_type);
     }
 
@@ -343,6 +351,7 @@ fn descriptor_type(
     match ty {
         JvmType::Int => Ok("I".to_owned()),
         JvmType::Boolean => Ok("Z".to_owned()),
+        JvmType::Long => Ok("J".to_owned()),
         JvmType::Reference(class) => {
             let Some(context) = context else {
                 return Err(JvmCodegenError::ReferenceMethodDescriptorUnsupported { symbol, ty });
@@ -421,6 +430,7 @@ fn primitive_value_type(
     match store.types.try_get(ty) {
         Some(Type::Constant(Constant::Int(_))) => Ok(JvmType::Int),
         Some(Type::Constant(Constant::Boolean(_))) => Ok(JvmType::Boolean),
+        Some(Type::Constant(Constant::Long(_))) => Ok(JvmType::Long),
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..
@@ -429,6 +439,10 @@ fn primitive_value_type(
             target: TypeRefTarget::Symbol(target),
             ..
         }) if *target == primitives.boolean => Ok(JvmType::Boolean),
+        Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(target),
+            ..
+        }) if *target == primitives.long => Ok(JvmType::Long),
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..
@@ -587,33 +601,39 @@ fn unsupported_type_error(store: &SemanticStore, symbol: SymbolId, ty: TypeId) -
 }
 
 impl JvmType {
-    /// Primitive JVM descriptor letter (`I` or `Z`), if this is primitive.
+    /// Primitive JVM descriptor letter (`I`, `Z`, or `J`), if primitive.
     pub const fn descriptor_char(self) -> Option<char> {
         match self {
             Self::Int => Some('I'),
             Self::Boolean => Some('Z'),
+            Self::Long => Some('J'),
             Self::Reference(_) => None,
         }
     }
 
-    /// JVM operand-stack category. Both supported primitives use an
-    /// int-like, category-one slot while retaining distinct descriptors.
+    /// JVM operand-stack category. `Int` and `Boolean` are int-like; `Long`
+    /// is category two.
     pub const fn category(self) -> JvmValueCategory {
         match self {
             Self::Int | Self::Boolean => JvmValueCategory::IntLike,
+            Self::Long => JvmValueCategory::Long,
             Self::Reference(_) => JvmValueCategory::Reference,
         }
     }
 
     /// Number of JVM local-variable slots occupied by this value.
     pub const fn slot_width(self) -> u8 {
-        1
+        match self {
+            Self::Long => 2,
+            Self::Int | Self::Boolean | Self::Reference(_) => 1,
+        }
     }
 
     const fn field_type(self) -> Option<FieldType> {
         match self {
             Self::Int => Some(FieldType::Int),
             Self::Boolean => Some(FieldType::Boolean),
+            Self::Long => Some(FieldType::Long),
             Self::Reference(_) => None,
         }
     }

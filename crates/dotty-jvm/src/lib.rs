@@ -69,13 +69,18 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 /// A JVM value representation supported by the current projection slice.
 ///
 /// `Int` and `Boolean` have distinct descriptor letters (`I` and `Z`) but
-/// both use the JVM's int-like category-one operand representation. References
-/// retain their exact planned class identity. Unit-aware method and field
-/// metadata can encode those identities; store-only projectors remain narrower.
+/// both use the JVM's int-like category-one operand representation. `Long`
+/// uses descriptor `J` and occupies two JVM slots; this metadata support does
+/// not enable Long expression lowering. References retain their exact planned
+/// class identity. Unit-aware method and field metadata can encode those
+/// identities; store-only projectors remain narrower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmType {
     Int,
     Boolean,
+    /// A category-two JVM `long` value. Metadata support only; code generation
+    /// for Long expressions, fields, and locals remains unsupported.
+    Long,
     /// A category-one reference to one exact class in a validated compilation unit.
     Reference(SymbolId),
 }
@@ -84,6 +89,8 @@ pub enum JvmType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmValueCategory {
     IntLike,
+    /// A JVM category-two `long` value.
+    Long,
     /// A JVM object reference; it occupies one operand-stack/local slot.
     Reference,
 }
@@ -1490,6 +1497,7 @@ pub enum UnsupportedJvmReferenceTypeKind {
 pub enum PrimitiveBuiltin {
     Int,
     Boolean,
+    Long,
     Unit,
 }
 

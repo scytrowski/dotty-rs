@@ -2540,7 +2540,7 @@ fn rejects_malformed_class_info_instead_of_guessing_class_shape() {
 }
 
 #[test]
-fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
+fn method_metadata_preserves_category_two_parameter_slot_widths() {
     let mut fixture = SignatureFixture::new(3);
     prepare_signature_class(&mut fixture, "Answer");
     let method_name = fixture.store.names.intern("select");
@@ -2555,7 +2555,7 @@ fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
             },
             MethodParam {
                 name: TermName::new(fixture.store.names.intern("second")),
-                ty: fixture.definitions.int,
+                ty: fixture.definitions.long,
                 erased: false,
                 varargs: false,
             },
@@ -2575,7 +2575,7 @@ fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
         .set_info(fixture.method, SymbolInfo::Complete(method_type));
     for (parameter, ty) in fixture.parameters.iter().copied().zip([
         fixture.definitions.boolean,
-        fixture.definitions.int,
+        fixture.definitions.long,
         fixture.definitions.int,
     ]) {
         fixture
@@ -2598,7 +2598,7 @@ fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
     let method = &metadata.methods()[0];
     assert_eq!(method.symbol(), fixture.method);
     assert_eq!(method.name(), "select");
-    assert_eq!(method.descriptor().as_str(), "(ZII)I");
+    assert_eq!(method.descriptor().as_str(), "(ZJI)I");
     assert_eq!(method.access_flags().0, 0x0001);
     assert_eq!(
         method
@@ -2608,8 +2608,8 @@ fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
             .collect::<Vec<_>>(),
         vec![
             (fixture.parameters[0], 1, 1),
-            (fixture.parameters[1], 2, 1),
-            (fixture.parameters[2], 3, 1),
+            (fixture.parameters[1], 2, 2),
+            (fixture.parameters[2], 4, 1),
         ]
     );
     assert_eq!(
@@ -2618,7 +2618,7 @@ fn method_metadata_preserves_parameter_identity_order_and_instance_slots() {
             .iter()
             .map(|parameter| parameter.ty())
             .collect::<Vec<_>>(),
-        vec![JvmType::Boolean, JvmType::Int, JvmType::Int]
+        vec![JvmType::Boolean, JvmType::Long, JvmType::Int]
     );
     for index in 0..7 {
         let name = format!("unrelated{index}");
@@ -4452,6 +4452,92 @@ fn enforces_the_jvms_method_parameter_slot_limit_including_instance_receiver() {
     assert_eq!(
         maximum_instance.descriptor().unwrap().parameters().len(),
         254
+    );
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let maximum_mixed_static = SignatureFixture::from_store(
+        store,
+        definitions,
+        &[definitions.long; 127]
+            .iter()
+            .copied()
+            .chain([definitions.int])
+            .collect::<Vec<_>>(),
+        definitions.int,
+        SymbolFlags::STATIC,
+        MethodKind::Plain,
+    );
+    assert_eq!(
+        maximum_mixed_static
+            .descriptor()
+            .unwrap()
+            .parameters()
+            .len(),
+        128
+    );
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let too_many_mixed_static = SignatureFixture::from_store(
+        store,
+        definitions,
+        &[definitions.long; 127]
+            .iter()
+            .copied()
+            .chain([definitions.int, definitions.int])
+            .collect::<Vec<_>>(),
+        definitions.int,
+        SymbolFlags::STATIC,
+        MethodKind::Plain,
+    );
+    assert_eq!(
+        too_many_mixed_static.descriptor(),
+        Err(JvmCodegenError::TooManyParameterSlots {
+            method: too_many_mixed_static.method,
+            slots: 256,
+        })
+    );
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let maximum_mixed_instance = SignatureFixture::from_store(
+        store,
+        definitions,
+        &[definitions.long; 127],
+        definitions.int,
+        SymbolFlags::EMPTY,
+        MethodKind::Plain,
+    );
+    assert_eq!(
+        maximum_mixed_instance
+            .descriptor()
+            .unwrap()
+            .parameters()
+            .len(),
+        127
+    );
+
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let too_many_mixed_instance = SignatureFixture::from_store(
+        store,
+        definitions,
+        &[definitions.long; 127]
+            .iter()
+            .copied()
+            .chain([definitions.int])
+            .collect::<Vec<_>>(),
+        definitions.int,
+        SymbolFlags::EMPTY,
+        MethodKind::Plain,
+    );
+    assert_eq!(
+        too_many_mixed_instance.descriptor(),
+        Err(JvmCodegenError::TooManyParameterSlots {
+            method: too_many_mixed_instance.method,
+            slots: 256,
+        })
     );
 }
 
@@ -7115,6 +7201,7 @@ fn constructor_call_fixture(parameter_types: &[JvmType]) -> ConstructorCallFixtu
         .map(|ty| match ty {
             JvmType::Int => definitions.int,
             JvmType::Boolean => definitions.boolean,
+            JvmType::Long => definitions.long,
             JvmType::Reference(_) => panic!("constructor fixture only accepts primitive types"),
         })
         .collect::<Vec<_>>();
