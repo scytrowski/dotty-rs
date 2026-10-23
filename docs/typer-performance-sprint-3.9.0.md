@@ -79,7 +79,7 @@ those values are excluded because that binary's build provenance is
 uncertain. Focused CI records per-sample wall/phase timing and process-tree RSS
 without enforcing a single-run latency threshold.
 
-## Full-corpus DoD status: local run complete; sprint comparison is inconclusive
+## Full-corpus DoD status: local comparison complete; hosted gate intentionally pending
 
 At the user's request, the full audit was run locally against the pinned Scala
 3.9.0 artifacts with one Cargo job and one Rust test thread. Two sequential
@@ -91,43 +91,42 @@ was unavailable because `/usr/bin/time` is not installed. The raw report is
 678 MB and remains in the local temporary audit directory; it is not checked
 into the repository.
 
-The comparison originally labelled “sprint start” is not a valid baseline.
-Although SHA `4025adf3092cfe4a0e51597acdfc91fcf5359746` is the intended source
-revision, its checked-in full report was last refreshed by commit
-`0fd3c38377cef2ddc3f0e4152af3159b33898dc5` on 2026-10-17. The intended source
-revision is from 2026-10-23. The report itself records that its full-corpus
-run completed on 2026-10-17; it does not contain a dotty-rs source SHA from the
-run. Between those dates, the repository merged substantial typer and
-classloader changes, including applied TASTy parent resolution and module
-completion. Therefore the apparent movement of 77/142 successful target keys,
-the `18,169 → 18,138` class-symbol count, and the historical fanout `9` cannot
-be attributed to the performance sprint. They are comparisons with older
-implementation data, not evidence of regressions introduced after `4025adf`.
+The checked-in report at `4025adf` was stale, so I reran the pinned audit
+locally from a detached worktree at that exact source SHA. Two complete passes
+processed 1,236 files / 3,297 local methods. The two-pass command took 3,742 s
+(62:22); the independently repeated second pass took 1,884.58 s (31:24.58).
+The first command exited while extracting its report because the temporary
+filesystem filled, after both audit tests had completed. I recovered the first
+report, reran the second pass with compressed logging, and compared the
+normalized semantic output. The exact normalized comparison (excluding
+interleaved progress diagnostics, canonicalizing JAR-origin paths, and omitting
+the rollback-counter line added by the newer harness) has 2,312,215 lines and
+SHA-256 `08e0c99ae89c97c67ecca4ccef52a310012bf2b17d8993cc228b3be5539ee603` at
+both sprint start and current. The only report-schema difference is the newer
+rollback telemetry; it does not affect semantic outcomes or the classpath
+safety measurements.
 
-The current run still has useful standalone findings: it reports 157 distinct
-successful target keys, 18,138 external class-symbol successes, p95 dependency
-depth 0 (limit 6), maximum depth 8, and maximum completed-class fanout 29
-(policy limit 16). The 29 completions are four
+The fresh baseline comparison confirms 157 successful target keys at both
+sprint start and current (157 retained, none missing), 18,138 external
+class-symbol successes at both points, 0 typed local methods, and identical
+first-blocker outcomes. Dependency p95 is 0 at both points (limit 6), maximum
+depth is 8 at both points, and maximum completed-class fanout is 29 at both
+points (policy limit 16). Thus the fanout limit is exceeded, but the excess
+predates this sprint and was not introduced by its changes. The 29 completions
+are four
 `scala.collection.immutable.List` requests from `ListMap.addOne`,
 `ListBuffer.removeAfter`, and `TrieMap.LNode` insert/remove methods; each
 touches 63 distinct classes. This current fanout exceeds the configured safety
-limit, but the stale baseline means we cannot say whether the condition was
-introduced by this sprint. Of the 77 keys missing only relative to the old
-report, 76 have no current member-request observation and one
-(`dotty.tools.io.AbstractFile`) has four current errors. This suggests those
-rows may have moved earlier in typing or changed attribution; it does not prove
-the resolver lost 77 capabilities.
+limit, but the fresh baseline confirms that the same fanout existed at sprint
+start. The previously reported 77 missing keys were an artifact of comparing
+against the stale 2026-10-17 report.
 
-The source code under `crates/dotty-typer/src`, `crates/dotty-classloader/src`,
-and `crates/dotty-core/src` is unchanged between the intended sprint-start
-revision and the current audit revision. The test audit harness changed
-substantially, so this local run cannot by itself recover what the baseline
-metrics would have been under the old harness. The correct next step is a
-baseline run at `4025adf` with the same pinned inputs and report schema, followed
-by a paired comparison with the current revision. Until that baseline and the
-authoritative hosted run exist, target retention is **inconclusive**, not a
-confirmed regression. Keep the independent current fanout policy violation
-visible and investigate it only after reproducing it under the same harness.
+The source code under `crates/dotty-typer/src`,
+`crates/dotty-classloader/src`, and `crates/dotty-core/src` is unchanged between
+the sprint-start and current audit revisions. The fresh local run confirms that
+the previously observed 77 missing keys came from comparing against the stale
+2026-10-17 report, not from this sprint. Keep the fanout policy violation
+visible as a pre-existing condition; it is not evidence of a sprint regression.
 
 The original audit runner stopped before assembling its final Markdown and
 cohort sidecars because the gate failed. It now keeps collecting evidence,
@@ -150,18 +149,18 @@ The opt-in frozen TASTy profile also ran locally. Its stale assertions were
 updated to the observed result: 7 unresolved roots / 17 weighted observations,
 34 recovered roots / 362 observations, and no newly unresolved roots. The
 reconciliation script passed; it attributes 252 current source observations to
-10 roots, including 5 roots absent from the frozen set. This does not resolve
-the two corpus-gate failures above.
+10 roots, including 5 roots absent from the frozen set. The absolute fanout
+policy violation and hosted-run requirement remain outstanding.
 
 | DoD item | Status | Evidence / blocker |
 | --- | --- | --- |
 | Paired measurements and sprint comparison | Partial | Existing bounded before/after profiles collated above; historical host metadata is incomplete for some pairs. |
 | Deterministic focused CI gate and tooling tests | Implemented; CI pending | New workflow verifies pinned inputs, two-pass determinism, normalized baseline, timing/RSS artifacts and audit-tool tests. |
-| Two complete full-corpus passes and deterministic output | **Local evidence complete; hosted run pending** | 1,236 files / 3,297 methods per pass; hashes match. The designated hosted/manual workflow has not run. |
-| No lost successful targets | **Inconclusive** | The checked-in report at `4025adf` contains audit data last refreshed on 2026-10-17, not at sprint start on 2026-10-23. A same-harness baseline is required. |
-| Current completed-class fanout <=16 | **Failed on current run; baseline delta unknown** | Current maximum is 29, above the configured limit 16. The historical value 9 is from the stale report and is not a valid comparison. |
+| Two complete full-corpus passes and deterministic output | **Local evidence complete; hosted run pending by user direction** | Exact sprint-start SHA: 1,236 files / 3,297 methods per pass. Normalized semantic reports match; raw local report artifacts remain under `/tmp`. |
+| No lost successful targets | **Pass locally** | Fresh baseline and current report contain the same 157 successful target keys; 157 retained, 0 missing. |
+| Current completed-class fanout <=16 | **Pre-existing policy violation** | Fanout is 29 at both sprint start and current; limit 16. The sprint did not introduce the excess. |
 | Current TASTy parent profile and provenance reconciliation | **Local evidence complete** | Profile and reconciliation passed after refreshing stale frozen assertions. |
-| Measured residual hotspot and bounded next step | Partial | Current `List` dependency fanout is measured, but its change from sprint start is unknown. First produce the missing same-harness baseline; then assess whether a separate production optimization is justified. |
+| Measured residual hotspot and bounded next step | Partial | `List` fanout 29 / 63 classes is unchanged from sprint start. A separate classloader follow-up may address the pre-existing policy violation; it is outside this sprint comparison. |
 
 ### Reproduction
 
@@ -181,10 +180,11 @@ CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
   <runner-output-path>/typer-classpath-corpus-audit-performance.md
 ```
 
-The local raw normalized report was generated at dotty-rs commit
-`2f67951133` on 2026-10-23. This is the requested local execution evidence; it
-does not substitute for the hosted/manual gate specified by the issue. The
-workflow-dispatch capability is unavailable in this environment, and this
-local run does not pass the target-retention or fanout assertions, so the issue
-must remain open until those blockers are resolved and a suitable hosted run
-passes.
+The current raw normalized report was generated at dotty-rs commit
+`2f67951133`; the baseline was generated from exact sprint-start SHA
+`4025adf3092cfe4a0e51597acdfc91fcf5359746`. The local run establishes the
+sprint comparison and target-retention result. The hosted/manual workflow was
+not run, per the user's instruction to keep this audit local. The issue's
+hosted-run DoD item therefore remains explicitly pending; local evidence does
+not claim to satisfy it. Peak RSS also remains unavailable locally because
+`/usr/bin/time` is absent.
