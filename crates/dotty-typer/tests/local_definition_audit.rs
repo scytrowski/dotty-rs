@@ -153,6 +153,34 @@ impl MemberRequestShapeKey {
     }
 }
 
+fn sorted_member_request_shape_rows<V>(
+    shapes: &BTreeMap<MemberRequestShapeKey, V>,
+) -> Vec<(String, &V)> {
+    let mut rows = shapes
+        .iter()
+        .map(|(shape, value)| (shape.report_row(), value))
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    rows
+}
+
+fn sorted_member_request_outcome_rows<V>(
+    outcomes: &BTreeMap<MemberRequestOutcomeKey, V>,
+) -> Vec<(String, &MemberRequestOutcomeKey, &V)> {
+    let mut rows = outcomes
+        .iter()
+        .map(|(key, value)| {
+            (
+                format!("{}::outcome={}", key.shape.report_row(), key.outcome),
+                key,
+                value,
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by(|(left, _, _), (right, _, _)| left.cmp(right));
+    rows
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct AuditWrapperTiming {
     calls: usize,
@@ -9759,6 +9787,71 @@ fn typed_member_request_shapes_preserve_legacy_rows_and_order() {
 }
 
 #[test]
+fn explicit_member_request_owner_rows_keep_legacy_order_for_reversed_arrival() {
+    let shape = |owner| MemberRequestShapeKey {
+        space: Cow::Owned(format!("Explicit:Class:pkg.{owner}")),
+        prefix_shape: "package TypeRef",
+        target_kind: "Package",
+        namespace: "type",
+        selector: "other",
+    };
+    let owner_a = shape("A");
+    let owner_a0 = shape("A0");
+    let expected_shape_rows = {
+        let mut rows = vec![owner_a.report_row(), owner_a0.report_row()];
+        rows.sort_unstable();
+        rows
+    };
+
+    let shape_rows = |first, second| {
+        let mut shapes = BTreeMap::new();
+        shapes.insert(first, 1);
+        shapes.insert(second, 1);
+        sorted_member_request_shape_rows(&shapes)
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shape_rows(owner_a.clone(), owner_a0.clone()),
+        expected_shape_rows
+    );
+    assert_eq!(
+        shape_rows(owner_a0.clone(), owner_a.clone()),
+        expected_shape_rows
+    );
+
+    let outcome_key = |shape, outcome: &str| MemberRequestOutcomeKey {
+        shape,
+        outcome: outcome.to_owned(),
+    };
+    let outcome_a = outcome_key(owner_a.clone(), "Ambiguous");
+    let outcome_a0 = outcome_key(owner_a0.clone(), "Ambiguous");
+    let expected_outcome_rows = {
+        let mut rows = vec![
+            format!("{}::outcome=Ambiguous", owner_a.report_row()),
+            format!("{}::outcome=Ambiguous", owner_a0.report_row()),
+        ];
+        rows.sort_unstable();
+        rows
+    };
+    let outcome_rows = |first, second| {
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert(first, 1);
+        outcomes.insert(second, 1);
+        sorted_member_request_outcome_rows(&outcomes)
+            .into_iter()
+            .map(|(row, _, _)| row)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        outcome_rows(outcome_a.clone(), outcome_a0.clone()),
+        expected_outcome_rows
+    );
+    assert_eq!(outcome_rows(outcome_a0, outcome_a), expected_outcome_rows);
+}
+
+#[test]
 fn local_definition_audit_is_deterministic() {
     let source =
         "object Audit { def outer: Int = { val n = 1; def local[A](x: A) = x; local(n) } }";
@@ -14201,12 +14294,14 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         println!("    {name}={count}");
     }
     println!("  member_request_shapes:");
-    for (shape, count) in &metrics.member_request_shapes {
-        println!("    {}={count}", shape.report_row());
+    for (row, count) in sorted_member_request_shape_rows(&metrics.member_request_shapes) {
+        println!("    {row}={count}");
     }
     println!("  member_request_unknown_prefix_identity:");
-    for (shape, count) in &metrics.member_request_unknown_identity_shapes {
-        println!("    {}={count}", shape.report_row());
+    for (row, count) in
+        sorted_member_request_shape_rows(&metrics.member_request_unknown_identity_shapes)
+    {
+        println!("    {row}={count}");
     }
     println!("  member_request_outcomes:");
     let mut outcomes = BTreeMap::<String, usize>::new();
@@ -14219,8 +14314,9 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         println!("    {outcome}={count}");
     }
     println!("  member_request_outcome_distinct_targets:");
-    for (key, targets) in &metrics.member_request_outcome_targets {
-        let family = format!("{}::outcome={}", key.shape.report_row(), key.outcome);
+    for (family, key, targets) in
+        sorted_member_request_outcome_rows(&metrics.member_request_outcome_targets)
+    {
         println!(
             "    {family}={}::files={}",
             targets.len(),
@@ -14235,12 +14331,17 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         println!("    {kind}={count}");
     }
     println!("  member_request_key_summary:");
-    for (shape, summary) in member_request_shape_summaries(metrics) {
+    let mut summaries = member_request_shape_summaries(metrics)
+        .into_iter()
+        .map(|(shape, summary)| (shape.report_row(), summary))
+        .collect::<Vec<_>>();
+    summaries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for (row, summary) in summaries {
         let distinct = summary.distinct_keys.len();
         let (repeat, known_repeat) = member_request_repeat_factors(&summary);
         println!(
             "    {}: requests={}, known_requests={}, distinct_keys={distinct}, unknown_identity_requests={}, owners={}, names={}, files={}, repeated_hit_factor={repeat}, known_repeated_hit_factor={known_repeat}, outcomes={:?}",
-            shape.report_row(),
+            row,
             summary.requests,
             summary.known_requests,
             summary.unknown_identity_requests,
