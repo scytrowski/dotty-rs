@@ -30,6 +30,42 @@ fn public_analyzer_computes_static_arithmetic_bounds() {
 }
 
 #[test]
+fn linear_analyzer_counts_long_parameters_and_locals_as_two_slots() {
+    let pool = ConstantPoolBuilder::new().finish().unwrap();
+    let instance_identity = [Instruction::LLoad(LocalIndex::new(1)), Instruction::LReturn];
+    assert_eq!(
+        analyze("(J)J", false, &instance_identity, &pool),
+        Ok(CodeAnalysis {
+            max_stack: 2,
+            max_locals: 3,
+        })
+    );
+
+    let following_int = [Instruction::ILoad(LocalIndex::new(3)), Instruction::IReturn];
+    assert_eq!(
+        analyze("(JI)I", false, &following_int, &pool),
+        Ok(CodeAnalysis {
+            max_stack: 1,
+            max_locals: 4,
+        })
+    );
+
+    // Slot 2 is the unusable tail of the instance method's Long parameter.
+    let tail_read = [Instruction::LLoad(LocalIndex::new(2)), Instruction::LReturn];
+    let tail_result = analyze("(J)J", false, &tail_read, &pool);
+    assert!(
+        matches!(
+            tail_result,
+            Err(dotty_classfile::bytecode::AnalysisError::LocalSlotOverlap {
+                instruction: 0,
+                index: 2,
+            })
+        ),
+        "{tail_result:?}"
+    );
+}
+
+#[test]
 fn public_analyzer_validates_int_bitwise_stack_effects() {
     let pool = ConstantPoolBuilder::new().finish().unwrap();
     for operation in [Instruction::IAnd, Instruction::IOr, Instruction::IXor] {

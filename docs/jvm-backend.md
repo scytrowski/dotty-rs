@@ -15,6 +15,11 @@ the cooperating `Counter` and `CounterClient` classes from one source session.
 This is end-to-end test orchestration, not a public source compiler or a
 classpath-aware JVM backend.
 
+The current `Long` and JVM category-two support boundary is recorded in
+[`jvm-long-category2.md`](jvm-long-category2.md), including the Scala 3.9.0
+source fixture, the existing linear/stack-map support, and the unsupported CFG
+and JVM projection paths.
+
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
 and preserving source parameter order. Backend validation does not rediscover
