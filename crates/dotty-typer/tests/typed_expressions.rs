@@ -10,6 +10,9 @@ use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
 use dotty_typer::{ExpressionContext, SourceTyper, TyperError};
 
+const NULL_REFERENCE_IDENTITY_SOURCE: &str =
+    include_str!("../../../tests/fixtures/jvm/NullReferenceIdentity.scala");
+
 fn class_definition(
     parsed: &dotty_parser::ParseResult,
     store: &SemanticStore,
@@ -109,6 +112,89 @@ fn types_a_small_source_program_with_no_resolver_or_jdk_fixture() {
         typer.typed_ast().get(typed).kind,
         TreeKind::Literal(_)
     ));
+}
+
+#[test]
+fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
+    let source_text = NULL_REFERENCE_IDENTITY_SOURCE;
+    let source = SourceId::from_index(1468);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "NullReferenceIdentity.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let methods = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            let name = store.names.resolve(definition.name.as_name().text());
+            matches!(name, "same" | "different" | "choose" | "readOrDefault").then(|| {
+                (
+                    name.to_owned(),
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods.len(),
+        4,
+        "the candidate source shape must be parsed"
+    );
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    let mut failures = Vec::new();
+    for (name, method, rhs) in methods {
+        let context = typer.expression_context_for(method).unwrap();
+        let Err(error) = typer.type_expression(rhs, context) else {
+            panic!("{name} unexpectedly typed")
+        };
+        assert!(
+            typer.source_typed_index().get(source, rhs).is_none(),
+            "failed typing of {name} must not publish a typed root"
+        );
+        failures.push((name, error));
+    }
+
+    for (name, error) in failures {
+        match (name.as_str(), error) {
+            ("same", TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "eq" => {}
+            ("different", TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "ne" => {}
+            ("choose", TyperError::NullLiteralTypingDeferred { source: actual, .. })
+                if actual == source => {}
+            ("readOrDefault", TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "eq" => {}
+            (method, error) => panic!("unexpected first typing failure for {method}: {error:?}"),
+        }
+    }
 }
 
 #[test]
