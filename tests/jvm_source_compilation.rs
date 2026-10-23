@@ -7781,22 +7781,6 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(start: Int)\nclass Box(counter: Counter)\nclass Client:\n  def nested(): Box = new Box(new Counter(1))\n",
         ),
         (
-            "null-reference-constructor-argument",
-            "class Counter\nclass Box(counter: Counter)\nclass Client:\n  def nested(): Box = new Box(null)\n",
-        ),
-        (
-            "reference-returning-call-constructor-argument",
-            "class Counter\nclass Box(counter: Counter)\nclass Client:\n  def make(): Counter = new Counter()\n  def nested(): Box = new Box(make())\n",
-        ),
-        (
-            "mutable-reference-local-constructor-argument",
-            "class Counter\nclass Box(counter: Counter)\nclass Client:\n  def nested(counter: Counter): Box =\n    var current = counter\n    new Box(current)\n",
-        ),
-        (
-            "reference-field-constructor-argument",
-            "class Counter\nclass Box(counter: Counter)\nclass Client(counter: Counter):\n  private val saved: Counter = counter\n  def nested(): Box = new Box(saved)\n",
-        ),
-        (
             "reference-var-reassignment",
             "class Counter(seed: Int)\nclass CounterClient:\n  def run(seed: Int): Int =\n    var counter = new Counter(seed)\n    counter = new Counter(seed + 1)\n    counter.get()\n",
         ),
@@ -7899,11 +7883,7 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                     ..
                 })
             ),
-            "nested-reference-constructor-argument"
-            | "null-reference-constructor-argument"
-            | "reference-returning-call-constructor-argument"
-            | "mutable-reference-local-constructor-argument"
-            | "reference-field-constructor-argument" => matches!(
+            "nested-reference-constructor-argument" => matches!(
                 &error,
                 PipelineFailure::Codegen(
                     JvmCodegenError::JvmConstructorCallArgumentTypeMismatch { .. }
@@ -8610,7 +8590,7 @@ fn null_identity_jdk21_acceptance_fixture_is_canonical_verified_and_deterministi
 fn reference_constructor_arguments_lower_in_order_and_verify_initialized_values() {
     let output = TestOutputDirectory::new("reference-constructor-arguments");
     let artifacts = compile_planned_constructor_source(
-        "class Counter(seed: Int):\n  private val value: Int = seed\n  def get(): Int = value\nclass Other()\nclass Holder(amount: Int, counter: Counter, enabled: Boolean):\n  private val saved: Counter = counter\n  private val savedAmount: Int = amount\n  private val savedEnabled: Boolean = enabled\n  def reference(): Counter = saved\n  def number(): Int = savedAmount\n  def flag(): Boolean = savedEnabled\nclass Pair(counter: Counter, other: Other):\n  private val savedCounter: Counter = counter\n  private val savedOther: Other = other\n  def first(): Counter = savedCounter\n  def second(): Other = savedOther\nclass OwnerBox(owner: Client):\n  private val savedOwner: Client = owner\n  def get(): Client = savedOwner\nclass Client:\n  def wrap(counter: Counter): Holder = new Holder(3, counter, true)\n  def wrapLocal(counter: Counter): Holder =\n    val saved = counter\n    new Holder(4, saved, false)\n  def pair(counter: Counter, other: Other): Pair = new Pair(counter, other)\n  def ownerBox(): OwnerBox = new OwnerBox(this)\n",
+        "class Counter(seed: Int):\n  private val value: Int = seed\n  def get(): Int = value\nclass Other()\nclass Holder(amount: Int, counter: Counter, enabled: Boolean):\n  private val saved: Counter = counter\n  private val savedAmount: Int = amount\n  private val savedEnabled: Boolean = enabled\n  def reference(): Counter = saved\n  def number(): Int = savedAmount\n  def flag(): Boolean = savedEnabled\nclass Pair(counter: Counter, other: Other):\n  private val savedCounter: Counter = counter\n  private val savedOther: Other = other\n  def first(): Counter = savedCounter\n  def second(): Other = savedOther\nclass OwnerBox(owner: Client):\n  private val savedOwner: Client = owner\n  def get(): Client = savedOwner\nclass Client:\n  def wrap(counter: Counter): Holder = new Holder(3, counter, true)\n  def wrapLocal(counter: Counter): Holder =\n    val saved = counter\n    new Holder(4, saved, false)\n  def wrapMutable(counter: Counter): Holder =\n    var current: Counter = counter\n    current = counter\n    new Holder(1, current, false)\n  def wrapNull(): Holder = new Holder(1, null, false)\n  def makeCounter(seed: Int): Counter = new Counter(seed)\n  def wrapFactory(seed: Int): Holder = new Holder(1, makeCounter(seed), true)\n  def pair(counter: Counter, other: Other): Pair = new Pair(counter, other)\n  def ownerBox(): OwnerBox = new OwnerBox(this)\nclass FieldClient(initial: Counter):\n  private val saved: Counter = initial\n  def wrap(): Holder = new Holder(1, saved, true)\n",
         output.path(),
     )
     .unwrap();
@@ -8651,37 +8631,78 @@ fn reference_constructor_arguments_lower_in_order_and_verify_initialized_values(
     assert_opcode_sequence(pair, &[0xbb, 0x59, 0x2b, 0x2c, 0xb7, 0xb0]);
     let owner_box = emitted_method_code(&client, "ownerBox");
     assert_opcode_sequence(owner_box, &[0xbb, 0x59, 0x2a, 0xb7, 0xb0]);
-    let assert_constructor_ref = |code: &[u8], expected_owner: &str, descriptor: &str| {
-        let instructions = decode_subset_instructions(code);
-        let invokes = instructions
-            .iter()
-            .filter_map(|(offset, opcode)| (*opcode == 0xb7).then_some(*offset))
-            .collect::<Vec<_>>();
-        assert_eq!(invokes.len(), 1);
-        let index = u16::from_be_bytes([code[invokes[0] + 1], code[invokes[0] + 2]]);
-        let ConstantPoolEntry::Methodref {
-            class_index,
-            name_and_type_index,
-        } = client
-            .constant_pool
-            .get(ConstantPoolIndex(index))
-            .expect("constructor invocation is a Methodref")
-        else {
-            panic!("invokespecial points at Methodref")
+    let wrap_mutable = emitted_method_code(&client, "wrapMutable");
+    assert_opcode_sequence(
+        wrap_mutable,
+        &[
+            0x2b, 0x4d, 0x2b, 0x4d, 0xbb, 0x59, 0x04, 0x2c, 0x03, 0xb7, 0xb0,
+        ],
+    );
+    let wrap_null = emitted_method_code(&client, "wrapNull");
+    assert_opcode_sequence(wrap_null, &[0xbb, 0x59, 0x04, 0x01, 0x03, 0xb7, 0xb0]);
+    let wrap_factory = emitted_method_code(&client, "wrapFactory");
+    assert_opcode_sequence(
+        wrap_factory,
+        &[0xbb, 0x59, 0x04, 0x2a, 0x1b, 0xb6, 0x04, 0xb7, 0xb0],
+    );
+    let field_client = decode_class("FieldClient");
+    let wrap_field = emitted_method_code(&field_client, "wrap");
+    assert_opcode_sequence(
+        wrap_field,
+        &[0xbb, 0x59, 0x04, 0x2a, 0xb4, 0x04, 0xb7, 0xb0],
+    );
+    assert_method_reference(
+        &client,
+        wrap_factory,
+        0xb6,
+        "Client",
+        "makeCounter",
+        "(I)LCounter;",
+    );
+    assert_field_reference(
+        &field_client,
+        wrap_field,
+        0xb4,
+        "FieldClient",
+        "saved",
+        "LCounter;",
+    );
+    let assert_constructor_ref =
+        |class: &ClassFile<'_>, code: &[u8], expected_owner: &str, descriptor: &str| {
+            let instructions = decode_subset_instructions(code);
+            let invokes = instructions
+                .iter()
+                .filter_map(|(offset, opcode)| (*opcode == 0xb7).then_some(*offset))
+                .collect::<Vec<_>>();
+            assert_eq!(invokes.len(), 1);
+            let index = u16::from_be_bytes([code[invokes[0] + 1], code[invokes[0] + 2]]);
+            let ConstantPoolEntry::Methodref {
+                class_index,
+                name_and_type_index,
+            } = class
+                .constant_pool
+                .get(ConstantPoolIndex(index))
+                .expect("constructor invocation is a Methodref")
+            else {
+                panic!("invokespecial points at Methodref")
+            };
+            assert_eq!(
+                class.constant_pool.class_name(*class_index),
+                Ok(expected_owner)
+            );
+            assert_eq!(
+                class.constant_pool.name_and_type(*name_and_type_index),
+                Ok(("<init>", descriptor))
+            );
         };
-        assert_eq!(
-            client.constant_pool.class_name(*class_index),
-            Ok(expected_owner)
-        );
-        assert_eq!(
-            client.constant_pool.name_and_type(*name_and_type_index),
-            Ok(("<init>", descriptor))
-        );
-    };
-    assert_constructor_ref(wrap, "Holder", "(ILCounter;Z)V");
-    assert_constructor_ref(wrap_local, "Holder", "(ILCounter;Z)V");
-    assert_constructor_ref(pair, "Pair", "(LCounter;LOther;)V");
-    assert_constructor_ref(owner_box, "OwnerBox", "(LClient;)V");
+    assert_constructor_ref(&client, wrap, "Holder", "(ILCounter;Z)V");
+    assert_constructor_ref(&client, wrap_local, "Holder", "(ILCounter;Z)V");
+    assert_constructor_ref(&client, pair, "Pair", "(LCounter;LOther;)V");
+    assert_constructor_ref(&client, owner_box, "OwnerBox", "(LClient;)V");
+    assert_constructor_ref(&client, wrap_mutable, "Holder", "(ILCounter;Z)V");
+    assert_constructor_ref(&client, wrap_null, "Holder", "(ILCounter;Z)V");
+    assert_constructor_ref(&client, wrap_factory, "Holder", "(ILCounter;Z)V");
+    assert_constructor_ref(&field_client, wrap_field, "Holder", "(ILCounter;Z)V");
 
     if require_jdk_or_skip() {
         let output_path = output.path().to_str().expect("UTF-8 output path");
@@ -8690,7 +8711,7 @@ fn reference_constructor_arguments_lower_in_order_and_verify_initialized_values(
             .join("ReferenceConstructorArgumentsHarness.java");
         fs::write(
             &harness,
-            "public final class ReferenceConstructorArgumentsHarness { public static void main(String[] args) { Client client = new Client(); Counter counter = new Counter(17); Other other = new Other(); Holder holder = client.wrap(counter); if (holder.reference() != counter || holder.number() != 3 || !holder.flag()) throw new AssertionError(\"mixed constructor arguments\"); Holder local = client.wrapLocal(counter); if (local.reference() != counter || local.number() != 4 || local.flag()) throw new AssertionError(\"initialized local argument\"); Pair pair = client.pair(counter, other); if (pair.first() != counter || pair.second() != other) throw new AssertionError(\"distinct reference arguments\"); OwnerBox owner = client.ownerBox(); if (owner.get() != client) throw new AssertionError(\"initialized this argument\"); } }\n",
+            "public final class ReferenceConstructorArgumentsHarness { public static void main(String[] args) { Client client = new Client(); Counter counter = new Counter(17); Other other = new Other(); Holder holder = client.wrap(counter); if (holder.reference() != counter || holder.number() != 3 || !holder.flag()) throw new AssertionError(\"mixed constructor arguments\"); Holder local = client.wrapLocal(counter); if (local.reference() != counter || local.number() != 4 || local.flag()) throw new AssertionError(\"initialized local argument\"); Holder mutable = client.wrapMutable(counter); if (mutable.reference() != counter || mutable.number() != 1 || mutable.flag()) throw new AssertionError(\"initialized mutable local argument\"); Holder nullable = client.wrapNull(); if (nullable.reference() != null) throw new AssertionError(\"null reference argument identity\"); Holder factory = client.wrapFactory(21); if (factory.reference().get() != 21) throw new AssertionError(\"factory reference argument\"); FieldClient fieldClient = new FieldClient(counter); Holder field = fieldClient.wrap(); if (field.reference() != counter) throw new AssertionError(\"current instance field argument\"); Pair pair = client.pair(counter, other); if (pair.first() != counter || pair.second() != other) throw new AssertionError(\"distinct reference arguments\"); OwnerBox owner = client.ownerBox(); if (owner.get() != client) throw new AssertionError(\"initialized this argument\"); } }\n",
         )
         .unwrap();
         let javac = Command::new("javac")

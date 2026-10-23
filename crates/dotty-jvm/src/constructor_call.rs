@@ -10,7 +10,8 @@ use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 
 use crate::{
     JvmClassInitializationPlan, JvmCodegenError, JvmCompilationUnit,
-    JvmConstructorCallShapeError as ShapeError, JvmConstructorCallTarget, JvmMethodPlan, JvmType,
+    JvmConstructorCallShapeError as ShapeError, JvmConstructorCallTarget, JvmFieldSourceVisibility,
+    JvmMethodPlan, JvmReturnType, JvmType,
 };
 
 struct ConstructorReferenceContext<'a> {
@@ -210,6 +211,11 @@ pub(super) fn resolve(
     let mut argument_types = Vec::with_capacity(apply.args.len());
     for (argument, expected) in apply.args.iter().copied().zip(expected_arguments) {
         let argument_tree = tree(unit.store, unit.typed_ast, argument)?;
+        let is_canonical_null = argument_tree.ty == definitions.null_type
+            && matches!(
+                &argument_tree.kind,
+                TreeKind::Literal(literal) if literal.value == Constant::Null
+            );
         let found = planned_argument_type(
             unit,
             caller_class,
@@ -219,11 +225,15 @@ pub(super) fn resolve(
             definitions,
             &class_identities,
         );
-        let assignable = match found {
-            Some(found) => {
-                crate::reference::is_assignable(Some(unit), found, *expected, definitions)?
+        let assignable = if is_canonical_null {
+            matches!(expected, JvmType::Reference(_))
+        } else {
+            match found {
+                Some(found) => {
+                    crate::reference::is_assignable(Some(unit), found, *expected, definitions)?
+                }
+                None => false,
             }
-            None => false,
         };
         if !assignable {
             return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
@@ -421,6 +431,17 @@ fn planned_argument_type(
         {
             Some(JvmType::Boolean)
         }
+        Type::TypeRef { .. } if matches!(argument_tree.kind, TreeKind::Apply(_)) => {
+            planned_reference_call_type(
+                unit,
+                caller_class,
+                caller_method,
+                argument,
+                argument_tree,
+                definitions,
+                class_identities,
+            )
+        }
         Type::TermRef {
             prefix,
             target: TermRefTarget::Symbol(symbol),
@@ -441,6 +462,38 @@ fn planned_argument_type(
         }
         _ => None,
     }
+}
+
+fn planned_reference_call_type(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    caller_method: &JvmMethodPlan,
+    call: TreeId<Typed>,
+    call_tree: &Tree<Typed>,
+    definitions: &Definitions,
+    class_identities: &[crate::JvmClassIdentity],
+) -> Option<JvmType> {
+    let target = unit
+        .resolve_planned_instance_call(caller_class, caller_method.method, call, definitions)
+        .ok()?;
+    let JvmReturnType::Value(JvmType::Reference(result)) = target.result() else {
+        return None;
+    };
+    if target.invocation_kind() != crate::JvmInvocationKind::Virtual
+        || target.receiver_tree().is_some_and(|receiver| {
+            !matches!(
+                unit.typed_ast.try_get(receiver).map(|tree| &tree.kind),
+                Some(TreeKind::This(dotty_core::ast::This { qual: None }))
+            )
+        })
+        || planned_result_class(unit, call_tree.ty, result, definitions) != Some(result)
+        || !class_identities
+            .iter()
+            .any(|identity| identity.symbol() == result)
+    {
+        return None;
+    }
+    Some(JvmType::Reference(result))
 }
 
 fn term_reference_type(
@@ -477,11 +530,18 @@ fn term_reference_type(
         }
         SymbolKind::Field => {
             if target.owner != Some(caller_class)
+                || target.visibility != Visibility::Private
                 || !unit
                     .classes
                     .iter()
                     .find(|plan| plan.class == caller_class)
-                    .is_some_and(|plan| plan.fields.iter().any(|field| field.field == symbol))
+                    .is_some_and(|plan| {
+                        plan.fields.iter().any(|field| {
+                            field.field == symbol
+                                && field.source_visibility == JvmFieldSourceVisibility::PlainPrivate
+                                && field.initializer.is_some()
+                        })
+                    })
             {
                 false
             } else {
@@ -517,37 +577,29 @@ fn term_reference_type(
         SymbolInfo::Complete(ty) => ty,
         SymbolInfo::Missing | SymbolInfo::Deferred(_) | SymbolInfo::Error => return None,
     };
-    if target.kind == SymbolKind::Field {
-        crate::descriptor::primitive_semantic_value_type(
-            store,
-            reference_context.definitions,
-            symbol,
-            *semantic_type,
-        )
-        .ok()
-    } else {
-        let found = planned_term_value_type(
-            unit,
-            symbol,
-            *semantic_type,
-            reference_context.definitions,
-            reference_context.class_identities,
-        )?;
-        if target.kind == SymbolKind::Local
-            && matches!(found, JvmType::Reference(_))
-            && (caller_method
-                .locals
-                .iter()
-                .find(|binding| binding.symbol == symbol)
-                .is_none_or(|binding| binding.mutable)
-                || target
-                    .flags
-                    .contains(dotty_core::symbols::SymbolFlags::MUTABLE))
-        {
-            return None;
-        }
-        Some(found)
+    let found = planned_term_value_type(
+        unit,
+        symbol,
+        *semantic_type,
+        reference_context.definitions,
+        reference_context.class_identities,
+    )?;
+    if target.kind == SymbolKind::Local
+        && matches!(found, JvmType::Reference(_))
+        && caller_method
+            .locals
+            .iter()
+            .find(|binding| binding.symbol == symbol)
+            .is_none_or(|binding| {
+                binding.mutable
+                    != target
+                        .flags
+                        .contains(dotty_core::symbols::SymbolFlags::MUTABLE)
+            })
+    {
+        return None;
     }
+    Some(found)
 }
 
 fn planned_term_value_type(

@@ -2258,8 +2258,39 @@ fn emit_object_creation(
     }
 
     let mut budget = 0;
-    for argument in arguments {
-        validate_constructor_argument(context, tree_id, *argument, depth + 1, &mut budget)?;
+    for (index, (argument, expected)) in arguments
+        .iter()
+        .copied()
+        .zip(target.argument_types().iter().copied())
+        .enumerate()
+    {
+        let source_expected =
+            source_method_parameter_type(context.store, target.constructor_symbol(), index);
+        validate_constructor_argument(
+            context,
+            tree_id,
+            argument,
+            Some(expected),
+            depth + 1,
+            &mut budget,
+        )?;
+        if let Some(source_expected) = source_expected {
+            let Some((unit, _, _)) = context.call_context else {
+                return Err(JvmCodegenError::JvmConstructorCallContextUnavailable {
+                    tree: tree_id,
+                    method: context.method.symbol(),
+                });
+            };
+            let source_type = planned_reference_type(unit, source_expected, context.definitions)?;
+            if source_type != expected {
+                return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                    tree: tree_id,
+                    argument,
+                    expected,
+                    found: Some(source_type),
+                });
+            }
+        }
     }
 
     code.new_object(target.owner_internal_name())
@@ -2269,17 +2300,17 @@ fn emit_object_creation(
             error,
         })?;
 
-    for (argument, expected) in arguments
+    for (index, (argument, expected)) in arguments
         .iter()
         .copied()
         .zip(target.argument_types().iter().copied())
+        .enumerate()
     {
-        let found = emit_expression(context, argument, code, depth + 1)?;
-        let assignable = match found {
-            Flow::Value(found) => flow_assignable(context, found, expected)?,
-            Flow::Null => false,
-            Flow::Unit | Flow::Diverges => false,
-        };
+        let source_expected =
+            source_method_parameter_type(context.store, target.constructor_symbol(), index);
+        let found =
+            emit_expression_with_expected(context, argument, source_expected, code, depth + 1)?;
+        let assignable = expression_flow_assignable(context, found, expected)?;
         if !assignable {
             return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
                 tree: tree_id,
@@ -2310,6 +2341,7 @@ fn validate_constructor_argument(
     context: &JvmLoweringContext<'_>,
     constructor_call: TreeId<Typed>,
     tree_id: TreeId<Typed>,
+    expected: Option<JvmType>,
     depth: usize,
     budget: &mut usize,
 ) -> Result<(), JvmCodegenError> {
@@ -2336,6 +2368,14 @@ fn validate_constructor_argument(
 
     match &tree.kind {
         TreeKind::Literal(literal) => {
+            if literal.value == Constant::Null {
+                if tree.ty == context.definitions.null_type
+                    && matches!(expected, Some(JvmType::Reference(_)))
+                {
+                    return Ok(());
+                }
+                return Err(unsupported());
+            }
             let primitive = match literal.value {
                 Constant::Int(_) => JvmType::Int,
                 Constant::Boolean(_) => JvmType::Boolean,
@@ -2364,13 +2404,33 @@ fn validate_constructor_argument(
                 .parameters()
                 .iter()
                 .any(|parameter| parameter.symbol() == *symbol);
-            let is_initialized_local = local_reference_slot(context, tree_id, *symbol)?
-                .is_some_and(|local| {
+            let is_initialized_local =
+                if let Some(local) = local_reference_slot(context, tree_id, *symbol)? {
+                    let symbol_mutable = context
+                        .store
+                        .symbols
+                        .get(*symbol)
+                        .flags
+                        .contains(dotty_core::symbols::SymbolFlags::MUTABLE);
+                    if symbol_mutable != local.is_mutable() {
+                        return Err(JvmCodegenError::LocalMutabilityMismatch {
+                            declaration: local.declaration(),
+                            symbol: *symbol,
+                            recorded_mutable: local.is_mutable(),
+                            symbol_mutable,
+                        });
+                    }
                     context.initialized_locals.contains(symbol)
                         && (matches!(local.ty(), JvmType::Int | JvmType::Boolean)
-                            || (matches!(local.ty(), JvmType::Reference(_)) && !local.is_mutable()))
-                });
-            if !is_parameter && !is_initialized_local {
+                            || matches!(local.ty(), JvmType::Reference(_)))
+                } else {
+                    false
+                };
+            let is_current_instance_field = context.store.symbols.contains(*symbol)
+                && context.store.symbols.get(*symbol).kind
+                    == dotty_core::symbols::SymbolKind::Field
+                && is_approved_constructor_reference_field(context, tree_id, *symbol)?;
+            if !is_parameter && !is_initialized_local && !is_current_instance_field {
                 return Err(unsupported());
             }
             Ok(())
@@ -2387,6 +2447,11 @@ fn validate_constructor_argument(
             Ok(())
         }
         TreeKind::Select(_) => {
+            if let Some(field) = selected_field_symbol(context, tree_id)?
+                && is_approved_constructor_reference_field(context, tree_id, field)?
+            {
+                return Ok(());
+            }
             let intrinsic = crate::resolve_boolean_intrinsic(
                 context.store,
                 context.typed_ast,
@@ -2407,6 +2472,7 @@ fn validate_constructor_argument(
                 context,
                 constructor_call,
                 select.qualifier,
+                None,
                 depth + 1,
                 budget,
             )
@@ -2451,7 +2517,14 @@ fn validate_constructor_argument(
                 false
             };
             if !safe_int && !safe_boolean {
-                return Err(unsupported());
+                return validate_constructor_reference_factory_call(
+                    context,
+                    constructor_call,
+                    tree_id,
+                    application,
+                    depth,
+                    budget,
+                );
             }
             let function = context.tree(application.function)?;
             let TreeKind::Select(select) = &function.kind else {
@@ -2464,13 +2537,151 @@ fn validate_constructor_argument(
                 context,
                 constructor_call,
                 select.qualifier,
+                None,
                 depth + 1,
                 budget,
             )?;
-            validate_constructor_argument(context, constructor_call, *right, depth + 1, budget)
+            validate_constructor_argument(
+                context,
+                constructor_call,
+                *right,
+                None,
+                depth + 1,
+                budget,
+            )
         }
         _ => Err(unsupported()),
     }
+}
+
+fn is_approved_constructor_reference_field(
+    context: &JvmLoweringContext<'_>,
+    tree_id: TreeId<Typed>,
+    field: SymbolId,
+) -> Result<bool, JvmCodegenError> {
+    let Some((_, class, _)) = context.call_context else {
+        return Ok(false);
+    };
+    if context.method.name() == "<init>" || context.method.access_flags().is_static() {
+        return Ok(false);
+    }
+    let class_symbol = class.identity().symbol();
+    let field_is_approved = context.call_context.is_some_and(|(unit, _, _)| {
+        unit.classes
+            .iter()
+            .find(|plan| plan.class == class_symbol)
+            .is_some_and(|plan| {
+                plan.fields.iter().any(|field_plan| {
+                    field_plan.field == field
+                        && field_plan.source_visibility
+                            == crate::JvmFieldSourceVisibility::PlainPrivate
+                        && field_plan.initializer.is_some()
+                })
+            })
+    });
+    let Some(metadata) = class
+        .fields()
+        .iter()
+        .find(|metadata| metadata.symbol() == field)
+    else {
+        return Ok(false);
+    };
+    if metadata.owner() != class_symbol
+        || !metadata.access_flags().is_private()
+        || !matches!(metadata.value_type(), JvmType::Reference(_))
+        || !field_is_approved
+        || !context.store.symbols.contains(field)
+        || context.store.symbols.get(field).owner != Some(class_symbol)
+        || context.store.symbols.get(field).kind != dotty_core::symbols::SymbolKind::Field
+    {
+        return Ok(false);
+    }
+    let Some(Type::TermRef {
+        prefix,
+        target: TermRefTarget::Symbol(selected),
+    }) = context.store.types.try_get(context.tree(tree_id)?.ty)
+    else {
+        return Ok(false);
+    };
+    if *selected != field || !is_current_this_type(context.store, *prefix, class_symbol) {
+        return Ok(false);
+    }
+    match &context.tree(tree_id)?.kind {
+        TreeKind::Ident(_) => Ok(true),
+        TreeKind::Select(select) => {
+            let receiver = context.tree(select.qualifier)?;
+            Ok(matches!(
+                receiver.kind,
+                TreeKind::This(dotty_core::ast::This { qual: None })
+            ) && is_current_this_type(context.store, receiver.ty, class_symbol))
+        }
+        _ => Ok(false),
+    }
+}
+
+fn validate_constructor_reference_factory_call(
+    context: &JvmLoweringContext<'_>,
+    constructor_call: TreeId<Typed>,
+    tree_id: TreeId<Typed>,
+    application: &dotty_core::ast::Apply<Typed>,
+    depth: usize,
+    budget: &mut usize,
+) -> Result<(), JvmCodegenError> {
+    let unsupported = || JvmCodegenError::UnsupportedJvmConstructorArgument {
+        tree: constructor_call,
+        argument: tree_id,
+    };
+    let Some((unit, class, _)) = context.call_context else {
+        return Err(unsupported());
+    };
+    let target = unit.resolve_planned_instance_call(
+        class.identity().symbol(),
+        context.method.symbol(),
+        tree_id,
+        context.definitions,
+    )?;
+    if target.invocation_kind() != JvmInvocationKind::Virtual
+        || !matches!(target.result(), JvmReturnType::Value(JvmType::Reference(_)))
+    {
+        return Err(unsupported());
+    }
+    if let Some(receiver) = target.receiver_tree()
+        && !matches!(
+            context.tree(receiver)?.kind,
+            TreeKind::This(dotty_core::ast::This { qual: None })
+        )
+    {
+        return Err(unsupported());
+    }
+    let parameters = target.descriptor().parameters();
+    if parameters.len() != application.args.len() {
+        return Ok(());
+    }
+    for (index, (argument, expected)) in application
+        .args
+        .iter()
+        .copied()
+        .zip(parameters.iter().copied())
+        .enumerate()
+    {
+        let source_expected =
+            source_method_parameter_type(context.store, target.method_symbol(), index);
+        if let Some(source_expected) = source_expected {
+            let source_type = planned_reference_type(unit, source_expected, context.definitions)?;
+            if source_type != expected {
+                return Err(unsupported());
+            }
+        }
+        validate_constructor_argument(
+            context,
+            constructor_call,
+            argument,
+            Some(expected),
+            depth + 1,
+            budget,
+        )?;
+    }
+    Ok(())
 }
 
 fn emit_short_circuit_boolean_intrinsic(

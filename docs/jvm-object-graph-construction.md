@@ -57,12 +57,12 @@ batch publishes no class files.
 | --- | --- | --- | --- |
 | `new Holder(counter)` for an exact reference parameter | Succeeds; argument keeps the canonical parameter symbol | Supported and emitted | Existing support |
 | `new Holder(current)` for an exact immutable reference local | Succeeds; argument keeps the canonical local symbol | Supported and emitted | Existing support |
-| `new Holder(current)` for an exact mutable reference local | Succeeds; argument keeps the canonical local symbol | `Codegen(JvmConstructorCallArgumentTypeMismatch { .. })` | #1495 |
-| `new Holder(saved)` for an exact current-instance reference field | Succeeds; argument keeps the canonical field symbol | `Codegen(JvmConstructorCallArgumentTypeMismatch { .. })` | #1495 |
+| `new Holder(current)` for an initialized exact mutable reference local | Succeeds; argument keeps the canonical local symbol | Supported and emitted | #1495 |
+| `new Holder(saved)` for an exact current-instance private planned reference field | Succeeds; argument keeps the canonical field symbol | Supported and emitted | #1495 |
 | `new Link(this)` in a method of `Link` | Succeeds with exact `Link` type | Supported and emitted; `Link.<init>(LLink;)V` verifies under JDK 21 | Existing support |
 | `new Holder(new Counter(seed))` | Succeeds; both constructor selections remain canonical | `Codegen(JvmConstructorCallArgumentTypeMismatch { .. })` | #1496 |
-| `new Holder(makeCounter(seed))` | Succeeds; selected factory method remains canonical | `Codegen(JvmConstructorCallArgumentTypeMismatch { .. })` | #1495 |
-| `new Holder(null)` | Succeeds; null stays `Definitions.null_type` | `Codegen(JvmConstructorCallArgumentTypeMismatch { .. })` | #1495, with explicit null contract |
+| `new Holder(makeCounter(seed))` for a planned same-instance reference-returning method | Succeeds; selected factory method remains canonical | Supported and emitted | #1495 |
+| `new Holder(null)` with a reference formal | Succeeds; null stays `Definitions.null_type` | Supported and emitted; null is accepted only with a reference formal | #1495 |
 | `private val inner: Counter = new Counter(seed)` | Succeeds; initializer is a typed constructor application | `Codegen(UnsupportedJvmReferenceFieldInitializer { .. })` | #1497 |
 | `new Counter(if flag then 1 else 2)` as a constructor argument | Succeeds with a typed `If` argument | `Codegen(UnsupportedJvmConstructorArgument { .. })` | #1495 |
 | Wrong constructor arity or primitive argument type | Rejected by the typer with its arity/type error | No JVM plan | Existing Typer behavior |
@@ -89,10 +89,12 @@ preserves:
 
 The positive source regression decodes the emitted owners and descriptors and,
 when JDK validation is enabled, compiles and runs a Java harness with
-`java -Xverify:all`. A new allocation nested inside constructor arguments or a
-reference-valued constructor argument remains outside the current emission
-contract. A successful selection or a typed result alone does not prove that
-the emitter can represent it.
+`java -Xverify:all`. The bounded reference-valued constructor argument subset
+includes initialized mutable locals, same-class private planned field reads,
+same-instance planned reference-returning calls, and canonical null for a
+reference formal. A new allocation nested inside constructor arguments remains
+outside the current emission contract. A successful selection or a typed result
+alone does not prove that the emitter can represent it.
 
 ## Scala 3.9.0 and JDK 21 oracle
 
@@ -224,7 +226,7 @@ argument integration that consume the verified contract.
 | --- | --- |
 | #1493 | Classfile verifier state for multiple live allocation sites, exact alias initialization, and invalid-use checks; implemented by this bounded transfer contract |
 | #1494 | Typer call-selection contracts, only where source typing needs a correction |
-| #1495 | Exact reference constructor arguments, including mutable locals, call results, and the explicit null boundary; preserve the already-working parameter, immutable-local, and same-class `this` forms |
+| #1495 | Exact reference constructor arguments, including initialized mutable locals, current-instance private planned fields, planned reference-returning calls, and null for reference formals; preserve the already-working parameter, immutable-local, and same-class `this` forms |
 | #1496 | Nested `new` lowering with separate allocation identities |
 | #1497 | Reference fields initialized from `new` in constructors |
 | #1498 | Chained call receivers and preserving the already-working receiver forms |
