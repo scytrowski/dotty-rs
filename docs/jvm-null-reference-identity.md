@@ -2,8 +2,8 @@
 
 This is an audit checkpoint for Scala 3.9.0 default-null semantics and the
 Java SE 21 verifier contract. It records current source and classfile boundaries
-and successor ownership. It adds no null typing, identity-call, or bytecode
-support.
+and successor ownership. The source typing increment in #1469 is implemented
+below; identity-call and bytecode support remain separate work.
 
 ## Reference evidence
 
@@ -70,7 +70,7 @@ Lexing, parsing, and naming succeed. The present first failures are:
 | --- | --- | --- |
 | `same(a, b)` | Typer member lookup | `MemberNotFound` for `eq` on `Box` |
 | `different(a, b)` | Typer member lookup | `MemberNotFound` for `ne` on `Box` |
-| `choose(flag, value)` | Typer literal typing | `NullLiteralTypingDeferred` for the `null` branch |
+| `choose(flag, value)` | Typer | Accepted with a typed `Box` result; the `null` branch retains canonical source `Null` |
 | `readOrDefault(flag, value)` | Typer member lookup | `MemberNotFound` for `eq` on `Box` |
 
 Each failed expression leaves no typed root in the source typed index. The
@@ -78,22 +78,26 @@ current error ordering matters: `readOrDefault` reaches the identity selection
 first; its null-sensitive branch and dereference are not evidence of existing
 null flow analysis. No code generation is attempted after these Typer failures.
 
-In default Scala 3.9 semantics, the source program is legal with `Box` as the
-expected reference type: `null` can be used in a typed local, parameter/result,
-field/constructor argument, or `If` arm where that reference type is expected.
-The verifier's permission to store or return a null reference does not create
-the missing source `Null` type or canonical source member identities in this
-repository. Dereference has ordinary runtime null behavior; the compiler must
-not silently add a guard. `-Yexplicit-nulls` and flow-sensitive narrowing are
-excluded.
+In default Scala 3.9 semantics, `null` has source type `Null` and conforms to
+reference types. This increment supports explicit `Null` results, inferred bare
+`null` results, local values annotated with an ordinary source class, and `If`
+joins between `null` and a non-generic top-level class from the current source
+unit (in either branch order). It also supports `Object`; it does not add
+general union erasure, generic or external-class conformance, parameter or
+field adaptation, or flow-sensitive narrowing. The verifier's permission to
+store or return a null reference does not imply JVM lowering support.
+Dereference has ordinary runtime null behavior; the compiler must not silently
+add a guard. `-Yexplicit-nulls` remains excluded.
 
 ## Current implementation boundary
 
-The source Typer reports `TyperError::NullLiteralTypingDeferred` for
-`Constant::Null`. `dotty-core::Definitions` provides canonical `Object`, `Any`,
-and `Nothing`, but no distinct default `Null` type identity or `AnyRef` alias;
-it also does not register the inherited `Object.eq`/`Object.ne` source methods.
-Member resolution therefore cannot select canonical equality method IDs.
+`dotty-core::Definitions` owns a canonical `Null` symbol and type distinct from
+`Nothing`, `Any`, and `Object`. Source `Constant::Null` literals use that type.
+The typer's bounded relation accepts `Null` for `Object` and current-unit,
+non-generic top-level source classes with canonical prefixes; it rejects
+primitive targets and unsupported class shapes. `AnyRef` aliases and inherited
+`Object.eq`/`Object.ne` source method identities are not implemented, so member
+resolution still cannot select canonical identity method IDs.
 
 At the classfile layer:
 
@@ -167,7 +171,7 @@ claims.
 
 | Issue | Owning layer and scope | Dependencies |
 | --- | --- | --- |
-| #1469 | `dotty-core`/`dotty-typer`: canonical source `Null` identity and limited default Scala 3.9 typing | This audit |
+| #1469 | `dotty-core`/`dotty-typer`: canonical source `Null` identity and limited default Scala 3.9 typing | Implemented in this increment |
 | #1470 | `dotty-classfile`: Scala-independent `Null` verifier flow, joins, and stack-map generation | This audit; may run alongside #1469 |
 | #1471 | `dotty-classfile`: reference compare/null branch instructions, symbolic assembly, and CFG transfer | This audit; may run alongside #1469/#1470; final null-branch tests require #1470 |
 | #1472 | `dotty-core`/`dotty-typer`: canonical `AnyRef.eq/ne` member IDs and normal Typer selection | This audit; may run alongside #1471 and non-null parts of #1469 |
