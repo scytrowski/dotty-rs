@@ -12947,6 +12947,8 @@ fn audit_source_inner_filtered(
     }
     let postprocess_started = Instant::now();
     let source_lines = SourceLineIndex::new(text);
+    let method_ancestors = method_ancestors_by_tree(&parsed.ast);
+    let root_failures_by_method = root_failures_by_method(&root_failures);
     let resolver_traces = request_metrics
         .as_ref()
         .map_or_else(BTreeMap::new, |metrics| {
@@ -13117,41 +13119,41 @@ fn audit_source_inner_filtered(
                 import_qualifier_path,
                 import_tree_index,
                 unsupported_type_tree,
-            ) = root_failures
-                .iter()
-                .filter(|failure| {
-                    failure.range.start() <= range.start() && range.end() <= failure.range.end()
-                })
-                .min_by_key(|failure| failure.range.end().saturating_sub(failure.range.start()))
-                .map(|failure| {
-                    (
-                        failure.failure.clone(),
-                        failure.missing_type_tree,
-                        failure.singleton_reference_tree,
-                        failure.local_method_signature.clone(),
-                        failure.local_value_declaration,
-                        Some(failure.enclosing_method_tree),
-                        failure.import_qualifier_path.clone(),
-                        failure.import_tree_index,
-                        failure.unsupported_type_tree,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        FailureClassification {
-                            bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
-                            family: FailureFamily::Other,
-                        },
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                });
+            ) = nearest_enclosing_root_failure(
+                tree.index(),
+                range,
+                &method_ancestors,
+                &root_failures_by_method,
+            )
+            .map(|failure| {
+                (
+                    failure.failure.clone(),
+                    failure.missing_type_tree,
+                    failure.singleton_reference_tree,
+                    failure.local_method_signature.clone(),
+                    failure.local_value_declaration,
+                    Some(failure.enclosing_method_tree),
+                    failure.import_qualifier_path.clone(),
+                    failure.import_tree_index,
+                    failure.unsupported_type_tree,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    FailureClassification {
+                        bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
+                        family: FailureFamily::Other,
+                    },
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            });
             if import_prefix_only {
                 if kind.bucket == "ImportQualifierNotFound"
                     && let (Some(import_tree_index), Some(qualifier), Some(_)) = (
@@ -17019,6 +17021,80 @@ fn index_resolver_traces_by_method(
     indexed
 }
 
+fn method_ancestors_by_tree(arena: &dotty_core::AstArena<Untyped>) -> BTreeMap<u32, Vec<u32>> {
+    let methods = arena
+        .iter()
+        .filter_map(|(tree, node)| {
+            matches!(node.kind, TreeKind::DefDef(_))
+                .then_some((tree.index(), node.position?.span().range()))
+        })
+        .collect::<Vec<_>>();
+    method_ancestor_index(&methods)
+}
+
+fn method_ancestor_index(methods: &[(u32, TextRange)]) -> BTreeMap<u32, Vec<u32>> {
+    let mut methods = methods.to_vec();
+    methods.sort_by_key(|(tree, range)| (range.start(), std::cmp::Reverse(range.end()), *tree));
+
+    let mut stack = Vec::<(u32, TextRange)>::new();
+    let mut ancestors = BTreeMap::new();
+    for (tree, range) in methods {
+        while stack.last().is_some_and(|(_, parent)| {
+            parent.start() > range.start()
+                || parent.end() < range.end()
+                || (parent.start() == range.start() && parent.end() == range.end())
+        }) {
+            stack.pop();
+        }
+        let mut tree_ancestors = Vec::with_capacity(stack.len() + 1);
+        tree_ancestors.push(tree);
+        tree_ancestors.extend(stack.iter().rev().map(|(ancestor, _)| *ancestor));
+        ancestors.insert(tree, tree_ancestors);
+        stack.push((tree, range));
+    }
+    ancestors
+}
+
+fn root_failures_by_method<'a>(
+    failures: &'a [RootFailure],
+) -> BTreeMap<u32, Vec<(usize, &'a RootFailure)>> {
+    let mut indexed = BTreeMap::<u32, Vec<(usize, &RootFailure)>>::new();
+    for (order, failure) in failures.iter().enumerate() {
+        indexed
+            .entry(failure.enclosing_method_tree)
+            .or_default()
+            .push((order, failure));
+    }
+    indexed
+}
+
+fn nearest_enclosing_root_failure<'a>(
+    method_tree: u32,
+    method_range: TextRange,
+    method_ancestors: &BTreeMap<u32, Vec<u32>>,
+    failures_by_method: &BTreeMap<u32, Vec<(usize, &'a RootFailure)>>,
+) -> Option<&'a RootFailure> {
+    let ancestors = method_ancestors.get(&method_tree)?;
+    let indexed_candidates = ancestors
+        .iter()
+        .filter_map(|ancestor| failures_by_method.get(ancestor));
+    // Preserve the old range-based behavior for malformed ASTs where an enclosing
+    // DefDef has no source span and therefore cannot appear in the ancestor index.
+    let unindexed_candidates = failures_by_method
+        .iter()
+        .filter(|(owner, _)| !method_ancestors.contains_key(owner))
+        .map(|(_, failures)| failures);
+    indexed_candidates
+        .chain(unindexed_candidates)
+        .flatten()
+        .filter(|(_, failure)| {
+            failure.range.start() <= method_range.start()
+                && method_range.end() <= failure.range.end()
+        })
+        .min_by_key(|(order, failure)| (failure.range.len(), *order))
+        .map(|(_, failure)| *failure)
+}
+
 #[test]
 fn source_line_index_handles_utf8_crlf_and_line_boundaries() {
     let source = "α\r\nbeta\n終";
@@ -17066,6 +17142,75 @@ fn resolver_trace_index_groups_only_exact_source_methods_in_stable_order() {
         ["first", "second"]
     );
     assert_eq!(indexed[&80][0].target, "other method");
+}
+
+#[test]
+fn method_ancestor_index_tracks_nested_methods_and_siblings() {
+    let range = |start, end| TextRange::new(start, end).expect("valid fixture range");
+    let indexed = method_ancestor_index(&[
+        (10, range(0, 100)),
+        (11, range(10, 40)),
+        (12, range(20, 30)),
+        (13, range(50, 80)),
+    ]);
+
+    assert_eq!(indexed[&10], [10]);
+    assert_eq!(indexed[&11], [11, 10]);
+    assert_eq!(indexed[&12], [12, 11, 10]);
+    assert_eq!(indexed[&13], [13, 10]);
+}
+
+#[test]
+fn enclosing_failure_index_prefers_smallest_covering_failure() {
+    let range = |start, end| TextRange::new(start, end).expect("valid fixture range");
+    let failure = |owner, start, end, bucket: &str| RootFailure {
+        range: range(start, end),
+        enclosing_method_tree: owner,
+        failure: FailureClassification {
+            bucket: bucket.to_owned(),
+            family: FailureFamily::Other,
+        },
+        import_qualifier_path: None,
+        import_tree_index: None,
+        unsupported_type_tree: None,
+        missing_type_tree: None,
+        singleton_reference_tree: None,
+        local_method_signature: None,
+        local_value_declaration: None,
+    };
+    let failures = [
+        failure(10, 0, 100, "outer"),
+        failure(11, 10, 40, "inner"),
+        failure(99, 20, 30, "missing-span-owner"),
+    ];
+    let failures_by_method = root_failures_by_method(&failures);
+    let method_ancestors = method_ancestor_index(&[
+        (10, range(0, 100)),
+        (11, range(10, 40)),
+        (12, range(20, 30)),
+        (13, range(50, 80)),
+    ]);
+
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(18, 33), &method_ancestors, &failures_by_method)
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("inner")
+    );
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(20, 30), &method_ancestors, &failures_by_method)
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("missing-span-owner")
+    );
+    assert_eq!(
+        nearest_enclosing_root_failure(13, range(50, 60), &method_ancestors, &failures_by_method)
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("outer")
+    );
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(20, 50), &method_ancestors, &failures_by_method)
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("outer")
+    );
 }
 
 fn function_with_mods_observation(
