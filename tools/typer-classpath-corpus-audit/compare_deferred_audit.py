@@ -3,6 +3,7 @@
 import argparse
 import collections
 import csv
+import io
 import re
 from pathlib import Path
 
@@ -19,18 +20,42 @@ COHORTS = {
 }
 
 
-def raw(text):
+def section_lines(text, name):
     marker = '## Full raw audit output'
-    return text[text.index(marker):] if marker in text else text
+    marker_offset = text.find(marker)
+    search_start = marker_offset + len(marker) if marker_offset >= 0 else 0
+    header = f'{name}:\n'
+    while True:
+        section_offset = text.find(header, search_start)
+        while section_offset >= 0 and section_offset > 0 and text[section_offset - 1] != '\n':
+            section_offset = text.find(header, section_offset + 1)
+        if section_offset < 0:
+            return
+        stream = io.StringIO(text)
+        stream.seek(section_offset + len(header))
+        for line in stream:
+            line = line.rstrip('\n')
+            if re.fullmatch(r'[a-zA-Z_0-9]+:', line):
+                search_start = stream.tell()
+                break
+            yield line
+        else:
+            return
 
 
-def sections(text):
+def sections(text, wanted=None):
     result = collections.defaultdict(list)
     section = None
-    for line in raw(text).splitlines():
+    marker = '## Full raw audit output'
+    stream = io.StringIO(text)
+    marker_offset = text.find(marker)
+    if marker_offset >= 0:
+        stream.seek(marker_offset + len(marker))
+    for line in stream:
+        line = line.rstrip('\n')
         if re.fullmatch(r'[a-zA-Z_0-9]+:', line):
             section = line[:-1]
-        elif section:
+        elif section and (wanted is None or section in wanted):
             result[section].append(line)
     return result
 
@@ -38,9 +63,10 @@ def sections(text):
 def requests(text):
     result = collections.defaultdict(collections.Counter)
     method = None
-    parts = sections(text)
-    lines = parts.get('resolver_observations_by_enclosing_method', parts['resolver_581_comparison'])
-    for line in lines:
+    section = ('resolver_observations_by_enclosing_method'
+               if '\nresolver_observations_by_enclosing_method:\n' in text
+               else 'resolver_581_comparison')
+    for line in section_lines(text, section):
         if match := re.match(r'^    (.*): requests=\d+, distinct_request_outcomes=', line):
             method = match[1]
         if match := re.match(r'^      (?:target=)?(.*?)::outcome=(.*?)=(\d+)$', line):
@@ -51,7 +77,7 @@ def requests(text):
 
 
 def scalar(text, section, name):
-    found = [int(m[1]) for line in sections(text)[section]
+    found = [int(m[1]) for line in section_lines(text, section)
              if (m := re.match(rf'^  {re.escape(name)}=(\d+)(?:\s|$)', line))]
     if len(found) != 1:
         raise ValueError(f'missing or duplicate metric {section}/{name}')
@@ -82,8 +108,9 @@ def gate(baseline, current):
 
 def cohort_records(text):
     records = {}
+    parts = sections(text, set(COHORTS))
     for section, cohort in COHORTS.items():
-        for line in sections(text)[section]:
+        for line in parts[section]:
             row = line.strip()
             if row.startswith('field:'):
                 continue
@@ -133,7 +160,7 @@ def cohort_records(text):
 
 def attempts(text):
     by_id, by_site = {}, {}
-    for line in sections(text)['local_method_attempts']:
+    for line in section_lines(text, 'local_method_attempts'):
         if match := re.match(r'^  method=(.*?)::site=(.*?)::attempt=(.*?)::blocker=(.*?)::typed=(true|false)$', line):
             by_id[match[1]] = (match[3], line.strip())
             by_site.setdefault(match[2], []).append(match[3])
@@ -142,7 +169,7 @@ def attempts(text):
 
 def lifecycle(text):
     result = {}
-    for line in sections(text)['dependency_load_profile']:
+    for line in section_lines(text, 'dependency_load_profile'):
         if match := re.match(r'^    method=(.*?)::shells=\[(.*?)\]::completed=\[(.*?)\]$', line):
             result[match[1]] = (match[2], match[3])
     return result
@@ -176,7 +203,7 @@ def cohort_rows(baseline, current):
     traces, states = requests(current), lifecycle(current)
     attempt_ids, attempt_sites = attempts(current)
     field_traces = {}
-    for lines in sections(current).values():
+    for lines in sections(current, {'dependency_load_profile'}).values():
         for line in lines:
             if match := re.match(r'^    field:(.*?)::targets=\[(.*?)\]::shells=\[(.*?)\]::completed=\[(.*?)\]$', line):
                 field_traces[match[1]] = (match[2], match[3], match[4])
