@@ -65,6 +65,8 @@ AUDIT_MATCH_PHASE file=compiler/A.scala elapsed_ms=46 selectors=1 probes=1
 AUDIT_MATCH_RESOLVER file=compiler/A.scala status=captured package_calls=1 member_calls=4 module_identity_calls=2 module_completion_calls=0 class_completion_calls=0 classfile_completion_calls=0 tasty_completion_calls=0 package_inner_us=100 member_inner_us=11700 module_identity_inner_us=200 module_completion_inner_us=0 class_completion_inner_us=0 classfile_completion_inner_us=0 tasty_completion_inner_us=0 rollback_count=1 rollback_operation_observations=2 rollback_member_observations=3 classpath_requests=8 classpath_inner_calls=7 classpath_positive=4 classpath_negative=3 classpath_errors=0 classpath_negative_cache_hits=1 classpath_returned_bytes=900 classpath_inner_wall_us=70
 AUDIT_MATCH_RESOLVER_WRAPPER file=compiler/A.scala operation=member_lookup calls=4 wall_us=12000 delegated_us=11700 exclusive_us=300
 AUDIT_RESOLVER_WRAPPER operation=member_lookup calls=3 wall_us=500 delegated_us=300 exclusive_us=200
+AUDIT_CHEAP_RESOLVER scope=source operation=member_lookup calls=5 wall_us=900 delegated_us=700 exclusive_us=200
+AUDIT_CHEAP_RESOLVER_OUTCOMES scope=source operation=member_lookup ok=2 none=2 errors=1
 AUDIT_ROLLBACK count=2 operation_observations=4 member_observations=6
 AUDIT_CLASSPATH_RESOURCES requests=10 inner_calls=7 positive=4 negative=3 errors=0 negative_cache_hits=3 returned_bytes=900 inner_wall_us=70 bytes_semantics=logical_resource_bytes_not_physical_io
 AUDIT_METHOD_RESOLVER file=compiler/A.scala tree=8 module_identity_calls=2 module_identity_inner_ms=3 module_identity_inner_us=3400 module_completion_calls=1 module_completion_inner_ms=6 module_completion_inner_us=6400 class_completion_calls=2 class_completion_inner_ms=8 class_completion_inner_us=8200 classfile_completion_calls=1 classfile_completion_inner_us=5100 tasty_completion_calls=1 tasty_completion_inner_us=3100 member_calls=4 member_inner_ms=11 member_inner_us=11700 package_calls=1 package_inner_ms=1 package_inner_us=1500
@@ -91,6 +93,8 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["match_resolver"][0]["classpath_positive"], "4")
         self.assertEqual(parsed["match_resolver_wrappers"][0]["exclusive_us"], "300")
         self.assertEqual(parsed["wrappers"]["member_lookup"]["exclusive_us"], 200)
+        self.assertEqual(parsed["cheap_resolver"][("source", "member_lookup")]["calls"], 5)
+        self.assertEqual(parsed["cheap_resolver_outcomes"][("source", "member_lookup")]["none"], 2)
         self.assertEqual(parsed["rollback"]["operation_observations"], 4)
         self.assertEqual(parsed["classpath_resources"]["returned_bytes"], "900")
         self.assertEqual(parsed["resolver"][("compiler/A.scala", "8")]["member_calls"], 4)
@@ -101,6 +105,36 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["resolver_counts"]["resolver_member_requests"], 4)
         self.assertEqual(parsed["load_roots"][0]["root"], "scala/Function1")
         self.assertEqual(parsed["load_roots"][0]["distinct_classes"], 7)
+
+    def test_cheap_match_counters_sum_all_files_independent_of_order(self):
+        blocks = [
+            "AUDIT_CHEAP_RESOLVER scope=match operation=member_lookup calls=560 wall_us=1000 delegated_us=900 exclusive_us=100",
+            "AUDIT_CHEAP_RESOLVER_OUTCOMES scope=match operation=member_lookup ok=18 none=541 errors=1",
+            "AUDIT_CHEAP_RESOLVER scope=match operation=member_lookup calls=470 wall_us=2000 delegated_us=1800 exclusive_us=200",
+            "AUDIT_CHEAP_RESOLVER_OUTCOMES scope=match operation=member_lookup ok=5 none=464 errors=1",
+            "AUDIT_CHEAP_RESOLVER scope=match operation=member_lookup calls=1687 wall_us=3000 delegated_us=2900 exclusive_us=100",
+            "AUDIT_CHEAP_RESOLVER_OUTCOMES scope=match operation=member_lookup ok=18 none=1668 errors=1",
+        ]
+        permutations = [
+            [*blocks, "AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=0", "AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=0"],
+            [*reversed(blocks), "AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=0", "AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=0"],
+            [*blocks[2:], *blocks[:2], "AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=0", "AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=0"],
+        ]
+
+        results = [
+            sequential_profile.parse_run("\n".join(lines))
+            for lines in permutations
+        ]
+
+        for parsed in results:
+            self.assertEqual(
+                parsed["cheap_resolver"][("match", "member_lookup")],
+                {"calls": 2717, "wall_us": 6000, "delegated_us": 5600, "exclusive_us": 400},
+            )
+            self.assertEqual(
+                parsed["cheap_resolver_outcomes"][("match", "member_lookup")],
+                {"ok": 41, "none": 2673, "errors": 3},
+            )
 
     def test_report_timer_includes_sidecar_writes_and_is_recorded_in_summary(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -131,7 +165,7 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
                 "files": {"compiler/A.scala": {"total_ms": 20, "outcome": "complete", "typing_ms": 20}},
                 "methods": {("compiler/A.scala", "8"): {"elapsed_ms": 20, "line": 12, "method": "foo"}},
                 "resolver": {("compiler/A.scala", "8"): {"member_calls": 0, "member_inner_us": 0}},
-                "summary": {"wall_ms": "20", "timing_mode": "timing_only", "method_limit_per_file": "1"},
+                "summary": {"wall_ms": "20", "timing_mode": "semantic_only", "method_limit_per_file": "1"},
                 "loads": {}, "resolver_counts": {"resolver_member_requests": 0}, "load_roots": [],
                 "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {},
             }
@@ -142,10 +176,37 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
 
             summary = (Path(temporary) / "summary.md").read_text()
             methods = (Path(temporary) / "methods.tsv").read_text()
-            self.assertIn("Resolver counters and timings were not captured", summary)
-            self.assertIn("Resolver attribution was not captured", summary)
+            self.assertIn("Detailed resolver counters and timings are not captured outside full mode", summary)
+            self.assertIn("Detailed per-method attribution is only available in full mode", summary)
             self.assertIn("not_captured", methods)
             self.assertNotIn("Three confirmed hot method roots", summary)
+
+    def test_cheap_counter_and_full_subphase_rows_are_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = {
+                "files": {"compiler/A.scala": {"total_ms": 20, "outcome": "complete", "typing_ms": 20}},
+                "methods": {}, "resolver": {}, "summary": {"wall_ms": "20", "timing_mode": "cheap_counters"},
+                "loads": {}, "resolver_counts": {}, "load_roots": [], "cheap_resolver": {
+                    ("source", "member_lookup"): {"calls": 5, "wall_us": 900, "delegated_us": 700, "exclusive_us": 200},
+                    ("match", "member_lookup"): {"calls": 17, "wall_us": 300, "delegated_us": 250, "exclusive_us": 50},
+                }, "cheap_resolver_outcomes": {
+                    ("source", "member_lookup"): {"ok": 2, "none": 2, "errors": 1},
+                    ("match", "member_lookup"): {"ok": 3, "none": 13, "errors": 1},
+                }, "resolver_stages": [{"stage": "observation_collection", "calls": "5", "elapsed_us": "300"}],
+            }
+            sequential_profile.write_report(
+                Path(temporary), [run], [20], ["warm"], [{"mode": "warm-read-through", "before_bytes": 0}],
+                ["compiler/A.scala"], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary), 0,
+            )
+
+            cheap = (Path(temporary) / "cheap-resolver.tsv").read_text()
+            stages = (Path(temporary) / "resolver-stages.tsv").read_text()
+            summary = (Path(temporary) / "summary.md").read_text()
+            self.assertIn("source\tmember_lookup\t5\t900\t700\t200\t2\t2\t1", cheap)
+            self.assertIn("match\tmember_lookup\t17\t300\t250\t50\t3\t13\t1", cheap)
+            self.assertIn("source\tobservation_collection\t5\t300", stages)
+            self.assertIn("Cheap counter adapter", summary)
+            self.assertIn("Full-mode AuditResolver subphases", summary)
 
 
 if __name__ == "__main__":

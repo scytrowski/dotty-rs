@@ -147,6 +147,7 @@ def parse_run(log: str) -> dict:
     result: dict = {
         "files": {}, "methods": {}, "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {}, "resolver": {}, "match_phases": [], "match_resolver": [], "match_resolver_wrappers": [], "summary": {},
         "loads": {}, "resolver_counts": {}, "load_roots": [], "wrappers": {}, "rollback": {},
+        "cheap_resolver": {}, "cheap_resolver_outcomes": {}, "resolver_stages": [], "match_resolver_stages": [],
         "classpath_resources": {},
     }
     for line in log.splitlines():
@@ -187,6 +188,22 @@ def parse_run(log: str) -> dict:
         elif line.startswith("AUDIT_MATCH_RESOLVER_WRAPPER "):
             values = kvs(line)
             result["match_resolver_wrappers"].append(values)
+        elif line.startswith("AUDIT_MATCH_RESOLVER_STAGE "):
+            result["match_resolver_stages"].append(kvs(line))
+        elif line.startswith("AUDIT_RESOLVER_STAGE "):
+            result["resolver_stages"].append(kvs(line))
+        elif line.startswith("AUDIT_CHEAP_RESOLVER_OUTCOMES "):
+            values = kvs(line)
+            scope, operation = values.pop("scope"), values.pop("operation")
+            totals = result["cheap_resolver_outcomes"].setdefault((scope, operation), {})
+            for key, value in values.items():
+                totals[key] = totals.get(key, 0) + int(value)
+        elif line.startswith("AUDIT_CHEAP_RESOLVER "):
+            values = kvs(line)
+            scope, operation = values.pop("scope"), values.pop("operation")
+            totals = result["cheap_resolver"].setdefault((scope, operation), {})
+            for key, value in values.items():
+                totals[key] = totals.get(key, 0) + int(value)
         elif line.startswith("AUDIT_RESOLVER_WRAPPER "):
             values = kvs(line)
             operation = values.pop("operation")
@@ -350,7 +367,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                  file_paths: list[str], commit: str,
                  scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path,
                  prebuild_wall_ms: int) -> None:
-    timing_only = runs[0]["summary"].get("timing_mode") == "timing_only"
+    timing_only = runs[0]["summary"].get("timing_mode") != "full"
     output_started_ns = time.monotonic_ns()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run-timings.tsv").write_text(
@@ -376,11 +393,40 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     match_resolver_totals: dict[str, int] = {}
     match_wrapper_totals: dict[str, dict[str, int]] = {}
     match_resolver_rows: list[str] = []
+    cheap_resolver_rows: list[str] = []
+    cheap_resolver_totals: dict[tuple[str, str], dict[str, int]] = {}
+    resolver_stage_rows: list[str] = []
+    resolver_stage_totals: dict[tuple[str, str], dict[str, int]] = {}
     match_phase_rows: list[str] = []
     load_root_rows: list[tuple[int, dict]] = []
     file_row_data: list[tuple[int, str, str, str, str]] = []
     method_row_data: list[tuple[int, str, str, str]] = []
     for run_index, result in enumerate(runs, 1):
+        for scope, key in (("source", "resolver_stages"), ("match", "match_resolver_stages")):
+            for row in result.get(key, []):
+                stage = row["stage"]
+                calls = int(row["calls"])
+                elapsed_us = int(row["elapsed_us"])
+                resolver_stage_rows.append(f"{run_index}\t{scope}\t{stage}\t{calls}\t{elapsed_us}")
+                total = resolver_stage_totals.setdefault((scope, stage), {"calls": 0, "elapsed_us": 0})
+                total["calls"] += calls
+                total["elapsed_us"] += elapsed_us
+        for (scope, operation), values in result.get("cheap_resolver", {}).items():
+            outcomes = result.get("cheap_resolver_outcomes", {}).get((scope, operation), {})
+            row = {**values, **outcomes}
+            cheap_resolver_rows.append(
+                f"{run_index}\t{scope}\t{operation}\t" + "\t".join(
+                    str(row.get(name, 0)) for name in (
+                        "calls", "wall_us", "delegated_us", "exclusive_us", "ok", "none", "errors"
+                    )
+                )
+            )
+            total = cheap_resolver_totals.setdefault(
+                (scope, operation),
+                {name: 0 for name in ("calls", "wall_us", "delegated_us", "exclusive_us", "ok", "none", "errors")},
+            )
+            for name in total:
+                total[name] += row.get(name, 0)
         for name, count in result["loads"].items():
             load_totals[name] = load_totals.get(name, 0) + count
         for name, count in result["resolver_counts"].items():
@@ -464,6 +510,16 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
             f"{run_index}\t{row['file']}\t{row['operation']}\t{row['calls']}\t{row['wall_us']}\t{row['delegated_us']}\t{row['exclusive_us']}\n"
             for run_index, result in enumerate(runs, 1) for row in result.get("match_resolver_wrappers", [])
         ), encoding="utf-8")
+    (out_dir / "cheap-resolver.tsv").write_text(
+        "run\tscope\toperation\tcalls\twall_us\tdelegated_us\texclusive_us\tok\tnone\terrors\n"
+        + "\n".join(cheap_resolver_rows) + ("\n" if cheap_resolver_rows else ""),
+        encoding="utf-8",
+    )
+    (out_dir / "resolver-stages.tsv").write_text(
+        "run\tscope\tstage\tcalls\telapsed_us\n"
+        + "\n".join(resolver_stage_rows) + ("\n" if resolver_stage_rows else ""),
+        encoding="utf-8",
+    )
     (out_dir / "methods.tsv").write_text("\n".join(method_rows) + "\n", encoding="utf-8")
     outcome_rows = ["run\tfile\ttree\tresult"] + [
         f"{run_index}\t{path}\t{tree}\t{result}"
@@ -568,14 +624,14 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"- Host: `{cpu_model}`, {mem_total} memory; build profile `test`; Cargo/test concurrency fixed at 1",
         f"- Manifest files: {len(file_paths)}; profiled method observations per run: {len(runs[0]['methods'])}; repetitions: {len(runs)}",
         f"- Exact audit integration-test binary prebuilt outside measured samples in {prebuild_wall_ms} ms; measured invocations that rebuild are rejected.",
-        f"- Timing mode: `{runs[0]['summary'].get('timing_mode', 'unknown')}`; root method limit per file: `{runs[0]['summary'].get('method_limit_per_file', 'unknown')}`. Exact path/tree/method identities and outcomes are in [`methods.tsv`](methods.tsv) and [`method-outcomes.tsv`](method-outcomes.tsv); match-probe selection is in [`match-probes.tsv`](match-probes.tsv). Wrapper, rollback, and classpath-resource data are in [`audit-wrapper.tsv`](audit-wrapper.tsv), [`rollback.tsv`](rollback.tsv), and [`classpath-resources.tsv`](classpath-resources.tsv).",
+        f"- Timing mode: `{runs[0]['summary'].get('timing_mode', 'unknown')}`; root method limit per file: `{runs[0]['summary'].get('method_limit_per_file', 'unknown')}`. Exact method identities/outcomes and match-probe selection are in [`methods.tsv`](methods.tsv), [`method-outcomes.tsv`](method-outcomes.tsv), and [`match-probes.tsv`](match-probes.tsv). A/B counters are in [`cheap-resolver.tsv`](cheap-resolver.tsv); full-mode wrapper, rollback, and classpath data are in [`audit-wrapper.tsv`](audit-wrapper.tsv), [`rollback.tsv`](rollback.tsv), and [`classpath-resources.tsv`](classpath-resources.tsv).",
         f"- Cargo target cache by repetition: {', '.join(f'{index}={state}' for index, state in enumerate(cache_states, 1))}. `cold` means no compiled local_definition_audit test binary existed in the selected target directory.",
         f"- Input page-cache measurements: {input_cache_summary}. Warm mode reads the selected Scala sources, pinned Scala JARs, and JDK jmods before each sample, then records residency with `fincore`. Cold mode evicts only these selected inputs with POSIX_FADV_DONTNEED; it does not clear the system-wide cache.",
         "- `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup, sampler overhead, and test-side log emission. Captured bytes plus the Python log read/write times are recorded in `run-timings.tsv`; the cost of emitting each diagnostic line remains inside the process timing.",
         f"- Process measurements: child CPU user/system mean {statistics.mean(cpu_user_s):.2f}/{statistics.mean(cpu_system_s):.2f} s; maximum sampled aggregate Cargo-process-tree RSS {max(sampled_rss, default=0) / (1024 * 1024):.1f} MiB. RSS sums per-process resident sets and can double-count shared mappings; 100 ms sampling may miss short peaks. CPU comes from child process accounting.",
         "- Classpath setup includes JDK module and Scala JAR adapter construction. No artifact decode timing is reported separately: class/module completion timers are inclusive at the resolver boundary.",
         "- Cache evidence: classloader profiles report completed-cache hits, full completions, identity shell creation/reuse, and hierarchy requests. They do not expose all lookup cache misses; those are not inferred.",
-        "- `audit-wrapper.tsv` separates the measured AuditResolver wrapper interval from delegated resolver time; `exclusive_us` is the difference and includes observation bookkeeping/formatting. Timing-only runs bypass AuditResolver and report no wrapper rows. Rollback counts and affected observation-range lengths are in `rollback.tsv`.",
+        "- `audit-wrapper.tsv` separates full AuditResolver wrapper time from delegated resolver time; `exclusive_us` includes detailed observation work. Semantic-only mode bypasses audit collection; cheap-counters mode records only fixed operation/outcome counters and timings in `cheap-resolver.tsv`. Rollback detail is available only in full mode.",
         "- `classpath-resources.tsv` counts logical resource responses and returned bytes, not physical JAR reads/decompressions: the classloader interface does not expose those physical events. `inner_wall_us` measures the aggregate ClassPathEntry lookup interval only in detailed mode; cached negative requests are counted separately.",
         "- Semantic/report ratio compares `typer_setup + typing` against generation of all profile TSV/Markdown artifacts. It does not time the full-corpus normalized report writer, which this focused run does not invoke.",
         "",
@@ -598,7 +654,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     phase_sum = sum(phase_totals.values())
     for phase, total in sorted(phase_totals.items(), key=lambda item: (-item[1], item[0])):
         lines.append(f"| `{phase}` | {total} | {100 * total / max(1, phase_sum):.1f}% |")
-    lines += ["", "## Resolver operation families", "", ("Resolver counters and timings were not captured in timing-only mode." if timing_only else "Durations measure delegated resolver calls; nested class/TASTy loading remains inclusive inside those calls. AuditResolver wrapper time is reported separately."), "", "| Operation | Calls | Delegated ms |", "| --- | ---: | ---: |"]
+    lines += ["", "## Resolver operation families", "", ("Detailed resolver counters and timings are not captured outside full mode; cheap boundary counters, when selected, are listed separately." if timing_only else "Durations measure delegated resolver calls; nested class/TASTy loading remains inclusive inside those calls. AuditResolver wrapper time is reported separately."), "", "| Operation | Calls | Delegated ms |", "| --- | ---: | ---: |"]
     resolver_sort_key = lambda item: (item[1][1] is None and item[1][2] is None, -(item[1][2] if item[1][2] is not None else (item[1][1] or 0) * 1000), item[0])
     for operation, (calls, millis, micros) in sorted(resolver_operations.items(), key=resolver_sort_key):
         calls_text = "not captured" if calls is None else str(calls)
@@ -611,6 +667,13 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         else:
             time_text = f"{millis:.3f}"
         lines.append(f"| `{operation}` | {calls_text} | {time_text} |")
+    lines += ["", "## Cheap counter adapter", "", "Mode B records resolver operation counts, delegate/wrapper durations, and coarse result categories without request identities or transaction/event strings. Empty rows mean the selected mode did not collect cheap counters.", "", "| Scope | Operation | Calls | Wall µs | Delegated µs | Exclusive µs | Ok | None | Errors |", "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
+    for (scope, operation), values in sorted(cheap_resolver_totals.items()):
+        lines.append(
+            f"| `{scope}` | `{operation}` | {values['calls']} | {values['wall_us']} | "
+            f"{values['delegated_us']} | {values['exclusive_us']} | {values['ok']} | "
+            f"{values['none']} | {values['errors']} |"
+        )
     lines += ["", "## Match-probe pass attribution", "", "Match selector and case typing run in a separate SourceTyper pass. These resolver and classpath observations are reported separately from root-method typing.", "", "| Operation | Calls | Delegated µs |", "| --- | ---: | ---: |"]
     match_operations = (
         ("package", "package_calls", "package_inner_us"),
@@ -658,13 +721,16 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 aggregate[key] += value
     for operation, values in sorted(wrapper_totals.items(), key=lambda item: (-item[1].get("wall_us", 0), item[0])):
         lines.append(f"| `{operation}` | {values.get('calls', 0)} | {values.get('wall_us', 0) / 1000:.3f} | {values.get('delegated_us', 0) / 1000:.3f} | {values.get('exclusive_us', 0) / 1000:.3f} |")
+    lines += ["", "## Full-mode AuditResolver subphases", "", "These separately timed wrapper windows attribute request preparation/identity, result classification, event collection, and transaction bookkeeping. They are inclusive across resolver operations that can nest; do not sum them with delegated resolver intervals or wrapper totals.", "", "| Scope | Stage | Calls | Elapsed ms |", "| --- | --- | ---: | ---: |"]
+    for (scope, stage), values in sorted(resolver_stage_totals.items(), key=lambda row: (-row[1]["elapsed_us"], row[0])):
+        lines.append(f"| `{scope}` | `{stage}` | {values['calls']} | {values['elapsed_us'] / 1000:.3f} |")
     lines += ["", "## Largest classpath request roots", "", "Existing resolver observations sorted these by completed-class fanout; paths and method/tree identities are unchanged.", "", "| Root | File and method | Classes touched | Completions | Cache hits |", "| --- | --- | ---: | ---: | ---: |"]
     sorted_roots = sorted(load_root_rows, key=lambda item: (-item[1]["distinct_classes"], item[1]["root"], item[1]["file"], item[1]["method"], item[0]))
     lines += [
         f"| `{root['root']}` | `{root['file']}::{root['method']}` (run {run}) | {root['distinct_classes']} | {root['full_completions']} | {root['completed_cache_hits']} |"
         for run, root in sorted_roots[:10]
     ]
-    lines += ["", "## Three measured method roots", "", "Ranked by mean inclusive method-attempt time. These attempts stop at the first typer blocker, so they characterize current audit work rather than successful full-method typing. " + ("Resolver attribution was not captured in timing-only mode." if timing_only else "Member resolver time is nested within method time and is shown only as attribution, not added again."), "", "| Rank | Mean inclusive ms | Member calls | Delegated member ms | Exact root |", "| ---: | ---: | ---: | ---: | --- |"]
+    lines += ["", "## Three measured method roots", "", "Ranked by mean inclusive method-attempt time. These attempts stop at the first typer blocker, so they characterize current audit work rather than successful full-method typing. " + ("Detailed per-method attribution is only available in full mode." if timing_only else "Member resolver time is nested within method time and is shown only as attribution, not added again."), "", "| Rank | Mean inclusive ms | Member calls | Delegated member ms | Exact root |", "| ---: | ---: | ---: | ---: | --- |"]
     for rank, (mean, _maximum, path, tree, name, _runs_count) in enumerate(top_hot_paths, 1):
         calls_and_time = method_resolver_samples.get((path, tree, name), [])
         mean_calls = statistics.mean(calls for calls, _elapsed in calls_and_time) if calls_and_time else None
@@ -687,8 +753,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         ]
     lines += [
         "",
-        ("Resolver per-method durations are emitted in microseconds. A zero call count means that operation did not run for that method; zero elapsed time with calls is below timer resolution, not proof of zero cost." if not timing_only else "Resolver per-method call counts and durations are not available in timing-only mode."),
-        ("The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts." if not timing_only else "Classloader and AuditResolver counters are omitted in timing-only mode by design."),
+        ("Resolver per-method durations are emitted in microseconds. A zero call count means that operation did not run for that method; zero elapsed time with calls is below timer resolution, not proof of zero cost." if not timing_only else "Per-method detailed resolver attribution is not collected in semantic-only or cheap-counters mode."),
+        ("The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts." if not timing_only else "Classloader load and AuditResolver detailed observations are full-mode-only; cheap counters contain resolver boundary measurements only."),
         "",
     ]
     (out_dir / "resolver-operations.tsv").write_text(
@@ -725,13 +791,17 @@ def main() -> int:
     parser.add_argument("--runs", type=int, default=2)
     parser.add_argument("--method-limit-per-file", type=int, help="type only the first N stable root-method trees in each selected file")
     parser.add_argument("--match-limit-per-file", type=int, help="type at most N supported-match probes per selected file")
-    parser.add_argument("--timing-only", action="store_true", help="skip AuditResolver/class-load instrumentation while retaining phase and method timers")
-    parser.add_argument("--compare-with", type=Path, help="compare exact selected identities/outcomes against another completed profile directory")
+    parser.add_argument("--mode", choices=("semantic_only", "cheap_counters", "full"), default="full", help="A/B/C resolver instrumentation mode: semantic-only, cheap counters, or full audit")
+    parser.add_argument("--timing-only", action="store_true", help="deprecated alias for --mode semantic_only")
+    parser.add_argument("--compare-with", type=Path, action="append", default=[], help="compare exact selected identities/outcomes against a completed profile directory; may be repeated for A/B/C comparisons")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target/typer-sequential-profile")
     parser.add_argument("--summarize-existing", action="store_true", help="rebuild reports from run-N.log without rerunning the audit")
     parser.add_argument("--measured-commit", help="override source commit when summarizing saved logs")
     parser.add_argument("--cold-inputs-first-run", action="store_true", help="evict selected Scala/JDK input pages before run 1 and measure residency with fincore")
     args = parser.parse_args()
+    if args.timing_only and args.mode != "full":
+        fail("--timing-only cannot be combined with --mode")
+    profile_mode = "semantic_only" if args.timing_only else args.mode
     if not 1 <= args.runs <= 3:
         fail("--runs must be between 1 and 3 to keep the profile bounded")
     if args.measured_commit and not args.summarize_existing:
@@ -774,11 +844,12 @@ def main() -> int:
     env["SCALA39_JDK_RELEASE"] = expected_release
     env["SCALA39_CLASSPATH"] = os.pathsep.join(str(artifact_root / item) for item in artifacts)
     env["DOTTY_AUDIT_PROFILE_FILES"] = ",".join(selected)
+    env["DOTTY_AUDIT_PROFILE_MODE"] = profile_mode
     if args.method_limit_per_file is not None:
         env["DOTTY_AUDIT_PROFILE_METHOD_LIMIT"] = str(args.method_limit_per_file)
     if args.match_limit_per_file is not None:
         env["DOTTY_AUDIT_PROFILE_MATCH_LIMIT"] = str(args.match_limit_per_file)
-    if args.timing_only:
+    if profile_mode == "semantic_only":
         env["DOTTY_AUDIT_TIMING_ONLY"] = "1"
     else:
         env.pop("DOTTY_AUDIT_TIMING_ONLY", None)
@@ -864,6 +935,7 @@ def main() -> int:
                 print(output, file=sys.stderr)
                 fail(f"profile run {index} failed with exit code {return_code}; see {log_path}")
             parsed = parse_run(output)
+            parsed["cargo_wall_ms"] = wall_ms
             parsed["process_metrics"] = process_metrics
             results.append(parsed)
             wall_times.append(wall_ms)
@@ -892,31 +964,35 @@ def main() -> int:
         if set(result["files"]) != expected_files:
             fail(f"profile run {index} did not preserve the same selected files")
     if args.compare_with:
-        comparison_runs = read_saved_runs(args.compare_with.resolve())
-        reference = comparison_runs[0]
-        for index, result in enumerate(results, 1):
-            if set(result["files"]) != set(reference["files"]):
-                fail(f"comparison run {index} selected a different file set")
-            if {(key, value["method"]) for key, value in result["methods"].items()} != {
-                (key, value["method"]) for key, value in reference["methods"].items()
-            }:
-                fail(f"comparison run {index} selected different method identities")
-            if result["outcomes"] != reference["outcomes"]:
-                fail(f"comparison run {index} changed method semantic outcomes")
-            if result["match_probe_ids"] != reference["match_probe_ids"]:
-                fail(f"comparison run {index} selected different exact match probes")
-            if result["match_outcomes"] != reference["match_outcomes"]:
-                fail(f"comparison run {index} changed match-probe semantic outcomes")
-        comparison_rows = ["timing_mode\truns\tmean_cargo_wall_ms\tmethod_count\tmatch_probe_count"]
-        comparison_rows.append(
-            f"{comparison_runs[0]['summary'].get('timing_mode', 'unknown')}\t{len(comparison_runs)}\t"
-            f"{statistics.mean(run['cargo_wall_ms'] for run in comparison_runs):.1f}\t"
-            f"{len(reference['methods'])}\t{len(reference['match_probe_ids'])}"
-        )
-        comparison_rows.append(
-            f"{results[0]['summary'].get('timing_mode', 'unknown')}\t{len(results)}\t"
-            f"{statistics.mean(wall_times):.1f}\t{len(results[0]['methods'])}\t{len(results[0]['match_probe_ids'])}"
-        )
+        comparison_profiles = [read_saved_runs(directory.resolve()) for directory in args.compare_with]
+        reference = comparison_profiles[0][0]
+        profiles = [*comparison_profiles, results]
+        for profile in profiles:
+            for index, result in enumerate(profile, 1):
+                if set(result["files"]) != set(reference["files"]):
+                    fail(f"comparison run {index} selected a different file set")
+                if {(key, value["method"]) for key, value in result["methods"].items()} != {
+                    (key, value["method"]) for key, value in reference["methods"].items()
+                }:
+                    fail(f"comparison run {index} selected different method identities")
+                if result["outcomes"] != reference["outcomes"]:
+                    fail(f"comparison run {index} changed method semantic outcomes")
+                if result["match_probe_ids"] != reference["match_probe_ids"]:
+                    fail(f"comparison run {index} selected different exact match probes")
+                if result["match_outcomes"] != reference["match_outcomes"]:
+                    fail(f"comparison run {index} changed match-probe semantic outcomes")
+        comparison_rows = ["timing_mode\truns\tmean_cargo_wall_ms\tmean_child_cpu_user_s\tmean_child_cpu_system_s\tmax_sampled_rss_bytes\tmethod_count\tmatch_probe_count"]
+        for profile in profiles:
+            first = profile[0]
+            cpu_user = [float(row.get("process_metrics", {}).get("child_cpu_user_s", "nan")) for row in profile]
+            cpu_system = [float(row.get("process_metrics", {}).get("child_cpu_system_s", "nan")) for row in profile]
+            rss = [int(row.get("process_metrics", {}).get("sampled_peak_tree_rss_bytes", 0)) for row in profile]
+            comparison_rows.append(
+                f"{first['summary'].get('timing_mode', 'unknown')}\t{len(profile)}\t"
+                f"{statistics.mean(row['cargo_wall_ms'] for row in profile):.1f}\t"
+                f"{statistics.mean(cpu_user):.2f}\t{statistics.mean(cpu_system):.2f}\t"
+                f"{max(rss, default=0)}\t{len(first['methods'])}\t{len(first['match_probe_ids'])}"
+            )
         (out_dir / "variant-comparison.tsv").write_text("\n".join(comparison_rows) + "\n", encoding="utf-8")
     commit = args.measured_commit or subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -925,7 +1001,7 @@ def main() -> int:
     if args.compare_with:
         summary_path = out_dir / "summary.md"
         summary = summary_path.read_text(encoding="utf-8")
-        summary += "\n## Instrumentation variant comparison\n\n`variant-comparison.tsv` records detailed versus timing-only wall time. Exact method identities, method outcomes, match-probe identities, and match outcomes were checked for equality against the comparison directory. This is an observer-effect comparison, not a code optimization speedup.\n"
+        summary += "\n## Instrumentation variant comparison\n\n`variant-comparison.tsv` records the selected A/B/C profile variants. Exact method identities, method outcomes, match-probe identities, and match outcomes were checked for equality across all listed directories. Timing differences estimate observer overhead; they are not code optimization speedups.\n"
         summary_path.write_text(summary, encoding="utf-8")
     print(f"profile report: {out_dir / 'summary.md'}")
     return 0
