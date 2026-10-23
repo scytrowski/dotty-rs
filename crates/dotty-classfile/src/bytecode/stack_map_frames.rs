@@ -128,6 +128,13 @@ pub enum StackMapFrameGenerationError {
         /// The unavailable or unsupported verifier value.
         state: UnsupportedStackMapState,
     },
+    /// A category-two local head or tail did not form a complete pair.
+    MalformedCategoryTwoLocal {
+        /// The target block with the malformed local state.
+        block: BasicBlockId,
+        /// The physical local slot with the orphaned marker.
+        index: usize,
+    },
     /// The generated frames failed the typed StackMapTable structural checks.
     InvalidStackMap(EncodeError),
     /// An exact flow class has no entry in the precomputed frame-class map.
@@ -235,6 +242,10 @@ impl fmt::Display for StackMapFrameGenerationError {
                 formatter,
                 "CFG block {} requires unsupported StackMapTable state {state:?}",
                 block.index()
+            ),
+            Self::MalformedCategoryTwoLocal { block, index } => write!(
+                formatter,
+                "block {block:?} has an incomplete category-two local at slot {index}"
             ),
             Self::InvalidStackMap(error) => error.fmt(formatter),
             Self::MissingClassEntry { block, class } => write!(
@@ -508,35 +519,58 @@ fn frame_from_state(
             state: UnsupportedStackMapState::InstanceReceiver,
         });
     }
-    let mut locals: Vec<_> = state
-        .locals
-        .iter()
-        .map(|local| match local {
-            FlowLocalState::Top => Ok(VerificationTypeInfo::Top),
-            FlowLocalState::Integer => Ok(VerificationTypeInfo::Integer),
-            FlowLocalState::Null => Ok(VerificationTypeInfo::Null),
+    let mut locals = Vec::with_capacity(state.locals.len());
+    let mut local_index = 0;
+    while local_index < state.locals.len() {
+        let local = match &state.locals[local_index] {
+            FlowLocalState::Top => VerificationTypeInfo::Top,
+            FlowLocalState::Integer => VerificationTypeInfo::Integer,
+            FlowLocalState::Long => {
+                if state.locals.get(local_index + 1) != Some(&FlowLocalState::LongTail) {
+                    return Err(StackMapFrameGenerationError::MalformedCategoryTwoLocal {
+                        block,
+                        index: local_index,
+                    });
+                }
+                locals.push(VerificationTypeInfo::Long);
+                local_index += 2;
+                continue;
+            }
+            FlowLocalState::LongTail => {
+                return Err(StackMapFrameGenerationError::MalformedCategoryTwoLocal {
+                    block,
+                    index: local_index,
+                });
+            }
+            FlowLocalState::Null => VerificationTypeInfo::Null,
             FlowLocalState::Receiver => match receiver_class {
                 Some(class) if constant_pool.class_name(class).is_ok() => {
-                    Ok(VerificationTypeInfo::Object(class))
+                    VerificationTypeInfo::Object(class)
                 }
-                Some(class) => Err(StackMapFrameGenerationError::WrongClassEntry {
-                    block,
-                    class: "current-class receiver".to_owned(),
-                    index: class,
-                }),
-                None => Err(StackMapFrameGenerationError::UnsupportedFlow {
-                    block,
-                    state: UnsupportedStackMapState::InstanceReceiver,
-                }),
+                Some(class) => {
+                    return Err(StackMapFrameGenerationError::WrongClassEntry {
+                        block,
+                        class: "current-class receiver".to_owned(),
+                        index: class,
+                    });
+                }
+                None => {
+                    return Err(StackMapFrameGenerationError::UnsupportedFlow {
+                        block,
+                        state: UnsupportedStackMapState::InstanceReceiver,
+                    });
+                }
             },
-            FlowLocalState::Object(class) => Ok(VerificationTypeInfo::Object(class_constant(
+            FlowLocalState::Object(class) => VerificationTypeInfo::Object(class_constant(
                 block,
                 class,
                 frame_classes,
                 constant_pool,
-            )?)),
-        })
-        .collect::<Result<_, _>>()?;
+            )?),
+        };
+        locals.push(local);
+        local_index += 1;
+    }
     while locals.last() == Some(&VerificationTypeInfo::Top) {
         locals.pop();
     }
@@ -546,6 +580,7 @@ fn frame_from_state(
         .iter()
         .map(|value| match value {
             FlowValue::Integer => Ok(VerificationTypeInfo::Integer),
+            FlowValue::Long => Ok(VerificationTypeInfo::Long),
             FlowValue::Null => Ok(VerificationTypeInfo::Null),
             FlowValue::Object(class) => Ok(VerificationTypeInfo::Object(class_constant(
                 block,
