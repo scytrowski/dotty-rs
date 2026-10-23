@@ -80,6 +80,39 @@ impl BooleanPrimitiveOperatorSymbols {
     }
 }
 
+/// The canonical source identities for Scala's reference-identity operators.
+/// These are compiler semantic members of `AnyRef` (whose source-level owner
+/// is represented by `object_class` here), not declarations of JVM
+/// `java.lang.Object` methods.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnyRefIdentityOperatorSymbols {
+    pub eq: SymbolId,
+    pub ne: SymbolId,
+}
+
+impl AnyRefIdentityOperatorSymbols {
+    /// Returns the two canonical methods in source spelling order.
+    pub const fn all(self) -> [SymbolId; 2] {
+        [self.eq, self.ne]
+    }
+}
+
+/// A malformed compiler-known AnyRef identity member registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnyRefIdentityOperatorRegistrationError {
+    /// The captured symbols, owner scope, flags, or signatures no longer match
+    /// the canonical compiler definitions.
+    MalformedCanonicalEntries,
+}
+
+impl std::fmt::Display for AnyRefIdentityOperatorRegistrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for AnyRefIdentityOperatorRegistrationError {}
+
 /// A conflict or malformed class/member encountered while registering
 /// canonical primitive operators.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -265,6 +298,10 @@ pub struct Definitions {
     /// identities remain available to validate a selected member even if its
     /// mutable semantic metadata later becomes malformed.
     boolean_primitive_operators: Option<BooleanPrimitiveOperatorSymbols>,
+    /// Compiler-known `AnyRef.eq/ne` members, kept outside Object's class
+    /// metadata because `object_class` currently represents both identities.
+    any_ref_identity_operators: Option<AnyRefIdentityOperatorSymbols>,
+    any_ref_identity_scope: Option<ScopeId>,
 }
 
 impl Definitions {
@@ -320,6 +357,8 @@ impl Definitions {
             and_type,
             or_type,
             boolean_primitive_operators: None,
+            any_ref_identity_operators: None,
+            any_ref_identity_scope: None,
         };
 
         // `Int` is a compiler-owned class shell rather than a classfile
@@ -334,6 +373,133 @@ impl Definitions {
                 .expect("fresh canonical Boolean class should accept builtin operators"),
         );
         definitions
+            .ensure_any_ref_identity_operators(store)
+            .expect("fresh builtin Object identity should accept AnyRef operators");
+        definitions
+    }
+
+    /// Returns the compiler-known `AnyRef.eq/ne` identities captured during
+    /// bootstrap. These symbols are not entered in `object_class`'s
+    /// `ClassInfo` declaration scope: the current builtin Object identity also
+    /// represents JVM `java.lang.Object`, which does not declare these Scala
+    /// methods. Source member resolution must apply the bounded AnyRef rules
+    /// before selecting one of these IDs.
+    pub const fn any_ref_identity_operator_ids(&self) -> Option<AnyRefIdentityOperatorSymbols> {
+        self.any_ref_identity_operators
+    }
+
+    /// Ensures the canonical source identities for `AnyRef.eq/ne` are
+    /// registered in their dedicated, compiler-owned semantic scope.
+    ///
+    /// Unlike class members, these are not entered into Object's ordinary
+    /// `ClassInfo`; doing so would conflate Scala's `AnyRef` members with
+    /// declarations in JVM `java.lang.Object`. Typer selection must validate
+    /// the receiver's supported source shape before using these IDs.
+    pub fn ensure_any_ref_identity_operators(
+        &mut self,
+        store: &mut SemanticStore,
+    ) -> Result<AnyRefIdentityOperatorSymbols, AnyRefIdentityOperatorRegistrationError> {
+        if self.any_ref_identity_operators.is_none() || self.any_ref_identity_scope.is_none() {
+            let (operators, scope) = self.register_any_ref_identity_operators(store);
+            self.any_ref_identity_operators = Some(operators);
+            self.any_ref_identity_scope = Some(scope);
+        }
+        self.any_ref_identity_operator_symbols(store)
+            .ok_or(AnyRefIdentityOperatorRegistrationError::MalformedCanonicalEntries)
+    }
+
+    /// Validates the registered AnyRef identity operator IDs against their
+    /// dedicated semantic scope, owner, flags, and signatures. A malformed
+    /// store returns `None`; it is never repaired from operator spelling.
+    pub fn any_ref_identity_operator_symbols(
+        &self,
+        store: &SemanticStore,
+    ) -> Option<AnyRefIdentityOperatorSymbols> {
+        let ids = self.any_ref_identity_operators?;
+        let scope = self.any_ref_identity_scope?;
+        if ids.eq == ids.ne || !store.scopes.contains(scope) {
+            return None;
+        }
+        let scope_data = store.scopes.get(scope);
+        if scope_data.owner != Some(self.object_class) || scope_data.entered_symbols().count() != 2
+        {
+            return None;
+        }
+        for (symbol, spelling) in [(ids.eq, "eq"), (ids.ne, "ne")] {
+            if !store.symbols.contains(symbol) {
+                return None;
+            }
+            let member = store.symbols.get(symbol);
+            let name = Name::new(store.names.get(spelling)?, Namespace::Term);
+            if member.name != name
+                || member.owner != Some(self.object_class)
+                || member.kind != SymbolKind::Method
+                || member.origin != SymbolOrigin::Builtin
+                || member.visibility != Visibility::Public
+                || member.flags != SymbolFlags::FINAL
+                || store.scopes.get(scope).lookup_all(&name) != [symbol]
+            {
+                return None;
+            }
+            let SymbolInfo::Complete(info) = member.info else {
+                return None;
+            };
+            let Some(Type::Method(method)) = store.types.try_get(info) else {
+                return None;
+            };
+            if method.kind != MethodKind::Plain
+                || method.params.len() != 1
+                || method.params[0].ty != self.object_type
+                || method.params[0].erased
+                || method.params[0].varargs
+                || method.result != self.boolean
+            {
+                return None;
+            }
+        }
+        Some(ids)
+    }
+
+    fn register_any_ref_identity_operators(
+        &self,
+        store: &mut SemanticStore,
+    ) -> (AnyRefIdentityOperatorSymbols, ScopeId) {
+        let scope = store.scopes.alloc(Scope::new(Some(self.object_class)));
+        let mut ids = [None; 2];
+        for (index, spelling) in ["eq", "ne"].into_iter().enumerate() {
+            let name = Name::new(store.names.intern(spelling), Namespace::Term);
+            let info = store.types.alloc(Type::Method(MethodType {
+                params: vec![MethodParam {
+                    name: TermName::new(store.names.intern("that")),
+                    ty: self.object_type,
+                    erased: false,
+                    varargs: false,
+                }],
+                result: self.boolean,
+                kind: MethodKind::Plain,
+            }));
+            let symbol = store.symbols.alloc(Symbol {
+                name,
+                owner: Some(self.object_class),
+                kind: SymbolKind::Method,
+                flags: SymbolFlags::FINAL,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(info),
+                origin: SymbolOrigin::Builtin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            store.scopes.get_mut(scope).enter(name, symbol);
+            ids[index] = Some(symbol);
+        }
+        (
+            AnyRefIdentityOperatorSymbols {
+                eq: ids[0].expect("eq symbol was just allocated"),
+                ne: ids[1].expect("ne symbol was just allocated"),
+            },
+            scope,
+        )
     }
 
     /// Returns the Boolean member identities captured at bootstrap.
@@ -1326,6 +1492,83 @@ mod tests {
         assert_eq!(
             definitions.source_builtin_type(&store, null_name),
             Some(definitions.null_type)
+        );
+    }
+
+    #[test]
+    fn any_ref_identity_operators_have_canonical_scoped_source_signatures() {
+        let mut store = SemanticStore::new();
+        let mut definitions = Definitions::bootstrap(&mut store);
+        let operators = definitions
+            .any_ref_identity_operator_symbols(&store)
+            .unwrap();
+        assert_eq!(definitions.any_ref_identity_operator_ids(), Some(operators));
+        assert_eq!(
+            definitions.ensure_any_ref_identity_operators(&mut store),
+            Ok(operators)
+        );
+        assert_ne!(operators.eq, operators.ne);
+
+        for (symbol, spelling) in [(operators.eq, "eq"), (operators.ne, "ne")] {
+            let member = store.symbols.get(symbol);
+            assert_eq!(member.kind, SymbolKind::Method);
+            assert_eq!(member.owner, Some(definitions.object_class));
+            assert_eq!(member.origin, SymbolOrigin::Builtin);
+            assert_eq!(member.visibility, Visibility::Public);
+            assert!(member.flags.contains(SymbolFlags::FINAL));
+            assert_eq!(store.names.resolve(member.name.text()), spelling);
+            let SymbolInfo::Complete(info) = member.info else {
+                panic!("AnyRef identity operator must have completed method info");
+            };
+            let Type::Method(method) = store.types.get(info) else {
+                panic!("AnyRef identity operator must have a MethodType");
+            };
+            assert_eq!(method.kind, MethodKind::Plain);
+            assert_eq!(method.params.len(), 1);
+            assert_eq!(method.params[0].ty, definitions.object_type);
+            assert!(!method.params[0].erased);
+            assert!(!method.params[0].varargs);
+            assert_eq!(method.result, definitions.boolean);
+        }
+    }
+
+    #[test]
+    fn any_ref_identity_registry_rejects_mutated_scope_or_signature() {
+        let mut store = SemanticStore::new();
+        let mut definitions = Definitions::bootstrap(&mut store);
+        let operators = definitions.any_ref_identity_operator_ids().unwrap();
+        let eq = store.symbols.get_mut(operators.eq);
+        eq.owner = None;
+
+        assert_eq!(
+            definitions.ensure_any_ref_identity_operators(&mut store),
+            Err(AnyRefIdentityOperatorRegistrationError::MalformedCanonicalEntries)
+        );
+        assert_eq!(definitions.any_ref_identity_operator_symbols(&store), None);
+
+        let eq = store.symbols.get_mut(operators.eq);
+        eq.owner = Some(definitions.object_class);
+        eq.flags = SymbolFlags::FINAL | SymbolFlags::STATIC;
+        assert_eq!(
+            definitions.any_ref_identity_operator_symbols(&store),
+            None,
+            "a static symbol must not pass as an instance intrinsic"
+        );
+
+        let eq = store.symbols.get_mut(operators.eq);
+        eq.flags = SymbolFlags::FINAL;
+        let SymbolInfo::Complete(method_type) = eq.info else {
+            unreachable!();
+        };
+        let Type::Method(mut method) = store.types.get(method_type).clone() else {
+            unreachable!();
+        };
+        method.result = definitions.int;
+        eq.info = SymbolInfo::Complete(store.types.alloc(Type::Method(method)));
+        assert_eq!(
+            definitions.any_ref_identity_operator_symbols(&store),
+            None,
+            "a forged result type must not pass canonical signature validation"
         );
     }
 

@@ -1,6 +1,6 @@
 //! End-to-end typed-expression checks over synthetic source.
 
-use dotty_core::ast::TreeKind;
+use dotty_core::ast::{TreeKind, UntypedNode};
 use dotty_core::types::{ClassInfo, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, NoResolver, Packages, SemanticStore, SourceId, SourceText, SymbolInfo, SymbolKind,
@@ -345,7 +345,27 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
                 return None;
             };
             let name = store.names.resolve(definition.name.as_name().text());
-            matches!(name, "same" | "different" | "choose" | "readOrDefault").then(|| {
+            matches!(
+                name,
+                "same"
+                    | "sameDot"
+                    | "selfSame"
+                    | "sameLocal"
+                    | "different"
+                    | "differentDot"
+                    | "isMissing"
+                    | "newSame"
+                    | "newLocalSame"
+                    | "sameThis"
+                    | "differentThis"
+                    | "thisAliasEq"
+                    | "thisMethodEq"
+                    | "mutableLocalDot"
+                    | "mutableLocalInfix"
+                    | "choose"
+                    | "readOrDefault"
+            )
+            .then(|| {
                 (
                     name.to_owned(),
                     index.symbol_at(source, tree).unwrap(),
@@ -356,9 +376,23 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
         .collect::<Vec<_>>();
     assert_eq!(
         methods.len(),
-        4,
+        17,
         "the candidate source shape must be parsed"
     );
+    let infix_operands = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::PhaseSpecific(UntypedNode::InfixOp(infix)) = &node.kind else {
+                return None;
+            };
+            matches!(store.names.resolve(infix.op.text()), "eq" | "ne").then_some((
+                tree,
+                infix.left,
+                infix.right,
+            ))
+        })
+        .collect::<Vec<_>>();
 
     let mut typer = SourceTyper::new(
         &parsed.ast,
@@ -370,7 +404,9 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
     );
     let box_class = class_definition(&parsed, typer.store(), &index, source, "Box").0;
     typer.complete_symbol(box_class).unwrap();
-    let mut failures = Vec::new();
+    let runner_class = class_definition(&parsed, typer.store(), &index, source, "Runner").0;
+    typer.complete_symbol(runner_class).unwrap();
+    let mut typed_methods = Vec::new();
     for (name, method, rhs) in methods {
         let context = typer.expression_context_for(method).unwrap();
         if name == "choose" {
@@ -390,28 +426,229 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
                 typer.typed_ast().get(if_expression.then_branch).ty,
                 definitions.null_type
             );
+            typed_methods.push((name, typed));
             continue;
         }
-        let Err(error) = typer.type_expression(rhs, context) else {
-            panic!("{name} unexpectedly typed")
-        };
-        assert!(
-            typer.source_typed_index().get(source, rhs).is_none(),
-            "failed typing of {name} must not publish a typed root"
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("typing {name}: {error:?}"));
+        assert_eq!(
+            typer.typed_ast().get(typed).ty,
+            if name == "readOrDefault" {
+                definitions.int
+            } else {
+                definitions.boolean
+            }
         );
-        failures.push((name, error));
+        typed_methods.push((name, typed));
     }
 
-    for (name, error) in failures {
-        match (name.as_str(), error) {
-            ("same", TyperError::MemberNotFound { name, .. })
-                if typer.store().names.resolve(name.text()) == "eq" => {}
-            ("different", TyperError::MemberNotFound { name, .. })
-                if typer.store().names.resolve(name.text()) == "ne" => {}
-            ("readOrDefault", TyperError::MemberNotFound { name, .. })
-                if typer.store().names.resolve(name.text()) == "eq" => {}
-            (method, error) => panic!("unexpected first typing failure for {method}: {error:?}"),
+    let operators = definitions
+        .any_ref_identity_operator_symbols(typer.store())
+        .unwrap();
+    let mut selected = Vec::new();
+    for (name, root) in typed_methods {
+        if !matches!(
+            name.as_str(),
+            "same"
+                | "sameDot"
+                | "selfSame"
+                | "sameLocal"
+                | "different"
+                | "differentDot"
+                | "isMissing"
+                | "newSame"
+                | "newLocalSame"
+                | "sameThis"
+                | "differentThis"
+                | "thisAliasEq"
+                | "thisMethodEq"
+                | "mutableLocalDot"
+                | "mutableLocalInfix"
+                | "readOrDefault"
+        ) {
+            continue;
         }
+        let mut pending = vec![root];
+        while let Some(tree) = pending.pop() {
+            let node = typer.typed_ast().get(tree);
+            if let TreeKind::Select(selection) = &node.kind
+                && let Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                } = typer.store().types.get(node.ty)
+                && operators.all().contains(symbol)
+            {
+                selected.push((*symbol, selection.qualifier));
+            }
+            pending.extend(match &node.kind {
+                TreeKind::Select(selection) => vec![selection.qualifier],
+                TreeKind::Apply(application) => std::iter::once(application.function)
+                    .chain(application.args.iter().copied())
+                    .collect(),
+                TreeKind::If(expression) => vec![
+                    expression.cond,
+                    expression.then_branch,
+                    expression.else_branch,
+                ],
+                TreeKind::Block(block) => block
+                    .stats
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(block.expr))
+                    .collect(),
+                _ => Vec::new(),
+            });
+        }
+    }
+    assert!(selected.iter().any(|(symbol, _)| *symbol == operators.eq));
+    assert!(selected.iter().any(|(symbol, _)| *symbol == operators.ne));
+    assert_eq!(selected.len(), 16, "all source calls retain canonical IDs");
+    for symbol in operators.all() {
+        assert_eq!(
+            typer.store().symbols.get(symbol).owner,
+            Some(definitions.object_class)
+        );
+    }
+    assert!(selected.iter().all(|(_, qualifier)| matches!(
+        typer.typed_ast().get(*qualifier).kind,
+        TreeKind::Ident(_) | TreeKind::This(_) | TreeKind::Select(_) | TreeKind::Apply(_)
+    )));
+    let mut same_parameter_on_both_sides = false;
+    for (source_tree, source_left, source_right) in infix_operands {
+        let typed = typer
+            .source_typed_index()
+            .get(source, source_tree)
+            .expect("typed infix source mapping is retained");
+        let node = typer.typed_ast().get(typed);
+        assert_eq!(node.ty, definitions.boolean);
+        let TreeKind::Apply(application) = &node.kind else {
+            panic!("identity infix expression keeps the ordinary Apply shape")
+        };
+        assert_eq!(application.args.len(), 1);
+        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
+            panic!("identity application function is the selected canonical member")
+        };
+        assert!(matches!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.function).ty),
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } if operators.all().contains(symbol)
+        ));
+        assert_eq!(
+            typer.source_typed_index().get(source, source_left),
+            Some(selection.qualifier)
+        );
+        assert_eq!(
+            typer.source_typed_index().get(source, source_right),
+            Some(application.args[0])
+        );
+        if let (
+            Type::TermRef {
+                target: TermRefTarget::Symbol(left_symbol),
+                ..
+            },
+            Type::TermRef {
+                target: TermRefTarget::Symbol(right_symbol),
+                ..
+            },
+        ) = (
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(selection.qualifier).ty),
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(application.args[0]).ty),
+        ) && left_symbol == right_symbol
+        {
+            same_parameter_on_both_sides = true;
+        }
+        assert!(node.position.is_some());
+    }
+    assert!(
+        same_parameter_on_both_sides,
+        "a eq a keeps one parameter SymbolId"
+    );
+}
+
+#[test]
+fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
+    let source_text = "class Box:\n  def eq(other: Box): Boolean = true\nclass Overloaded:\n  def eq(other: Overloaded): Boolean = true\n  def eq(other: Int): Boolean = false\nclass WrongArity:\n  def eq(): Boolean = true\nclass Generic[A]\ntrait Marker\nclass Runner:\n  def foreign(a: Box, b: Box): Boolean = a eq b\n  def overloadedInfix(a: Overloaded, b: Overloaded): Boolean = a eq b\n  def overloadedDot(a: Overloaded, b: Overloaded): Boolean = a.eq(b)\n  def wrongArity(a: WrongArity, b: WrongArity): Boolean = a eq b\n  def primitive(a: Int, b: Int): Boolean = a eq b\n  def incompatible(a: Box, b: Int): Boolean = a eq b\n  def traitRef(a: Marker, b: Marker): Boolean = a eq b\n  def generic(a: Generic[Int], b: Generic[Int]): Boolean = a eq b\n  def objectRef(a: Object, b: Object): Boolean = a eq b\n  def universal(a: Box, b: Box): Boolean = a == b\n";
+    let source = SourceId::from_index(1472);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(source_text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(source_text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "AnyRefIdentityNegative.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let methods = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            let name = store.names.resolve(definition.name.as_name().text());
+            matches!(
+                name,
+                "foreign"
+                    | "overloadedInfix"
+                    | "overloadedDot"
+                    | "wrongArity"
+                    | "primitive"
+                    | "incompatible"
+                    | "traitRef"
+                    | "generic"
+                    | "objectRef"
+                    | "universal"
+            )
+            .then(|| {
+                (
+                    name.to_owned(),
+                    index.symbol_at(source, tree).unwrap(),
+                    definition.rhs.unwrap(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 10);
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (name, method, rhs) in methods {
+        let context = typer.expression_context_for(method).unwrap();
+        let error = typer.type_expression(rhs, context).unwrap_err();
+        match (name.as_str(), error) {
+            ("incompatible", TyperError::OverloadApplicationNoApplicable { .. }) => {}
+            (_, TyperError::MemberNotFound { .. }) => {}
+            (name, error) => panic!("unexpected {name} identity rejection: {error:?}"),
+        }
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
     }
 }
 

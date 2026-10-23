@@ -981,6 +981,40 @@ impl SourceTyper<'_> {
         let receiver_type = self.typed_arena.get(qualifier).ty;
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
         let receiver = self.this_type_receiver_view(receiver)?;
+
+        // `AnyRef.eq/ne` are compiler semantic members, not methods loaded
+        // from the JVM Object class. Keep their selection narrower than
+        // ordinary member lookup until the source model distinguishes those
+        // owners and supports a complete reference hierarchy.
+        if self.any_ref_identity_operator_name(name) {
+            if self
+                .any_ref_identity_symbol_for_receiver(receiver, name)
+                .is_some()
+            {
+                let candidates = self
+                    .lookup_members_journaled(receiver, name, info_journal)
+                    .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                if candidates.is_empty()
+                    && let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, name)
+                {
+                    let ty = self.store.types.alloc(Type::TermRef {
+                        prefix: receiver_type,
+                        target: TermRefTarget::Symbol(symbol),
+                    });
+                    return Ok(
+                        TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
+                            .select(qualifier, name, backquoted, ty, position),
+                    );
+                }
+            }
+            return Err(TyperError::MemberNotFound {
+                source: self.source,
+                tree_index,
+                receiver,
+                name,
+            });
+        }
+
         let candidates = self
             .lookup_members_journaled(receiver, name, info_journal)
             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
@@ -1010,6 +1044,127 @@ impl SourceTyper<'_> {
             TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
                 .select(qualifier, name, backquoted, ty, position),
         )
+    }
+
+    pub(in crate::typer) fn any_ref_identity_operator_name(&self, name: Name) -> bool {
+        matches!(self.store.names.resolve(name.text()), "eq" | "ne")
+    }
+
+    pub(in crate::typer) fn is_any_ref_identity_symbol(&self, symbol: SymbolId) -> bool {
+        let Some(operators) = self
+            .definitions
+            .any_ref_identity_operator_symbols(self.store)
+        else {
+            return false;
+        };
+        symbol == operators.eq || symbol == operators.ne
+    }
+
+    /// Produces the nominal view used only for checking a `this` value against
+    /// the canonical AnyRef identity parameter. The typed tree keeps its
+    /// original ThisType and source identity.
+    pub(in crate::typer) fn any_ref_identity_argument_view(
+        &mut self,
+        ty: TypeId,
+    ) -> Option<TypeId> {
+        let Some(Type::ThisType { class }) = self.store.types.try_get(ty).cloned() else {
+            return None;
+        };
+        if !self.is_supported_any_ref_identity_receiver(ty) {
+            return None;
+        }
+        let prefix = self.type_symbol_prefix(class);
+        Some(self.store.types.alloc(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(class),
+        }))
+    }
+
+    pub(in crate::typer) fn any_ref_identity_symbol_for_receiver(
+        &self,
+        receiver: TypeId,
+        name: Name,
+    ) -> Option<SymbolId> {
+        if !self.is_supported_any_ref_identity_receiver(receiver) {
+            return None;
+        }
+        let operators = self
+            .definitions
+            .any_ref_identity_operator_symbols(self.store)?;
+        match self.store.names.resolve(name.text()) {
+            "eq" => Some(operators.eq),
+            "ne" => Some(operators.ne),
+            _ => None,
+        }
+    }
+
+    fn is_supported_any_ref_identity_receiver(&self, receiver: TypeId) -> bool {
+        let class = match self.store.types.try_get(receiver) {
+            Some(Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(class),
+            }) => {
+                if !self.store.symbols.contains(*class) {
+                    return false;
+                }
+                let Some(owner) = self.store.symbols.get(*class).owner else {
+                    return false;
+                };
+                if *prefix != self.definitions.no_prefix
+                    && !matches!(
+                        self.store.types.try_get(*prefix),
+                        Some(Type::TypeRef {
+                            prefix: package_prefix,
+                            target: TypeRefTarget::Symbol(package),
+                        }) if *package_prefix == self.definitions.no_prefix && *package == owner
+                    )
+                {
+                    return false;
+                }
+                *class
+            }
+            Some(Type::ThisType { class }) => *class,
+            _ => return false,
+        };
+        if !self.store.symbols.contains(class) {
+            return false;
+        }
+        let declaration = self.store.symbols.get(class);
+        if declaration.kind != SymbolKind::Class
+            || declaration.origin != SymbolOrigin::Source(self.source)
+            || declaration.owner.is_none_or(|owner| {
+                !self.store.symbols.contains(owner)
+                    || self.store.symbols.get(owner).kind != SymbolKind::Package
+            })
+            || !matches!(
+                self.index.definition_of(class),
+                Some(SourceDefinition::Canonical { source, .. }) if source == self.source
+            )
+        {
+            return false;
+        }
+        let SymbolInfo::Complete(info_id) = declaration.info else {
+            return false;
+        };
+        let Some(Type::ClassInfo(info)) = self.store.types.try_get(info_id) else {
+            return false;
+        };
+        if info.class != class || !self.store.scopes.contains(info.declarations) {
+            return false;
+        }
+        if self.index.scope_of(class) != Some(info.declarations) {
+            return false;
+        }
+        let declarations = self.store.scopes.get(info.declarations);
+        if declarations.owner != Some(class)
+            || declarations.entered_symbols().any(|symbol| {
+                !self.store.symbols.contains(symbol)
+                    || self.store.symbols.get(symbol).kind == SymbolKind::TypeParameter
+            })
+        {
+            return false;
+        }
+        info.parents.as_slice() == [self.definitions.object_type]
     }
 
     /// Type a selection qualifier without treating a package path as a value.

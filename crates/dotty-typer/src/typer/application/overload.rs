@@ -58,45 +58,91 @@ impl SourceTyper<'_> {
             }
         }
         let receiver = self.this_type_receiver_view(receiver)?;
-        let members = self
-            .lookup_overload_members_journaled(receiver, operator, info_journal)
-            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-        if members.is_empty() {
-            return Err(TyperError::MemberNotFound {
-                source: self.source,
-                tree_index,
-                receiver,
-                name: operator,
-            });
-        }
-        if members
-            .iter()
-            .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
-        {
-            return Err(TyperError::MixedApplicationCandidateKinds {
-                source: self.source,
-                tree_index,
-                candidates: members.iter().map(|member| member.symbol).collect(),
-            });
-        }
-        let mut candidates = members
-            .into_iter()
-            .map(|member| {
-                let callable = self.member_type_on_journaled(&member, info_journal)?;
-                self.validate_overload_callable(member.symbol, callable)?;
-                Ok(ApplicationCandidate {
-                    symbol: member.symbol,
-                    callable,
-                    member: Some(member),
-                    rejection: None,
+        let mut candidates = if self.any_ref_identity_operator_name(operator) {
+            let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, operator) else {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            };
+            let source_members = self
+                .lookup_overload_members_journaled(receiver, operator, info_journal)
+                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            // A same-spelled source or trait declaration cannot stand in for
+            // the compiler's final AnyRef identity symbol.
+            if !source_members.is_empty() {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            }
+            let SymbolInfo::Complete(callable) = self.store.symbols.get(symbol).info else {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            };
+            self.validate_overload_callable(symbol, callable)?;
+            vec![ApplicationCandidate {
+                symbol,
+                callable,
+                member: None,
+                rejection: None,
+            }]
+        } else {
+            let members = self
+                .lookup_overload_members_journaled(receiver, operator, info_journal)
+                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            if members.is_empty() {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            }
+            if members
+                .iter()
+                .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
+            {
+                return Err(TyperError::MixedApplicationCandidateKinds {
+                    source: self.source,
+                    tree_index,
+                    candidates: members.iter().map(|member| member.symbol).collect(),
+                });
+            }
+            members
+                .into_iter()
+                .map(|member| {
+                    let callable = self.member_type_on_journaled(&member, info_journal)?;
+                    self.validate_overload_callable(member.symbol, callable)?;
+                    Ok(ApplicationCandidate {
+                        symbol: member.symbol,
+                        callable,
+                        member: Some(member),
+                        rejection: None,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, TyperError>>()?;
+                .collect::<Result<Vec<_>, TyperError>>()?
+        };
 
         let typed =
             self.type_value_expression_inner(argument_tree, context, info_journal, new_mappings)?;
         let own_type = self.typed_arena.get(typed).ty;
         let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+        let widened_type =
+            if candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol) {
+                self.any_ref_identity_argument_view(widened_type)
+                    .unwrap_or(widened_type)
+            } else {
+                widened_type
+            };
         let arguments = [TypedArgument {
             typed,
             own_type,
@@ -224,73 +270,91 @@ impl SourceTyper<'_> {
                 let receiver =
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let receiver_view = self.this_type_receiver_view(receiver)?;
-                let members = match self.lookup_overload_members_journaled(
-                    receiver_view,
-                    selection.name,
-                    info_journal,
-                ) {
-                    Ok(members) => members,
-                    Err(error) => {
-                        return Err(TyperError::MemberLookup(Box::new(error)));
+                if self.any_ref_identity_operator_name(selection.name) {
+                    let Some(symbol) =
+                        self.any_ref_identity_symbol_for_receiver(receiver_view, selection.name)
+                    else {
+                        return Err(TyperError::MemberNotFound {
+                            source: self.source,
+                            tree_index: function_tree.index(),
+                            receiver: receiver_view,
+                            name: selection.name,
+                        });
+                    };
+                    let source_members = self
+                        .lookup_overload_members_journaled(
+                            receiver_view,
+                            selection.name,
+                            info_journal,
+                        )
+                        .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+                    // Do not let an overload set hide a source declaration
+                    // that shadows the compiler-owned AnyRef identity member.
+                    if !source_members.is_empty() {
+                        return Err(TyperError::MemberNotFound {
+                            source: self.source,
+                            tree_index: function_tree.index(),
+                            receiver: receiver_view,
+                            name: selection.name,
+                        });
                     }
-                };
-                if members.is_empty() {
-                    if let Some(resolved) = self.resolve_local_extension_application(
-                        selection,
-                        qualifier,
-                        argument_trees,
-                        application_kind,
-                        context,
-                        function_tree,
-                        application_tree_index,
+                    let SymbolInfo::Complete(callable) = self.store.symbols.get(symbol).info else {
+                        return Err(TyperError::MemberNotFound {
+                            source: self.source,
+                            tree_index: function_tree.index(),
+                            receiver: receiver_view,
+                            name: selection.name,
+                        });
+                    };
+                    self.validate_overload_callable(symbol, callable)?;
+                    let allow_mutable_local_receiver =
+                        self.is_mutable_local_selection_receiver(qualifier, receiver_type);
+                    if !allow_mutable_local_receiver {
+                        self.require_stable_application_selection_prefix(
+                            qualifier,
+                            receiver_type,
+                            function_tree.index(),
+                        )?;
+                    }
+                    (
+                        vec![ApplicationCandidate {
+                            symbol,
+                            callable,
+                            member: None,
+                            rejection: None,
+                        }],
+                        ApplicationFunctionShape::Select {
+                            selection,
+                            qualifier,
+                            receiver_type,
+                            allow_mutable_local_receiver,
+                        },
+                    )
+                } else {
+                    let members = match self.lookup_overload_members_journaled(
+                        receiver_view,
+                        selection.name,
                         info_journal,
-                        new_mappings,
-                    )? {
-                        return Ok(Some(resolved));
-                    }
-                    self.require_stable_application_selection_prefix(
-                        qualifier,
-                        receiver_type,
-                        function_tree.index(),
-                    )?;
-                    return Ok(None);
-                }
-                if members.len() == 1 {
-                    // Only a call to one already-applicable method may read
-                    // a mutable local receiver; selecting a member as a value
-                    // still requires the ordinary stable-prefix check.
-                    let mutable_local_method_call =
-                        if self.store.symbols.get(members[0].symbol).kind == SymbolKind::Method {
-                            let applicability = self.single_member_application_applicability(
-                                &members[0],
-                                argument_trees,
-                                context,
-                                application_kind,
-                                info_journal,
-                                new_mappings,
-                            )?;
-                            if applicability == Some(false)
-                                && let Some(resolved) = self.resolve_local_extension_application(
-                                    selection,
-                                    qualifier,
-                                    argument_trees,
-                                    application_kind,
-                                    context,
-                                    function_tree,
-                                    application_tree_index,
-                                    info_journal,
-                                    new_mappings,
-                                )?
-                            {
-                                return Ok(Some(resolved));
-                            }
-                            applicability == Some(true)
-                                && self
-                                    .is_mutable_local_selection_receiver(qualifier, receiver_type)
-                        } else {
-                            false
-                        };
-                    if !mutable_local_method_call {
+                    ) {
+                        Ok(members) => members,
+                        Err(error) => {
+                            return Err(TyperError::MemberLookup(Box::new(error)));
+                        }
+                    };
+                    if members.is_empty() {
+                        if let Some(resolved) = self.resolve_local_extension_application(
+                            selection,
+                            qualifier,
+                            argument_trees,
+                            application_kind,
+                            context,
+                            function_tree,
+                            application_tree_index,
+                            info_journal,
+                            new_mappings,
+                        )? {
+                            return Ok(Some(resolved));
+                        }
                         self.require_stable_application_selection_prefix(
                             qualifier,
                             receiver_type,
@@ -298,50 +362,99 @@ impl SourceTyper<'_> {
                         )?;
                         return Ok(None);
                     }
-                }
-                if members
-                    .iter()
-                    .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
-                {
-                    self.require_stable_application_selection_prefix(
-                        qualifier,
-                        receiver_type,
-                        function_tree.index(),
-                    )?;
-                    return Err(TyperError::MixedApplicationCandidateKinds {
-                        source: self.source,
-                        tree_index: application_tree_index,
-                        candidates: members.iter().map(|member| member.symbol).collect(),
-                    });
-                }
-                let allow_mutable_local_receiver = members.len() == 1
-                    && self.is_mutable_local_selection_receiver(qualifier, receiver_type);
-                let candidates = members
-                    .into_iter()
-                    .map(|member| {
-                        let callable = self.member_type_on_journaled(&member, info_journal)?;
-                        self.validate_overload_callable(member.symbol, callable)?;
-                        Ok(ApplicationCandidate {
-                            symbol: member.symbol,
-                            callable,
-                            member: Some(member),
-                            rejection: None,
+                    if members.len() == 1 {
+                        // Only a call to one already-applicable method may read
+                        // a mutable local receiver; selecting a member as a value
+                        // still requires the ordinary stable-prefix check.
+                        let mutable_local_method_call =
+                            if self.store.symbols.get(members[0].symbol).kind == SymbolKind::Method
+                            {
+                                let applicability = self.single_member_application_applicability(
+                                    &members[0],
+                                    argument_trees,
+                                    context,
+                                    application_kind,
+                                    info_journal,
+                                    new_mappings,
+                                )?;
+                                if applicability == Some(false)
+                                    && let Some(resolved) = self
+                                        .resolve_local_extension_application(
+                                            selection,
+                                            qualifier,
+                                            argument_trees,
+                                            application_kind,
+                                            context,
+                                            function_tree,
+                                            application_tree_index,
+                                            info_journal,
+                                            new_mappings,
+                                        )?
+                                {
+                                    return Ok(Some(resolved));
+                                }
+                                applicability == Some(true)
+                                    && self.is_mutable_local_selection_receiver(
+                                        qualifier,
+                                        receiver_type,
+                                    )
+                            } else {
+                                false
+                            };
+                        if !mutable_local_method_call {
+                            self.require_stable_application_selection_prefix(
+                                qualifier,
+                                receiver_type,
+                                function_tree.index(),
+                            )?;
+                            return Ok(None);
+                        }
+                    }
+                    if members.iter().any(|member| {
+                        self.store.symbols.get(member.symbol).kind != SymbolKind::Method
+                    }) {
+                        self.require_stable_application_selection_prefix(
+                            qualifier,
+                            receiver_type,
+                            function_tree.index(),
+                        )?;
+                        return Err(TyperError::MixedApplicationCandidateKinds {
+                            source: self.source,
+                            tree_index: application_tree_index,
+                            candidates: members.iter().map(|member| member.symbol).collect(),
+                        });
+                    }
+                    let allow_mutable_local_receiver = members.len() == 1
+                        && self.is_mutable_local_selection_receiver(qualifier, receiver_type);
+                    let candidates = members
+                        .into_iter()
+                        .map(|member| {
+                            let callable = self.member_type_on_journaled(&member, info_journal)?;
+                            self.validate_overload_callable(member.symbol, callable)?;
+                            Ok(ApplicationCandidate {
+                                symbol: member.symbol,
+                                callable,
+                                member: Some(member),
+                                rejection: None,
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, TyperError>>()?;
-                (
-                    candidates,
-                    ApplicationFunctionShape::Select {
-                        selection,
-                        qualifier,
-                        receiver_type,
-                        allow_mutable_local_receiver,
-                    },
-                )
+                        .collect::<Result<Vec<_>, TyperError>>()?;
+                    (
+                        candidates,
+                        ApplicationFunctionShape::Select {
+                            selection,
+                            qualifier,
+                            receiver_type,
+                            allow_mutable_local_receiver,
+                        },
+                    )
+                }
             }
             _ => return Ok(None),
         };
 
+        let canonical_identity_application =
+            candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol);
         let mut arguments = Vec::with_capacity(argument_trees.len());
         for argument_tree in argument_trees {
             let typed = self.type_value_expression_inner(
@@ -355,7 +468,11 @@ impl SourceTyper<'_> {
             // underlying String type to widen to. Keep the raw type until a
             // candidate's parameter type determines whether the constant is
             // needed.
-            let widened_type = if matches!(
+            let widened_type = if canonical_identity_application {
+                let widened = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+                self.any_ref_identity_argument_view(widened)
+                    .unwrap_or(widened)
+            } else if matches!(
                 self.store.types.try_get(own_type),
                 Some(Type::Constant(dotty_core::Constant::String(_)))
             ) {

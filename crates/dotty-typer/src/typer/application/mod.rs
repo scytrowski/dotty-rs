@@ -341,6 +341,13 @@ impl SourceTyper<'_> {
             });
         }
         let mut arguments = Vec::with_capacity(argument_trees.len());
+        let canonical_identity_application = matches!(
+            self.store.types.try_get(self.typed_arena.get(function).ty),
+            Some(Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            }) if self.is_any_ref_identity_symbol(*symbol)
+        );
         for (argument_index, (argument_tree, parameter)) in
             argument_trees.iter().zip(&method.params).enumerate()
         {
@@ -354,8 +361,19 @@ impl SourceTyper<'_> {
                     self.typed_arena.get(typed_argument.typed).ty,
                     typed_argument.own_type
                 );
+                let argument_type = if canonical_identity_application {
+                    let widened = self.widen_expression_type_journaled(
+                        typed_argument.own_type,
+                        info_journal,
+                        0,
+                    )?;
+                    self.any_ref_identity_argument_view(widened)
+                        .unwrap_or(widened)
+                } else {
+                    typed_argument.own_type
+                };
                 let actual = self.adapt_expression_type_to_expected(
-                    typed_argument.own_type,
+                    argument_type,
                     expected_type,
                     info_journal,
                 )?;
