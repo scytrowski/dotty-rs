@@ -360,7 +360,11 @@ fn branch_size(branch: &BranchInstruction) -> usize {
         | BranchInstruction::IfICmpLt(_)
         | BranchInstruction::IfICmpGe(_)
         | BranchInstruction::IfICmpGt(_)
-        | BranchInstruction::IfICmpLe(_) => 3,
+        | BranchInstruction::IfICmpLe(_)
+        | BranchInstruction::IfACmpEq(_)
+        | BranchInstruction::IfACmpNe(_)
+        | BranchInstruction::IfNull(_)
+        | BranchInstruction::IfNonNull(_) => 3,
     }
 }
 
@@ -427,6 +431,18 @@ fn encode_branch(
         }
         BranchInstruction::IfICmpLe(_) => {
             write_conditional_branch(&mut writer, instruction, offset, 0xa4)?;
+        }
+        BranchInstruction::IfACmpEq(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xa5)?;
+        }
+        BranchInstruction::IfACmpNe(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xa6)?;
+        }
+        BranchInstruction::IfNull(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xc6)?;
+        }
+        BranchInstruction::IfNonNull(_) => {
+            write_conditional_branch(&mut writer, instruction, offset, 0xc7)?;
         }
     }
     Ok(writer.into_bytes())

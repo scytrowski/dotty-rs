@@ -913,7 +913,7 @@ impl ClassFileBuilder {
                     let graph = ControlFlowGraph::build(&sequence)
                         .map_err(ClassFileBuildError::ControlFlow)?;
                     if method.name == "<init>" {
-                        // The integer-only flow model does not track the
+                        // Branched constructor flow does not track the
                         // transition from `uninitializedThis` to the class
                         // type after an invokespecial constructor call.
                         return Err(ClassFileBuildError::StackMapFrames(
@@ -1296,6 +1296,10 @@ fn resolve_code(
                         SymbolicBranch::IfICmpGe => BranchInstruction::IfICmpGe(target),
                         SymbolicBranch::IfICmpGt => BranchInstruction::IfICmpGt(target),
                         SymbolicBranch::IfICmpLe => BranchInstruction::IfICmpLe(target),
+                        SymbolicBranch::IfACmpEq => BranchInstruction::IfACmpEq(target),
+                        SymbolicBranch::IfACmpNe => BranchInstruction::IfACmpNe(target),
+                        SymbolicBranch::IfNull => BranchInstruction::IfNull(target),
+                        SymbolicBranch::IfNonNull => BranchInstruction::IfNonNull(target),
                     });
                 }
             }

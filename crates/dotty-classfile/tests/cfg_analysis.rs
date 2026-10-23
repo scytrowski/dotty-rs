@@ -286,6 +286,203 @@ fn object_root_assignability_requires_an_explicit_proof() {
 }
 
 #[test]
+fn reference_branches_pop_initialized_references_and_null() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let pool = pool_builder.finish().unwrap();
+
+    let mut identity = CodeSequence::new();
+    let equal = identity.new_label().unwrap();
+    identity
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::ALoad(local(2)))
+        .branch(BranchInstruction::IfACmpEq(equal.clone()))
+        .instruction(Instruction::IConst(SmallIntConstant::Zero))
+        .instruction(Instruction::IReturn)
+        .bind(equal)
+        .unwrap()
+        .instruction(Instruction::IConst(SmallIntConstant::One))
+        .instruction(Instruction::IReturn);
+    let graph = ControlFlowGraph::build(&identity).unwrap();
+    let flow = CfgCodeAnalyzer::analyze_with_current_class(
+        &graph,
+        "sameIdentity",
+        "(Lexample/Left;Lexample/Right;)I",
+        false,
+        &pool,
+        owner,
+    )
+    .unwrap();
+    assert!(graph.blocks()[0].successors.len() == 2);
+    for successor in &graph.blocks()[0].successors {
+        assert!(
+            flow.entry_state(*successor)
+                .unwrap()
+                .operand_stack
+                .is_empty()
+        );
+    }
+
+    let mut not_identity = CodeSequence::new();
+    let different = not_identity.new_label().unwrap();
+    not_identity
+        .instruction(Instruction::ALoad(local(1)))
+        .instruction(Instruction::ALoad(local(2)))
+        .branch(BranchInstruction::IfACmpNe(different.clone()))
+        .instruction(Instruction::IConst(SmallIntConstant::Zero))
+        .instruction(Instruction::IReturn)
+        .bind(different)
+        .unwrap()
+        .instruction(Instruction::IConst(SmallIntConstant::One))
+        .instruction(Instruction::IReturn);
+    let graph = ControlFlowGraph::build(&not_identity).unwrap();
+    assert!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "differentIdentity",
+            "(Ljava/lang/Object;Ljava/lang/Object;)I",
+            false,
+            &pool,
+            owner,
+        )
+        .is_ok()
+    );
+
+    let mut null = CodeSequence::new();
+    let is_null = null.new_label().unwrap();
+    null.instruction(Instruction::AConstNull)
+        .branch(BranchInstruction::IfNull(is_null.clone()))
+        .instruction(Instruction::IConst(SmallIntConstant::Zero))
+        .instruction(Instruction::IReturn)
+        .bind(is_null)
+        .unwrap()
+        .instruction(Instruction::IConst(SmallIntConstant::One))
+        .instruction(Instruction::IReturn);
+    let graph = ControlFlowGraph::build(&null).unwrap();
+    let flow =
+        CfgCodeAnalyzer::analyze_with_current_class(&graph, "isNull", "()I", false, &pool, owner)
+            .unwrap();
+    for successor in &graph.blocks()[0].successors {
+        assert!(
+            flow.entry_state(*successor)
+                .unwrap()
+                .operand_stack
+                .is_empty()
+        );
+    }
+
+    let mut nonnull = CodeSequence::new();
+    let has_value = nonnull.new_label().unwrap();
+    nonnull
+        .instruction(Instruction::ALoad(local(1)))
+        .branch(BranchInstruction::IfNonNull(has_value.clone()))
+        .instruction(Instruction::IConst(SmallIntConstant::Zero))
+        .instruction(Instruction::IReturn)
+        .bind(has_value)
+        .unwrap()
+        .instruction(Instruction::IConst(SmallIntConstant::One))
+        .instruction(Instruction::IReturn);
+    let graph = ControlFlowGraph::build(&nonnull).unwrap();
+    assert!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "isNonNull",
+            "(Ljava/lang/Object;)I",
+            false,
+            &pool,
+            owner,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn reference_branches_reject_integer_and_uninitialized_operands() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let owner = pool_builder.class("example/Client").unwrap();
+    let fresh_class = pool_builder.class("example/Fresh").unwrap();
+    let pool = pool_builder.finish().unwrap();
+
+    let mut integer = CodeSequence::new();
+    let target = integer.new_label().unwrap();
+    integer
+        .instruction(Instruction::IConst(SmallIntConstant::Zero))
+        .branch(BranchInstruction::IfNull(target.clone()))
+        .bind(target)
+        .unwrap()
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&integer).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "badNullOperand",
+            "()V",
+            false,
+            &pool,
+            owner
+        ),
+        Err(AnalysisError::StackTypeMismatch {
+            instruction: 1,
+            expected: ValueKind::Reference,
+            actual: ValueKind::Int,
+        })
+    ));
+
+    let mut missing_reference = CodeSequence::new();
+    let target = missing_reference.new_label().unwrap();
+    missing_reference
+        .instruction(Instruction::ALoad(local(1)))
+        .branch(BranchInstruction::IfACmpEq(target.clone()))
+        .bind(target)
+        .unwrap()
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&missing_reference).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "missingReferenceOperand",
+            "(Ljava/lang/Object;)V",
+            false,
+            &pool,
+            owner
+        ),
+        Err(AnalysisError::StackUnderflow {
+            instruction: 1,
+            needed: 1,
+            available: 0,
+        })
+    ));
+
+    let mut uninitialized = CodeSequence::new();
+    let target = uninitialized.new_label().unwrap();
+    uninitialized
+        .instruction(Instruction::New(
+            dotty_classfile::bytecode::ClassReference::new(
+                dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(fresh_class).unwrap(),
+            ),
+        ))
+        .branch(BranchInstruction::IfNonNull(target.clone()))
+        .bind(target)
+        .unwrap()
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&uninitialized).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "badUninitializedOperand",
+            "()V",
+            false,
+            &pool,
+            owner
+        ),
+        Err(AnalysisError::UninitializedReferenceUse {
+            instruction: 1,
+            allocation_site: 0,
+        })
+    ));
+}
+
+#[test]
 fn hierarchy_graph_rejects_duplicates_conflicts_cycles_and_excessive_depth() {
     assert!(matches!(
         ClassHierarchy::from_edges(vec![("example.Bad".to_owned(), "example/Base".to_owned())]),

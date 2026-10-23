@@ -179,7 +179,7 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | `new` | Validate the `CONSTANT_Class`; push a fresh uninitialized allocation-site identity. |
 | `invokespecial <init>` | The constructor owner must equal the uninitialized allocation class; constructor arguments use explicit hierarchy assignability. On normal completion rewrite all aliases of that allocation to `Initialized(owner)`. |
 | `invokespecial DirectParent.method` | Require the `Methodref` owner to equal the validated direct parent and the receiver to be exactly the initialized emitting class. Validate the supported descriptor arguments, then push its exact reference or int-like result. The class-file builder requires `ACC_SUPER`; constructors keep their separate allocation transfer. |
-| Integer instructions and branches | Preserve the existing integer transfer rules. Branch operands are int-like only; reference equality branches are out of scope. |
+| Conditional branches | `ifeq`/`ifne` pop one integer; `if_icmp*` pop two integers; `if_acmpeq`/`if_acmpne` pop two initialized references or nulls; `ifnull`/`ifnonnull` pop one initialized reference or null. Branches do not push a result. Uninitialized allocations are rejected as ordinary branch operands. |
 | Returns | Preserve primitive/void checks; `areturn` requires an initialized reference assignable to the planned result class using the explicit hierarchy. |
 
 Field and method constant-pool operands must be resolved to validated entry

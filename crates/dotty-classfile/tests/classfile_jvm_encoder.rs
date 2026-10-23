@@ -2144,3 +2144,192 @@ fn int_bitwise_instructions_execute_and_verify_with_jvm_semantics() {
         "int bitwise semantics ok"
     );
 }
+
+#[test]
+fn reference_comparison_branches_verify_and_execute() {
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut builder = ClassFileBuilder::new("ReferenceBranches", version).unwrap();
+    builder
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    builder
+        .add_static_method("same", "(Ljava/lang/Object;Ljava/lang/Object;)Z", |code| {
+            let equal = code.new_label()?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.if_acmpeq(equal.clone())?;
+            code.iconst(0)?;
+            code.ireturn()?;
+            code.mark(equal)?;
+            code.iconst(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method(
+            "different",
+            "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+            |code| {
+                let different = code.new_label()?;
+                code.aload(0)?;
+                code.aload(1)?;
+                code.if_acmpne(different.clone())?;
+                code.iconst(0)?;
+                code.ireturn()?;
+                code.mark(different)?;
+                code.iconst(1)?;
+                code.ireturn()?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    builder
+        .add_static_method("isNull", "(Ljava/lang/Object;)Z", |code| {
+            let is_null = code.new_label()?;
+            code.aload(0)?;
+            code.ifnull(is_null.clone())?;
+            code.iconst(0)?;
+            code.ireturn()?;
+            code.mark(is_null)?;
+            code.iconst(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("isNonNull", "(Ljava/lang/Object;)Z", |code| {
+            let is_non_null = code.new_label()?;
+            code.aload(0)?;
+            code.ifnonnull(is_non_null.clone())?;
+            code.iconst(0)?;
+            code.ireturn()?;
+            code.mark(is_non_null)?;
+            code.iconst(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("nullConstant", "()Z", |code| {
+            let is_null = code.new_label()?;
+            code.aconst_null()?;
+            code.ifnull(is_null.clone())?;
+            code.iconst(0)?;
+            code.ireturn()?;
+            code.mark(is_null)?;
+            code.iconst(1)?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode_and_validate(&bytes);
+    assert_eq!(class_file.methods.len(), 5);
+    for (name, branch_pc, opcode) in [
+        ("same", 2, 0xa5),
+        ("different", 2, 0xa6),
+        ("isNull", 1, 0xc6),
+        ("isNonNull", 1, 0xc7),
+        ("nullConstant", 1, 0xc6),
+    ] {
+        let generated = code(method_named(&class_file, name));
+        assert_eq!(generated.code[branch_pc], opcode, "{name} opcode");
+        assert_eq!(
+            &generated.code[branch_pc + 1..branch_pc + 3],
+            &[0x00, 0x05],
+            "{name} branch displacement"
+        );
+        assert!(
+            matches!(generated.attributes.as_slice(), [Attribute::Other(attribute)]
+            if class_file.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable"))
+        );
+    }
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let class_path = directory.path().join("ReferenceBranches.class");
+    fs::write(&class_path, &bytes).unwrap();
+    let harness_path = directory.path().join("ReferenceBranchesHarness.java");
+    fs::write(
+        &harness_path,
+        r#"public final class ReferenceBranchesHarness {
+    public static void main(String[] args) {
+        Object first = new Object();
+        Object second = new Object();
+        if (!ReferenceBranches.same(first, first) || ReferenceBranches.same(first, second)) throw new AssertionError("if_acmpeq");
+        if (ReferenceBranches.different(first, first) || !ReferenceBranches.different(first, second)) throw new AssertionError("if_acmpne");
+        if (!ReferenceBranches.isNull(null) || ReferenceBranches.isNull(first)) throw new AssertionError("ifnull");
+        if (ReferenceBranches.isNonNull(null) || !ReferenceBranches.isNonNull(second)) throw new AssertionError("ifnonnull");
+        if (!ReferenceBranches.nullConstant()) throw new AssertionError("null constant");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let directory_arg = directory.path().to_string_lossy().into_owned();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            &directory_arg,
+            "-d",
+            &directory_arg,
+            harness_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed: {}",
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            &directory_arg,
+            "ReferenceBranchesHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all failed:\n{}\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    let javap = run(
+        "javap",
+        &[
+            "-c",
+            "-v",
+            "-classpath",
+            &directory_arg,
+            "ReferenceBranches",
+        ],
+    );
+    assert!(
+        javap.status.success(),
+        "javap failed: {}",
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    for mnemonic in [
+        "if_acmpeq",
+        "if_acmpne",
+        "ifnull",
+        "ifnonnull",
+        "StackMapTable",
+    ] {
+        assert!(
+            javap.contains(mnemonic),
+            "javap output missing {mnemonic}: {javap}"
+        );
+    }
+}
