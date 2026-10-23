@@ -6303,10 +6303,8 @@ fn pinned_scala39_local_definition_audit() {
     }
     let mut audit = Audit::default();
     let mut processed_files = 0;
-    for (index, file) in files.iter().enumerate() {
-        if index % 25 == 0 {
-            eprintln!("audited {index}/{} Scala files", files.len());
-        }
+    let mut completed_files = 0;
+    for file in &files {
         let relative = file
             .strip_prefix(&root)
             .unwrap_or(file)
@@ -6327,7 +6325,15 @@ fn pinned_scala39_local_definition_audit() {
                     source_read_started.map_or(Duration::ZERO, |started| started.elapsed());
                 audit.files_attempted += 1;
                 audit.file_read_failed_files += 1;
-                audit.file_read_failed_paths.insert(relative);
+                audit.file_read_failed_paths.insert(relative.clone());
+                completed_files += 1;
+                report_audit_file_progress(
+                    completed_files,
+                    expected_files,
+                    &relative,
+                    "read_error",
+                    selected_files.is_some(),
+                );
                 continue;
             }
         };
@@ -6345,6 +6351,14 @@ fn pinned_scala39_local_definition_audit() {
         ));
         audit_merge_time +=
             source_processing_and_merge_started.map_or(Duration::ZERO, |started| started.elapsed());
+        completed_files += 1;
+        report_audit_file_progress(
+            completed_files,
+            expected_files,
+            &relative,
+            "processed",
+            selected_files.is_some(),
+        );
     }
 
     if let Some(output_path) = std::env::var_os("DOTTY_AUDIT_TASTY_PARENT_PROVENANCE_OUTPUT") {
@@ -11948,6 +11962,40 @@ fn audit_source_inner_filtered(
         );
     }
     audit
+}
+
+fn report_audit_file_progress(
+    completed_files: usize,
+    expected_files: usize,
+    path: &str,
+    outcome: &str,
+    report_every_file: bool,
+) {
+    if should_report_audit_file_progress(completed_files, expected_files, report_every_file) {
+        eprintln!(
+            "AUDIT_PROGRESS completed_files={completed_files} total_files={expected_files} file={path} outcome={outcome}"
+        );
+    }
+}
+
+fn should_report_audit_file_progress(
+    completed_files: usize,
+    expected_files: usize,
+    report_every_file: bool,
+) -> bool {
+    completed_files > 0
+        && (report_every_file
+            || completed_files.is_multiple_of(25)
+            || completed_files == expected_files)
+}
+
+#[test]
+fn audit_progress_uses_completed_selection_counts() {
+    assert!(!should_report_audit_file_progress(0, 1_236, false));
+    assert!(should_report_audit_file_progress(25, 1_236, false));
+    assert!(should_report_audit_file_progress(1, 4, true));
+    assert!(should_report_audit_file_progress(4, 4, false));
+    assert!(should_report_audit_file_progress(1_236, 1_236, false));
 }
 
 fn print_match_readiness(readiness: &MatchReadiness) {
