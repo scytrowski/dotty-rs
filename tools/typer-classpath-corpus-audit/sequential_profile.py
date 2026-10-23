@@ -586,8 +586,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         ]
     lines += [
         "",
-        "Per-method resolver durations are emitted in microseconds. A zero call count means that operation did not run for that method; zero elapsed time with calls is below timer resolution, not proof of zero cost.",
-        "The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts.",
+        ("Resolver per-method durations are emitted in microseconds. A zero call count means that operation did not run for that method; zero elapsed time with calls is below timer resolution, not proof of zero cost." if not timing_only else "Resolver per-method call counts and durations are not available in timing-only mode."),
+        ("The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts." if not timing_only else "Classloader and AuditResolver counters are omitted in timing-only mode by design."),
         "",
     ]
     (out_dir / "resolver-operations.tsv").write_text(
