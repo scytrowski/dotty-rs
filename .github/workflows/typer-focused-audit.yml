@@ -134,14 +134,15 @@ jobs:
               --verify-determinism \
               "$DOTTY_AUDIT_REPORT_DIR/focused-report.md" \
             2> "$DOTTY_AUDIT_REPORT_DIR/runtime-resource-usage.txt"
+          AUDIT_RUN_DIR="$(python3 tools/typer-classpath-corpus-audit/audit_run_directory.py resolve "$DOTTY_AUDIT_TMP_ROOT")"
           python3 tools/typer-classpath-corpus-audit/verify_focused_gate.py \
             --report "$DOTTY_AUDIT_REPORT_DIR/focused-report.md" \
             --baseline docs/typer-focused-smoke-baseline-3.9.0.txt \
             --timing-output "$DOTTY_AUDIT_REPORT_DIR/focused-timings.tsv" \
-            --timing-log "$DOTTY_AUDIT_TMP_ROOT/first.log" \
-            --timing-rss "$DOTTY_AUDIT_TMP_ROOT/first.rss" \
-            --timing-log "$DOTTY_AUDIT_TMP_ROOT/second.log" \
-            --timing-rss "$DOTTY_AUDIT_TMP_ROOT/second.rss"
+            --timing-log "$AUDIT_RUN_DIR/first.log" \
+            --timing-rss "$AUDIT_RUN_DIR/first.rss" \
+            --timing-log "$AUDIT_RUN_DIR/second.log" \
+            --timing-rss "$AUDIT_RUN_DIR/second.rss"
           printf 'Focused-only coverage: 3 files / 31 methods; not a full-corpus result.\n' \
             > "$DOTTY_AUDIT_REPORT_DIR/status.txt"
 
