@@ -10,7 +10,7 @@ use dotty_core::{
     ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver,
     Type, TypeId, TypeRefTarget,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 struct ResolverUndo {
     session: SessionCheckpoint,
@@ -81,8 +81,10 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
     // Entries never retain SymbolId, TypeId, or ScopeId across rollback.
     decoded_module_cache: HashMap<BinaryName, crate::loader::CachedDecodedModule>,
     // This proof is usable only while the current classpath resource equals
-    // the snapshot retained alongside the decoded declarations.
+    // every resource snapshot used to validate the module's hierarchy.
     validated_module_declarations: HashSet<BinaryName>,
+    validated_module_resources:
+        HashMap<BinaryName, BTreeMap<BinaryName, crate::class_path::ClassResource>>,
     #[cfg(test)]
     package_failure_after_segment: Option<usize>,
 }
@@ -101,6 +103,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             negative_module_member_lookups: HashSet::new(),
             decoded_module_cache: HashMap::new(),
             validated_module_declarations: HashSet::new(),
+            validated_module_resources: HashMap::new(),
             #[cfg(test)]
             package_failure_after_segment: None,
         }
@@ -308,10 +311,12 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
-        let (result, decoded_cache_hit) =
+        let (result, decoded_cache_hit, resource_observations) =
             loader.complete_module_with_tasty_cache(name, &mut self.decoded_module_cache);
         if result.is_ok() {
             self.validated_module_declarations.insert(name.clone());
+            self.validated_module_resources
+                .insert(name.clone(), resource_observations);
         }
         if self.collect_module_resolution_profile {
             if decoded_cache_hit {
@@ -826,27 +831,38 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     .validated_module_declarations
                     .contains(&identity.object_name);
             let cache_is_current = if has_cached_evidence {
-                let current_resource = self
+                let class_path = self
                     .class_path
                     .as_ref()
-                    .expect("resolver operation is exclusive")
-                    .find_class(&identity.object_name)
-                    .map_err(|error| ResolutionError::Malformed {
-                        reason: format!(
-                            "cannot verify cached external module {}: {error}",
-                            identity.object_name
-                        ),
-                    })?;
-                let is_current = current_resource.as_ref().is_some_and(|resource| {
-                    resource.format() == crate::class_path::ClassFormat::Tasty
-                        && self
-                            .decoded_module_cache
+                    .expect("resolver operation is exclusive");
+                let mut is_current = self
+                    .validated_module_resources
+                    .get(&identity.object_name)
+                    .is_some_and(|resources| {
+                        !resources.is_empty()
+                            && resources.iter().all(|(name, previous)| {
+                                class_path
+                                    .find_class(name)
+                                    .is_ok_and(|current| current.as_ref() == Some(previous))
+                            })
+                    });
+                // Keep the decoded root snapshot check explicit: a module can
+                // have been decoded before its hierarchy was successfully
+                // completed, so only the validated proof makes it reusable.
+                is_current &= self
+                    .decoded_module_cache
+                    .get(&identity.object_name)
+                    .is_some_and(|cached| {
+                        self.validated_module_resources
                             .get(&identity.object_name)
-                            .is_some_and(|cached| cached.resource == *resource)
-                });
+                            .and_then(|resources| resources.get(&identity.object_name))
+                            == Some(&cached.resource)
+                    });
                 if !is_current {
                     self.decoded_module_cache.remove(&identity.object_name);
                     self.validated_module_declarations
+                        .remove(&identity.object_name);
+                    self.validated_module_resources
                         .remove(&identity.object_name);
                     self.negative_module_member_lookups
                         .retain(|(module, _)| module != &identity.object_name);
@@ -1581,6 +1597,7 @@ mod tests {
     #[derive(Clone)]
     struct ModuleTastyPath {
         entries: Arc<Mutex<std::collections::HashMap<BinaryName, Vec<u8>>>>,
+        object_missing: Arc<AtomicBool>,
     }
 
     impl ModuleTastyPath {
@@ -1594,6 +1611,7 @@ mod tests {
                     BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both"),
                     bytes,
                 )]))),
+                object_missing: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -1601,11 +1619,13 @@ mod tests {
     impl ClassPathEntry for ModuleTastyPath {
         fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
             if name.as_internal() == "java/lang/Object" {
-                return Ok(Some(ClassResource::new(
-                    test_class_stub("java/lang/Object", 0x0021),
-                    ClassFormat::Class,
-                    ClassOrigin::Directory(PathBuf::from("<module-dependency>")),
-                )));
+                return Ok((!self.object_missing.load(Ordering::SeqCst)).then(|| {
+                    ClassResource::new(
+                        test_class_stub("java/lang/Object", 0x0021),
+                        ClassFormat::Class,
+                        ClassOrigin::Directory(PathBuf::from("<module-dependency>")),
+                    )
+                }));
             }
             Ok(self.entries.lock().unwrap().get(name).map(|bytes| {
                 ClassResource::new(
@@ -2133,6 +2153,7 @@ mod tests {
                 binary.clone(),
                 bytes,
             )]))),
+            object_missing: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -2191,6 +2212,7 @@ mod tests {
                 Box::new(DirectoryClassPath::new(library_root.clone())),
                 Box::new(ModuleTastyPath {
                     entries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                    object_missing: Arc::new(AtomicBool::new(false)),
                 }),
             ]);
             let resource = class_path
@@ -2620,6 +2642,7 @@ mod tests {
             Box::new(DirectoryClassPath::new(compiler_root)),
             Box::new(ModuleTastyPath {
                 entries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                object_missing: Arc::new(AtomicBool::new(false)),
             }),
         ]);
         let mut resolver = ClasspathSymbolResolver::new(
@@ -2680,6 +2703,7 @@ mod tests {
                 binary.clone(),
                 bytes,
             )]))),
+            object_missing: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -2969,6 +2993,7 @@ mod tests {
         .expect("StaticAnnotation.tasty fixture should exist");
         let path = ModuleTastyPath {
             entries: Arc::new(Mutex::new(std::collections::HashMap::from([(name, bytes)]))),
+            object_missing: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -3418,6 +3443,80 @@ mod tests {
     }
 
     #[test]
+    fn changed_module_parent_invalidates_rolled_back_hierarchy_proof() {
+        let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let path = ModuleTastyPath::both_fixture();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let first_absent = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentFirst"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        assert_eq!(resolver.resolve_member(&mut store, &first_absent), Ok(None));
+        let module_class = resolver.session.modules[&binary].module_class;
+        assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        assert!(
+            resolver.validated_module_resources[&binary]
+                .contains_key(&BinaryName::from_internal("java/lang/Object"))
+        );
+
+        // Keep the module TASTy unchanged while removing its hierarchy parent.
+        path.object_missing.store(true, Ordering::SeqCst);
+        for name in ["absentSecond", "make"] {
+            let request = MemberRequest {
+                prefix: object_prefix,
+                name: Name::new(store.names.intern(name), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let store_checkpoint = store.checkpoint();
+            let session_checkpoint = resolver.session.checkpoint();
+            let result = resolver.resolve_member(&mut store, &request);
+            assert!(
+                matches!(&result, Err(ResolutionError::Malformed { reason }) if reason.contains("java/lang/Object")),
+                "a changed hierarchy dependency must not be hidden by the miss shortcut: {result:?}"
+            );
+            assert_eq!(store.checkpoint(), store_checkpoint);
+            assert_eq!(resolver.session.checkpoint(), session_checkpoint);
+            assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        }
+        assert!(!resolver.validated_module_declarations.contains(&binary));
+        assert!(!resolver.validated_module_resources.contains_key(&binary));
+    }
+
+    #[test]
     fn decoded_module_without_successful_completion_does_not_prove_member_absence() {
         let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
         let path = ModuleTastyPath::both_fixture();
@@ -3623,6 +3722,7 @@ mod tests {
                 binary,
                 vec![0, 1, 2, 3],
             )]))),
+            object_missing: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);

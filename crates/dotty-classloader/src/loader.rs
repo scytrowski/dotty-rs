@@ -31,7 +31,7 @@ use dotty_core::{
     TypeParam, Visibility,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 const MAX_INHERITANCE_DEPTH: usize = 256;
@@ -270,6 +270,8 @@ pub struct ClassLoader<'store, E> {
     /// Inheritance-cycle detection can fail a class before its own load
     /// returns, so its selected resource must be available to that branch.
     loading_context: HashMap<BinaryName, (ClassOrigin, ClassFormat)>,
+    resource_observations: BTreeMap<BinaryName, ClassResource>,
+    collect_resource_observations: bool,
     active_load_profile: Option<ActiveLoadProfile>,
     load_profiles: Vec<ClassLoadProfile>,
     collect_load_profiles: bool,
@@ -458,6 +460,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             in_progress_classes: HashMap::new(),
             dependency_failure_context: None,
             loading_context: HashMap::new(),
+            resource_observations: BTreeMap::new(),
+            collect_resource_observations: false,
             active_load_profile: None,
             load_profiles: Vec::new(),
             collect_load_profiles: false,
@@ -491,6 +495,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Returns and clears dependency profiles collected by this loader.
     pub(crate) fn take_load_profiles(&mut self) -> Vec<ClassLoadProfile> {
         std::mem::take(&mut self.load_profiles)
+    }
+
+    pub(crate) fn take_resource_observations(&mut self) -> BTreeMap<BinaryName, ClassResource> {
+        std::mem::take(&mut self.resource_observations)
     }
 
     pub(crate) fn set_load_profile_collection(&mut self, enabled: bool) {
@@ -581,17 +589,25 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         &mut self,
         name: &BinaryName,
         decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
-    ) -> (Result<ModuleIdentity, ClassLoadError>, bool) {
+    ) -> (
+        Result<ModuleIdentity, ClassLoadError>,
+        bool,
+        BTreeMap<BinaryName, ClassResource>,
+    ) {
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
+        self.resource_observations.clear();
+        let was_collecting_resources = self.collect_resource_observations;
+        self.collect_resource_observations = true;
         let mut decoded_cache_hit = false;
         let result = self.complete_module_inner(name, decoded_cache, &mut decoded_cache_hit);
+        self.collect_resource_observations = was_collecting_resources;
         if result.is_err() {
             self.session.rollback_to(self.store, session_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.repository.discard_rolled_back_symbols(self.store);
         }
-        (result, decoded_cache_hit)
+        (result, decoded_cache_hit, self.take_resource_observations())
     }
 
     fn complete_module_inner(
@@ -671,6 +687,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 name: name.clone(),
                 reason: "a classfile cannot complete a Scala module class".to_owned(),
             });
+        }
+        if self.collect_resource_observations {
+            self.resource_observations
+                .insert(name.clone(), resource.clone());
         }
 
         let alias_error = RefCell::new(None);
@@ -1566,6 +1586,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let resource_origin = resource.origin().clone();
         let resource_format = resource.format();
+        if self.collect_resource_observations {
+            self.resource_observations
+                .insert(name.clone(), resource.clone());
+        }
         self.loading_context
             .insert(name.clone(), (resource_origin.clone(), resource_format));
         let result = match resource_format {
