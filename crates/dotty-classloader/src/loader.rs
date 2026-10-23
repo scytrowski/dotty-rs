@@ -272,6 +272,7 @@ pub struct ClassLoader<'store, E> {
     loading_context: HashMap<BinaryName, (ClassOrigin, ClassFormat)>,
     resource_observations: BTreeMap<BinaryName, ClassResource>,
     collect_resource_observations: bool,
+    resource_observations_complete: bool,
     active_load_profile: Option<ActiveLoadProfile>,
     load_profiles: Vec<ClassLoadProfile>,
     collect_load_profiles: bool,
@@ -462,6 +463,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             loading_context: HashMap::new(),
             resource_observations: BTreeMap::new(),
             collect_resource_observations: false,
+            resource_observations_complete: true,
             active_load_profile: None,
             load_profiles: Vec::new(),
             collect_load_profiles: false,
@@ -593,10 +595,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         Result<ModuleIdentity, ClassLoadError>,
         bool,
         BTreeMap<BinaryName, ClassResource>,
+        bool,
     ) {
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         self.resource_observations.clear();
+        self.resource_observations_complete = true;
         let was_collecting_resources = self.collect_resource_observations;
         self.collect_resource_observations = true;
         let mut decoded_cache_hit = false;
@@ -607,7 +611,12 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.store.rollback_to(store_checkpoint);
             self.repository.discard_rolled_back_symbols(self.store);
         }
-        (result, decoded_cache_hit, self.take_resource_observations())
+        (
+            result,
+            decoded_cache_hit,
+            self.take_resource_observations(),
+            self.resource_observations_complete,
+        )
     }
 
     fn complete_module_inner(
@@ -1408,6 +1417,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // never stored here -- only in the loader-local `self.repository`
         // consulted next.
         if let Some(&symbol) = self.session.resolved.get(name) {
+            if self.collect_resource_observations {
+                match self.class_path.find_class(name) {
+                    Ok(Some(resource)) => {
+                        self.resource_observations.insert(name.clone(), resource);
+                    }
+                    Ok(None) | Err(_) => self.resource_observations_complete = false,
+                }
+            }
             if let Some(profile) = &mut self.active_load_profile {
                 profile.completed_cache_hits += 1;
             }

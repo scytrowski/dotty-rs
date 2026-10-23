@@ -311,12 +311,15 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
-        let (result, decoded_cache_hit, resource_observations) =
+        let (result, decoded_cache_hit, resource_observations, resource_observations_complete) =
             loader.complete_module_with_tasty_cache(name, &mut self.decoded_module_cache);
-        if result.is_ok() {
+        if result.is_ok() && resource_observations_complete {
             self.validated_module_declarations.insert(name.clone());
             self.validated_module_resources
                 .insert(name.clone(), resource_observations);
+        } else {
+            self.validated_module_declarations.remove(name);
+            self.validated_module_resources.remove(name);
         }
         if self.collect_module_resolution_profile {
             if decoded_cache_hit {
@@ -3514,6 +3517,80 @@ mod tests {
         }
         assert!(!resolver.validated_module_declarations.contains(&binary));
         assert!(!resolver.validated_module_resources.contains_key(&binary));
+    }
+
+    #[test]
+    fn precompleted_parent_is_part_of_rolled_back_hierarchy_proof() {
+        let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let path = ModuleTastyPath::both_fixture();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let outer_store_checkpoint = store.checkpoint();
+        let outer_session_checkpoint = resolver.session.checkpoint();
+
+        resolver
+            .load_class(&mut store, &BinaryName::from_internal("java/lang/Object"))
+            .unwrap();
+        let absent = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentBeforeRollback"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        assert_eq!(resolver.resolve_member(&mut store, &absent), Ok(None));
+        assert!(
+            resolver.validated_module_resources[&binary]
+                .contains_key(&BinaryName::from_internal("java/lang/Object"))
+        );
+
+        // Simulate an outer caller rolling back the earlier completed parent
+        // after module resolution itself succeeded and cached a declaration miss.
+        resolver
+            .session
+            .rollback_to(&mut store, outer_session_checkpoint);
+        store.rollback_to(outer_store_checkpoint);
+        path.object_missing.store(true, Ordering::SeqCst);
+
+        let absent_after_rollback = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentAfterRollback"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let result = resolver.resolve_member(&mut store, &absent_after_rollback);
+        assert!(
+            matches!(&result, Err(ResolutionError::Malformed { reason }) if reason.contains("java/lang/Object")),
+            "a rolled-back precompleted parent must not leave a valid miss proof: {result:?}"
+        );
     }
 
     #[test]
