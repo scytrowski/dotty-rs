@@ -88,6 +88,7 @@ distinguishes:
 | --- | --- | --- |
 | `Top` | Unusable local after no assignment or a local join | `Top` |
 | `Integer` | JVM int-like primitive | `Integer` |
+| `Null` | The JVM null verification type, with no class identity | `Null_variable_info` (tag 5) |
 | `Initialized(class)` | Initialized reference with exact validated JVM internal class name | `Object(cp_index)` |
 | `Uninitialized(allocation_site)` | Fresh instance at one specific `new` instruction | `Uninitialized(new_pc)`; prohibited at CFG joins in this increment |
 | `UninitializedThis` | Constructor receiver before the required `this`/super call | `UninitializedThis`; branched constructors remain deferred |
@@ -113,6 +114,9 @@ initialized `this`. Branched constructor flow remains unsupported.
 At each reachable block:
 
 1. Operand-stack heights must match. `Integer` joins only with `Integer`.
+   `Null` joins `Null` as `Null`, and `Null` with `Initialized(C)` as
+   `Initialized(C)`; null contributes no class identity to retained join
+   evidence. `Null` cannot join an uninitialized value.
    Equal initialized classes remain unchanged. Different initialized classes
    join at the nearest unique shared non-`Object` superclass proven by the
    explicit, validated single-parent hierarchy. Every incoming class at a
@@ -152,7 +156,8 @@ all paths carry initialized references and the complete checked evidence
 proves their common non-`Object` ancestor. Primitive/reference differences,
 receiver/reference differences, missing hierarchy paths, and any incoming
 `Top` remain `Top`; no later store on another path can make that slot
-definitely initialized.
+definitely initialized. A `Null`/initialized-object local join keeps the
+object's exact class, while `Null`/`Top` remains `Top`.
 
 The source-level `Base`-declared sibling case and its separate typer, method
 descriptor, and verifier questions are characterized in the [sibling

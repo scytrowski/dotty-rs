@@ -1762,6 +1762,136 @@ fn sibling_reference_stack_join_frames_verify_with_jdk() {
 }
 
 #[test]
+fn null_stack_map_frames_verify_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut class = ClassFileBuilder::new("example/NullJoin", version).unwrap();
+    class
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    class.set_super_class(Some("java/lang/Object")).unwrap();
+    class
+        .add_static_method(
+            "choose",
+            "(ZLjava/lang/Object;)Ljava/lang/Object;",
+            |code| {
+                let null_arm = code.new_label()?;
+                let join = code.new_label()?;
+                code.iload(0)?;
+                code.ifeq(null_arm.clone())?;
+                code.aload(1)?;
+                code.goto(join.clone())?;
+                code.mark(null_arm)?;
+                code.aconst_null()?;
+                code.mark(join)?;
+                code.areturn()?;
+                Ok(())
+            },
+        )
+        .unwrap();
+    class
+        .add_static_method("alwaysNull", "(Z)Ljava/lang/Object;", |code| {
+            let null_arm = code.new_label()?;
+            let join = code.new_label()?;
+            code.iload(0)?;
+            code.ifeq(null_arm.clone())?;
+            code.aconst_null()?;
+            code.goto(join.clone())?;
+            code.mark(null_arm)?;
+            code.aconst_null()?;
+            code.mark(join)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    class
+        .add_static_method("localNull", "(Z)Ljava/lang/Object;", |code| {
+            let null_arm = code.new_label()?;
+            let join = code.new_label()?;
+            code.iload(0)?;
+            code.ifeq(null_arm.clone())?;
+            code.aconst_null()?;
+            code.astore(1)?;
+            code.goto(join.clone())?;
+            code.mark(null_arm)?;
+            code.aconst_null()?;
+            code.astore(1)?;
+            code.mark(join)?;
+            code.aload(1)?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    fs::create_dir_all(directory.path().join("example")).unwrap();
+    fs::write(
+        directory.path().join("example/NullJoin.class"),
+        class.encode().unwrap(),
+    )
+    .unwrap();
+
+    let harness = directory.path().join("NullJoinHarness.java");
+    fs::write(
+        &harness,
+        "import example.NullJoin; public class NullJoinHarness { public static void main(String[] args) { Object value = new Object(); if (NullJoin.choose(true, value) != value || NullJoin.choose(false, value) != null || NullJoin.alwaysNull(true) != null || NullJoin.alwaysNull(false) != null || NullJoin.localNull(true) != null || NullJoin.localNull(false) != null) throw new AssertionError(\"null join\"); System.out.println(\"null-join=ok\"); } }\n",
+    )
+    .unwrap();
+    let directory_arg = directory.path().to_str().unwrap();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            directory_arg,
+            "-d",
+            directory_arg,
+            harness.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for null-join harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            directory_arg,
+            "NullJoinHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected null verification frames\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&java.stdout).trim(), "null-join=ok");
+    let javap = run(
+        "javap",
+        &["-c", "-v", "-classpath", directory_arg, "example.NullJoin"],
+    );
+    assert!(
+        javap.status.success(),
+        "javap failed for null verifier fixture\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap = String::from_utf8_lossy(&javap.stdout);
+    assert!(
+        javap.contains("StackMapTable"),
+        "missing emitted StackMapTable: {javap}"
+    );
+}
+
+#[test]
 fn integer_arithmetic_instructions_execute_with_jvm_signed_semantics() {
     let directory = TempDir::new();
     let version = ClassFileVersion {

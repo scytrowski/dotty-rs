@@ -1656,10 +1656,7 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
             Ok(())
         })
         .unwrap();
-    assert!(matches!(
-        references.encode(),
-        Err(ClassFileBuildError::Analysis(_))
-    ));
+    assert!(references.encode().is_ok());
 
     let mut unreachable_reference =
         ClassFileBuilder::new("example/UnreachableReferenceBranch", version).unwrap();

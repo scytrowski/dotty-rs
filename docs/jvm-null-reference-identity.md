@@ -104,21 +104,18 @@ At the classfile layer:
 - `Instruction::AConstNull` exists in the typed instruction model.
 - `VerificationTypeInfo::Null` serializes as the JVMS tag 5; the existing
   `encodes_every_verification_type_tag` regression checks that byte.
-- The exact CFG state model has `FlowValue::Integer`/`Object(ClassIdentity)` on
-  the stack and `Top`/`Integer`/`Receiver`/`Object(ClassIdentity)` in locals.
-  It has no `Null` state. The context-free `CfgCodeAnalyzer::analyze`
+- The exact CFG state model has `FlowValue::Null` alongside
+  `Integer`/`Object(ClassIdentity)` on the stack and `Null` alongside
+  `Top`/`Integer`/`Receiver`/`Object(ClassIdentity)` in locals. The
+  context-free `CfgCodeAnalyzer::analyze`
   entrypoint rejects `aconst_null; areturn` with
   `UnsupportedFlowInstructionKind::Reference` because that entrypoint does not
   admit reference flow.
-- The class-aware straight-line frame uses a generic reference category with
-  no class identity for `aconst_null`; it cannot preserve `Null` distinctly
-  from an unclassified reference value. `CfgCodeAnalyzer::analyze_with_current_class`
-  admits `aconst_null` as that unclassified reference, but
-  `aconst_null; areturn` still fails at instruction 1 with
-  `MissingExactReferenceReturn`. The in-block sequence
-  `aconst_null; astore; aload; pop; return` is accepted there. These outcomes
-  show a difference between instruction admission and exact null-flow identity;
-  neither provides first-class `Null` CFG support.
+- The class-aware analyzer preserves `Null` through `aconst_null`, `astore`,
+  and `aload`; null joins another null as `Null` and joins an initialized
+  object as that object's exact class. Reference arguments and `areturn` accept
+  null under their declared reference types. Local `Top` remains absorbing,
+  and null never gains a fabricated class identity.
 - The current typed branch model handles integer conditions and integer
   comparisons. It has no reference equality or null-check branch variants.
 - `Object_eq`/`Object_ne` are Scala semantic method identities, not methods to
@@ -126,8 +123,10 @@ At the classfile layer:
   reference comparison branch contract below, not `invokevirtual` or
   universal `equals` semantics.
 
-The wire-format support for a `Null` stack-map item is therefore not evidence
-that CFG analysis, frame generation, source typing, or lowering supports null.
+The classfile CFG and stack-map frame generator now project `Null` directly to
+the existing `VerificationTypeInfo::Null` tag 5 without interning a class.
+This does not imply source lowering or the reference/null branch opcodes from
+the next classfile increment are supported.
 
 ## Required verifier contract for successor work
 
