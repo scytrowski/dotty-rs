@@ -1,6 +1,6 @@
 use crate::annotation::{AnnotationValue, SemanticAnnotation};
 use crate::binary_name::BinaryName;
-use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError};
+use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::error::{ClassLoadError, ClassLoadFailure};
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
@@ -31,10 +31,15 @@ use dotty_core::{
     TypeParam, Visibility,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 const MAX_INHERITANCE_DEPTH: usize = 256;
+
+pub(crate) struct CachedDecodedModule {
+    pub(crate) resource: ClassResource,
+    pub(crate) decoded: tasty_symbol::DecodedTastyClass,
+}
 
 #[derive(Debug)]
 pub(crate) enum TastyAliasResolutionError {
@@ -265,6 +270,9 @@ pub struct ClassLoader<'store, E> {
     /// Inheritance-cycle detection can fail a class before its own load
     /// returns, so its selected resource must be available to that branch.
     loading_context: HashMap<BinaryName, (ClassOrigin, ClassFormat)>,
+    resource_observations: BTreeMap<BinaryName, ClassResource>,
+    collect_resource_observations: bool,
+    resource_observations_complete: bool,
     active_load_profile: Option<ActiveLoadProfile>,
     load_profiles: Vec<ClassLoadProfile>,
     collect_load_profiles: bool,
@@ -453,6 +461,9 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             in_progress_classes: HashMap::new(),
             dependency_failure_context: None,
             loading_context: HashMap::new(),
+            resource_observations: BTreeMap::new(),
+            collect_resource_observations: false,
+            resource_observations_complete: true,
             active_load_profile: None,
             load_profiles: Vec::new(),
             collect_load_profiles: false,
@@ -486,6 +497,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// Returns and clears dependency profiles collected by this loader.
     pub(crate) fn take_load_profiles(&mut self) -> Vec<ClassLoadProfile> {
         std::mem::take(&mut self.load_profiles)
+    }
+
+    pub(crate) fn take_resource_observations(&mut self) -> BTreeMap<BinaryName, ClassResource> {
+        std::mem::take(&mut self.resource_observations)
     }
 
     pub(crate) fn set_load_profile_collection(&mut self, enabled: bool) {
@@ -568,20 +583,47 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     /// shared loading session return the same module identity without adding
     /// another declarations scope.
     pub fn complete_module(&mut self, name: &BinaryName) -> Result<ModuleIdentity, ClassLoadError> {
+        self.complete_module_with_tasty_cache(name, &mut HashMap::new())
+            .0
+    }
+
+    pub(crate) fn complete_module_with_tasty_cache(
+        &mut self,
+        name: &BinaryName,
+        decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
+    ) -> (
+        Result<ModuleIdentity, ClassLoadError>,
+        bool,
+        BTreeMap<BinaryName, ClassResource>,
+        bool,
+    ) {
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
-        let result = self.complete_module_inner(name);
+        self.resource_observations.clear();
+        self.resource_observations_complete = true;
+        let was_collecting_resources = self.collect_resource_observations;
+        self.collect_resource_observations = true;
+        let mut decoded_cache_hit = false;
+        let result = self.complete_module_inner(name, decoded_cache, &mut decoded_cache_hit);
+        self.collect_resource_observations = was_collecting_resources;
         if result.is_err() {
             self.session.rollback_to(self.store, session_checkpoint);
             self.store.rollback_to(store_checkpoint);
             self.repository.discard_rolled_back_symbols(self.store);
         }
-        result
+        (
+            result,
+            decoded_cache_hit,
+            self.take_resource_observations(),
+            self.resource_observations_complete,
+        )
     }
 
     fn complete_module_inner(
         &mut self,
         name: &BinaryName,
+        decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
+        decoded_cache_hit: &mut bool,
     ) -> Result<ModuleIdentity, ClassLoadError> {
         let identity = self.ensure_module_identity_inner(name)?;
         match self.store.symbols.get(identity.module_class).info {
@@ -655,37 +697,57 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 reason: "a classfile cannot complete a Scala module class".to_owned(),
             });
         }
+        if self.collect_resource_observations {
+            self.resource_observations
+                .insert(name.clone(), resource.clone());
+        }
 
         let alias_error = RefCell::new(None);
         let class_path = &self.class_path;
-        let decoded = tasty_symbol::decode_module_class_with_resolvers(
-            resource.bytes(),
-            &identity.module_class_name,
-            |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
-                Ok(target) => target,
-                Err(error) => {
-                    alias_error.borrow_mut().get_or_insert(error);
-                    None
-                }
-            },
-            |package, simple_name| match resolve_tasty_bare_reference(
-                class_path,
-                package,
-                simple_name,
-            ) {
-                Ok(target) => target,
-                Err(error) => {
-                    alias_error.borrow_mut().get_or_insert(error);
-                    None
-                }
-            },
-        );
-        if let Some(error) = alias_error.into_inner() {
-            return Err(error.into_class_load_error().0);
-        }
-        let decoded = decoded.map_err(|error| {
-            ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
-        })?;
+        let decoded = if let Some(cached) = decoded_cache.get(name)
+            && cached.resource == resource
+        {
+            *decoded_cache_hit = true;
+            cached.decoded.clone()
+        } else {
+            decoded_cache.remove(name);
+            let decoded = tasty_symbol::decode_module_class_with_resolvers(
+                resource.bytes(),
+                &identity.module_class_name,
+                |owner, alias| match resolve_tasty_alias(class_path, owner, alias) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        alias_error.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                },
+                |package, simple_name| match resolve_tasty_bare_reference(
+                    class_path,
+                    package,
+                    simple_name,
+                ) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        alias_error.borrow_mut().get_or_insert(error);
+                        None
+                    }
+                },
+            );
+            if let Some(error) = alias_error.into_inner() {
+                return Err(error.into_class_load_error().0);
+            }
+            let decoded = decoded.map_err(|error| {
+                ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
+            })?;
+            decoded_cache.insert(
+                name.clone(),
+                CachedDecodedModule {
+                    resource: resource.clone(),
+                    decoded: decoded.clone(),
+                },
+            );
+            decoded
+        };
 
         let module_class = self.store.symbols.get(identity.module_class);
         if module_class.kind != SymbolKind::ModuleClass
@@ -1355,6 +1417,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // never stored here -- only in the loader-local `self.repository`
         // consulted next.
         if let Some(&symbol) = self.session.resolved.get(name) {
+            if self.collect_resource_observations {
+                // A resource read now cannot prove which bytes produced the
+                // already completed semantic class, nor its transitive
+                // hierarchy. Do not publish a reusable module-miss proof
+                // when completion reused such a session entry.
+                self.resource_observations_complete = false;
+            }
             if let Some(profile) = &mut self.active_load_profile {
                 profile.completed_cache_hits += 1;
             }
@@ -1533,6 +1602,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let resource_origin = resource.origin().clone();
         let resource_format = resource.format();
+        if self.collect_resource_observations {
+            self.resource_observations
+                .insert(name.clone(), resource.clone());
+        }
         self.loading_context
             .insert(name.clone(), (resource_origin.clone(), resource_format));
         let result = match resource_format {

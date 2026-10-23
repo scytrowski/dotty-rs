@@ -69,7 +69,7 @@ def gate(baseline, current):
         raise ValueError(f'lost previously successful targets: {sorted(lost)}')
     depth = scalar(current, 'dependency_load_profile', 'p95_dependency_depth')
     fanout = scalar(current, 'dependency_load_profile', 'max_distinct_fully_completed_classes_per_request')
-    if depth > 70 or fanout > 524:
+    if depth > 6 or fanout > 16:
         raise ValueError(f'dependency reduction gate failed: p95={depth}, fanout={fanout}')
     before = scalar(baseline, 'resolver_metrics', 'external_class_symbol_successes')
     after = scalar(current, 'resolver_metrics', 'external_class_symbol_successes')
@@ -231,7 +231,7 @@ def main():
                              'shells_observed', 'completions_observed', 'resolved_requests',
                              'current_first_blocker', 'full_method_typed'))
             writer.writerows(rows)
-    print(f'Gate passed: p95 completion depth {depth}/140; maximum completed fanout {fanout}/1048.')
+    print(f'Gate passed: p95 completion depth {depth}/6; maximum completed fanout {fanout}/16.')
     print(f'Previously successful target keys retained: {len(successful_targets(baseline))}/{len(successful_targets(current))}.')
     print('Frozen cohort rows:', dict(sorted(collections.Counter(row[0] for row in rows).items())))
 

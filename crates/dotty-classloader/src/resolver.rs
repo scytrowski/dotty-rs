@@ -10,7 +10,7 @@ use dotty_core::{
     ResolverCheckpoint, SemanticStore, Symbol, SymbolId, SymbolInfo, SymbolKind, SymbolResolver,
     Type, TypeId, TypeRefTarget,
 };
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 struct ResolverUndo {
     session: SessionCheckpoint,
@@ -49,6 +49,12 @@ pub struct ModuleResolutionProfile {
     pub member_targets: std::collections::BTreeSet<String>,
     /// Sorted module binary names whose ModuleClass completion succeeded.
     pub completed_module_classes: std::collections::BTreeSet<String>,
+    /// Module completion requests served from the resolver-local decoded TASTy cache.
+    pub module_decode_cache_hits: u64,
+    /// Module completion requests that successfully populated the decoded TASTy cache.
+    pub module_decode_cache_misses: u64,
+    /// Member misses answered from declarations of a previously completed module.
+    pub module_declaration_miss_shortcuts: u64,
 }
 
 /// Resolves core symbols from a classpath while sharing the caller's store,
@@ -70,6 +76,15 @@ pub struct ClasspathSymbolResolver<E: ClassPathEntry> {
     module_profile: ModuleResolutionProfile,
     collect_module_resolution_profile: bool,
     negative_module_member_lookups: HashSet<(BinaryName, Name)>,
+    // Decoded facts outlive semantic-store transactions, but every reuse is
+    // guarded by the exact ClassResource snapshot from which they were decoded.
+    // Entries never retain SymbolId, TypeId, or ScopeId across rollback.
+    decoded_module_cache: HashMap<BinaryName, crate::loader::CachedDecodedModule>,
+    // This proof is usable only while the current classpath resource equals
+    // every resource snapshot used to validate the module's hierarchy.
+    validated_module_declarations: HashSet<BinaryName>,
+    validated_module_resources:
+        HashMap<BinaryName, BTreeMap<BinaryName, crate::class_path::ClassResource>>,
     #[cfg(test)]
     package_failure_after_segment: Option<usize>,
 }
@@ -86,6 +101,9 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             module_profile: ModuleResolutionProfile::default(),
             collect_module_resolution_profile: false,
             negative_module_member_lookups: HashSet::new(),
+            decoded_module_cache: HashMap::new(),
+            validated_module_declarations: HashSet::new(),
+            validated_module_resources: HashMap::new(),
             #[cfg(test)]
             package_failure_after_segment: None,
         }
@@ -293,7 +311,23 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
-        let result = loader.complete_module(name);
+        let (result, decoded_cache_hit, resource_observations, resource_observations_complete) =
+            loader.complete_module_with_tasty_cache(name, &mut self.decoded_module_cache);
+        if result.is_ok() && resource_observations_complete {
+            self.validated_module_declarations.insert(name.clone());
+            self.validated_module_resources
+                .insert(name.clone(), resource_observations);
+        } else {
+            self.validated_module_declarations.remove(name);
+            self.validated_module_resources.remove(name);
+        }
+        if self.collect_module_resolution_profile {
+            if decoded_cache_hit {
+                self.module_profile.module_decode_cache_hits += 1;
+            } else if self.decoded_module_cache.contains_key(name) {
+                self.module_profile.module_decode_cache_misses += 1;
+            }
+        }
         let (class_path, session) = loader.into_parts();
         self.class_path = Some(class_path);
         self.session = session;
@@ -792,19 +826,95 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             module_member_cache_key.as_ref(),
             module_identity_for_cache.as_ref(),
             &target,
-        ) && self.negative_module_member_lookups.contains(cache_key)
-            && matches!(store.symbols.get(*class).info, SymbolInfo::Missing)
+        ) && matches!(store.symbols.get(*class).info, SymbolInfo::Missing)
         {
-            let package = store.symbols.get(identity.object).owner.ok_or_else(|| {
-                ResolutionError::Malformed {
-                    reason: format!(
-                        "module class {:?} has an ownerless object identity",
-                        identity.module_class
-                    ),
+            let cached_miss = self.negative_module_member_lookups.contains(cache_key);
+            let has_cached_evidence = cached_miss
+                || self
+                    .validated_module_declarations
+                    .contains(&identity.object_name);
+            let cache_is_current = if has_cached_evidence {
+                let class_path = self
+                    .class_path
+                    .as_ref()
+                    .expect("resolver operation is exclusive");
+                let mut is_current = self
+                    .validated_module_resources
+                    .get(&identity.object_name)
+                    .is_some_and(|resources| {
+                        !resources.is_empty()
+                            && resources.iter().all(|(name, previous)| {
+                                class_path
+                                    .find_class(name)
+                                    .is_ok_and(|current| current.as_ref() == Some(previous))
+                            })
+                    });
+                // Keep the decoded root snapshot check explicit: a module can
+                // have been decoded before its hierarchy was successfully
+                // completed, so only the validated proof makes it reusable.
+                is_current &= self
+                    .decoded_module_cache
+                    .get(&identity.object_name)
+                    .is_some_and(|cached| {
+                        self.validated_module_resources
+                            .get(&identity.object_name)
+                            .and_then(|resources| resources.get(&identity.object_name))
+                            == Some(&cached.resource)
+                    });
+                if !is_current {
+                    self.decoded_module_cache.remove(&identity.object_name);
+                    self.validated_module_declarations
+                        .remove(&identity.object_name);
+                    self.validated_module_resources
+                        .remove(&identity.object_name);
+                    self.negative_module_member_lookups
+                        .retain(|(module, _)| module != &identity.object_name);
                 }
-            })?;
-            self.validate_module_object(store, package, identity.object)?;
-            return Ok(None);
+                is_current
+            } else {
+                false
+            };
+            let cached_miss = cached_miss && cache_is_current;
+            let declaration_miss = !cached_miss
+                && cache_is_current
+                && self
+                    .validated_module_declarations
+                    .contains(&identity.object_name)
+                && self
+                    .decoded_module_cache
+                    .get(&identity.object_name)
+                    .is_some_and(|cached| {
+                        // Module completion currently publishes ValDef/DefDef terms
+                        // only. Inspect the same projection, not raw TASTy names or
+                        // inherited members (this resolver returns declarations).
+                        let wanted = store.names.resolve(request.name.text());
+                        !request.name.is_term()
+                            || (!cached
+                                .decoded
+                                .fields
+                                .iter()
+                                .any(|field| field.name == wanted)
+                                && !cached
+                                    .decoded
+                                    .methods
+                                    .iter()
+                                    .any(|method| method.name == wanted))
+                    });
+            if cached_miss || declaration_miss {
+                let package = store.symbols.get(identity.object).owner.ok_or_else(|| {
+                    ResolutionError::Malformed {
+                        reason: format!(
+                            "module class {:?} has an ownerless object identity",
+                            identity.module_class
+                        ),
+                    }
+                })?;
+                self.validate_module_object(store, package, identity.object)?;
+                if !cached_miss && declaration_miss && self.collect_module_resolution_profile {
+                    self.module_profile.module_declaration_miss_shortcuts += 1;
+                }
+                return Ok(None);
+            }
         }
         let owner_result = self.resolve_target(store, target)?;
         let Some((resolved_owner, scope)) = owner_result else {
@@ -1490,6 +1600,8 @@ mod tests {
     #[derive(Clone)]
     struct ModuleTastyPath {
         entries: Arc<Mutex<std::collections::HashMap<BinaryName, Vec<u8>>>>,
+        object_missing: Arc<AtomicBool>,
+        object_corrupted: Arc<AtomicBool>,
     }
 
     impl ModuleTastyPath {
@@ -1503,6 +1615,8 @@ mod tests {
                     BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both"),
                     bytes,
                 )]))),
+                object_missing: Arc::new(AtomicBool::new(false)),
+                object_corrupted: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -1510,11 +1624,20 @@ mod tests {
     impl ClassPathEntry for ModuleTastyPath {
         fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
             if name.as_internal() == "java/lang/Object" {
-                return Ok(Some(ClassResource::new(
-                    test_class_stub("java/lang/Object", 0x0021),
-                    ClassFormat::Class,
-                    ClassOrigin::Directory(PathBuf::from("<module-dependency>")),
-                )));
+                if self.object_corrupted.load(Ordering::SeqCst) {
+                    return Ok(Some(ClassResource::new(
+                        vec![0xCA, 0xFE, 0xBA, 0xBE],
+                        ClassFormat::Class,
+                        ClassOrigin::Directory(PathBuf::from("<module-dependency>")),
+                    )));
+                }
+                return Ok((!self.object_missing.load(Ordering::SeqCst)).then(|| {
+                    ClassResource::new(
+                        test_class_stub("java/lang/Object", 0x0021),
+                        ClassFormat::Class,
+                        ClassOrigin::Directory(PathBuf::from("<module-dependency>")),
+                    )
+                }));
             }
             Ok(self.entries.lock().unwrap().get(name).map(|bytes| {
                 ClassResource::new(
@@ -2042,6 +2165,8 @@ mod tests {
                 binary.clone(),
                 bytes,
             )]))),
+            object_missing: Arc::new(AtomicBool::new(false)),
+            object_corrupted: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -2100,6 +2225,8 @@ mod tests {
                 Box::new(DirectoryClassPath::new(library_root.clone())),
                 Box::new(ModuleTastyPath {
                     entries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                    object_missing: Arc::new(AtomicBool::new(false)),
+                    object_corrupted: Arc::new(AtomicBool::new(false)),
                 }),
             ]);
             let resource = class_path
@@ -2529,6 +2656,8 @@ mod tests {
             Box::new(DirectoryClassPath::new(compiler_root)),
             Box::new(ModuleTastyPath {
                 entries: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                object_missing: Arc::new(AtomicBool::new(false)),
+                object_corrupted: Arc::new(AtomicBool::new(false)),
             }),
         ]);
         let mut resolver = ClasspathSymbolResolver::new(
@@ -2589,6 +2718,8 @@ mod tests {
                 binary.clone(),
                 bytes,
             )]))),
+            object_missing: Arc::new(AtomicBool::new(false)),
+            object_corrupted: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -2878,6 +3009,8 @@ mod tests {
         .expect("StaticAnnotation.tasty fixture should exist");
         let path = ModuleTastyPath {
             entries: Arc::new(Mutex::new(std::collections::HashMap::from([(name, bytes)]))),
+            object_missing: Arc::new(AtomicBool::new(false)),
+            object_corrupted: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -3136,6 +3269,60 @@ mod tests {
         assert_eq!(store.checkpoint(), store_mark);
         assert_eq!(resolver.session.checkpoint(), session_mark);
 
+        let another_absent_name = Name::new(store.names.intern("alsoAbsent"), Namespace::Term);
+        assert_eq!(
+            resolver.resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: object_ref,
+                    name: another_absent_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            ),
+            Ok(None),
+            "a distinct missing member should reuse the immutable decoded module data"
+        );
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        let profile = resolver.take_module_resolution_profile();
+        assert_eq!(profile.module_decode_cache_misses, 1);
+        assert_eq!(profile.module_decode_cache_hits, 0);
+        assert_eq!(profile.module_declaration_miss_shortcuts, 1);
+
+        let make_text = store.names.intern("make");
+        let make_type = MemberRequest {
+            prefix: object_ref,
+            name: Name::new(make_text, Namespace::Type),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        assert_eq!(resolver.resolve_member(&mut store, &make_type), Ok(None));
+        assert_eq!(store.checkpoint(), store_mark);
+        assert_eq!(resolver.session.checkpoint(), session_mark);
+        let make_term = MemberRequest {
+            name: Name::new(make_text, Namespace::Term),
+            ..make_type
+        };
+        let make_store_mark = store.checkpoint();
+        let make_resolver_mark = resolver.checkpoint();
+        let make = resolver
+            .resolve_member(&mut store, &make_term)
+            .unwrap()
+            .unwrap();
+        assert_eq!(store.symbols.get(make).kind, SymbolKind::Method);
+        assert_eq!(store.symbols.get(make).owner, Some(module_class));
+        resolver.rollback_to(&mut store, make_resolver_mark);
+        store.rollback_to(make_store_mark);
+        assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        assert!(
+            resolver
+                .validated_module_declarations
+                .contains(&BinaryName::from_internal(
+                    "me/cytrowski/tastyfixtures/semantic/Both"
+                ))
+        );
+
         assert!(
             resolver
                 .complete_module_class(&mut store, module_class)
@@ -3154,10 +3341,393 @@ mod tests {
             Ok(None),
             "a cached miss must still inspect a module completed through another resolver hook"
         );
-        assert!(matches!(
-            store.symbols.get(module_class).info,
-            SymbolInfo::Complete(_)
-        ));
+        let SymbolInfo::Complete(info) = store.symbols.get(module_class).info else {
+            panic!("the positive lookup should complete the module");
+        };
+        let Type::ClassInfo(info) = store.types.get(info) else {
+            panic!("the module should retain ClassInfo");
+        };
+        let declarations = info.declarations;
+        let member = Symbol {
+            name: absent_name,
+            owner: Some(module_class),
+            kind: SymbolKind::Field,
+            flags: SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Missing,
+            origin: SymbolOrigin::Synthetic,
+            annotations: Vec::new(),
+            position: None,
+            links: dotty_core::SymbolLinks::default(),
+        };
+        let added = store.symbols.alloc(member.clone());
+        store.scopes.get_mut(declarations).enter(absent_name, added);
+        let absent_request = MemberRequest {
+            prefix: object_ref,
+            name: absent_name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        assert_eq!(
+            resolver.resolve_member(&mut store, &absent_request),
+            Ok(Some(added))
+        );
+        let duplicate = store.symbols.alloc(member);
+        store
+            .scopes
+            .get_mut(declarations)
+            .enter(absent_name, duplicate);
+        assert_eq!(
+            resolver.resolve_member(&mut store, &absent_request),
+            Err(ResolutionError::Ambiguous { candidates: 2 })
+        );
+    }
+
+    #[test]
+    fn changed_module_resource_invalidates_rolled_back_decode_and_miss_caches() {
+        let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let path = ModuleTastyPath::both_fixture();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let absent = |store: &mut SemanticStore, name: &str| MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern(name), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        let first_absent = absent(&mut store, "absentFirst");
+        assert_eq!(resolver.resolve_member(&mut store, &first_absent), Ok(None));
+        let module_class = resolver.session.modules[&binary].module_class;
+        assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+
+        path.entries
+            .lock()
+            .unwrap()
+            .insert(binary.clone(), b"corrupted artifact".to_vec());
+
+        for request in [
+            absent(&mut store, "absentSecond"),
+            absent(&mut store, "make"),
+        ] {
+            let store_checkpoint = store.checkpoint();
+            let session_checkpoint = resolver.session.checkpoint();
+            let result = resolver.resolve_member(&mut store, &request);
+            assert!(
+                matches!(&result, Err(ResolutionError::Malformed { reason }) if reason.contains("invalid TASTy")),
+                "changed resource must be decoded and rejected, got {result:?}"
+            );
+            assert_eq!(store.checkpoint(), store_checkpoint);
+            assert_eq!(resolver.session.checkpoint(), session_checkpoint);
+            assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        }
+        assert!(!resolver.validated_module_declarations.contains(&binary));
+        assert!(
+            !resolver
+                .negative_module_member_lookups
+                .iter()
+                .any(|(module, _)| module == &binary)
+        );
+    }
+
+    #[test]
+    fn changed_module_parent_invalidates_rolled_back_hierarchy_proof() {
+        let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let path = ModuleTastyPath::both_fixture();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let first_absent = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentFirst"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+
+        assert_eq!(resolver.resolve_member(&mut store, &first_absent), Ok(None));
+        let module_class = resolver.session.modules[&binary].module_class;
+        assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        assert!(
+            resolver.validated_module_resources[&binary]
+                .contains_key(&BinaryName::from_internal("java/lang/Object"))
+        );
+
+        // Keep the module TASTy unchanged while removing its hierarchy parent.
+        path.object_missing.store(true, Ordering::SeqCst);
+        for name in ["absentSecond", "make"] {
+            let request = MemberRequest {
+                prefix: object_prefix,
+                name: Name::new(store.names.intern(name), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let store_checkpoint = store.checkpoint();
+            let session_checkpoint = resolver.session.checkpoint();
+            let result = resolver.resolve_member(&mut store, &request);
+            assert!(
+                matches!(&result, Err(ResolutionError::Malformed { reason }) if reason.contains("java/lang/Object")),
+                "a changed hierarchy dependency must not be hidden by the miss shortcut: {result:?}"
+            );
+            assert_eq!(store.checkpoint(), store_checkpoint);
+            assert_eq!(resolver.session.checkpoint(), session_checkpoint);
+            assert_eq!(store.symbols.get(module_class).info, SymbolInfo::Missing);
+        }
+        assert!(!resolver.validated_module_declarations.contains(&binary));
+        assert!(!resolver.validated_module_resources.contains_key(&binary));
+    }
+
+    #[test]
+    fn precompleted_parent_is_part_of_rolled_back_hierarchy_proof() {
+        let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let path = ModuleTastyPath::both_fixture();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let outer_store_checkpoint = store.checkpoint();
+        let outer_session_checkpoint = resolver.session.checkpoint();
+
+        resolver
+            .load_class(&mut store, &BinaryName::from_internal("java/lang/Object"))
+            .unwrap();
+        let absent = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentBeforeRollback"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        assert_eq!(resolver.resolve_member(&mut store, &absent), Ok(None));
+        assert!(!resolver.validated_module_declarations.contains(&binary));
+        assert!(!resolver.validated_module_resources.contains_key(&binary));
+
+        // Simulate an outer caller rolling back the earlier completed parent
+        // after module resolution itself succeeded and cached a declaration miss.
+        resolver
+            .session
+            .rollback_to(&mut store, outer_session_checkpoint);
+        store.rollback_to(outer_store_checkpoint);
+        path.object_missing.store(true, Ordering::SeqCst);
+
+        let absent_after_rollback = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentAfterRollback"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let result = resolver.resolve_member(&mut store, &absent_after_rollback);
+        assert!(
+            matches!(&result, Err(ResolutionError::Malformed { reason }) if reason.contains("java/lang/Object")),
+            "a rolled-back precompleted parent must not leave a valid miss proof: {result:?}"
+        );
+    }
+
+    #[test]
+    fn changed_precompleted_parent_bytes_cannot_validate_a_module_miss() {
+        let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let path = ModuleTastyPath::both_fixture();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let outer_store_checkpoint = store.checkpoint();
+        let outer_session_checkpoint = resolver.session.checkpoint();
+
+        resolver
+            .load_class(&mut store, &BinaryName::from_internal("java/lang/Object"))
+            .unwrap();
+        path.object_corrupted.store(true, Ordering::SeqCst);
+        let absent = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentFirst"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        assert_eq!(resolver.resolve_member(&mut store, &absent), Ok(None));
+        assert!(!resolver.validated_module_declarations.contains(&binary));
+
+        resolver
+            .session
+            .rollback_to(&mut store, outer_session_checkpoint);
+        store.rollback_to(outer_store_checkpoint);
+        let absent_after_rollback = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentSecond"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let result = resolver.resolve_member(&mut store, &absent_after_rollback);
+        assert!(
+            matches!(&result, Err(ResolutionError::Malformed { reason }) if reason.contains("java/lang/Object")),
+            "current corrupted bytes must not be hidden by an older cached ClassInfo: {result:?}"
+        );
+    }
+
+    #[test]
+    fn decoded_module_without_successful_completion_does_not_prove_member_absence() {
+        let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let path = ModuleTastyPath::both_fixture();
+        let bytes = path.entries.lock().unwrap()[&binary].clone();
+        let decoded = crate::tasty_symbol::decode_module_class_with_resolvers(
+            &bytes,
+            &BinaryName::from_internal(format!("{}$", binary.as_internal())),
+            |_, _| None,
+            |_, _| None,
+        )
+        .unwrap();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new());
+        let identity = resolver
+            .ensure_module_identity(&mut store, &binary)
+            .unwrap();
+        resolver.decoded_module_cache.insert(
+            binary.clone(),
+            crate::loader::CachedDecodedModule {
+                resource: ClassResource::new(
+                    bytes,
+                    ClassFormat::Tasty,
+                    ClassOrigin::Directory(PathBuf::from("<module-fixture>")),
+                ),
+                decoded,
+            },
+        );
+        path.entries.lock().unwrap().remove(&binary);
+        let prefix = store.types.alloc(Type::TermRef {
+            prefix: definitions.no_prefix,
+            target: dotty_core::TermRefTarget::Symbol(identity.object),
+        });
+        let expected = Err(ResolutionError::Malformed {
+            reason: format!(
+                "module completion failed: {}",
+                ClassLoadError::NotFound(binary.clone())
+            ),
+        });
+        for text in ["absent", "alsoAbsent"] {
+            let request = MemberRequest {
+                prefix,
+                name: Name::new(store.names.intern(text), Namespace::Term),
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let store_mark = store.checkpoint();
+            let session_mark = resolver.session.checkpoint();
+            assert_eq!(resolver.resolve_member(&mut store, &request), expected);
+            assert_eq!(store.checkpoint(), store_mark);
+            assert_eq!(resolver.session.checkpoint(), session_mark);
+            assert!(!resolver.validated_module_declarations.contains(&binary));
+        }
     }
 
     #[test]
@@ -3309,6 +3879,8 @@ mod tests {
                 binary,
                 vec![0, 1, 2, 3],
             )]))),
+            object_missing: Arc::new(AtomicBool::new(false)),
+            object_corrupted: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);

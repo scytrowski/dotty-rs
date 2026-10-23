@@ -3,6 +3,7 @@ use crate::error::ClassLoadCategory;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Where a [`ClassResource`]'s bytes came from, kept for diagnostics and
 /// duplicate-class detection.
@@ -40,7 +41,7 @@ pub enum ClassFormat {
 /// file, which decoder they need, and where they came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassResource {
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     format: ClassFormat,
     origin: ClassOrigin,
 }
@@ -48,7 +49,7 @@ pub struct ClassResource {
 impl ClassResource {
     pub fn new(bytes: Vec<u8>, format: ClassFormat, origin: ClassOrigin) -> Self {
         Self {
-            bytes,
+            bytes: bytes.into(),
             format,
             origin,
         }

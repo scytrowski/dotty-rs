@@ -3,10 +3,30 @@
 use super::*;
 
 impl SourceTyper<'_> {
+    fn begin_semantic_transaction(&mut self) -> bool {
+        let outermost = self.semantic_transaction_depth == 0;
+        if outermost {
+            self.import_qualifier_cache.clear();
+        }
+        self.semantic_transaction_depth += 1;
+        outermost
+    }
+
+    fn finish_semantic_transaction(&mut self, outermost: bool, committed: bool) {
+        self.semantic_transaction_depth -= 1;
+        if outermost || !committed {
+            self.import_qualifier_cache.clear();
+        }
+        if !committed {
+            self.import_member_cache.clear();
+        }
+    }
+
     pub(super) fn run_atomic<T>(
         &mut self,
         operation: impl FnOnce(&mut Self, &mut Vec<(SymbolId, SymbolInfo)>) -> Result<T, TyperError>,
     ) -> Result<T, TyperError> {
+        let outermost_transaction = self.begin_semantic_transaction();
         let checkpoint = self.store.checkpoint();
         let resolver_checkpoint = self.resolver.checkpoint();
         let package_entry_checkpoint = self.synthetic_package_entries.len();
@@ -26,6 +46,7 @@ impl SourceTyper<'_> {
         let expression_scope_checkpoint = self.expression_scopes.clone();
         let mut info_journal = Vec::new();
         let result = operation(self, &mut info_journal);
+        let committed = result.is_ok();
         if result.is_err() {
             for (changed, previous) in info_journal.into_iter().rev() {
                 if self.store.symbols.contains(changed) {
@@ -50,6 +71,7 @@ impl SourceTyper<'_> {
             self.inferred_method_results_in_progress = inferred_method_results_checkpoint;
             self.expression_scopes = expression_scope_checkpoint;
         }
+        self.finish_semantic_transaction(outermost_transaction, committed);
         result
     }
 
@@ -61,6 +83,7 @@ impl SourceTyper<'_> {
             &mut Vec<(SourceId, TreeId<Untyped>)>,
         ) -> Result<T, TyperError>,
     ) -> Result<T, TyperError> {
+        let outermost_transaction = self.begin_semantic_transaction();
         let ast_checkpoint = self.typed_arena.checkpoint();
         let typed_index_checkpoint = self.typed_index.clone();
         let function_literals_checkpoint = self.function_literals.clone();
@@ -80,7 +103,8 @@ impl SourceTyper<'_> {
         let mut info_journal = Vec::new();
         let mut new_mappings = Vec::new();
         let result = operation(self, &mut info_journal, &mut new_mappings);
-        match result {
+        let committed = result.is_ok();
+        let outcome = match result {
             Ok(typed) => Ok(typed),
             Err(error) => {
                 for (symbol, previous) in info_journal.into_iter().rev() {
@@ -110,7 +134,9 @@ impl SourceTyper<'_> {
                 self.function_literals = function_literals_checkpoint;
                 Err(error)
             }
-        }
+        };
+        self.finish_semantic_transaction(outermost_transaction, committed);
+        outcome
     }
 
     pub(super) fn rollback_synthetic_package_entries(&mut self, checkpoint: usize) {

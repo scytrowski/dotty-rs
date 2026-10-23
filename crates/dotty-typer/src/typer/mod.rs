@@ -123,6 +123,9 @@ pub struct SourceTyper<'a> {
     inferred_field_types_in_progress: HashSet<SymbolId>,
     inferred_method_results_in_progress: HashSet<SymbolId>,
     uninitialized_parent_receiver: Option<SymbolId>,
+    import_qualifier_cache: HashMap<ImportQualifierCacheKey, SymbolId>,
+    import_member_cache: HashMap<ImportMemberCacheKey, SymbolId>,
+    semantic_transaction_depth: usize,
     typed_arena: AstArena<Typed>,
     typed_index: SourceTypedIndex,
     function_literals: expression::FunctionLiteralIndex,
@@ -165,6 +168,22 @@ impl TypedLocalBinding {
 struct SourceTreeLocation {
     tree_index: u32,
     position: Option<SourceSpan>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ImportQualifierCacheKey {
+    import_tree: u32,
+    qualifier_tree: u32,
+    source_context: u32,
+    qualifier_context: u32,
+    location_tree: u32,
+    position: Option<SourceSpan>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ImportMemberCacheKey {
+    qualifier: SymbolId,
+    name: Name,
 }
 
 #[derive(Clone, Default)]
@@ -215,6 +234,9 @@ impl<'a> SourceTyper<'a> {
             inferred_field_types_in_progress: HashSet::new(),
             inferred_method_results_in_progress: HashSet::new(),
             uninitialized_parent_receiver: None,
+            import_qualifier_cache: HashMap::new(),
+            import_member_cache: HashMap::new(),
+            semantic_transaction_depth: 0,
             typed_arena: AstArena::new(),
             typed_index: SourceTypedIndex::new(),
             function_literals: expression::FunctionLiteralIndex::default(),
@@ -9975,6 +9997,90 @@ mod tests {
     }
 
     #[test]
+    fn import_qualifier_cache_is_cleared_on_rollback_and_at_outer_commit() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object CacheScope { def value = 1 }");
+        let (method, _) = method_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+        let key = ImportQualifierCacheKey {
+            import_tree: method.index(),
+            qualifier_tree: method.index(),
+            source_context: context.lexical.index(),
+            qualifier_context: context.lexical.index(),
+            location_tree: method.index(),
+            position: None,
+        };
+
+        let result: Result<(), TyperError> = typer.run_expression_transaction(|typer, _, _| {
+            typer.import_qualifier_cache.insert(key, method);
+            let nested: Result<(), TyperError> = typer.run_expression_transaction(|_, _, _| {
+                Err(TyperError::TreeOutsideArena {
+                    source,
+                    tree_index: u32::MAX,
+                })
+            });
+            assert!(nested.is_err());
+            assert!(typer.import_qualifier_cache.is_empty());
+
+            typer.import_qualifier_cache.insert(key, method);
+            typer.run_expression_transaction(|_, _, _| Ok(()))?;
+            assert!(typer.import_qualifier_cache.contains_key(&key));
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert!(typer.import_qualifier_cache.is_empty());
+    }
+
+    #[test]
+    fn import_member_cache_survives_commit_and_clears_on_rollback() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("object CacheScope { def value = 1 }");
+        let (method_symbol, _) =
+            method_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let key = ImportMemberCacheKey {
+            qualifier: method_symbol,
+            name: Name::new(store.names.intern("cached"), Namespace::Term),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        let result: Result<(), TyperError> = typer.run_expression_transaction(|typer, _, _| {
+            typer.import_member_cache.insert(key, method_symbol);
+            let nested: Result<(), TyperError> = typer.run_expression_transaction(|_, _, _| {
+                Err(TyperError::TreeOutsideArena {
+                    source,
+                    tree_index: u32::MAX,
+                })
+            });
+            assert!(nested.is_err());
+            assert!(typer.import_member_cache.is_empty());
+
+            typer.import_member_cache.insert(key, method_symbol);
+            typer.run_expression_transaction(|_, _, _| Ok(()))?;
+            assert!(typer.import_member_cache.contains_key(&key));
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert!(typer.import_member_cache.contains_key(&key));
+    }
+
+    #[test]
     fn wildcard_package_import_resolves_a_type_name() {
         let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
             "package lib { class Imported }\npackage app { import lib.*; val x: Imported = 1 }",
@@ -10004,6 +10110,40 @@ mod tests {
         let projected = typer.complete_symbol(value).unwrap();
 
         assert_eq!(type_symbol(typer.store(), projected), imported_type);
+    }
+
+    #[test]
+    fn repeated_external_import_member_lookup_reuses_the_resolved_symbol() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "object Outer {}; import Outer.External; val first: External = 1; val second: External = 1",
+        );
+        let (first, _) = val_symbol(&parsed, &store, &index, source, "first");
+        let (second, _) = val_symbol(&parsed, &store, &index, source, "second");
+        let external_type = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);
+        let member_requests = Rc::new(RefCell::new(Vec::new()));
+        let resolver = ScriptedResolver {
+            member: Some(external_type),
+            package: None,
+            member_requests: Rc::clone(&member_requests),
+            package_requests: Rc::new(RefCell::new(Vec::new())),
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        )
+        .with_resolver(Box::new(resolver));
+
+        let first_type = typer.complete_symbol(first).unwrap();
+        let second_type = typer.complete_symbol(second).unwrap();
+
+        assert_eq!(type_symbol(typer.store(), first_type), external_type);
+        assert_eq!(type_symbol(typer.store(), second_type), external_type);
+        assert_eq!(member_requests.borrow().len(), 1);
+        assert_eq!(member_requests.borrow()[0].namespace(), Namespace::Type);
     }
 
     #[test]

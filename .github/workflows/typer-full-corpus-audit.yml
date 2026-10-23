@@ -97,12 +97,46 @@ jobs:
         env:
           COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
           DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}/typer-audit-intermediates
+          SCALA39_TASTY_PARENT_AUDIT_REPORT: ${{ runner.temp }}/typer-audit-report/typer-classpath-corpus-audit-post-tasty-parents-3.9.0.md
         run: |
           set -euo pipefail
           /usr/bin/time -v \
             tools/typer-classpath-corpus-audit/run --verify-determinism \
-              "$RUNNER_TEMP/typer-audit-report/typer-classpath-corpus-audit-post-compiler-modules-3.9.0.md" \
+              "$SCALA39_TASTY_PARENT_AUDIT_REPORT" \
             2> "$RUNNER_TEMP/typer-audit-report/runtime-resource-usage.txt"
+
+      - name: Reconcile frozen TASTy parent roots
+        shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
+          SCALA39_COMPILER_JAR: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar
+          SCALA39_LIBRARY_JAR: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar
+          SCALA39_LIBRARY3_JAR: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2/org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar
+          SCALA39_PARENT_PROFILE_OUTPUT: ${{ runner.temp }}/typer-audit-report/current-tasty-supertype-profile.tsv
+          SCALA39_TASTY_PARENT_AUDIT_REPORT: ${{ runner.temp }}/typer-audit-report/typer-classpath-corpus-audit-post-tasty-parents-3.9.0.md
+        run: |
+          set -euo pipefail
+          SOURCE_PROVENANCE="${SCALA39_TASTY_PARENT_AUDIT_REPORT%.md}-tasty-parent-source-provenance.tsv"
+          CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+            cargo test -p dotty-classloader --lib --locked \
+              profile_frozen_unresolved_supertype_parent_roots -- --ignored --nocapture
+          PYTHONDONTWRITEBYTECODE=1 \
+            python3 tools/typer-classpath-corpus-audit/reconcile_tasty_supertype_roots.py \
+              --baseline docs/typer-classpath-corpus-audit-post-compiler-modules-3.9.0-tasty-supertype-roots.tsv \
+              --historical-parent-profile docs/classloader-unresolved-tasty-parent-profile-3.9.0.tsv \
+              --historical-source-provenance docs/classloader-unresolved-tasty-parent-source-provenance-3.9.0.tsv \
+              --parent-profile "$SCALA39_PARENT_PROFILE_OUTPUT" \
+              --source-provenance "$SOURCE_PROVENANCE" \
+              --rows "$RUNNER_TEMP/typer-audit-report/typer-classpath-corpus-audit-post-tasty-parents-3.9.0-tasty-supertype-roots.tsv" \
+              --summary "$RUNNER_TEMP/typer-audit-report/tasty-supertype-root-summary.txt"
+          {
+            printf '\n## #1417 current TASTy parent reconciliation\n\n'
+            printf 'The table joins every frozen #1342 root to its original failed parent, current parent resolution, full hierarchy load result, source-audit observation count, and current source files. Newly observed roots remain separate rows. The full matrix is [typer-classpath-corpus-audit-post-tasty-parents-3.9.0-tasty-supertype-roots.tsv](typer-classpath-corpus-audit-post-tasty-parents-3.9.0-tasty-supertype-roots.tsv).\n\n'
+            printf '```text\n'
+            cat "$RUNNER_TEMP/typer-audit-report/tasty-supertype-root-summary.txt"
+            printf '```\n\n'
+            printf 'The standalone TASTy parent profile is retained at [current-tasty-supertype-profile.tsv](current-tasty-supertype-profile.tsv). The source-level root/file observations are retained at [typer-classpath-corpus-audit-post-tasty-parents-3.9.0-tasty-parent-source-provenance.tsv](typer-classpath-corpus-audit-post-tasty-parents-3.9.0-tasty-parent-source-provenance.tsv).\n'
+          } >> "$SCALA39_TASTY_PARENT_AUDIT_REPORT"
 
       - name: Upload reports, sidecars, inputs, and sequential run logs
         if: always()
