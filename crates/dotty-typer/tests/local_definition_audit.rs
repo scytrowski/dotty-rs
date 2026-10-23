@@ -1833,7 +1833,17 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             MemberSpace::Explicit(owner) => owner,
             _ => request.prefix,
         };
-        let actual_target = prefix_profile(store, target_type);
+        let target_profile_started = (target_type != request.prefix)
+            .then(|| wrapper_started.map(|_| Instant::now()))
+            .flatten();
+        let distinct_target_profile =
+            distinct_member_target_profile(store, request.prefix, target_type);
+        record_audit_stage(
+            &self.metrics,
+            "symbol_identity_rendering",
+            target_profile_started,
+        );
+        let actual_target = distinct_target_profile.as_ref().unwrap_or(&prefix);
         let target_info_before = actual_target
             .symbol
             .filter(|id| store.symbols.contains(*id))
@@ -1876,7 +1886,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .iter()
                 .any(|profile| &profile.root == name && profile.completed_classes.contains(name))
         });
-        let outcome = member_outcome(store, &result, request, &actual_target, target_completed);
+        let outcome = member_outcome(store, &result, request, actual_target, target_completed);
         record_audit_stage(
             &self.metrics,
             "result_classification",
@@ -2072,7 +2082,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .push(ResolverRequestObservation {
                     target: target_key.clone(),
                     outcome: outcome.clone(),
-                    cause: member_request_cause(&outcome, &actual_target, &result),
+                    cause: member_request_cause(&outcome, actual_target, &result),
                     materialized_prefix,
                     selected_identity,
                     enclosing_attempt: method.clone(),
@@ -4871,6 +4881,28 @@ fn is_external_symbol(origin: dotty_core::SymbolOrigin) -> bool {
         origin,
         dotty_core::SymbolOrigin::Classfile(_) | dotty_core::SymbolOrigin::Tasty(_)
     )
+}
+
+fn distinct_member_target_profile(
+    store: &SemanticStore,
+    prefix: dotty_core::ids::TypeId,
+    target: dotty_core::ids::TypeId,
+) -> Option<PrefixProfile> {
+    (target != prefix).then(|| prefix_profile(store, target))
+}
+
+#[test]
+fn member_target_profile_reuses_prefix_and_profiles_distinct_owner() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let prefix = prefix_profile(&store, definitions.int);
+
+    assert!(distinct_member_target_profile(&store, definitions.int, definitions.int).is_none());
+    assert_eq!(
+        distinct_member_target_profile(&store, definitions.int, definitions.long),
+        Some(prefix_profile(&store, definitions.long))
+    );
+    assert_eq!(prefix.target_kind, "Class");
 }
 
 fn prefix_profile(store: &SemanticStore, ty: dotty_core::ids::TypeId) -> PrefixProfile {
