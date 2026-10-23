@@ -29,6 +29,8 @@ use std::time::{Duration, Instant};
 struct ResolverMetrics {
     timing_enabled: bool,
     audit_wrapper_timings: BTreeMap<&'static str, AuditWrapperTiming>,
+    audit_stage_timings: BTreeMap<&'static str, AuditStageTiming>,
+    cheap_resolver_metrics: Rc<RefCell<CheapResolverMetrics>>,
     rollback_count: usize,
     rollback_operation_observations: usize,
     rollback_member_observations: usize,
@@ -39,6 +41,9 @@ struct ResolverMetrics {
     module_completion_inner_time: Duration,
     class_completion_inner_time: Duration,
     class_completion_calls: usize,
+    class_completion_successes: usize,
+    class_completion_unsupported: usize,
+    class_completion_errors: usize,
     classfile_completion_calls: usize,
     tasty_completion_calls: usize,
     classfile_completion_inner_time: Duration,
@@ -120,6 +125,341 @@ struct AuditWrapperTiming {
     delegated_time: Duration,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AuditStageTiming {
+    calls: usize,
+    elapsed: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AuditProfileMode {
+    SemanticOnly,
+    CheapCounters,
+    #[default]
+    Full,
+}
+
+impl AuditProfileMode {
+    fn from_environment() -> Self {
+        match std::env::var("DOTTY_AUDIT_PROFILE_MODE").as_deref() {
+            Ok("semantic_only") => Self::SemanticOnly,
+            Ok("cheap_counters") => Self::CheapCounters,
+            Ok("full") => Self::Full,
+            Ok(mode) => panic!("unknown DOTTY_AUDIT_PROFILE_MODE: {mode}"),
+            Err(_) if std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1") => {
+                Self::SemanticOnly
+            }
+            Err(_) => Self::Full,
+        }
+    }
+}
+
+fn duration_micros(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
+}
+
+fn print_cheap_resolver_metrics(metrics: &CheapResolverMetrics, scope: &str) {
+    eprintln!("AUDIT_CHEAP_RESOLVER_BEGIN scope={scope}");
+    for (operation, row) in &metrics.operations {
+        let wall_us = duration_micros(row.wall_time);
+        let delegated_us = duration_micros(row.delegated_time);
+        eprintln!(
+            "AUDIT_CHEAP_RESOLVER scope={scope} operation={operation} calls={} wall_us={wall_us} delegated_us={delegated_us} exclusive_us={}",
+            row.calls,
+            wall_us.saturating_sub(delegated_us)
+        );
+        eprintln!(
+            "AUDIT_CHEAP_RESOLVER_OUTCOMES scope={scope} operation={operation} ok={} none={} errors={}",
+            row.ok, row.none, row.errors
+        );
+    }
+    eprintln!("AUDIT_CHEAP_RESOLVER_END scope={scope}");
+}
+
+fn profile_mode() -> AuditProfileMode {
+    AuditProfileMode::from_environment()
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum CheapResolverOutcome {
+    #[default]
+    Ok,
+    None,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CheapResolverOperationMetrics {
+    calls: usize,
+    wall_time: Duration,
+    delegated_time: Duration,
+    ok: usize,
+    none: usize,
+    errors: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CheapResolverMetrics {
+    operations: BTreeMap<&'static str, CheapResolverOperationMetrics>,
+}
+
+impl CheapResolverMetrics {
+    fn record(
+        &mut self,
+        operation: &'static str,
+        wall_time: Duration,
+        delegated_time: Duration,
+        outcome: CheapResolverOutcome,
+    ) {
+        let metrics = self.operations.entry(operation).or_default();
+        metrics.calls += 1;
+        metrics.wall_time += wall_time;
+        metrics.delegated_time += delegated_time;
+        match outcome {
+            CheapResolverOutcome::Ok => metrics.ok += 1,
+            CheapResolverOutcome::None => metrics.none += 1,
+            CheapResolverOutcome::Error => metrics.errors += 1,
+        }
+    }
+}
+
+fn cheap_resolver_outcome<T>(result: &Result<Option<T>, ResolutionError>) -> CheapResolverOutcome {
+    match result {
+        Ok(Some(_)) => CheapResolverOutcome::Ok,
+        Ok(None) => CheapResolverOutcome::None,
+        Err(_) => CheapResolverOutcome::Error,
+    }
+}
+
+fn cheap_resolver_bool_outcome(result: &Result<bool, ResolutionError>) -> CheapResolverOutcome {
+    match result {
+        Ok(true) => CheapResolverOutcome::Ok,
+        Ok(false) => CheapResolverOutcome::None,
+        Err(_) => CheapResolverOutcome::Error,
+    }
+}
+
+/// Counts resolver calls and delegate time without collecting detailed audit
+/// identities, transaction rows, or per-request strings.
+struct CounterResolver<E: ClassPathEntry> {
+    inner: Option<ClasspathSymbolResolver<E>>,
+    metrics: Rc<RefCell<CheapResolverMetrics>>,
+    session_out: Rc<RefCell<Option<LoadingSession>>>,
+}
+
+impl<E: ClassPathEntry> Drop for CounterResolver<E> {
+    fn drop(&mut self) {
+        if let Some(resolver) = self.inner.take() {
+            *self.session_out.borrow_mut() = Some(resolver.into_session());
+        }
+    }
+}
+
+impl<E: ClassPathEntry> CounterResolver<E> {
+    fn measure<T>(
+        &mut self,
+        operation: &'static str,
+        call: impl FnOnce(&mut ClasspathSymbolResolver<E>) -> Result<T, ResolutionError>,
+        classify: impl FnOnce(&Result<T, ResolutionError>) -> CheapResolverOutcome,
+    ) -> Result<T, ResolutionError> {
+        let wall_started = Instant::now();
+        let delegated_started = Instant::now();
+        let result = call(self.inner.as_mut().expect("counter resolver is available"));
+        let delegated_time = delegated_started.elapsed();
+        let outcome = classify(&result);
+        self.metrics.borrow_mut().record(
+            operation,
+            wall_started.elapsed(),
+            delegated_time,
+            outcome,
+        );
+        result
+    }
+}
+
+impl<E: ClassPathEntry> SymbolResolver for CounterResolver<E> {
+    fn package_object_collision(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: dotty_core::Name,
+    ) -> Result<bool, ResolutionError> {
+        let started = Instant::now();
+        let delegated_started = Instant::now();
+        let result = self
+            .inner
+            .as_mut()
+            .expect("counter resolver is available")
+            .package_object_collision(store, package, name);
+        let delegated = delegated_started.elapsed();
+        self.metrics.borrow_mut().record(
+            "package_object_collision",
+            started.elapsed(),
+            delegated,
+            cheap_resolver_bool_outcome(&result),
+        );
+        result
+    }
+
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let started = Instant::now();
+        let delegated_started = Instant::now();
+        let result = self
+            .inner
+            .as_ref()
+            .expect("counter resolver is available")
+            .module_class_of_object(store, object);
+        let delegated = delegated_started.elapsed();
+        self.metrics.borrow_mut().record(
+            "module_identity",
+            started.elapsed(),
+            delegated,
+            cheap_resolver_outcome(&result),
+        );
+        result
+    }
+
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        let started = Instant::now();
+        let delegated_started = Instant::now();
+        let result = self
+            .inner
+            .as_mut()
+            .expect("counter resolver is available")
+            .complete_module_class(store, module_class);
+        let delegated = delegated_started.elapsed();
+        self.metrics.borrow_mut().record(
+            "module_completion",
+            started.elapsed(),
+            delegated,
+            cheap_resolver_bool_outcome(&result),
+        );
+        result
+    }
+
+    fn complete_class(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        let started = Instant::now();
+        let delegated_started = Instant::now();
+        let result = self
+            .inner
+            .as_mut()
+            .expect("counter resolver is available")
+            .complete_class(store, symbol);
+        let delegated = delegated_started.elapsed();
+        self.metrics.borrow_mut().record(
+            "class_completion",
+            started.elapsed(),
+            delegated,
+            cheap_resolver_bool_outcome(&result),
+        );
+        result
+    }
+
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        let started = Instant::now();
+        let delegated_started = Instant::now();
+        let checkpoint = self
+            .inner
+            .as_ref()
+            .expect("counter resolver is available")
+            .checkpoint();
+        let delegated = delegated_started.elapsed();
+        self.metrics.borrow_mut().record(
+            "checkpoint",
+            started.elapsed(),
+            delegated,
+            CheapResolverOutcome::Ok,
+        );
+        checkpoint
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        let started = Instant::now();
+        let delegated_started = Instant::now();
+        self.inner
+            .as_mut()
+            .expect("counter resolver is available")
+            .rollback_to(store, checkpoint);
+        let delegated = delegated_started.elapsed();
+        self.metrics.borrow_mut().record(
+            "rollback_to",
+            started.elapsed(),
+            delegated,
+            CheapResolverOutcome::Ok,
+        );
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.measure(
+            "member_lookup",
+            |resolver| resolver.resolve_member(store, request),
+            cheap_resolver_outcome,
+        )
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        let started = Instant::now();
+        let delegated_started = Instant::now();
+        let result = self
+            .inner
+            .as_mut()
+            .expect("counter resolver is available")
+            .resolve_package(store, path);
+        let delegated = delegated_started.elapsed();
+        self.metrics.borrow_mut().record(
+            "package_lookup",
+            started.elapsed(),
+            delegated,
+            cheap_resolver_outcome(&result),
+        );
+        result
+    }
+
+    fn enter_synthetic_package_member(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: dotty_core::Name,
+        member: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        let started = Instant::now();
+        let delegated_started = Instant::now();
+        let result = self
+            .inner
+            .as_mut()
+            .expect("counter resolver is available")
+            .enter_synthetic_package_member(store, package, name, member);
+        let delegated = delegated_started.elapsed();
+        self.metrics.borrow_mut().record(
+            "enter_synthetic_package_member",
+            started.elapsed(),
+            delegated,
+            cheap_resolver_bool_outcome(&result),
+        );
+        result
+    }
+}
+
 fn record_audit_wrapper_timing(
     metrics: &Rc<RefCell<ResolverMetrics>>,
     operation: &'static str,
@@ -132,6 +472,19 @@ fn record_audit_wrapper_timing(
     timing.calls += 1;
     timing.wall_time += started.elapsed();
     timing.delegated_time += delegated_time;
+}
+
+#[inline]
+fn record_audit_stage(
+    metrics: &Rc<RefCell<ResolverMetrics>>,
+    stage: &'static str,
+    started: Option<Instant>,
+) {
+    let Some(started) = started else { return };
+    let mut metrics = metrics.borrow_mut();
+    let timing = metrics.audit_stage_timings.entry(stage).or_default();
+    timing.calls += 1;
+    timing.elapsed += started.elapsed();
 }
 
 fn merge_module_resolution_profile(
@@ -572,7 +925,7 @@ struct ClassPathCacheMetrics {
 impl SharedClassPath {
     fn new(inner: CompositeClassPath) -> Self {
         let profile_resource_metrics = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some()
-            && std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() != Ok("1");
+            && profile_mode() == AuditProfileMode::Full;
         Self::new_with_resource_profile(inner, profile_resource_metrics)
     }
 
@@ -916,6 +1269,40 @@ fn unresolved_package_details_uses_prefix_evidence_and_stable_causes() {
     );
 }
 
+#[test]
+fn counter_resolver_tracks_calls_and_outcomes_without_request_identities() {
+    let classpath = CompositeClassPath::new(vec![Box::new(PrefixOnlyAuditEntry)]);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let metrics = Rc::new(RefCell::new(CheapResolverMetrics::default()));
+    let mut resolver = CounterResolver {
+        inner: Some(ClasspathSymbolResolver::new(
+            classpath,
+            definitions,
+            LoadingSession::new(),
+        )),
+        metrics: Rc::clone(&metrics),
+        session_out: Rc::new(RefCell::new(None)),
+    };
+
+    let checkpoint = resolver.checkpoint();
+    resolver.rollback_to(&mut store, checkpoint);
+    assert_eq!(
+        resolver.resolve_package(&mut store, &["missing"]).unwrap(),
+        None
+    );
+
+    let metrics = metrics.borrow();
+    assert_eq!(metrics.operations["checkpoint"].calls, 1);
+    assert_eq!(metrics.operations["rollback_to"].calls, 1);
+    let package_lookup = metrics.operations["package_lookup"];
+    assert_eq!(package_lookup.calls, 1);
+    assert_eq!(package_lookup.none, 1);
+    assert_eq!(package_lookup.ok, 0);
+    assert_eq!(package_lookup.errors, 0);
+    assert_eq!(metrics.operations.len(), 3);
+}
+
 impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
     // Module-port maintenance contract: module_class_of_object and
     // complete_module_class are forwarded here. The trait also has default
@@ -964,6 +1351,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             );
             return result;
         }
+        let identity_started = wrapper_started.map(|_| Instant::now());
         let object_identity = if store.symbols.contains(object) {
             audit_module_object_candidate(store, object)
                 .unwrap_or_else(|| "<unknown-object>".to_owned())
@@ -971,6 +1359,8 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             "<unknown-object>".to_owned()
         };
         let object_origin = symbol_origin_category(store, object);
+        record_audit_stage(&self.metrics, "symbol_identity_rendering", identity_started);
+        let classification_started = wrapper_started.map(|_| Instant::now());
         let (module_class_identity, outcome, result_state, error_category) = match &result {
             Ok(Some(module_class))
                 if store.symbols.contains(*module_class)
@@ -1011,6 +1401,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             Ok(Some(module_class)) => module_class_observed_state(store, *module_class),
             _ => "Unavailable",
         };
+        record_audit_stage(
+            &self.metrics,
+            "result_classification",
+            classification_started,
+        );
+        let collection_started = wrapper_started.map(|_| Instant::now());
         let mut metrics = self.metrics.borrow_mut();
         if outcome == "resolved"
             && !object_identity.starts_with('<')
@@ -1036,6 +1432,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 error_category,
             });
         drop(metrics);
+        record_audit_stage(&self.metrics, "observation_collection", collection_started);
         record_audit_wrapper_timing(
             &self.metrics,
             "module_identity",
@@ -1052,6 +1449,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
     ) -> Result<bool, ResolutionError> {
         let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let resolver_started = wrapper_started;
+        let identity_started = wrapper_started.map(|_| Instant::now());
         let module_class_identity = if store.symbols.contains(module_class) {
             audit_binary_candidate(store, module_class)
                 .unwrap_or_else(|| "<unknown-module-class>".to_owned())
@@ -1067,6 +1465,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             .unwrap_or_default();
         let object_origin = symbol_origin_category(store, module_class);
         let request = format!("module-completion::{module_class_identity}");
+        record_audit_stage(&self.metrics, "symbol_identity_rendering", identity_started);
         let result = self
             .resolver_mut()
             .complete_module_class(store, module_class);
@@ -1075,6 +1474,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             self.metrics.borrow_mut().module_completion_inner_time += resolver_elapsed;
         }
         let profiles = self.resolver_mut().take_load_profiles();
+        let classification_started = wrapper_started.map(|_| Instant::now());
         let result_state = module_class_observed_state(store, module_class);
         let (outcome, error_category) = match &result {
             Ok(true) if result_state == "Complete(ClassInfo)" => ("completed", None),
@@ -1082,6 +1482,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             Ok(false) => ("unsupported", None),
             Err(error) => ("error", Some(resolution_error_category(error))),
         };
+        record_audit_stage(
+            &self.metrics,
+            "result_classification",
+            classification_started,
+        );
+        let collection_started = wrapper_started.map(|_| Instant::now());
         let mut metrics = self.metrics.borrow_mut();
         metrics.module_completion_resolver_calls += 1;
         *metrics
@@ -1116,6 +1522,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 });
         }
         drop(metrics);
+        record_audit_stage(&self.metrics, "observation_collection", collection_started);
         record_audit_wrapper_timing(
             &self.metrics,
             "module_completion",
@@ -1132,16 +1539,37 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
     ) -> Result<bool, ResolutionError> {
         let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let resolver_started = wrapper_started;
+        let identity_started = wrapper_started.map(|_| Instant::now());
         let format_origin = resolver_started.map(|_| symbol_origin_category(store, symbol));
         let request = if store.symbols.contains(symbol) {
             format!("completion::{}", audit_symbol_path(store, symbol))
         } else {
             "completion::unknown-symbol".to_owned()
         };
+        record_audit_stage(&self.metrics, "symbol_identity_rendering", identity_started);
         let result = self.resolver_mut().complete_class(store, symbol);
         let elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
         let profiles = self.resolver_mut().take_load_profiles();
+        let classification_started = wrapper_started.map(|_| Instant::now());
+        let outcome = match &result {
+            Ok(true) => CheapResolverOutcome::Ok,
+            Ok(false) => CheapResolverOutcome::None,
+            Err(_) => CheapResolverOutcome::Error,
+        };
+        record_audit_stage(
+            &self.metrics,
+            "result_classification",
+            classification_started,
+        );
+        let collection_started = wrapper_started.map(|_| Instant::now());
         let mut metrics = self.metrics.borrow_mut();
+        if wrapper_started.is_some() {
+            match outcome {
+                CheapResolverOutcome::Ok => metrics.class_completion_successes += 1,
+                CheapResolverOutcome::None => metrics.class_completion_unsupported += 1,
+                CheapResolverOutcome::Error => metrics.class_completion_errors += 1,
+            }
+        }
         if let Some(origin) = format_origin {
             metrics.class_completion_calls += 1;
             metrics.class_completion_inner_time += elapsed;
@@ -1168,6 +1596,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             });
         }
         drop(metrics);
+        record_audit_stage(&self.metrics, "observation_collection", collection_started);
         record_audit_wrapper_timing(&self.metrics, "class_completion", wrapper_started, elapsed);
         result
     }
@@ -1177,6 +1606,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let resolver_started = wrapper_started;
         let inner_checkpoint = self.resolver().checkpoint();
         let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let bookkeeping_started = wrapper_started.map(|_| Instant::now());
         let mut metrics = self.metrics.borrow_mut();
         metrics.next_module_operation_checkpoint = metrics
             .next_module_operation_checkpoint
@@ -1191,6 +1621,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             .module_operation_checkpoints
             .insert(token, (inner_checkpoint, offsets.0, offsets.1));
         drop(metrics);
+        record_audit_stage(&self.metrics, "checkpoint_bookkeeping", bookkeeping_started);
         record_audit_wrapper_timing(
             &self.metrics,
             "checkpoint",
@@ -1222,6 +1653,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let resolver_started = wrapper_started.map(|_| Instant::now());
         self.resolver_mut().rollback_to(store, inner_checkpoint);
         let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
+        let annotation_started = wrapper_started.map(|_| Instant::now());
         let mut metrics = self.metrics.borrow_mut();
         metrics.rollback_count += 1;
         metrics.rollback_operation_observations += rolled_back_operations;
@@ -1254,6 +1686,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             (inner_checkpoint, operation_offset, member_offset),
         );
         drop(metrics);
+        record_audit_stage(&self.metrics, "rollback_annotation", annotation_started);
         record_audit_wrapper_timing(
             &self.metrics,
             "rollback_to",
@@ -1268,7 +1701,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
         let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let prefix_render_started = wrapper_started.map(|_| Instant::now());
         let prefix = prefix_profile(store, request.prefix);
+        record_audit_stage(
+            &self.metrics,
+            "symbol_identity_rendering",
+            prefix_render_started,
+        );
         let module_class = match prefix.target_kind {
             "ModuleClass" => prefix.symbol,
             "Object" => prefix.symbol.and_then(|object| {
@@ -1277,6 +1716,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }),
             _ => None,
         };
+        let request_preparation_started = wrapper_started.map(|_| Instant::now());
         let module_class_identity =
             module_class.map_or_else(String::new, |symbol| audit_symbol_path(store, symbol));
         let module_state_before = module_class.map_or("NotModuleClass", |symbol| {
@@ -1415,6 +1855,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     .and_then(|id| audit_binary_candidate(store, id))
             })
             .flatten();
+        record_audit_stage(
+            &self.metrics,
+            "member_request_preparation",
+            request_preparation_started,
+        );
         let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.resolver_mut().resolve_member(store, request);
         let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
@@ -1425,11 +1870,19 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let module_profile = self.resolver_mut().take_module_resolution_profile();
         // Profiles describe work performed even when Ok(None) rolls it back.
         // Only the actual lookup owner can establish that its scope was available.
+        let classification_started = wrapper_started.map(|_| Instant::now());
         let target_completed = target_binary.as_ref().is_some_and(|name| {
             load_profiles
                 .iter()
                 .any(|profile| &profile.root == name && profile.completed_classes.contains(name))
         });
+        let outcome = member_outcome(store, &result, request, &actual_target, target_completed);
+        record_audit_stage(
+            &self.metrics,
+            "result_classification",
+            classification_started,
+        );
+        let collection_started = wrapper_started.map(|_| Instant::now());
         let mut metrics = self.metrics.borrow_mut();
         metrics.resolver_member_requests += 1;
         *metrics
@@ -1442,7 +1895,6 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .entry(shape.clone())
                 .or_default() += 1;
         }
-        let outcome = member_outcome(store, &result, request, &actual_target, target_completed);
         let current_file = metrics.current_file.clone();
         let current_method = metrics.current_method.clone();
         if module_class.is_some() && !current_method.is_empty() {
@@ -1796,6 +2248,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             }
         }
         drop(metrics);
+        record_audit_stage(&self.metrics, "observation_collection", collection_started);
         record_audit_wrapper_timing(
             &self.metrics,
             "member_lookup",
@@ -6838,20 +7291,38 @@ fn pinned_scala39_local_definition_audit() {
         );
         let method_limit = std::env::var("DOTTY_AUDIT_PROFILE_METHOD_LIMIT")
             .unwrap_or_else(|_| "unlimited".to_owned());
-        let timing_mode = if std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1") {
-            "timing_only"
-        } else {
-            "detailed"
+        let timing_mode = match profile_mode() {
+            AuditProfileMode::SemanticOnly => "semantic_only",
+            AuditProfileMode::CheapCounters => "cheap_counters",
+            AuditProfileMode::Full => "full",
         };
-        let (resolver_package_requests, resolver_member_requests) = if timing_mode == "timing_only"
-        {
-            ("not_captured".to_owned(), "not_captured".to_owned())
-        } else {
-            let metrics = resolver_metrics.borrow();
-            (
-                metrics.resolver_package_requests.to_string(),
-                metrics.resolver_member_requests.to_string(),
-            )
+        let (resolver_package_requests, resolver_member_requests) = match profile_mode() {
+            AuditProfileMode::SemanticOnly => {
+                ("not_captured".to_owned(), "not_captured".to_owned())
+            }
+            AuditProfileMode::CheapCounters => {
+                let metrics = resolver_metrics.borrow();
+                let cheap = metrics.cheap_resolver_metrics.borrow();
+                (
+                    cheap
+                        .operations
+                        .get("package_lookup")
+                        .map_or(0, |operation| operation.calls)
+                        .to_string(),
+                    cheap
+                        .operations
+                        .get("member_lookup")
+                        .map_or(0, |operation| operation.calls)
+                        .to_string(),
+                )
+            }
+            AuditProfileMode::Full => {
+                let metrics = resolver_metrics.borrow();
+                (
+                    metrics.resolver_package_requests.to_string(),
+                    metrics.resolver_member_requests.to_string(),
+                )
+            }
         };
         let completed_status = if completed_files == expected_files {
             "complete"
@@ -6871,11 +7342,21 @@ fn pinned_scala39_local_definition_audit() {
             source_read_time.as_millis(),
             audit_merge_time.as_millis()
         );
-        if timing_mode == "timing_only" {
-            eprintln!("AUDIT_RESOLVER_METRICS status=not_captured mode=timing_only");
-        } else {
-            print_resolver_metrics(&resolver_metrics.borrow());
-            print_classpath_resource_metrics(&classpath);
+        match profile_mode() {
+            AuditProfileMode::SemanticOnly => {
+                eprintln!("AUDIT_RESOLVER_METRICS status=not_captured mode=semantic_only");
+            }
+            AuditProfileMode::CheapCounters => {
+                print_cheap_resolver_metrics(
+                    &resolver_metrics.borrow().cheap_resolver_metrics.borrow(),
+                    "source",
+                );
+                eprintln!("AUDIT_RESOLVER_METRICS status=captured mode=cheap_counters");
+            }
+            AuditProfileMode::Full => {
+                print_resolver_metrics(&resolver_metrics.borrow());
+                print_classpath_resource_metrics(&classpath);
+            }
         }
         return;
     }
@@ -10808,16 +11289,15 @@ fn probe_supported_match_cases_in_index(
 
     let packages = Packages::new();
     let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
-    let timing_only_profile =
-        profile_timing && std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1");
+    let mode = profile_mode();
+    let timing_only_profile = profile_timing && mode == AuditProfileMode::SemanticOnly;
     let probe_metrics = Rc::new(RefCell::new(ResolverMetrics {
         timing_enabled: profile_timing && !timing_only_profile,
         ..ResolverMetrics::default()
     }));
     let mut typer = SourceTyper::new(arena, source, index, store, definitions, &packages);
-    let timing_only = std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1");
     let mut resolver = ClasspathSymbolResolver::new(classpath.clone(), definitions, session);
-    if !timing_only {
+    if mode == AuditProfileMode::Full {
         resolver = resolver.with_load_profile_collection();
         if !profile_timing
             || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1")
@@ -10830,20 +11310,28 @@ fn probe_supported_match_cases_in_index(
     // those observations are discarded here; wrapping every resolver call
     // made this verification pass substantially slower. Retain that wrapper
     // only for explicit diagnostic profiles.
-    typer = if profile_timing && !timing_only {
-        typer.with_resolver(Box::new(AuditResolver {
+    typer = match mode {
+        AuditProfileMode::Full if profile_timing => typer.with_resolver(Box::new(AuditResolver {
             inner: Some(resolver),
             metrics: Rc::clone(&probe_metrics),
             class_path_probe: Some(classpath.clone()),
             session_out: None,
-        }))
-    } else if timing_only {
-        typer.with_resolver(Box::new(TimingOnlyResolver {
-            inner: Some(resolver),
-            session_out: Rc::new(RefCell::new(None)),
-        }))
-    } else {
-        typer.with_resolver(Box::new(resolver))
+        })),
+        AuditProfileMode::CheapCounters if profile_timing => {
+            let cheap_metrics = Rc::clone(&probe_metrics.borrow().cheap_resolver_metrics);
+            typer.with_resolver(Box::new(CounterResolver {
+                inner: Some(resolver),
+                metrics: cheap_metrics,
+                session_out: Rc::new(RefCell::new(None)),
+            }))
+        }
+        AuditProfileMode::SemanticOnly if profile_timing => {
+            typer.with_resolver(Box::new(TimingOnlyResolver {
+                inner: Some(resolver),
+                session_out: Rc::new(RefCell::new(None)),
+            }))
+        }
+        _ => typer.with_resolver(Box::new(resolver)),
     };
 
     let mut successes = [
@@ -10939,7 +11427,7 @@ fn probe_supported_match_cases_in_index(
             };
             selector_outcomes.insert(key, (error_name, boundary));
         }
-        if profile_timing && !timing_only_profile {
+        if profile_timing && mode == AuditProfileMode::Full {
             let metrics = probe_metrics.borrow();
             eprintln!(
                 "AUDIT_MATCH_SELECTOR file={path} elapsed_ms={} module_identity_calls={}",
@@ -10978,7 +11466,7 @@ fn probe_supported_match_cases_in_index(
                 .expression_context_for(method)
                 .and_then(|context| typer.type_expression(match_tree, context)),
         };
-        if profile_timing && !timing_only_profile {
+        if profile_timing && mode == AuditProfileMode::Full {
             let metrics = probe_metrics.borrow();
             eprintln!(
                 "AUDIT_MATCH_PROBE_TIMING file={path} family={family} elapsed_ms={} module_identity_calls={}",
@@ -11058,6 +11546,12 @@ fn probe_supported_match_cases_in_index(
         );
         if timing_only_profile {
             eprintln!("AUDIT_MATCH_RESOLVER file={path} status=not_captured");
+        } else if mode == AuditProfileMode::CheapCounters {
+            print_cheap_resolver_metrics(
+                &probe_metrics.borrow().cheap_resolver_metrics.borrow(),
+                "match",
+            );
+            eprintln!("AUDIT_MATCH_RESOLVER file={path} status=cheap_counters");
         } else {
             print_match_resolver_metrics(
                 path,
@@ -11266,8 +11760,8 @@ fn audit_source_inner_filtered(
     focused_method_tree_filter: Option<&BTreeSet<u32>>,
 ) -> Audit {
     let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
-    let timing_only_profile =
-        profile_timing && std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1");
+    let mode = profile_mode();
+    let timing_only_profile = profile_timing && mode == AuditProfileMode::SemanticOnly;
     let file_started = Instant::now();
     let mut parse_time = Duration::ZERO;
     let mut inventory_time = Duration::ZERO;
@@ -11586,27 +12080,34 @@ fn audit_source_inner_filtered(
             definitions,
             LoadingSession::with_packages(packages),
         );
-        if !timing_only_profile {
+        if mode == AuditProfileMode::Full {
             resolver = resolver.with_load_profile_collection();
         }
-        if !timing_only_profile
+        if mode == AuditProfileMode::Full
             && (!profile_timing
                 || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1"))
         {
             resolver = resolver.with_module_resolution_profile_collection();
         }
-        if timing_only_profile {
-            typer = typer.with_resolver(Box::new(TimingOnlyResolver {
-                inner: Some(resolver),
-                session_out: Rc::clone(&resolver_session_out),
-            }));
-        } else {
-            typer = typer.with_resolver(Box::new(AuditResolver {
+        typer = match mode {
+            AuditProfileMode::Full => typer.with_resolver(Box::new(AuditResolver {
                 inner: Some(resolver),
                 metrics,
                 class_path_probe: Some(classpath),
                 session_out: Some(Rc::clone(&resolver_session_out)),
-            }));
+            })),
+            AuditProfileMode::CheapCounters => {
+                let cheap_metrics = Rc::clone(&metrics.borrow().cheap_resolver_metrics);
+                typer.with_resolver(Box::new(CounterResolver {
+                    inner: Some(resolver),
+                    metrics: cheap_metrics,
+                    session_out: Rc::clone(&resolver_session_out),
+                }))
+            }
+            AuditProfileMode::SemanticOnly => typer.with_resolver(Box::new(TimingOnlyResolver {
+                inner: Some(resolver),
+                session_out: Rc::clone(&resolver_session_out),
+            })),
         }
     }
     if profile_timing {
@@ -11648,7 +12149,7 @@ fn audit_source_inner_filtered(
                 })
                 .unwrap_or(0)
         });
-        let resolver_before = (profile_timing && !timing_only_profile).then(|| {
+        let resolver_before = (profile_timing && mode == AuditProfileMode::Full).then(|| {
             let metrics = request_metrics
                 .as_ref()
                 .expect("classpath profiling requires resolver metrics")
@@ -11677,7 +12178,9 @@ fn audit_source_inner_filtered(
                 method_line.unwrap_or(0)
             );
         }
-        if !timing_only_profile && let Some(metrics) = &request_metrics {
+        if mode == AuditProfileMode::Full
+            && let Some(metrics) = &request_metrics
+        {
             metrics.borrow_mut().current_method = format!(
                 "{}#tree={}::{}",
                 path,
@@ -11704,10 +12207,15 @@ fn audit_source_inner_filtered(
                 method_label.as_deref().unwrap_or("<unknown>"),
                 method_started.elapsed().as_millis()
             );
-            if timing_only_profile {
+            if mode != AuditProfileMode::Full {
                 eprintln!(
-                    "AUDIT_METHOD_RESOLVER_SKIPPED file={path} tree={} reason=timing_only",
-                    method_tree.index()
+                    "AUDIT_METHOD_RESOLVER_SKIPPED file={path} tree={} reason={}",
+                    method_tree.index(),
+                    if timing_only_profile {
+                        "semantic_only"
+                    } else {
+                        "cheap_counters"
+                    }
                 );
             } else {
                 let metrics = request_metrics
@@ -13292,6 +13800,13 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             wall_us.saturating_sub(delegated_us)
         );
     }
+    for (stage, timing) in &metrics.audit_stage_timings {
+        println!(
+            "AUDIT_RESOLVER_STAGE stage={stage} calls={} elapsed_us={}",
+            timing.calls,
+            timing.elapsed.as_micros()
+        );
+    }
     let module_profile = &metrics.module_resolution;
     let completed_module_classes = completed_module_class_targets(metrics);
     println!("module_resolution_profile:");
@@ -13687,6 +14202,13 @@ fn print_match_resolver_metrics(
             "AUDIT_MATCH_RESOLVER_WRAPPER file={path} operation={operation} calls={} wall_us={wall_us} delegated_us={delegated_us} exclusive_us={}",
             timing.calls,
             wall_us.saturating_sub(delegated_us)
+        );
+    }
+    for (stage, timing) in &metrics.audit_stage_timings {
+        println!(
+            "AUDIT_MATCH_RESOLVER_STAGE file={path} stage={stage} calls={} elapsed_us={}",
+            timing.calls,
+            timing.elapsed.as_micros()
         );
     }
 }
