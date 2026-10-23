@@ -1545,6 +1545,31 @@ mod tests {
             Err(AnyRefIdentityOperatorRegistrationError::MalformedCanonicalEntries)
         );
         assert_eq!(definitions.any_ref_identity_operator_symbols(&store), None);
+
+        let eq = store.symbols.get_mut(operators.eq);
+        eq.owner = Some(definitions.object_class);
+        eq.flags = SymbolFlags::FINAL | SymbolFlags::STATIC;
+        assert_eq!(
+            definitions.any_ref_identity_operator_symbols(&store),
+            None,
+            "a static symbol must not pass as an instance intrinsic"
+        );
+
+        let eq = store.symbols.get_mut(operators.eq);
+        eq.flags = SymbolFlags::FINAL;
+        let SymbolInfo::Complete(method_type) = eq.info else {
+            unreachable!();
+        };
+        let Type::Method(mut method) = store.types.get(method_type).clone() else {
+            unreachable!();
+        };
+        method.result = definitions.int;
+        eq.info = SymbolInfo::Complete(store.types.alloc(Type::Method(method)));
+        assert_eq!(
+            definitions.any_ref_identity_operator_symbols(&store),
+            None,
+            "a forged result type must not pass canonical signature validation"
+        );
     }
 
     #[test]
