@@ -106,6 +106,36 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["load_roots"][0]["root"], "scala/Function1")
         self.assertEqual(parsed["load_roots"][0]["distinct_classes"], 7)
 
+    def test_cheap_match_counters_sum_all_files_independent_of_order(self):
+        blocks = [
+            "AUDIT_CHEAP_RESOLVER scope=match operation=member_lookup calls=560 wall_us=1000 delegated_us=900 exclusive_us=100",
+            "AUDIT_CHEAP_RESOLVER_OUTCOMES scope=match operation=member_lookup ok=18 none=541 errors=1",
+            "AUDIT_CHEAP_RESOLVER scope=match operation=member_lookup calls=470 wall_us=2000 delegated_us=1800 exclusive_us=200",
+            "AUDIT_CHEAP_RESOLVER_OUTCOMES scope=match operation=member_lookup ok=5 none=464 errors=1",
+            "AUDIT_CHEAP_RESOLVER scope=match operation=member_lookup calls=1687 wall_us=3000 delegated_us=2900 exclusive_us=100",
+            "AUDIT_CHEAP_RESOLVER_OUTCOMES scope=match operation=member_lookup ok=18 none=1668 errors=1",
+        ]
+        permutations = [
+            [*blocks, "AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=0", "AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=0"],
+            [*reversed(blocks), "AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=0", "AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=0"],
+            [*blocks[2:], *blocks[:2], "AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=0", "AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=0"],
+        ]
+
+        results = [
+            sequential_profile.parse_run("\n".join(lines))
+            for lines in permutations
+        ]
+
+        for parsed in results:
+            self.assertEqual(
+                parsed["cheap_resolver"][("match", "member_lookup")],
+                {"calls": 2717, "wall_us": 6000, "delegated_us": 5600, "exclusive_us": 400},
+            )
+            self.assertEqual(
+                parsed["cheap_resolver_outcomes"][("match", "member_lookup")],
+                {"ok": 41, "none": 2673, "errors": 3},
+            )
+
     def test_report_timer_includes_sidecar_writes_and_is_recorded_in_summary(self):
         with tempfile.TemporaryDirectory() as temporary:
             original_write_text = Path.write_text
@@ -158,8 +188,10 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
                 "methods": {}, "resolver": {}, "summary": {"wall_ms": "20", "timing_mode": "cheap_counters"},
                 "loads": {}, "resolver_counts": {}, "load_roots": [], "cheap_resolver": {
                     ("source", "member_lookup"): {"calls": 5, "wall_us": 900, "delegated_us": 700, "exclusive_us": 200},
+                    ("match", "member_lookup"): {"calls": 17, "wall_us": 300, "delegated_us": 250, "exclusive_us": 50},
                 }, "cheap_resolver_outcomes": {
                     ("source", "member_lookup"): {"ok": 2, "none": 2, "errors": 1},
+                    ("match", "member_lookup"): {"ok": 3, "none": 13, "errors": 1},
                 }, "resolver_stages": [{"stage": "observation_collection", "calls": "5", "elapsed_us": "300"}],
             }
             sequential_profile.write_report(
@@ -171,6 +203,7 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
             stages = (Path(temporary) / "resolver-stages.tsv").read_text()
             summary = (Path(temporary) / "summary.md").read_text()
             self.assertIn("source\tmember_lookup\t5\t900\t700\t200\t2\t2\t1", cheap)
+            self.assertIn("match\tmember_lookup\t17\t300\t250\t50\t3\t13\t1", cheap)
             self.assertIn("source\tobservation_collection\t5\t300", stages)
             self.assertIn("Cheap counter adapter", summary)
             self.assertIn("Full-mode AuditResolver subphases", summary)

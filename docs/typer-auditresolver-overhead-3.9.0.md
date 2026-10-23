@@ -20,6 +20,8 @@ In C, the source-pass `AuditResolver` wrappers spent about 90.5 ms exclusive acr
 
 Delegated `member_lookup` consumed about 5.93 s in each source-method pass and 5.79 s in each match pass. Combined, this is approximately 11.72 s per sample, while full phase wall averages about 12.1 s. The measured cost is therefore dominated by real resolver work, not the `AuditResolver` wrapper. The classpath report records logical responses and returned bytes; it does not reveal physical JAR reads or decompression.
 
+The corrected B-mode aggregation retains all three match files on each repetition: 2,717 `member_lookup` calls, 5,033 `module_identity` calls, and 185 rollbacks per run. These counts match the corresponding full-mode cohort. The earlier generated B table had retained only the last match file; [`cheap-counters-summary.md`](typer-auditresolver-overhead-3.9.0/cheap-counters-summary.md) and [`cheap-resolver.tsv`](typer-auditresolver-overhead-3.9.0/cheap-resolver.tsv) were regenerated from the preserved logs after fixing the parser.
+
 The source pass recorded 386 rollbacks per repetition. The exclusive rollback wrapper plus rollback annotation was under 0.2 ms per sample; measured postprocessing was about 16 ms per sample. Neither currently supports a rollback or postprocessing optimization on performance grounds. Most observer collection time was in member request preparation and observation collection; the subphase table reports these separately. Subphase windows can overlap resolver call windows and must not be added to their totals.
 
 ## Semantic equivalence and interpretation
@@ -34,16 +36,22 @@ Run the same pinned manifest serially once per mode; each invocation itself cont
 
 ```sh
 python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
-  --mode semantic_only --runs 2 --method-limit-per-file 2 \
+  --mode semantic_only --runs 2 \
+  --manifest docs/typer-hot-path-profile-manifest-3.9.0.tsv \
+  --method-limit-per-file 2 --match-limit-per-file 1 \
   --output-dir target/issue-1483-semantic-only
 
 python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
-  --mode cheap_counters --runs 2 --method-limit-per-file 2 \
+  --mode cheap_counters --runs 2 \
+  --manifest docs/typer-hot-path-profile-manifest-3.9.0.tsv \
+  --method-limit-per-file 2 --match-limit-per-file 1 \
   --compare-with target/issue-1483-semantic-only \
   --output-dir target/issue-1483-cheap-counters
 
 python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
-  --mode full --runs 2 --method-limit-per-file 2 \
+  --mode full --runs 2 \
+  --manifest docs/typer-hot-path-profile-manifest-3.9.0.tsv \
+  --method-limit-per-file 2 --match-limit-per-file 1 \
   --compare-with target/issue-1483-semantic-only \
   --compare-with target/issue-1483-cheap-counters \
   --output-dir target/issue-1483-full

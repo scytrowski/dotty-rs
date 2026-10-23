@@ -195,11 +195,15 @@ def parse_run(log: str) -> dict:
         elif line.startswith("AUDIT_CHEAP_RESOLVER_OUTCOMES "):
             values = kvs(line)
             scope, operation = values.pop("scope"), values.pop("operation")
-            result["cheap_resolver_outcomes"][(scope, operation)] = {key: int(value) for key, value in values.items()}
+            totals = result["cheap_resolver_outcomes"].setdefault((scope, operation), {})
+            for key, value in values.items():
+                totals[key] = totals.get(key, 0) + int(value)
         elif line.startswith("AUDIT_CHEAP_RESOLVER "):
             values = kvs(line)
             scope, operation = values.pop("scope"), values.pop("operation")
-            result["cheap_resolver"][(scope, operation)] = {key: int(value) for key, value in values.items()}
+            totals = result["cheap_resolver"].setdefault((scope, operation), {})
+            for key, value in values.items():
+                totals[key] = totals.get(key, 0) + int(value)
         elif line.startswith("AUDIT_RESOLVER_WRAPPER "):
             values = kvs(line)
             operation = values.pop("operation")
