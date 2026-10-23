@@ -73,8 +73,11 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 /// uses descriptor `J` and occupies two JVM slots. The current expression
 /// subset supports Long literals, parameters, ordinary locals, assignments,
 /// returns, and private instance fields with primary-constructor
-/// initialization. Long calls, operators, and control-flow joins remain
-/// unsupported. References retain their exact planned class identity.
+/// initialization. Checked planned calls, Long constructor arguments,
+/// Long-valued `If` joins, and Long local updates across supported `While`
+/// loops are also supported. Long arithmetic, comparisons, static Long calls,
+/// and category-two stack manipulation remain unsupported. References retain
+/// their exact planned class identity.
 /// Unit-aware method and field metadata can encode those identities;
 /// store-only projectors remain narrower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1938,7 +1941,8 @@ pub fn lower_value_expression(
 /// no stack value; `Diverges` has no reachable fallthrough. Blocks discard unused primitive
 /// values with category-correct stack operations where supported and stop
 /// lowering after a definitely diverging statement. Long-valued branch joins
-/// and discarded Long statements remain unsupported.
+/// are supported; discarded Long statements remain unsupported because the
+/// standalone API does not emit category-two stack manipulation.
 /// The expression is built into a fresh method-local instruction builder, so
 /// an error never exposes partial code. This standalone API has no local
 /// binding layout; local `Ident` nodes return [`JvmCodegenError::MissingLocalBinding`].

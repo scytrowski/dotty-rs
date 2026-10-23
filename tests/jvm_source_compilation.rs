@@ -1720,37 +1720,32 @@ fn long_literals_parameters_locals_and_returns_verify_and_execute() {
 }
 
 #[test]
-fn unsupported_long_discard_and_control_flow_fail_without_artifacts() {
-    for (name, source) in [
-        (
-            "LongDiscard.scala",
-            "class LongDiscard:\n  def valueTwice(value: Long): Long =\n    value\n    value\n",
+fn discarded_long_values_remain_unsupported_and_arithmetic_fails_in_typer() {
+    let output = TestOutputDirectory::new("LongDiscard.scala");
+    let error = compile_source(
+        "class LongDiscard:\n  def valueTwice(value: Long): Long =\n    value\n    value\n",
+        "LongDiscard.scala",
+        output.path(),
+    )
+    .expect_err("discarding a Long requires unsupported pop2");
+    assert!(matches!(error, PipelineFailure::Codegen(_)));
+    assert!(output.class_files().is_empty());
+
+    let output = TestOutputDirectory::new("LongMixedJoin.scala");
+    let error = compile_source(
+        "class LongMixedJoin:\n  def choose(flag: Boolean, left: Long, right: Int): Long = if flag then left else right\n",
+        "LongMixedJoin.scala",
+        output.path(),
+    )
+    .expect_err("Long and Int branches do not gain an implicit numeric conversion");
+    assert!(
+        matches!(
+            error,
+            PipelineFailure::Typer(_) | PipelineFailure::Codegen(_)
         ),
-        (
-            "LongBranch.scala",
-            "class LongBranch:\n  def choose(flag: Boolean, left: Long, right: Long): Long = if flag then left else right\n",
-        ),
-        (
-            "LongAndAssignment.scala",
-            "class LongAndAssignment:\n  def update(flag: Boolean, value: Long): Long =\n    var saved: Long = 0L\n    flag && { saved = value; true }\n    saved\n",
-        ),
-        (
-            "LongOrAssignment.scala",
-            "class LongOrAssignment:\n  def update(flag: Boolean, value: Long): Long =\n    var saved: Long = 0L\n    flag || { saved = value; true }\n    saved\n",
-        ),
-    ] {
-        let output = TestOutputDirectory::new(name);
-        let error = compile_source(source, name, output.path())
-            .expect_err("unsupported Long operation must fail closed");
-        assert!(
-            matches!(error, PipelineFailure::Codegen(_)),
-            "{name}: {error:?}"
-        );
-        assert!(
-            output.class_files().is_empty(),
-            "{name} must not publish a partial class"
-        );
-    }
+        "mixed Long/Int join fails at a typed pipeline stage: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
 
     let output = TestOutputDirectory::new("LongArithmetic.scala");
     let error = compile_source(
@@ -1974,7 +1969,210 @@ fn long_fields_and_primary_constructor_initialization_verify_and_execute() {
 }
 
 #[test]
-fn long_category_two_audit_emits_fields_but_rejects_long_control_flow() {
+fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
+    let first_output = TestOutputDirectory::new("long-composition-first");
+    let second_output = TestOutputDirectory::new("long-composition-second");
+    let first = compile_fixture_classes("LongComposition.scala", first_output.path())
+        .expect("Long calls and CFG expressions compile");
+    let second = compile_fixture_classes("LongComposition.scala", second_output.path())
+        .expect("a fresh frontend compiles the same Long composition");
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        "fresh frontend sessions emit byte-identical Long classes"
+    );
+
+    let artifact = |name: &str| {
+        first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("{name} class is emitted"))
+    };
+    let long_box = decode_emitted_class(artifact("LongBox"));
+    let runner = decode_emitted_class(artifact("Runner"));
+    assert_eq!(
+        methods_with_descriptors(&long_box),
+        [
+            ("<init>".to_owned(), "(J)V".to_owned()),
+            ("get".to_owned(), "()J".to_owned()),
+            ("set".to_owned(), "(J)V".to_owned()),
+            ("select".to_owned(), "(IJZJ)J".to_owned()),
+        ]
+    );
+    assert_eq!(code_max_stack(&long_box, "select"), 2);
+    assert_eq!(code_max_locals(&long_box, "select"), 7);
+    assert_eq!(
+        methods_with_descriptors(&runner),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("choose".to_owned(), "(ZJJ)J".to_owned()),
+            ("loop".to_owned(), "(IJJ)J".to_owned()),
+            ("forward".to_owned(), "(LLongBox;)J".to_owned()),
+            ("mixed".to_owned(), "(LLongBox;ZJJ)J".to_owned()),
+            ("roundTrip".to_owned(), "(J)J".to_owned()),
+        ]
+    );
+
+    let choose_code = emitted_method_code(&runner, "choose");
+    assert_eq!(
+        decode_subset_instructions(choose_code)
+            .iter()
+            .map(|(_, opcode)| *opcode)
+            .collect::<Vec<_>>(),
+        [0x1b, 0x99, 0x20, 0xa7, 0x16, 0xad]
+    );
+    assert_eq!(code_max_stack(&runner, "choose"), 2);
+    assert_eq!(code_max_locals(&runner, "choose"), 6);
+    let choose_join = decode_branch_targets(choose_code)
+        .iter()
+        .find(|(_, opcode, _)| *opcode == 0xa7)
+        .map(|(_, _, target)| *target)
+        .expect("choose contains a false branch");
+    assert!(stack_map_frames(&runner, "choose").iter().any(|frame| {
+        frame.pc == choose_join && frame.stack == [StackMapVerificationType::Long]
+    }));
+
+    let loop_code = emitted_method_code(&runner, "loop");
+    assert_eq!(code_max_stack(&runner, "loop"), 2);
+    assert_eq!(code_max_locals(&runner, "loop"), 9);
+    let loop_targets = decode_branch_targets(loop_code);
+    let loop_header = loop_targets
+        .iter()
+        .find(|(offset, _, target)| target < offset)
+        .map(|(_, _, target)| *target)
+        .expect("loop has a backward edge");
+    let loop_frame = stack_map_frames(&runner, "loop")
+        .into_iter()
+        .find(|frame| frame.pc == loop_header)
+        .expect("loop header has a full StackMapTable frame");
+    assert_eq!(
+        loop_frame.locals,
+        [
+            StackMapVerificationType::Object("Runner".to_owned()),
+            StackMapVerificationType::Integer,
+            StackMapVerificationType::Long,
+            StackMapVerificationType::Long,
+            StackMapVerificationType::Long,
+            StackMapVerificationType::Integer,
+        ],
+        "parameter and mutable Long locals keep exact loop-header slots"
+    );
+    assert!(loop_frame.stack.is_empty());
+
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "forward"),
+        &[(0xb6, "LongBox", "get", "()J")],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "mixed"),
+        &[(0xb6, "LongBox", "select", "(IJZJ)J")],
+    );
+    assert_eq!(code_max_stack(&runner, "mixed"), 7);
+    assert_eq!(code_max_locals(&runner, "mixed"), 7);
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "roundTrip"),
+        &[
+            (0xb7, "LongBox", "<init>", "(J)V"),
+            (0xb6, "LongBox", "get", "()J"),
+        ],
+    );
+    assert_eq!(code_max_locals(&runner, "roundTrip"), 4);
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+
+    for class_name in ["LongBox", "Runner"] {
+        let output_path = first_output.path().to_str().expect("UTF-8 output path");
+        let javap = Command::new("javap")
+            .args(["-v", "-c", "-classpath", output_path, class_name])
+            .output()
+            .expect("start javap");
+        assert!(
+            javap.status.success(),
+            "javap rejected {class_name}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let text = String::from_utf8_lossy(&javap.stdout);
+        assert!(text.contains("lreturn"));
+        if class_name == "Runner" {
+            assert!(text.contains("StackMapTable"));
+            assert!(text.contains("descriptor: (ZJJ)J"));
+            assert!(text.contains("descriptor: (IJJ)J"));
+            assert!(text.contains("descriptor: (LLongBox;ZJJ)J"));
+            assert!(text.contains("invokespecial"));
+            assert!(text.contains("invokevirtual"));
+            assert!(text.contains("lload"));
+            assert!(text.contains("lstore"));
+        }
+    }
+
+    let output_path = first_output.path().to_str().expect("UTF-8 output path");
+    let harness = first_output.path().join("LongCompositionHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class LongCompositionHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    LongBox box = new LongBox(9000000000L);
+    if (runner.choose(true, 9000000000L, -9000000000L) != 9000000000L) throw new AssertionError("choose true");
+    if (runner.choose(false, 9000000000L, -9000000000L) != -9000000000L) throw new AssertionError("choose false");
+    if (runner.loop(0, 11L, 22L) != 11L || runner.loop(3, 11L, 22L) != 22L) throw new AssertionError("loop");
+    if (runner.mixed(box, true, Long.MIN_VALUE, 5L) != Long.MIN_VALUE || runner.mixed(box, false, 7L, -9000000000L) != -9000000000L) throw new AssertionError("mixed call");
+    if (runner.forward(box) != 9000000000L || runner.roundTrip(-9000000000L) != -9000000000L) throw new AssertionError("calls");
+    box.set(Long.MIN_VALUE);
+    if (runner.forward(box) != Long.MIN_VALUE) throw new AssertionError("LongBox state");
+    System.out.println("long composition ok");
+  }
+}
+"#,
+    )
+    .expect("write Long composition harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", output_path, "-d", output_path])
+        .arg(&harness)
+        .output()
+        .expect("start javac");
+    assert!(
+        javac.status.success(),
+        "javac rejected Long composition harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            output_path,
+            "LongCompositionHarness",
+        ])
+        .output()
+        .expect("start Java verifier");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected Long composition\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "long composition ok"
+    );
+}
+
+#[test]
+fn long_category_two_audit_emits_fields_and_control_flow() {
     let source = fs::read_to_string(fixture_path("LongCategoryTwo.scala"))
         .expect("read Scala Long category-two audit fixture");
     let output = TestOutputDirectory::new("scala-long-category-two-audit");
@@ -2079,14 +2277,11 @@ fn long_category_two_audit_emits_fields_but_rejects_long_control_flow() {
         observed,
         "parser, namer and typer completed before code generation: {result:?}"
     );
-    let emission_failure = result.expect_err("Long control-flow expressions remain out of scope");
-    assert!(matches!(
-        emission_failure,
-        PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression { .. })
-    ));
+    let artifacts = result.expect("Long control-flow expressions emit after #1518");
+    assert_eq!(artifacts.len(), 2);
     assert!(
-        output.class_files().is_empty(),
-        "unsupported Long field/control-flow methods publish no classes"
+        output.class_files().len() == 2,
+        "both Long category-two classes are published together"
     );
 }
 

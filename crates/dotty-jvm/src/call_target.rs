@@ -903,6 +903,7 @@ fn project_result_type(
     match store.types.try_get(ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmReturnType::Value(JvmType::Int)),
         Type::Constant(Constant::Boolean(_)) => Some(JvmReturnType::Value(JvmType::Boolean)),
+        Type::Constant(Constant::Long(_)) => Some(JvmReturnType::Value(JvmType::Long)),
         Type::Constant(Constant::Unit) => Some(JvmReturnType::Void),
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
@@ -919,13 +920,20 @@ fn project_result_type(
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
             ..
+        } if Some(*symbol) == type_symbol(store, definitions.long) => {
+            Some(JvmReturnType::Value(JvmType::Long))
+        }
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
         } if Some(*symbol) == type_symbol(store, definitions.unit) => Some(JvmReturnType::Void),
         Type::TypeRef { .. } => match crate::reference::project_type(unit, ty, definitions)
             .or_else(|_| crate::reference::project_constructor_type(unit, ty, definitions))
             .ok()?
         {
             JvmType::Reference(class) => Some(JvmReturnType::Value(JvmType::Reference(class))),
-            JvmType::Int | JvmType::Boolean | JvmType::Long => None,
+            JvmType::Int | JvmType::Boolean => None,
+            JvmType::Long => Some(JvmReturnType::Value(JvmType::Long)),
         },
         _ => None,
     }

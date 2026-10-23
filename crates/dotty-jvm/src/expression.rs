@@ -155,7 +155,6 @@ struct JvmLoweringContext<'a> {
     local_layout: Option<&'a JvmLocalLayout>,
     initialized_locals: HashSet<SymbolId>,
     reference_assignment_restricted_region_depth: usize,
-    long_control_flow_depth: usize,
     call_context: Option<(
         &'a JvmCompilationUnit<'a>,
         &'a JvmClassMetadata,
@@ -180,7 +179,6 @@ impl<'a> JvmLoweringContext<'a> {
             local_layout: None,
             initialized_locals: HashSet::new(),
             reference_assignment_restricted_region_depth: 0,
-            long_control_flow_depth: 0,
             call_context: None,
             expected_expression_type: None,
             node_visits: 0,
@@ -406,7 +404,6 @@ fn lower_leaf(
     match &tree.kind {
         TreeKind::Literal(literal) => {
             if let Constant::Long(value) = literal.value {
-                reject_long_control_flow_value(context, tree_id)?;
                 let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
                 let matches_constant_type = match context.store.types.try_get(tree.ty) {
                     Some(Type::Constant(typed_value)) => typed_value == &literal.value,
@@ -493,10 +490,7 @@ fn lower_leaf(
                     return Ok(Flow::Value(local.ty()));
                 }
                 let load = match local.ty() {
-                    JvmType::Long => {
-                        reject_long_control_flow_value(context, tree_id)?;
-                        code.lload(usize::from(local.slot()))
-                    }
+                    JvmType::Long => code.lload(usize::from(local.slot())),
                     JvmType::Int | JvmType::Boolean => code.iload(usize::from(local.slot())),
                     JvmType::Reference(_) => unreachable!("references use aload above"),
                 };
@@ -536,10 +530,7 @@ fn lower_leaf(
             match parameter.ty() {
                 JvmType::Reference(_) => code.aload(usize::from(parameter.slot())),
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(parameter.slot())),
-                JvmType::Long => {
-                    reject_long_control_flow_value(context, tree_id)?;
-                    code.lload(usize::from(parameter.slot()))
-                }
+                JvmType::Long => code.lload(usize::from(parameter.slot())),
             }
             .map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
@@ -933,7 +924,7 @@ fn emit_null_literal(
         });
     };
     if !matches!(
-        planned_reference_type(unit, expected_type, context.definitions)?,
+        planned_value_type(unit, expected_type, context.definitions)?,
         JvmType::Reference(_)
     ) {
         return Err(JvmCodegenError::UnsupportedTypedExpression {
@@ -946,7 +937,7 @@ fn emit_null_literal(
     Ok(Flow::Null)
 }
 
-fn planned_reference_type(
+fn planned_value_type(
     unit: &JvmCompilationUnit<'_>,
     ty: TypeId,
     definitions: &Definitions,
@@ -971,6 +962,9 @@ fn planned_reference_type(
     }
     if is_same_symbol(ty, definitions.boolean) {
         return Ok(JvmType::Boolean);
+    }
+    if is_same_symbol(ty, definitions.long) {
+        return Ok(JvmType::Long);
     }
     match unit.reference_type(ty, definitions) {
         Err(JvmCodegenError::UnsupportedJvmReferenceType {
@@ -1922,7 +1916,7 @@ fn contextual_block_value_type(
     if source_type == context.definitions.null_type
         && let Some(expected_type) = expected_type
     {
-        let expected = planned_reference_type(
+        let expected = planned_value_type(
             context.call_context.map(|(unit, _, _)| unit).ok_or(
                 JvmCodegenError::UnsupportedTypedExpression {
                     tree,
@@ -2338,7 +2332,7 @@ fn emit_object_creation(
                     method: context.method.symbol(),
                 });
             };
-            let source_type = planned_reference_type(unit, source_expected, context.definitions)?;
+            let source_type = planned_value_type(unit, source_expected, context.definitions)?;
             if source_type != expected {
                 return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
                     tree: tree_id,
@@ -2437,6 +2431,7 @@ fn validate_constructor_argument(
             let primitive = match literal.value {
                 Constant::Int(_) => JvmType::Int,
                 Constant::Boolean(_) => JvmType::Boolean,
+                Constant::Long(_) => JvmType::Long,
                 _ => return Err(unsupported()),
             };
             let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
@@ -2480,6 +2475,7 @@ fn validate_constructor_argument(
                     }
                     context.initialized_locals.contains(symbol)
                         && (matches!(local.ty(), JvmType::Int | JvmType::Boolean)
+                            || matches!(local.ty(), JvmType::Long)
                             || matches!(local.ty(), JvmType::Reference(_)))
                 } else {
                     false
@@ -2580,7 +2576,7 @@ fn validate_constructor_argument(
                     );
                     if let Some(source_expected) = source_expected {
                         let source_type =
-                            planned_reference_type(unit, source_expected, context.definitions)?;
+                            planned_value_type(unit, source_expected, context.definitions)?;
                         if source_type != formal {
                             return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
                                 tree: tree_id,
@@ -2795,7 +2791,7 @@ fn validate_constructor_reference_factory_call(
         let source_expected =
             source_method_parameter_type(context.store, target.method_symbol(), index);
         if let Some(source_expected) = source_expected {
-            let source_type = planned_reference_type(unit, source_expected, context.definitions)?;
+            let source_type = planned_value_type(unit, source_expected, context.definitions)?;
             if source_type != expected {
                 return Err(unsupported());
             }
@@ -2886,9 +2882,7 @@ fn emit_short_circuit_boolean_intrinsic(
 
     let initialized_on_skip = context.initialized_locals.clone();
     context.reference_assignment_restricted_region_depth += 1;
-    context.long_control_flow_depth += 1;
     let argument_flow = emit_expression(context, *argument, code, depth + 1)?;
-    context.long_control_flow_depth -= 1;
     context.reference_assignment_restricted_region_depth -= 1;
     if argument_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
@@ -3280,17 +3274,14 @@ fn emit_if(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    context.long_control_flow_depth += 1;
-    let result = emit_if_body(
+    emit_if_body(
         context,
         tree_id,
         expected_type,
         identity_reference_context,
         code,
         depth,
-    );
-    context.long_control_flow_depth -= 1;
-    result
+    )
 }
 
 fn emit_if_body(
@@ -3316,12 +3307,6 @@ fn emit_if_body(
             if_tree.else_branch,
         )
     };
-    if primitive_type(context.store, result_ty, context.definitions) == Some(JvmType::Long) {
-        return Err(JvmCodegenError::UnsupportedTypedExpression {
-            tree: tree_id,
-            node: "Long-valued control-flow expression",
-        });
-    }
     let condition_flow = emit_expression(context, condition, code, depth + 1)?;
     if condition_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::InvalidIfCondition {
@@ -3423,10 +3408,7 @@ fn emit_while(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    context.long_control_flow_depth += 1;
-    let result = emit_while_body(context, tree_id, code, depth);
-    context.long_control_flow_depth -= 1;
-    result
+    emit_while_body(context, tree_id, code, depth)
 }
 
 fn emit_while_body(
@@ -3498,6 +3480,12 @@ fn emit_while_body(
 
     let body_flow = emit_expression(context, body, code, depth + 1)?;
     match body_flow {
+        Flow::Value(JvmType::Long) => {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: body,
+                node: "discarded Long value requires category-two stack operation",
+            });
+        }
         Flow::Value(_) => {
             code.pop()
                 .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
@@ -3955,20 +3943,6 @@ fn primitive_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) 
             Some(JvmType::Long)
         }
         _ => None,
-    }
-}
-
-fn reject_long_control_flow_value(
-    context: &JvmLoweringContext<'_>,
-    tree: TreeId<Typed>,
-) -> Result<(), JvmCodegenError> {
-    if context.long_control_flow_depth > 0 {
-        Err(JvmCodegenError::UnsupportedTypedExpression {
-            tree,
-            node: "Long value inside control flow",
-        })
-    } else {
-        Ok(())
     }
 }
 
