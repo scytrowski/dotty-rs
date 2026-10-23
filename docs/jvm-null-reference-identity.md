@@ -13,7 +13,11 @@ At that revision, the [Scala expression specification](https://github.com/scala/
 states that `null` has type `scala.Null` and conforms to every reference type.
 For the null value, it specifies `eq` and `==` as true exactly when the
 argument is also null, and `ne` and `!=` as true when the argument is not null;
-other member access on that value throws `NullPointerException`.
+ordinary member access on that value throws `NullPointerException`. The same
+specification separately defines null-safe intrinsics: `isInstanceOf` returns
+`false`, `asInstanceOf` returns the target type's default value, and `##`
+returns zero. These intrinsic behaviors are recorded here as compatibility
+facts, not implemented by this audit.
 [`Definitions.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/core/Definitions.scala)
 models `AnyRef` as an alias of `Object`, declares `Object_eq` and `Object_ne`
 with signature `(AnyRef): Boolean`, and declares `Null` as a class whose
@@ -98,11 +102,19 @@ At the classfile layer:
   `encodes_every_verification_type_tag` regression checks that byte.
 - The exact CFG state model has `FlowValue::Integer`/`Object(ClassIdentity)` on
   the stack and `Top`/`Integer`/`Receiver`/`Object(ClassIdentity)` in locals.
-  It has no `Null` state. Its CFG analyzer rejects the current
-  `aconst_null; areturn` case with `UnsupportedFlowInstructionKind::Reference`.
+  It has no `Null` state. The context-free `CfgCodeAnalyzer::analyze`
+  entrypoint rejects `aconst_null; areturn` with
+  `UnsupportedFlowInstructionKind::Reference` because that entrypoint does not
+  admit reference flow.
 - The class-aware straight-line frame uses a generic reference category with
   no class identity for `aconst_null`; it cannot preserve `Null` distinctly
-  from an unclassified reference value.
+  from an unclassified reference value. `CfgCodeAnalyzer::analyze_with_current_class`
+  admits `aconst_null` as that unclassified reference, but
+  `aconst_null; areturn` still fails at instruction 1 with
+  `MissingExactReferenceReturn`. The in-block sequence
+  `aconst_null; astore; aload; pop; return` is accepted there. These outcomes
+  show a difference between instruction admission and exact null-flow identity;
+  neither provides first-class `Null` CFG support.
 - The current typed branch model handles integer conditions and integer
   comparisons. It has no reference equality or null-check branch variants.
 - `Object_eq`/`Object_ne` are Scala semantic method identities, not methods to
