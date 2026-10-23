@@ -25,6 +25,12 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The parameter order comes from the source constructor clause. | Identity audit only; public accessor ABI is out of scope. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same clause ordering as `val`. | Identity audit only; public getter/setter ABI is out of scope. |
 
+The combined [`LongCategory2.scala`](../tests/fixtures/jvm/LongCategory2.scala)
+fixture verifies these stateful shapes in the same three-class source batch as
+Long calls and control flow. Its test decodes all artifacts, checks exact field
+and method descriptors plus constructor initialization order, and executes
+cross-class reads and writes on JDK 21.
+
 The `Counter.get` method body also types to a `TermRef` for the canonical
 `current` field symbol. The exact typed RHS can be exported without a new API or retyping in
 `dotty-jvm`: `SourceTyper::type_expression_expected` returns the typed tree ID,

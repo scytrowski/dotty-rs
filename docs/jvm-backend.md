@@ -27,6 +27,10 @@ Long arguments to object creation and approved direct-parent constructor calls
 loops. Long arithmetic,
 comparisons, static Long calls, and category-two stack manipulation remain
 outside the supported subset.
+The #1519 `LongCategory2.scala` acceptance batch verifies the complete
+three-class source path and its signed 64-bit execution cases on JDK 21; the
+focused positive and fail-closed coverage is mapped in
+[`jvm-long-category2.md`](jvm-long-category2.md).
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,

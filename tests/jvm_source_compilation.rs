@@ -1740,10 +1740,10 @@ fn discarded_long_values_remain_unsupported_and_arithmetic_fails_in_typer() {
     .expect_err("Long and Int branches do not gain an implicit numeric conversion");
     assert!(
         matches!(
-            error,
-            PipelineFailure::Typer(_) | PipelineFailure::Codegen(_)
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::ReferenceClassNotInJvmPlan { .. })
         ),
-        "mixed Long/Int join fails at a typed pipeline stage: {error:?}"
+        "mixed Long/Int join fails with its exact backend plan error: {error:?}"
     );
     assert!(output.class_files().is_empty());
 
@@ -1766,6 +1766,169 @@ fn discarded_long_values_remain_unsupported_and_arithmetic_fails_in_typer() {
         "Long arithmetic currently stops at missing scala.Long class info: {error:?}"
     );
     assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn mismatched_long_fields_and_formals_fail_at_typer_without_class_artifacts() {
+    let cases = [
+        (
+            "LongToIntField",
+            "class LongToIntField:\n  private val value: Int = 1L\n",
+        ),
+        (
+            "LongToBooleanField",
+            "class LongToBooleanField:\n  private val value: Boolean = 1L\n",
+        ),
+        (
+            "LongToReferenceField",
+            "class LongBox(initial: Long)\nclass LongToReferenceField:\n  private val value: LongBox = 1L\n",
+        ),
+    ];
+    for (label, source) in cases {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("a Long initializer cannot be retyped as another field type");
+        let expected_error = if label == "LongToReferenceField" {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ExpectedExpressionConformanceUnsupported { .. })
+            )
+        } else {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
+            )
+        };
+        assert!(
+            expected_error,
+            "{label} must fail at the exact contextual Typer check: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure publishes no class files"
+        );
+    }
+
+    let cases = [
+        (
+            "LongToIntFormal",
+            "class LongToIntFormal:\n  def consume(value: Int): Int = value\n  def use(value: Long): Int = consume(value)\n",
+        ),
+        (
+            "LongToBooleanFormal",
+            "class LongToBooleanFormal:\n  def consume(value: Boolean): Boolean = value\n  def use(value: Long): Boolean = consume(value)\n",
+        ),
+        (
+            "LongToReferenceFormal",
+            "class LongBox(initial: Long)\nclass LongToReferenceFormal:\n  def consume(value: LongBox): LongBox = value\n  def use(value: Long): LongBox = consume(value)\n",
+        ),
+    ];
+    for (label, source) in cases {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("a Long argument cannot satisfy another formal parameter type");
+        let expected_error = if label == "LongToReferenceFormal" {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentConformanceUnsupported {
+                    argument_index: 0,
+                    ..
+                })
+            )
+        } else {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    ..
+                })
+            )
+        };
+        assert!(
+            expected_error,
+            "{label} must fail at the exact Typer application argument check: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure publishes no class files"
+        );
+    }
+}
+
+#[test]
+fn long_comparison_and_mixed_object_join_fail_closed_at_typer() {
+    let cases = [
+        (
+            "LongComparison",
+            "class LongComparison:\n  def less(left: Long, right: Long): Boolean = left < right\n",
+            "Long comparison remains unsupported by the source Typer",
+        ),
+        (
+            "LongObjectJoin",
+            "class LongBox(initial: Long)\nclass LongObjectJoin:\n  def choose(flag: Boolean, value: Long, box: LongBox): LongBox = if flag then value else box\n",
+            "a Long and a reference do not acquire a common source result type",
+        ),
+    ];
+    for (label, source, expectation) in cases {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err(expectation);
+        let expected_error = if label == "LongComparison" {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::MemberLookup(error))
+                    if matches!(
+                        **error,
+                        dotty_typer::MemberLookupError::ClassInfoUnavailable { .. }
+                    )
+            )
+        } else {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::IfBranchJoinUnsupported { .. })
+            )
+        };
+        assert!(
+            expected_error,
+            "{label} must fail at its exact first Typer stage: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure publishes no class files"
+        );
+    }
+}
+
+#[test]
+fn float_and_double_source_signatures_fail_at_backend_without_artifacts() {
+    for (label, source) in [
+        (
+            "FloatSignature",
+            "class FloatSignature:\n  def identity(value: Float): Float = value\n",
+        ),
+        (
+            "DoubleSignature",
+            "class DoubleSignature:\n  def identity(value: Double): Double = value\n",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source(source, &format!("{label}.scala"), output.path())
+            .expect_err("Float and Double remain outside the bounded JVM source subset");
+        assert!(
+            matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmReferenceType {
+                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass,
+                    ..
+                })
+            ),
+            "{label} must be rejected as an unsupported external JVM reference: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure publishes no class files"
+        );
+    }
 }
 
 #[test]
@@ -2201,6 +2364,380 @@ fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
     assert_eq!(
         String::from_utf8_lossy(&java.stdout).trim(),
         "long composition ok"
+    );
+}
+
+#[test]
+fn long_category_two_acceptance_batch_verifies_and_executes_on_jvm() {
+    let first_output = TestOutputDirectory::new("long-category2-first");
+    let second_output = TestOutputDirectory::new("long-category2-second");
+    let first = compile_fixture_classes("LongCategory2.scala", first_output.path())
+        .expect("the complete Scala 3.9 Long acceptance fixture compiles");
+    let second = compile_fixture_classes("LongCategory2.scala", second_output.path())
+        .expect("a fresh frontend session compiles the complete fixture");
+    let first_batch = first
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.class.internal_name(),
+                artifact.class.bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let second_batch = second
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.class.internal_name(),
+                artifact.class.bytes().to_vec(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        first_batch, second_batch,
+        "independent canonical source sessions emit byte-identical batches"
+    );
+    assert_eq!(
+        first_batch
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        ["LongBox", "LongConstants", "Runner"],
+        "batch publication follows source class order"
+    );
+    assert_eq!(first.len(), 3);
+    assert_eq!(first_output.class_files().len(), 3);
+
+    let artifact = |name: &str| {
+        first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("missing emitted {name} class"))
+    };
+    let decode = |name: &str| {
+        let mut reader = Reader::new(artifact(name).class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("emitted class decodes");
+        assert!(reader.is_at_end());
+        class
+            .validate_references()
+            .expect("all encoded references resolve");
+        assert_eq!(class.version.major, 65, "{name} uses Java 21 class files");
+        assert_eq!(class.version.minor, 0);
+        assert_eq!(class.constant_pool.class_name(class.this_class), Ok(name));
+        let super_class = class.super_class.expect("source class extends Object");
+        assert_eq!(
+            class.constant_pool.class_name(super_class),
+            Ok("java/lang/Object")
+        );
+        assert!(class.interfaces.is_empty());
+        assert!(class.access_flags.is_public());
+        for method in &class.methods {
+            assert!(method.access_flags.is_public());
+            assert!(matches!(method.attributes.as_slice(), [Attribute::Code(_)]));
+        }
+        class
+    };
+    let long_box = decode("LongBox");
+    let long_constants = decode("LongConstants");
+    let runner = decode("Runner");
+
+    assert_eq!(
+        methods_with_descriptors(&long_box),
+        [
+            ("<init>".to_owned(), "(J)V".to_owned()),
+            ("get".to_owned(), "()J".to_owned()),
+            ("set".to_owned(), "(J)V".to_owned()),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&long_constants),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("value".to_owned(), "()J".to_owned()),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&runner),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("zero".to_owned(), "()J".to_owned()),
+            ("one".to_owned(), "()J".to_owned()),
+            ("constant".to_owned(), "()J".to_owned()),
+            ("roundTrip".to_owned(), "(J)J".to_owned()),
+            ("reassigned".to_owned(), "(JJ)J".to_owned()),
+            ("choose".to_owned(), "(ZJJ)J".to_owned()),
+            ("loop".to_owned(), "(IJJ)J".to_owned()),
+            ("forward".to_owned(), "(LLongBox;)J".to_owned()),
+            ("construct".to_owned(), "(J)J".to_owned()),
+        ]
+    );
+
+    let [current] = long_box.fields.as_slice() else {
+        panic!("LongBox contains only its current field")
+    };
+    assert_eq!(
+        long_box.constant_pool.utf8(current.name_index),
+        Ok("current")
+    );
+    assert_eq!(
+        long_box.constant_pool.utf8(current.descriptor_index),
+        Ok("J")
+    );
+    assert_eq!(
+        current.access_flags.0,
+        dotty_classfile::access_flags::ACC_PRIVATE
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&long_box, "<init>"),
+        &[0x2a, 0xb7, 0x2a, 0x1f, 0xb5, 0xb1],
+    );
+    assert_method_reference(
+        &long_box,
+        emitted_method_code(&long_box, "<init>"),
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_field_reference(
+        &long_box,
+        emitted_method_code(&long_box, "<init>"),
+        0xb5,
+        "LongBox",
+        "current",
+        "J",
+    );
+    assert_eq!(code_max_stack(&long_box, "<init>"), 3);
+    assert_eq!(code_max_locals(&long_box, "<init>"), 3);
+    assert_opcode_sequence(emitted_method_code(&long_box, "get"), &[0x2a, 0xb4, 0xad]);
+    assert_field_reference(
+        &long_box,
+        emitted_method_code(&long_box, "get"),
+        0xb4,
+        "LongBox",
+        "current",
+        "J",
+    );
+    assert_eq!(code_max_stack(&long_box, "set"), 3);
+    assert_eq!(code_max_locals(&long_box, "set"), 6);
+    assert_field_reference(
+        &long_box,
+        emitted_method_code(&long_box, "set"),
+        0xb5,
+        "LongBox",
+        "current",
+        "J",
+    );
+
+    let [large] = long_constants.fields.as_slice() else {
+        panic!("LongConstants contains only its large field")
+    };
+    assert_eq!(
+        long_constants.constant_pool.utf8(large.name_index),
+        Ok("large")
+    );
+    assert_eq!(
+        long_constants.constant_pool.utf8(large.descriptor_index),
+        Ok("J")
+    );
+    assert_eq!(
+        large.access_flags.0,
+        dotty_classfile::access_flags::ACC_PRIVATE | dotty_classfile::access_flags::ACC_FINAL
+    );
+    let constant_init = emitted_method_code(&long_constants, "<init>");
+    assert_opcode_sequence(constant_init, &[0x2a, 0xb7, 0x2a, 0x14, 0xb5, 0xb1]);
+    assert_method_reference(
+        &long_constants,
+        constant_init,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_field_reference(
+        &long_constants,
+        constant_init,
+        0xb5,
+        "LongConstants",
+        "large",
+        "J",
+    );
+    assert_eq!(code_max_stack(&long_constants, "<init>"), 3);
+    assert_eq!(code_max_locals(&long_constants, "<init>"), 1);
+    assert_opcode_sequence(
+        emitted_method_code(&long_constants, "value"),
+        &[0x2a, 0xb4, 0xad],
+    );
+
+    let long_constant_index = (1..=u16::MAX)
+        .find(|index| {
+            matches!(
+                long_constants.constant_pool.get(ConstantPoolIndex(*index)),
+                Some(ConstantPoolEntry::Long(9_000_000_000))
+            )
+        })
+        .expect("LongConstants stores the full signed 64-bit literal");
+    assert!(
+        long_constants
+            .constant_pool
+            .get(ConstantPoolIndex(long_constant_index + 1))
+            .is_none(),
+        "CONSTANT_Long reserves the following constant-pool index"
+    );
+    assert_eq!(emitted_method_code(&runner, "zero"), [0x09, 0xad]);
+    assert_eq!(emitted_method_code(&runner, "one"), [0x0a, 0xad]);
+    let constant_code = emitted_method_code(&runner, "constant");
+    assert_eq!(constant_code[0], 0x14, "nontrivial Long uses ldc2_w");
+    assert_eq!(*constant_code.last().unwrap(), 0xad);
+    assert_eq!(code_max_stack(&runner, "constant"), 2);
+    assert_eq!(code_max_locals(&runner, "roundTrip"), 5);
+    assert_eq!(code_max_locals(&runner, "reassigned"), 7);
+    assert_eq!(code_max_stack(&runner, "reassigned"), 2);
+
+    let choose_code = emitted_method_code(&runner, "choose");
+    assert_eq!(code_max_stack(&runner, "choose"), 2);
+    assert_eq!(code_max_locals(&runner, "choose"), 6);
+    let choose_join = decode_branch_targets(choose_code)
+        .iter()
+        .find(|(_, opcode, _)| *opcode == 0xa7)
+        .map(|(_, _, target)| *target)
+        .expect("choose has a conditional branch to its Long join");
+    assert!(stack_map_frames(&runner, "choose").iter().any(|frame| {
+        frame.pc == choose_join && frame.stack == [StackMapVerificationType::Long]
+    }));
+
+    let loop_code = emitted_method_code(&runner, "loop");
+    assert_eq!(code_max_stack(&runner, "loop"), 2);
+    assert_eq!(code_max_locals(&runner, "loop"), 9);
+    let loop_header = decode_branch_targets(loop_code)
+        .iter()
+        .find(|(offset, _, target)| target < offset)
+        .map(|(_, _, target)| *target)
+        .expect("loop has a verified backedge");
+    let loop_frame = stack_map_frames(&runner, "loop")
+        .into_iter()
+        .find(|frame| frame.pc == loop_header)
+        .expect("loop header has a full Long local frame");
+    assert_eq!(
+        loop_frame.locals,
+        [
+            StackMapVerificationType::Object("Runner".to_owned()),
+            StackMapVerificationType::Integer,
+            StackMapVerificationType::Long,
+            StackMapVerificationType::Long,
+            StackMapVerificationType::Long,
+            StackMapVerificationType::Integer,
+        ]
+    );
+    assert!(loop_frame.stack.is_empty());
+
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "forward"),
+        &[(0xb6, "LongBox", "get", "()J")],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "construct"),
+        &[
+            (0xb7, "LongBox", "<init>", "(J)V"),
+            (0xb6, "LongBox", "get", "()J"),
+        ],
+    );
+    assert_eq!(code_max_locals(&runner, "construct"), 4);
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = first_output.path().to_str().expect("UTF-8 output path");
+    for class_name in ["LongBox", "LongConstants", "Runner"] {
+        let javap = Command::new("javap")
+            .args(["-v", "-c", "-classpath", classpath, class_name])
+            .output()
+            .expect("start javap");
+        assert!(
+            javap.status.success(),
+            "javap rejected {class_name}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let text = String::from_utf8_lossy(&javap.stdout);
+        assert!(text.contains("major version: 65"));
+        if class_name != "LongConstants" {
+            assert!(text.contains("lreturn"));
+        }
+        if class_name == "LongConstants" {
+            assert!(text.contains("ldc2_w"));
+            assert!(text.contains("9000000000"));
+            assert!(text.contains("descriptor: ()J"));
+        }
+        if class_name == "Runner" {
+            for descriptor in ["(ZJJ)J", "(IJJ)J", "(LLongBox;)J", "(J)J"] {
+                assert!(text.contains(&format!("descriptor: {descriptor}")));
+            }
+            assert!(text.contains("StackMapTable"));
+            assert!(text.contains("invokespecial"));
+            assert!(text.contains("invokevirtual"));
+            assert!(text.contains("ldc2_w"));
+            assert!(text.contains("lload"));
+            assert!(text.contains("lstore"));
+        }
+    }
+
+    let harness = first_output.path().join("LongCategory2Harness.java");
+    fs::write(
+        &harness,
+        r#"public final class LongCategory2Harness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    if (runner.zero() != 0L || runner.one() != 1L || runner.constant() != 9000000000L) throw new AssertionError("constants");
+    if (new LongConstants().value() != 9000000000L) throw new AssertionError("LongConstants field");
+    for (long value : new long[] {0L, 9000000000L, -9000000000L, Long.MIN_VALUE, Long.MAX_VALUE}) {
+      if (runner.roundTrip(value) != value || runner.construct(value) != value) throw new AssertionError("roundTrip/construct " + value);
+    }
+    if (runner.reassigned(7L, -9000000000L) != -9000000000L) throw new AssertionError("reassigned");
+    if (runner.choose(true, 9000000000L, -9000000000L) != 9000000000L || runner.choose(false, 9000000000L, -9000000000L) != -9000000000L) throw new AssertionError("choose");
+    if (runner.loop(0, 11L, 22L) != 11L || runner.loop(1, 11L, 22L) != 22L || runner.loop(3, 11L, 22L) != 22L || runner.loop(-2, 11L, 22L) != 11L) throw new AssertionError("loop");
+    LongBox first = new LongBox(9000000000L);
+    LongBox second = new LongBox(-9000000000L);
+    if (runner.forward(first) != 9000000000L || runner.forward(second) != -9000000000L) throw new AssertionError("forward");
+    first.set(Long.MIN_VALUE);
+    if (runner.forward(first) != Long.MIN_VALUE || runner.forward(second) != -9000000000L) throw new AssertionError("independent fields");
+    System.out.println("Long category-two acceptance ok");
+  }
+}
+"#,
+    )
+    .expect("write acceptance harness");
+    let javac = Command::new("javac")
+        .args(["-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac");
+    assert!(
+        javac.status.success(),
+        "javac rejected acceptance harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "LongCategory2Harness",
+        ])
+        .output()
+        .expect("start Java verifier");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected acceptance classes\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "Long category-two acceptance ok"
     );
 }
 

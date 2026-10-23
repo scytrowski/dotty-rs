@@ -67,10 +67,11 @@ Straight-line methods use the linear analyzer and do not receive an automatic
 `StackMapTable`. Branched methods use symbolic labels, CFG analysis, final
 assembled byte offsets, and `full_frame` entries. Automatic branched emission
 requires class-file major version 65 or newer. It accepts only the analyzer's
-integer, null, initialized-object, and current-receiver states; it is not a
-general JVM verifier and rejects category-two, incompatible-stack,
-uninitialized-local, and unreachable-block flows. Reference branches accept
-initialized objects and `null`, but reject an uninitialized allocation. The
+integer and bounded category-two Long states, plus null, initialized-object,
+and current-receiver states; it is not a general JVM verifier and rejects
+unsupported category-two operations, incompatible-stack, uninitialized-local,
+and unreachable-block flows. Reference branches accept initialized objects and
+`null`, but reject an uninitialized allocation. The
 identity branches compare object identity and do not infer a source-level
 equality operation. Unreachable bytecode is rejected because automatic frame generation
 does not infer verifier states for dead code.

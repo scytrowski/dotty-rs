@@ -15,7 +15,7 @@ revision `777528f19a58e794c9954a42f433373472ec57f8`.
 | Stack-map wire model | `VerificationTypeInfo::Long` uses verification tag 4 and has a two-slot local width. A stack-map frame stores one verification entry for a `Long`, not two entries. |
 | CFG analyzer | Supports `Long` parameters, constants, local loads/stores, `lreturn`, branch joins, loop backedges, physical slot accounting, StackMapTable projection, class-aware instance field transfer for descriptor `J`, and exact virtual/constructor invocation transfer for `J` parameters and results. Static Long calls and Long arithmetic remain outside this increment. |
 
-`LongValues.scala` exercises #1516 through the real source pipeline. `LongFields.scala` exercises #1517's `LongBox` constructor parameter, mutable `current:J` field, getter/setter, and immutable `number:J` literal field. `LongComposition.scala` exercises #1518 with a mixed `(IJZJ)J` virtual call, a `Long`-valued `If`, a Boolean-controlled loop with a mutable Long local, `(J)V` object creation and direct-parent constructor calls from both a Long parameter and a Long literal. Tests check decoded descriptors and invocation owners, instruction order, Long StackMapTable joins, physical `max_locals`/`max_stack`, `javap`, deterministic fresh-session bytes, and signed 64-bit execution under `java -Xverify:all`. `LongCategoryTwo.scala` remains an additional source metadata and emission audit fixture.
+`LongValues.scala` exercises #1516 through the real source pipeline. `LongFields.scala` exercises #1517's `LongBox` constructor parameter, mutable `current:J` field, getter/setter, and immutable `number:J` literal field. `LongComposition.scala` exercises #1518 with a mixed `(IJZJ)J` virtual call, a `Long`-valued `If`, a Boolean-controlled loop with a mutable Long local, `(J)V` object creation and direct-parent constructor calls from both a Long parameter and a Long literal. `LongCategory2.scala` is the #1519 acceptance batch: one source session emits `LongBox`, `LongConstants`, and `Runner`; its integration test checks descriptors, fields, constant-pool Long slots, constructor and call order, frames, physical `max_locals`/`max_stack`, deterministic bytes from fresh sessions, and signed 64-bit behavior under `java -Xverify:all`. `LongCategoryTwo.scala` remains an additional source metadata and emission audit fixture.
 
 The current source frontend cannot reach backend validation for Long arithmetic:
 `value + 1L` stops in `SourceTyper` with `MemberLookupError::ClassInfoUnavailable`
@@ -36,6 +36,11 @@ unchanged.
 | `Runner.roundTrip(value: Long)` | `(J)J` |
 | `Runner.choose(flag: Boolean, left: Long, right: Long)` | `(ZJJ)J` |
 | `Runner.repeat(n: Int, first: Long, second: Long)` | `(IJJ)J` |
+
+The #1519 acceptance source is a separate Rust-frontend integration fixture at
+[`LongCategory2.scala`](../tests/fixtures/jvm/LongCategory2.scala). It combines
+the field, constructor, call, branch, and loop shapes into the exact three-class
+batch checked by `long_category_two_acceptance_batch_verifies_and_executes_on_jvm`.
 
 The emitted constructor uses `lload_1` for its `Long` parameter, after
 `this` occupies local slot 0. In an instance method with descriptor `(J)J`,
@@ -119,6 +124,36 @@ physical stack/local maxima, and rejection of an Int where a Long is required.
 `Ldc2` uses the existing validated constant-pool path; arithmetic, `lcmp`,
 `pop2`/`dup2`, and conversions remain unsupported.
 
+## Acceptance failure matrix
+
+`mismatched_long_fields_and_formals_fail_at_typer_without_class_artifacts`
+asserts each source failure's first stage and verifies that a failed batch
+publishes no class files. Int and Boolean field mismatches produce
+`ExpectedExpressionTypeMismatch`; a Long initializer for a planned reference
+field produces `ExpectedExpressionConformanceUnsupported`; Int and Boolean
+formals produce `ApplicationArgumentTypeMismatch`; and a reference formal
+produces `ApplicationArgumentConformanceUnsupported` while class info for the
+reference is unavailable. The same test pins a mixed Long/Int branch to the
+current backend rejection `ReferenceClassNotInJvmPlan`, also with no files.
+
+`long_comparison_and_mixed_object_join_fail_closed_at_typer` pins Long
+comparison to the current missing `scala.Long` `ClassInfoUnavailable` lookup
+and a Long/reference branch join to `IfBranchJoinUnsupported`. The tests expect
+these current first errors; they do not change or bypass Typer behavior.
+`float_and_double_source_signatures_fail_at_backend_without_artifacts` pins
+Float and Double signatures to `UnsupportedJvmReferenceType(ExternalClass)`
+during backend projection.
+
+The lower-level malformed bytecode cases remain covered at their owning layer:
+`long_locals_are_pair_aware_at_joins_and_overlapping_stores` checks tail
+overlap, unassigned locals, and incompatible local evidence;
+`long_stack_joins_reject_integer_values_in_both_predecessor_orders` checks
+stack-shape failure; `reference_flow_is_rejected_and_category_two_opcode_errors_are_typed`
+checks one-slot operations on Long; and
+`parameter_slot_limit_matches_the_linear_analyzer` checks the JVM parameter
+unit limit. The class-file builder and decoder suites retain malformed
+constant-pool, constructor-owner, and StackMapTable rejection coverage.
+
 ## JVMS 21 constraints
 
 The class-file descriptor for `long` is `J` ([JVMS 21 §4.3.3](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-4.html#jvms-4.3.3)). A `long` value occupies two consecutive local-variable slots and two operand-stack units; the second local slot is not an independently loadable value. A store to that second slot invalidates the overlapping category-two value ([JVMS 21 §2.6.1](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html#jvms-2.6.1), [§2.6.2](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-2.html#jvms-2.6.2)).
@@ -136,7 +171,8 @@ The JVM Backend issues split implementation into descriptors and slot
 allocation (#1514), CFG category-two state (#1515), literal/local/return
 lowering (#1516), fields and constructors (#1517), calls and `If`/`While`
 control flow (#1518), and broader end-to-end verification (#1519). Issues
-#1514–#1518 now cover descriptors, CFG, straight-line values, private fields,
-planned calls, and bounded Long control flow. Long arithmetic, Long comparison,
+#1514–#1519 now cover descriptors, CFG, straight-line values, private fields,
+planned calls, bounded Long control flow, and a complete JDK 21 acceptance batch.
+Long arithmetic, Long comparison,
 category-two stack manipulation, conversions, and static Long calls remain
 follow-up work; Typer is unchanged.

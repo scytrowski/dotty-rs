@@ -105,20 +105,21 @@ and loop backedges. It stores one logical `Long` on the operand stack while
 counting two physical stack slots. Locals track `Long` and `LongTail`
 separately, invalidate overlapping pairs on stores, and merge an uncertain
 pair to `Top`. Frame projection emits one Long verification entry and skips
-the tail while preserving genuine Top holes. Long arithmetic, `lcmp`,
-`dup2`/`pop2`, conversions, and Long field or method transfer remain
-unsupported.
+the tail while preserving genuine Top holes. Class-aware instance Long field
+transfer and exact virtual/approved constructor transfer are supported for
+descriptor `J`. Long arithmetic, `lcmp`, `dup2`/`pop2`, conversions, static
+Long calls, and branched constructors remain unsupported.
 
 For an ordinary non-static, non-constructor method, the initial local 0 is
 `Initialized(emitting_class)`. Static methods start with descriptor-derived
 parameters, including exact object identities. The Scala source backend still
 restricts emitted public method signatures to its existing subset. A constructor starts with
 `UninitializedThis`; do not treat it as an ordinary receiver. The validated
-branchless constructor path accepts only a bounded sequence of integer
-constants and loads from initialized constructor parameter locals before one
-direct-super `<init>` call. It checks the call's owner, descriptor, argument
-categories, and exact reference identities before analyzing the remainder as
-initialized `this`. Branched constructor flow remains unsupported.
+branchless constructor path accepts a bounded sequence of supported integer
+and Long constants and loads from initialized constructor parameter locals
+before one direct-super `<init>` call. It checks the call's owner, descriptor,
+argument categories, and exact reference identities before analyzing the
+remainder as initialized `this`. Branched constructor flow remains unsupported.
 
 ## Join and termination policy
 
