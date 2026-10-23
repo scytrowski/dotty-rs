@@ -11,7 +11,7 @@ use dotty_core::ast::{
 };
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TreeId};
-use dotty_core::names::{Name, Namespace, TermName};
+use dotty_core::names::{Name, NameInterner, Namespace, TermName};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{
     Scope, Symbol, SymbolFlags, SymbolInfo, SymbolKind, SymbolLinks, SymbolOrigin, Visibility,
@@ -4172,6 +4172,40 @@ fn long_descriptor_projection_rejects_invalid_builtin_symbols() {
             "corrupted Long builtin {corrupt_symbol} was accepted"
         );
     }
+}
+
+#[test]
+fn long_descriptor_projection_rejects_a_stale_builtin_name() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let long_symbol = store
+        .types
+        .get(definitions.long)
+        .reference_symbol()
+        .expect("Long definition has a canonical symbol");
+    let mut foreign_names = NameInterner::new();
+    let mut foreign_name = foreign_names.intern("foreign-0");
+    for index in 1..=4096 {
+        foreign_name = foreign_names.intern(&format!("foreign-{index}"));
+    }
+    store.symbols.get_mut(long_symbol).name = Name::new(foreign_name, Namespace::Type);
+
+    let fixture = SignatureFixture::from_store(
+        store,
+        definitions,
+        &[definitions.int],
+        definitions.int,
+        SymbolFlags::EMPTY,
+        MethodKind::Plain,
+    );
+
+    assert!(matches!(
+        fixture.descriptor(),
+        Err(JvmCodegenError::InvalidBuiltinDefinition {
+            builtin: PrimitiveBuiltin::Long,
+            ty,
+        }) if ty == definitions.long
+    ));
 }
 
 #[test]

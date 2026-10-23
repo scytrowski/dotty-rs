@@ -461,7 +461,7 @@ fn long_builtin_symbol(
         SymbolInfo::Deferred(_) | SymbolInfo::Error => false,
     };
     if builtin.name.namespace() != dotty_core::Namespace::Type
-        || store.names.resolve(builtin.name.text()) != "Long"
+        || store.names.try_resolve(builtin.name.text()) != Some("Long")
         || builtin.kind != SymbolKind::Class
         || builtin.owner.is_some()
         || builtin.flags != SymbolFlags::EMPTY
