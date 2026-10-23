@@ -2232,6 +2232,7 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
         let counter = audit_class_named(unit, "Counter");
         let holder = audit_class_named(unit, "Holder");
         let owned_holder = audit_class_named(unit, "OwnedHolder");
+        let pair = audit_class_named(unit, "Pair");
         let runner = audit_class_named(unit, "Runner");
         let primary_constructor = |class| {
             let plan = unit
@@ -2248,6 +2249,7 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
         let counter_constructor = primary_constructor(counter).symbol();
         let holder_constructor = primary_constructor(holder).symbol();
         let owned_holder_constructor = primary_constructor(owned_holder).symbol();
+        let pair_constructor = primary_constructor(pair).symbol();
 
         let owner_name = |symbol: SymbolId| {
             let owner = unit
@@ -2265,6 +2267,7 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
             (counter_constructor, "Counter"),
             (holder_constructor, "Holder"),
             (owned_holder_constructor, "OwnedHolder"),
+            (pair_constructor, "Pair"),
             (audit_method_named(unit, counter, "get").method, "Counter"),
             (audit_method_named(unit, holder, "get").method, "Holder"),
             (audit_method_named(unit, holder, "value").method, "Holder"),
@@ -2355,6 +2358,18 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
                 "Runner.{method} retains the canonical Holder constructor application"
             );
         }
+        let from_local_targets = targets("fromLocal");
+        assert!(from_local_targets.contains(&holder_constructor));
+        let pair_targets = targets("createPair");
+        assert!(pair_targets.contains(&pair_constructor));
+        assert_eq!(
+            pair_targets
+                .iter()
+                .filter(|target| **target == counter_constructor)
+                .count(),
+            2,
+            "both Pair arguments retain the canonical Counter constructor"
+        );
 
         let existing = audit_method_named(unit, runner, "existing");
         let TreeKind::Apply(existing_call) = &unit.typed_ast.get(existing.body.unwrap()).kind
@@ -2622,16 +2637,16 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
     );
     let artifacts =
         result.expect("the audited object graph now emits its direct-new field initializer");
-    assert_eq!(artifacts.len(), 4, "the complete source batch is emitted");
+    assert_eq!(artifacts.len(), 5, "the complete source batch is emitted");
     assert_eq!(
         output.class_files().len(),
-        4,
+        5,
         "all classfiles are published"
     );
 }
 
 #[test]
-fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
+fn object_graph_acceptance_batch_is_complete_deterministic_and_jdk_verified() {
     let source = fs::read_to_string(fixture_path("ObjectGraphConstruction.scala"))
         .expect("read the source-backed object graph fixture");
     let output = TestOutputDirectory::new("object-graph-chained-receivers");
@@ -2639,7 +2654,7 @@ fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
         &source,
         "ObjectGraphConstruction.scala",
         output.path(),
-        SourceId::from_index(1498),
+        SourceId::from_index(1499),
         SourceUnitCardinality::AtLeastTwo,
     )
     .expect("real object graph source emits chained reference receivers");
@@ -2649,7 +2664,7 @@ fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
         &source,
         "ObjectGraphConstruction.scala",
         repeated_output.path(),
-        SourceId::from_index(1499),
+        SourceId::from_index(1500),
         SourceUnitCardinality::AtLeastTwo,
     )
     .expect("a fresh frontend session emits the same source batch");
@@ -2657,6 +2672,34 @@ fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
     for (first, second) in artifacts.iter().zip(&repeated) {
         assert_eq!(first.class.internal_name(), second.class.internal_name());
         assert_eq!(first.class.bytes(), second.class.bytes());
+    }
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Counter", "Holder", "OwnedHolder", "Pair", "Runner"],
+        "complete class batch publishes in source order"
+    );
+    assert_eq!(output.class_files().len(), 5);
+    for artifact in &artifacts {
+        let class = decode_emitted_class(artifact);
+        class.validate_references().unwrap_or_else(|error| {
+            panic!(
+                "{} references validate: {error}",
+                artifact.class.internal_name()
+            )
+        });
+        assert_eq!(class.version.major, 65);
+        let super_class = class
+            .super_class
+            .expect("emitted classes have a superclass");
+        assert_eq!(
+            class.constant_pool.class_name(super_class),
+            Ok("java/lang/Object"),
+            "{} has its checked Object superclass",
+            artifact.class.internal_name()
+        );
     }
 
     let runner_artifact = artifacts
@@ -2666,7 +2709,66 @@ fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
     let runner = decode_emitted_class(runner_artifact);
     runner
         .validate_references()
-        .expect("all chained receiver constant-pool references resolve");
+        .expect("all object-graph constant-pool references resolve");
+    let counter = decode_emitted_class(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Counter")
+            .expect("Counter is emitted"),
+    );
+    let holder = decode_emitted_class(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Holder")
+            .expect("Holder is emitted"),
+    );
+    let owned_holder = decode_emitted_class(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "OwnedHolder")
+            .expect("OwnedHolder is emitted"),
+    );
+    let pair = decode_emitted_class(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Pair")
+            .expect("Pair is emitted"),
+    );
+    for (class, field_name, descriptor, is_final) in [
+        (&counter, "current", "I", false),
+        (&holder, "inner", "LCounter;", true),
+        (&owned_holder, "inner", "LCounter;", true),
+        (&pair, "savedFirst", "LCounter;", true),
+        (&pair, "savedSecond", "LCounter;", true),
+        (&runner, "receiverCalls", "I", false),
+    ] {
+        let field = class
+            .fields
+            .iter()
+            .find(|field| class.constant_pool.utf8(field.name_index) == Ok(field_name))
+            .unwrap_or_else(|| panic!("missing field {field_name}"));
+        assert_eq!(
+            class.constant_pool.utf8(field.descriptor_index),
+            Ok(descriptor),
+            "field {field_name} descriptor"
+        );
+        assert!(
+            field.access_flags.is_private(),
+            "field {field_name} is private"
+        );
+        assert_eq!(
+            field.access_flags.is_final(),
+            is_final,
+            "field {field_name} finality"
+        );
+    }
+    assert!(methods_with_descriptors(&counter).contains(&("<init>".into(), "(I)V".into())));
+    assert!(methods_with_descriptors(&holder).contains(&("<init>".into(), "(LCounter;)V".into())));
+    assert!(methods_with_descriptors(&owned_holder).contains(&("<init>".into(), "(I)V".into())));
+    assert!(
+        methods_with_descriptors(&pair)
+            .contains(&("<init>".into(), "(LCounter;LCounter;)V".into()))
+    );
     assert_invocation_sequence(
         &runner,
         emitted_method_code(&runner, "read"),
@@ -2693,18 +2795,157 @@ fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
             (0xb6, "OwnedHolder", "get", "()I"),
         ],
     );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "fromFactory"),
+        &[
+            (0xb6, "Runner", "makeCounter", "(I)LCounter;"),
+            (0xb7, "Holder", "<init>", "(LCounter;)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "fromLocal"),
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb7, "Holder", "<init>", "(LCounter;)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "createPair"),
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb7, "Pair", "<init>", "(LCounter;LCounter;)V"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "fromNull"),
+        &[(0xb7, "Holder", "<init>", "(LCounter;)V")],
+    );
+    assert_eq!(
+        (
+            code_max_stack(&runner, "createPair"),
+            code_max_locals(&runner, "createPair")
+        ),
+        (6, 3)
+    );
+    assert_eq!(
+        (
+            code_max_stack(&runner, "read"),
+            code_max_locals(&runner, "read")
+        ),
+        (2, 2)
+    );
+    assert_eq!(
+        (
+            code_max_stack(&runner, "readOwned"),
+            code_max_locals(&runner, "readOwned")
+        ),
+        (3, 2)
+    );
+    for method in [
+        "fromFactory",
+        "fromLocal",
+        "createPair",
+        "fromNull",
+        "read",
+        "chainedFactory",
+        "readOwned",
+    ] {
+        assert!(
+            decode_subset_instructions(emitted_method_code(&runner, method))
+                .iter()
+                .all(|(_, opcode)| *opcode != 0xc0),
+            "Runner.{method} does not insert checkcast coercions"
+        );
+    }
+    assert_invocation_sequence(
+        &owned_holder,
+        emitted_method_code(&owned_holder, "<init>"),
+        &[
+            (0xb7, "java/lang/Object", "<init>", "()V"),
+            (0xb7, "Counter", "<init>", "(I)V"),
+        ],
+    );
+    assert_field_reference_sequence(
+        &pair,
+        emitted_method_code(&pair, "<init>"),
+        &[
+            (0xb5, "Pair", "savedFirst", "LCounter;"),
+            (0xb5, "Pair", "savedSecond", "LCounter;"),
+        ],
+    );
+    assert_field_reference_sequence(
+        &runner,
+        emitted_method_code(&runner, "makeCounter"),
+        &[
+            (0xb4, "Runner", "receiverCalls", "I"),
+            (0xb5, "Runner", "receiverCalls", "I"),
+        ],
+    );
+    assert_field_reference(
+        &owned_holder,
+        emitted_method_code(&owned_holder, "<init>"),
+        0xb5,
+        "OwnedHolder",
+        "inner",
+        "LCounter;",
+    );
+    assert_eq!(code_max_stack(&owned_holder, "<init>"), 4);
+    assert_field_reference(
+        &counter,
+        emitted_method_code(&counter, "increment"),
+        0xb4,
+        "Counter",
+        "current",
+        "I",
+    );
+    assert_field_reference(
+        &counter,
+        emitted_method_code(&counter, "increment"),
+        0xb5,
+        "Counter",
+        "current",
+        "I",
+    );
 
     if require_jdk_or_skip() {
         let classpath = output.path().to_str().expect("UTF-8 class output path");
-        let harness = output
-            .path()
-            .join("ObjectGraphChainedReceiversHarness.java");
+        let harness = output.path().join("ObjectGraphConstructionHarness.java");
         fs::write(
             &harness,
-            r#"public final class ObjectGraphChainedReceiversHarness {
+            r#"public final class ObjectGraphConstructionHarness {
   public static void main(String[] args) {
     Runner runner = new Runner();
-    int expectedCalls = 0;
+    Counter shared = new Counter(10);
+    Holder alias = runner.existing(shared);
+    if (alias.value() != shared) throw new AssertionError("reference alias preserved");
+    if (alias.value().increment() != 11 || shared.get() != 11) throw new AssertionError("alias shares state");
+    Holder independent = runner.fromLocal(8);
+    if (independent.value().get() != 8) throw new AssertionError("mutable local passed to constructor");
+    if (independent.value() == shared) throw new AssertionError("unrelated allocation is distinct");
+
+    int expectedCalls = runner.receiverCallCount();
+    Holder fromFactory = runner.fromFactory(7);
+    if (fromFactory.value().get() != 7) throw new AssertionError("factory constructor argument");
+    if (runner.receiverCallCount() != ++expectedCalls) throw new AssertionError("factory evaluated once");
+
+    if (runner.fromNull().value() != null) throw new AssertionError("null identity preserved");
+
+    Pair pair = runner.createPair(3, 4);
+    Counter first = pair.firstCounter();
+    Counter second = pair.secondCounter();
+    if (first == second || pair.firstValue() != 3 || pair.secondValue() != 4) throw new AssertionError("sibling allocations");
+    if (first.increment() != 4 || pair.secondValue() != 4) throw new AssertionError("sibling state is independent");
+
+    OwnedHolder ownedA = new OwnedHolder(5);
+    OwnedHolder ownedB = new OwnedHolder(5);
+    if (ownedA.value() == ownedB.value()) throw new AssertionError("field initializer allocates per owner");
+    if (ownedA.value().increment() != 6 || ownedB.get() != 5) throw new AssertionError("owned child state is independent");
+
     for (int seed : new int[] {10, 0, -3}) {
       if (runner.read(seed) != seed) throw new AssertionError("create/value/get result");
       if (runner.receiverCallCount() != ++expectedCalls) throw new AssertionError("create evaluated once");
@@ -2712,11 +2953,12 @@ fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
       if (runner.receiverCallCount() != ++expectedCalls) throw new AssertionError("factory evaluated once");
       if (runner.readOwned(seed) != seed) throw new AssertionError("new OwnedHolder/get result");
     }
+    System.out.println("object graph construction verified");
   }
 }
 "#,
         )
-        .expect("write chained receiver runtime harness");
+        .expect("write object graph runtime harness");
         let javac = Command::new("javac")
             .args(["--release", "21", "-classpath", classpath, "-d", classpath])
             .arg(&harness)
@@ -2724,7 +2966,7 @@ fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
             .expect("start javac for chained receiver harness");
         assert!(
             javac.status.success(),
-            "javac rejected chained receiver harness\nstdout:\n{}\nstderr:\n{}",
+            "javac rejected object graph harness\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&javac.stdout),
             String::from_utf8_lossy(&javac.stderr)
         );
@@ -2733,17 +2975,75 @@ fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
                 "-Xverify:all",
                 "-classpath",
                 classpath,
-                "ObjectGraphChainedReceiversHarness",
+                "ObjectGraphConstructionHarness",
             ])
             .output()
             .expect("start java verifier for chained receiver harness");
         assert!(
             java.status.success(),
-            "java -Xverify:all rejected chained receiver classes\nstdout:\n{}\nstderr:\n{}",
+            "java -Xverify:all rejected object graph classes\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );
+
+        let javap = Command::new("javap")
+            .args([
+                "-c",
+                "-v",
+                "-classpath",
+                classpath,
+                "Runner",
+                "Pair",
+                "OwnedHolder",
+            ])
+            .output()
+            .expect("start javap for emitted object graph classes");
+        assert!(
+            javap.status.success(),
+            "javap rejected emitted object graph classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap = String::from_utf8(javap.stdout).expect("javap output is UTF-8");
+        for reference in [
+            "Pair.\"<init>\":(LCounter;LCounter;)V",
+            "Counter.\"<init>\":(I)V",
+            "Field receiverCalls:I",
+            "Field savedFirst:LCounter;",
+            "Field savedSecond:LCounter;",
+            "Field inner:LCounter;",
+        ] {
+            assert!(
+                javap.contains(reference),
+                "javap output is missing {reference}"
+            );
+        }
     }
+}
+
+#[test]
+fn object_graph_unsupported_deep_allocation_publishes_no_fixture_classes() {
+    let mut source = fs::read_to_string(fixture_path("ObjectGraphConstruction.scala"))
+        .expect("read the source-backed object graph fixture");
+    source.push_str(
+        "\nclass Leaf(seed: Int)\nclass Middle(leaf: Leaf)\nclass Outer(middle: Middle)\nclass TooDeep:\n  def make(): Outer = new Outer(new Middle(new Leaf(1)))\n",
+    );
+    let output = TestOutputDirectory::new("object-graph-deep-batch-failure");
+    let result = compile_source_batch(
+        &source,
+        "ObjectGraphConstructionWithUnsupportedDepth.scala",
+        output.path(),
+        SourceId::from_index(1501),
+        SourceUnitCardinality::AtLeastTwo,
+    );
+    assert!(
+        matches!(result, Err(PipelineFailure::Codegen(_))),
+        "unsupported third live allocation must fail during codegen, got {result:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "a later unsupported allocation must not publish any fixture class"
+    );
 }
 
 #[test]
@@ -13731,6 +14031,43 @@ fn assert_field_reference(
     assert_eq!(
         class.constant_pool.name_and_type(*name_and_type_index),
         Ok((name, descriptor))
+    );
+}
+
+fn assert_field_reference_sequence(
+    class: &ClassFile<'_>,
+    code: &[u8],
+    expected: &[(u8, &str, &str, &str)],
+) {
+    let actual = decode_subset_instructions(code)
+        .into_iter()
+        .filter_map(|(offset, opcode)| {
+            if !matches!(opcode, 0xb4 | 0xb5) {
+                return None;
+            }
+            let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+            let ConstantPoolEntry::Fieldref {
+                class_index,
+                name_and_type_index,
+            } = class.constant_pool.get(ConstantPoolIndex(index))?
+            else {
+                panic!("field access must reference Fieldref");
+            };
+            let (name, descriptor) = class
+                .constant_pool
+                .name_and_type(*name_and_type_index)
+                .unwrap();
+            Some((
+                opcode,
+                class.constant_pool.class_name(*class_index).unwrap(),
+                name,
+                descriptor,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual, expected,
+        "unexpected ordered field references in code"
     );
 }
 

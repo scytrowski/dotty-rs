@@ -47,19 +47,21 @@ class, constructor, method, parameter, and local symbols. In particular:
 - The `OwnedHolder.inner` initializer stays a typed `new Counter(seed)` tree
   and uses the exact `OwnedHolder.<init>` parameter symbol.
 
-The nested-allocation, reference-argument, field-initializer, and chained-call
-shapes all pass source typing in this fixture. Their present failures occur
-after the frontend boundary where noted below. Wrong constructor arity and
-primitive type cases remain ordinary Typer errors. That distinction matters
-for follow-up work: #1494 owns Typer call contracts only if an actual typing
-defect is found; the observed emission gaps belong to later JVM stages.
+The supported nested-allocation, reference-argument, field-initializer, and
+chained-call shapes now pass through source emission in this fixture. The
+acceptance test checks the complete five-class batch, decoded classfile
+references, deterministic bytes across fresh frontend sessions, and execution
+under JDK 21 `-Xverify:all`. Wrong constructor arity and primitive type cases
+remain ordinary Typer errors. Branch-valued constructor arguments and deeper
+nested allocations remain explicit backend errors and must not publish a
+partial batch.
 
 ## Observed pipeline matrix
 
-The source test records the current first failure and checks that the failed
-batch publishes no class files.
+The source test records the current backend result. Negative forms check that
+the failed batch publishes no class files.
 
-| Source form | Source typing | First current JVM failure | Follow-up |
+| Source form | Source typing | Current backend result | Follow-up |
 | --- | --- | --- | --- |
 | `new Holder(counter)` for an exact reference parameter | Succeeds; argument keeps the canonical parameter symbol | Supported and emitted | Existing support |
 | `new Holder(current)` for an exact immutable reference local | Succeeds; argument keeps the canonical local symbol | Supported and emitted | Existing support |
@@ -145,8 +147,9 @@ The returned factory value is initialized and is passed as the constructor
 argument; the lower stack entry remains the separate uninitialized
 `Holder` allocation. Scala's `OwnedHolder.<init>` calls `Object.<init>` first,
 then executes `new Counter`, its constructor, and one `putfield inner:LCounter;`.
-These observations define useful target bytecode shapes. The repository
-regression does not claim that dotty-rs emits them today.
+These observations define useful target bytecode shapes. The source regression
+checks emitted bytecode shapes where applicable, then runs the resulting
+classes on JDK 21 with `-Xverify:all`.
 
 The oracle source is the `ObjectGraphConstruction.scala` fixture plus the
 same-class `Link(this)` case. The Scala compiler reports version 3.9.0 and its
@@ -245,13 +248,14 @@ argument integration that consume the verified contract.
 | #1496 | Two-level nested `new` lowering with separate allocation identities; deeper nesting and branches with a live allocation remain unsupported |
 | #1497 | Reference fields initialized from `new` in constructors |
 | #1498 | End-to-end tests for chained call receivers and preserving the already-working receiver forms |
-| #1499 | End-to-end integration after the lower-level contracts are ready |
+| #1499 | Full source-to-classfile object graph acceptance: nested/factory/local/null arguments, owned field initialization, chained receivers, sibling identity, deterministic complete batches, and JDK 21 execution |
 
-The #1492 audit itself changed tests and documentation only. This #1493
-increment adds the bounded classfile verifier capability and JDK-verified
-symbolic output; source emission remains gated by existing typed errors until
-the constructor-argument, nested-emission, and field-initializer follow-ups
-implement their separate contracts.
+The #1492 audit itself changed tests and documentation only. Follow-ups #1493
+through #1498 added the bounded verifier contract and the source-emission
+features described above. This #1499 acceptance gate composes them through
+the real frontend, verifies all emitted classfiles, checks deterministic
+complete-batch publication, and executes the object graph on JDK 21. The
+unsupported cases in the matrix remain rejected with no partial output.
 
 Related contracts: [object creation](jvm-object-creation-contract.md),
 [reference fields and constructor arguments](jvm-reference-fields-constructors.md),
