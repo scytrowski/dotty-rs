@@ -1,0 +1,3 @@
+run	cargo_target_cache_state	input_cache_mode	input_cache_before_resident_bytes	input_cache_after_setup_resident_bytes	input_warmup_ms	cargo_wall_ms	child_cpu_user_s	child_cpu_system_s	sampled_peak_tree_rss_bytes	rss_sample_count	rss_sample_interval_ms	captured_log_bytes	capture_read_ms	saved_log_write_ms	audit_wall_ms	runner_overhead_ms	classpath_setup_ms	file_discovery_ms	source_read_ms	source_processing_and_merge_ms
+1	warm	warm-read-through	unknown	122241024	14	12081	10.66	1.32	103342080	120	100	13864	0	0	11978	103	87	3	0	11885
+2	warm	warm-read-through	unknown	122241024	14	11979	10.729999999999999	1.18	104083456	119	100	13865	0	0	11893	86	82	3	0	11806
