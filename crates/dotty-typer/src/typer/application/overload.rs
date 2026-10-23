@@ -135,14 +135,14 @@ impl SourceTyper<'_> {
         let typed =
             self.type_value_expression_inner(argument_tree, context, info_journal, new_mappings)?;
         let own_type = self.typed_arena.get(typed).ty;
-        let widened_type = if candidates.len() == 1
-            && self.is_any_ref_identity_symbol(candidates[0].symbol)
-            && let Some(view) = self.any_ref_identity_argument_view(own_type)
-        {
-            view
-        } else {
-            self.widen_expression_type_journaled(own_type, info_journal, 0)?
-        };
+        let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+        let widened_type =
+            if candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol) {
+                self.any_ref_identity_argument_view(widened_type)
+                    .unwrap_or(widened_type)
+            } else {
+                widened_type
+            };
         let arguments = [TypedArgument {
             typed,
             own_type,
@@ -298,11 +298,6 @@ impl SourceTyper<'_> {
                             name: selection.name,
                         });
                     }
-                    self.require_stable_application_selection_prefix(
-                        qualifier,
-                        receiver_type,
-                        function_tree.index(),
-                    )?;
                     let SymbolInfo::Complete(callable) = self.store.symbols.get(symbol).info else {
                         return Err(TyperError::MemberNotFound {
                             source: self.source,
@@ -312,6 +307,15 @@ impl SourceTyper<'_> {
                         });
                     };
                     self.validate_overload_callable(symbol, callable)?;
+                    let allow_mutable_local_receiver =
+                        self.is_mutable_local_selection_receiver(qualifier, receiver_type);
+                    if !allow_mutable_local_receiver {
+                        self.require_stable_application_selection_prefix(
+                            qualifier,
+                            receiver_type,
+                            function_tree.index(),
+                        )?;
+                    }
                     (
                         vec![ApplicationCandidate {
                             symbol,
@@ -323,7 +327,7 @@ impl SourceTyper<'_> {
                             selection,
                             qualifier,
                             receiver_type,
-                            allow_mutable_local_receiver: false,
+                            allow_mutable_local_receiver,
                         },
                     )
                 } else {
@@ -464,10 +468,10 @@ impl SourceTyper<'_> {
             // underlying String type to widen to. Keep the raw type until a
             // candidate's parameter type determines whether the constant is
             // needed.
-            let widened_type = if canonical_identity_application
-                && let Some(view) = self.any_ref_identity_argument_view(own_type)
-            {
-                view
+            let widened_type = if canonical_identity_application {
+                let widened = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+                self.any_ref_identity_argument_view(widened)
+                    .unwrap_or(widened)
             } else if matches!(
                 self.store.types.try_get(own_type),
                 Some(Type::Constant(dotty_core::Constant::String(_)))

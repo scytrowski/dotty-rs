@@ -18,6 +18,18 @@ class Runner:
     created eq b
   def sameThis(): Boolean = this eq this
   def differentThis(): Boolean = this ne this
+  def thisAliasEq(b: Runner): Boolean =
+    val self = this
+    b eq self
+  def thisMethodEq(b: Runner): Boolean =
+    def me = this
+    b.eq(me)
+  def mutableLocalDot(b: Box): Boolean =
+    var a: Box = b
+    a.eq(b)
+  def mutableLocalInfix(b: Box): Boolean =
+    var a: Box = b
+    a eq b
   def choose(flag: Boolean, value: Box): Box =
     if flag then null else value
   def readOrDefault(flag: Boolean, value: Box): Int =

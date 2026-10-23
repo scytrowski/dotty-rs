@@ -358,6 +358,10 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
                     | "newLocalSame"
                     | "sameThis"
                     | "differentThis"
+                    | "thisAliasEq"
+                    | "thisMethodEq"
+                    | "mutableLocalDot"
+                    | "mutableLocalInfix"
                     | "choose"
                     | "readOrDefault"
             )
@@ -372,7 +376,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
         .collect::<Vec<_>>();
     assert_eq!(
         methods.len(),
-        13,
+        17,
         "the candidate source shape must be parsed"
     );
     let infix_operands = parsed
@@ -457,6 +461,10 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
                 | "newLocalSame"
                 | "sameThis"
                 | "differentThis"
+                | "thisAliasEq"
+                | "thisMethodEq"
+                | "mutableLocalDot"
+                | "mutableLocalInfix"
                 | "readOrDefault"
         ) {
             continue;
@@ -495,7 +503,7 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
     }
     assert!(selected.iter().any(|(symbol, _)| *symbol == operators.eq));
     assert!(selected.iter().any(|(symbol, _)| *symbol == operators.ne));
-    assert_eq!(selected.len(), 12, "all source calls retain canonical IDs");
+    assert_eq!(selected.len(), 16, "all source calls retain canonical IDs");
     for symbol in operators.all() {
         assert_eq!(
             typer.store().symbols.get(symbol).owner,

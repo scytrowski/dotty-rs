@@ -362,8 +362,13 @@ impl SourceTyper<'_> {
                     typed_argument.own_type
                 );
                 let argument_type = if canonical_identity_application {
-                    self.any_ref_identity_argument_view(typed_argument.own_type)
-                        .unwrap_or(typed_argument.own_type)
+                    let widened = self.widen_expression_type_journaled(
+                        typed_argument.own_type,
+                        info_journal,
+                        0,
+                    )?;
+                    self.any_ref_identity_argument_view(widened)
+                        .unwrap_or(widened)
                 } else {
                     typed_argument.own_type
                 };
