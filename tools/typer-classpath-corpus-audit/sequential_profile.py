@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import tempfile
 import statistics
 import subprocess
@@ -269,8 +270,10 @@ def run_measured(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[in
             time.sleep(0.1)
         return_code = process.wait()
         wall_ms = (time.monotonic_ns() - started) // 1_000_000
+        capture_read_started = time.monotonic_ns()
         capture.seek(0)
         output = capture.read()
+        capture_read_ms = (time.monotonic_ns() - capture_read_started) // 1_000_000
     after = os.times()
     return return_code, output, {
         "cargo_wall_ms": int(wall_ms),
@@ -279,6 +282,8 @@ def run_measured(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[in
         "sampled_peak_tree_rss_bytes": sampled_peak_rss,
         "rss_sample_count": sample_count,
         "rss_sample_interval_ms": 100,
+        "captured_log_bytes": len(output.encode("utf-8")),
+        "capture_read_ms": int(capture_read_ms),
     }
 
 
@@ -323,11 +328,12 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     output_started_ns = time.monotonic_ns()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run-timings.tsv").write_text(
-        "run\tcargo_target_cache_state\tinput_cache_mode\tinput_cache_before_resident_bytes\tinput_cache_after_evict_resident_bytes\tinput_warmup_ms\tcargo_wall_ms\tchild_cpu_user_s\tchild_cpu_system_s\tsampled_peak_tree_rss_bytes\trss_sample_count\trss_sample_interval_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
+        "run\tcargo_target_cache_state\tinput_cache_mode\tinput_cache_before_resident_bytes\tinput_cache_after_setup_resident_bytes\tinput_warmup_ms\tcargo_wall_ms\tchild_cpu_user_s\tchild_cpu_system_s\tsampled_peak_tree_rss_bytes\trss_sample_count\trss_sample_interval_ms\tcaptured_log_bytes\tcapture_read_ms\tsaved_log_write_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
         + "".join(
-            f"{i}\t{cache_state}\t{input_state['mode']}\t{input_state['before_bytes']}\t{input_state['after_evict_bytes']}\t{input_state.get('warmup_ms', 'not_warmed')}\t"
+            f"{i}\t{cache_state}\t{input_state['mode']}\t{input_state['before_bytes']}\t{input_state.get('after_setup_bytes', 'unknown')}\t{input_state.get('warmup_ms', 'not_warmed')}\t"
             f"{wall}\t{r.get('process_metrics', {}).get('child_cpu_user_s', 'unavailable')}\t{r.get('process_metrics', {}).get('child_cpu_system_s', 'unavailable')}\t"
             f"{r.get('process_metrics', {}).get('sampled_peak_tree_rss_bytes', 'unavailable')}\t{r.get('process_metrics', {}).get('rss_sample_count', 'unavailable')}\t{r.get('process_metrics', {}).get('rss_sample_interval_ms', 'unavailable')}\t"
+            f"{r.get('process_metrics', {}).get('captured_log_bytes', 'unavailable')}\t{r.get('process_metrics', {}).get('capture_read_ms', 'unavailable')}\t{r.get('process_metrics', {}).get('saved_log_write_ms', 'unavailable')}\t"
             f"{int(r['summary']['wall_ms'])}\t{wall-int(r['summary']['wall_ms'])}\t"
             f"{r['summary'].get('classpath_setup_ms', '0')}\t{r['summary'].get('file_discovery_ms', '0')}\t"
             f"{r['summary'].get('source_read_ms', '0')}\t{r['summary'].get('source_processing_and_merge_ms', r['summary'].get('source_audit_merge_ms', '0'))}\n"
@@ -473,7 +479,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     except OSError:
         pass
     input_cache_summary = ", ".join(
-        f"{index}={state['mode']} (warmup {state.get('warmup_ms', 'unknown')} ms; {state['before_bytes']} bytes resident before)"
+        f"{index}={state['mode']} (warmup {state.get('warmup_ms', 'unknown')} ms; resident bytes before/after setup {state['before_bytes']}/{state.get('after_setup_bytes', 'unknown')})"
         for index, state in enumerate(input_cache, 1)
     )
     cpu_user_s = [float(run.get("process_metrics", {}).get("child_cpu_user_s", float("nan"))) for run in runs]
@@ -492,8 +498,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"- Manifest files: {len(file_paths)}; profiled method observations per run: {len(runs[0]['methods'])}; repetitions: {len(runs)}",
         f"- Timing mode: `{runs[0]['summary'].get('timing_mode', 'unknown')}`; root method limit per file: `{runs[0]['summary'].get('method_limit_per_file', 'unknown')}`. Exact path/tree/method identities and outcomes are in [`methods.tsv`](methods.tsv) and [`method-outcomes.tsv`](method-outcomes.tsv); match-probe selection is in [`match-probes.tsv`](match-probes.tsv). Wrapper, rollback, and classpath-resource data are in [`audit-wrapper.tsv`](audit-wrapper.tsv), [`rollback.tsv`](rollback.tsv), and [`classpath-resources.tsv`](classpath-resources.tsv).",
         f"- Cargo target cache by repetition: {', '.join(f'{index}={state}' for index, state in enumerate(cache_states, 1))}. `cold` means no compiled local_definition_audit test binary existed in the selected target directory.",
-        f"- Input page-cache measurements: {input_cache_summary}. Cold mode evicts only the selected Scala sources, pinned Scala JARs, and JDK jmods with POSIX_FADV_DONTNEED, then checks their resident bytes using `fincore`; it does not clear the system-wide cache.",
-        "- `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup and harness/report-log overhead.",
+        f"- Input page-cache measurements: {input_cache_summary}. Warm mode reads the selected Scala sources, pinned Scala JARs, and JDK jmods before each sample, then records residency with `fincore`. Cold mode evicts only these selected inputs with POSIX_FADV_DONTNEED; it does not clear the system-wide cache.",
+        "- `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup, sampler overhead, and test-side log emission. Captured bytes plus the Python log read/write times are recorded in `run-timings.tsv`; the cost of emitting each diagnostic line remains inside the process timing.",
         f"- Process measurements: child CPU user/system mean {statistics.mean(cpu_user_s):.2f}/{statistics.mean(cpu_system_s):.2f} s; maximum sampled aggregate Cargo-process-tree RSS {max(sampled_rss, default=0) / (1024 * 1024):.1f} MiB. RSS is sampled every 100 ms and may miss short peaks; CPU comes from child process accounting.",
         "- Classpath setup includes JDK module and Scala JAR adapter construction. No artifact decode timing is reported separately: class/module completion timers are inclusive at the resolver boundary.",
         "- Cache evidence: classloader profiles report completed-cache hits, full completions, identity shell creation/reuse, and hierarchy requests. They do not expose all lookup cache misses; those are not inferred.",
@@ -694,6 +700,9 @@ def main() -> int:
                     "sampled_peak_tree_rss_bytes": int(row.get("sampled_peak_tree_rss_bytes", 0)),
                     "rss_sample_count": int(row.get("rss_sample_count", 0)),
                     "rss_sample_interval_ms": int(row.get("rss_sample_interval_ms", 100)),
+                    "captured_log_bytes": int(row.get("captured_log_bytes", 0)),
+                    "capture_read_ms": int(row.get("capture_read_ms", 0)),
+                    "saved_log_write_ms": int(row.get("saved_log_write_ms", 0)),
                 }
                 results.append(parsed)
                 wall_times.append(int(row["cargo_wall_ms"]))
@@ -701,8 +710,7 @@ def main() -> int:
                 input_cache.append({
                     "mode": row.get("input_cache_mode", "unmeasured"),
                     "before_bytes": row.get("input_cache_before_resident_bytes", "unknown"),
-                    "after_evict_bytes": row.get("input_cache_after_evict_resident_bytes", "not_evicted"),
-                    "warmup_ms": row.get("input_warmup_ms", "not_warmed"),
+                    "after_setup_bytes": row.get("input_cache_after_setup_resident_bytes", "unknown"),
                     "warmup_ms": row.get("input_warmup_ms", "not_warmed"),
                 })
     else:
@@ -716,19 +724,22 @@ def main() -> int:
                 before_bytes = resident_bytes(inputs)
                 if index == 1:
                     evict_input_pages(inputs)
-                    after_evict_bytes = resident_bytes(inputs)
-                    input_mode = "evicted" if after_evict_bytes == 0 else "partial-eviction"
+                    after_setup_bytes = resident_bytes(inputs)
+                    input_mode = "evicted" if after_setup_bytes == 0 else "partial-eviction"
                 else:
-                    after_evict_bytes = "not_evicted"
+                    after_setup_bytes = "not_measured"
                     input_mode = "warm-observed"
-                input_cache.append({"mode": input_mode, "before_bytes": before_bytes, "after_evict_bytes": after_evict_bytes, "warmup_ms": 0})
+                input_cache.append({"mode": input_mode, "before_bytes": before_bytes, "after_setup_bytes": after_setup_bytes, "warmup_ms": 0})
             else:
                 warmup_ms = warm_input_pages(inputs)
-                input_cache.append({"mode": "warm-read-through", "before_bytes": "unknown", "after_evict_bytes": "not_applicable", "warmup_ms": warmup_ms})
+                after_setup_bytes = resident_bytes(inputs) if shutil.which("fincore") else "unavailable"
+                input_cache.append({"mode": "warm-read-through", "before_bytes": "unknown", "after_setup_bytes": after_setup_bytes, "warmup_ms": warmup_ms})
             return_code, output, process_metrics = run_measured(AUDIT_TEST, REPO_ROOT, env)
             wall_ms = process_metrics["cargo_wall_ms"]
             log_path = out_dir / f"run-{index}.log"
+            log_write_started = time.monotonic_ns()
             log_path.write_text(output, encoding="utf-8")
+            process_metrics["saved_log_write_ms"] = (time.monotonic_ns() - log_write_started) // 1_000_000
             if return_code:
                 print(output, file=sys.stderr)
                 fail(f"profile run {index} failed with exit code {return_code}; see {log_path}")
