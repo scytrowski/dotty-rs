@@ -13,7 +13,7 @@ revision `777528f19a58e794c9954a42f433373472ec57f8`.
 | `dotty-jvm` projection | `JvmType` currently represents `Int`, `Boolean`, and planned class references. Descriptor projection and local allocation therefore have no `Long` representation or width. The allocator reserves one slot per supported parameter/local. |
 | Class-file descriptors | The descriptor parser accepts `J`; the linear bytecode analyzer already counts `Long` parameters/values as two slots and tracks the unusable second local slot. |
 | Stack-map wire model | `VerificationTypeInfo::Long` uses verification tag 4 and has a two-slot local width. A stack-map frame stores one verification entry for a `Long`, not two entries. |
-| CFG analyzer | Its flow state has no `Long` value/local variant. It rejects a `Long` method parameter as `UnsupportedFlowParameter` before CFG transfer analysis. |
+| CFG analyzer | Supports `Long` parameters, constants, local loads/stores, `lreturn`, branch joins, loop backedges, physical slot accounting, and StackMapTable projection. Long arithmetic, category-two stack manipulation, fields, and calls remain outside this increment. |
 
 The source characterization test is `scala_long_source_reaches_typed_plans_before_backend_rejects_it` in `tests/jvm_source_compilation.rs`. Its observer runs after successful parsing, naming, typing, and JVM plan construction. All checked source signatures and `saved` locals use the canonical `Definitions.long`; the `constant` body retains `Constant::Long(9_000_000_000)` and a source position. The test calls `unit.metadata(definitions)` within that same session and compares its failing type to `definitions.long`. Metadata projection returns `UnsupportedJvmReferenceType { kind: ExternalClass }` for that exact canonical `Long` type; final class emission returns the same error and type. The first backend blocker is therefore the `Long` metadata/type projection: builtin `scala.Long` falls through to the unsupported external-reference case. This precedes literal, local, return, field, call, and CFG lowering. No production behavior was changed to work around it.
 
@@ -43,18 +43,18 @@ second slot of the first `Long` is rejected as `LocalSlotOverlap`.
 `dotty-classfile` already has related coverage: `stack_map.rs`'s
 `counts_verification_entries_separately_from_slots` checks that a `Long`
 occupies one verification entry but two local slots; field-width coverage in
-`bytecode_analysis.rs` checks `J` field operations. The CFG analyzer's
-existing `non_integer_parameters_are_rejected_without_changing_linear_analysis`
-and `reference_and_category_two_flows_are_rejected_explicitly` tests pin the
-unsupported CFG boundaries.
+`bytecode_analysis.rs` checks `J` field operations. CFG behavior is covered by
+`cfg_analysis.rs`, including `long_parameter_branch_join_uses_physical_slots_and_one_frame_entry`,
+`long_locals_are_pair_aware_at_joins_and_overlapping_stores`, and
+`stable_long_local_converges_across_a_counted_loop_backedge`.
 
-## Bounded CFG contract for follow-up #1515
+## Bounded CFG contract implemented by #1515
 
 The CFG implementation should keep the existing separation between logical
 stack values and physical local slots. `FlowValue::Long` is one logical
 operand-stack value with width two for stack depth and `max_stack`. Physical
-locals need distinct `LongHead` and `LongTail` states (or an equivalent
-unambiguous pair); the tail is not a readable value. A local `lload` is valid
+locals use `FlowLocalState::Long` and `FlowLocalState::LongTail` as an
+unambiguous pair; the tail is not a readable value. A local `lload` is valid
 only when the selected slot is a head immediately followed by its matching
 tail. An orphan head or tail is an invalid analyzer state, not a value to
 guess through.
@@ -71,7 +71,7 @@ the destination was `Top`, and must respect the method's physical `max_locals`
 bound.
 
 Local joins are conservative and pair-aware. A `Long` local survives a join
-only when every reachable predecessor has a `LongHead` at the same index and
+only when every reachable predecessor has a `Long` head at the same index and
 the corresponding `LongTail` at the next index. If any predecessor has
 `Top`, a category-one value, or a differently aligned category-two value in
 either half, the merged pair is unusable (`Top` at both physical slots).
@@ -88,7 +88,7 @@ category-one value or with a different stack shape is rejected. This audit
 does not propose general numeric widening, `dup2`/`pop2`, or uninitialized
 object handling changes.
 
-Conversion to StackMapTable locals must consume an actual `LongHead` and its
+Conversion to StackMapTable locals consumes an actual `Long` head and its
 matching `LongTail` as one `VerificationTypeInfo::Long` entry. It must retain
 each independent `Top` slot as a `Top` verification entry, and reject an
 orphan tail. For example, physical locals
@@ -100,21 +100,17 @@ physical slot 2.
 | --- | --- | --- |
 | Descriptor `J`, two-slot linear parameter/local accounting, valid head load and tail-load rejection | Positive/negative tests in `bytecode_analysis.rs`; current behavior passes | Existing class-file linear analyzer |
 | One StackMapTable Long entry with two physical local slots | Existing `counts_verification_entries_separately_from_slots` test | Existing class-file wire model |
-| CFG `Long` parameter and `lconst_0` transfer | Existing tests reject these as unsupported | Current CFG analyzer boundary |
-| CFG head/tail initialization, overlap invalidation, local joins and unreadable `Top` paths | Not implemented or claimed by this audit | Follow-up #1515 tests and CFG implementation |
-| CFG loop-backedge convergence for a stable `Long` and for incompatible/`Top` evidence | Not implemented or claimed by this audit | Follow-up #1515 tests and CFG implementation |
-| Physical-to-logical frame conversion preserving genuine `Top` gaps | Not implemented or claimed by this audit | Follow-up #1515 tests and frame generation |
+| CFG `Long` parameters, constants, loads/stores, and `lreturn` | Focused positive and negative `cfg_analysis.rs` tests | Implemented by #1515 |
+| Pair-aware overlap invalidation, local joins, and unreadable `Top` paths | `long_locals_are_pair_aware_at_joins_and_overlapping_stores` plus linear analyzer tail checks | Implemented by #1515 |
+| CFG loop-backedge convergence for stable and invalidated `Long` locals | Stable counted loop coverage plus pair-aware join behavior | Implemented by #1515 |
+| Physical-to-logical frame conversion and correct branch PCs | CFG frame projection test; generated-class JDK test when JDK 21+ is available | Implemented by #1515 |
 
-The future CFG positive matrix should cover: a `Long` parameter loaded from
-its head; a local initialized by `lstore` then loaded; category-one and
-category-two overwrites of an existing pair; identical `Long` states joined
-across both arms and a loop backedge; and frame conversion with a `Top` gap.
-Negative coverage should include: loading the tail or an orphan head, a
-category-one overwrite followed by `lload`, a `Long` initialized on only one
-predecessor then read after the join, incompatible stack joins, malformed
-head/tail states, out-of-bounds pairs, and a loop backedge that invalidates a
-previously initialized pair. These are follow-up acceptance cases, not claims
-that the current CFG analyzer supports them.
+The CFG regression matrix also checks category-one opcode rejection for
+category-two values, both orders of an incompatible `Long`/`Integer` stack
+join, wrong return descriptors, one-arm initialization, tail overwrite, and
+stable Long locals through a loop backedge. `Ldc2` uses the existing validated
+constant-pool path; arithmetic, `lcmp`, `pop2`/`dup2`, conversions, and
+Long-aware field/method transfer remain separate follow-up work.
 
 ## JVMS 21 constraints
 
@@ -129,9 +125,9 @@ verification tag.
 
 ## Scope for follow-up issues
 
-The subsequent JVM Backend issues split implementation into descriptors and
-slot allocation (#1514), CFG category-two state (#1515), literal/local/return
+The JVM Backend issues split implementation into descriptors and slot
+allocation (#1514), CFG category-two state (#1515), literal/local/return
 lowering (#1516), fields and constructors (#1517), calls and `If`/`While`
-control flow (#1518), and end-to-end execution (#1519). This audit does not
-implement those increments, `dup2`/`pop2`, general verifier joins, or any
-source Typer changes.
+control flow (#1518), and end-to-end execution (#1519). This increment does
+not implement `dup2`/`pop2`, general numeric verifier joins, Long arithmetic,
+or source Typer changes.
