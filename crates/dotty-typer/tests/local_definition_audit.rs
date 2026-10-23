@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,13 +71,13 @@ struct ResolverMetrics {
     member_error_distinct_targets: BTreeMap<String, BTreeSet<String>>,
     member_error_files: BTreeMap<String, BTreeSet<String>>,
     member_error_source_origins: BTreeMap<String, BTreeMap<String, usize>>,
-    member_request_shapes: BTreeMap<String, usize>,
-    member_request_unknown_identity_shapes: BTreeMap<String, usize>,
+    member_request_shapes: BTreeMap<MemberRequestShapeKey, usize>,
+    member_request_unknown_identity_shapes: BTreeMap<MemberRequestShapeKey, usize>,
     member_request_targets: BTreeMap<String, RequestTargetMetrics>,
     member_requests_by_method: BTreeMap<String, BTreeMap<String, usize>>,
     resolver_requests_by_method: BTreeMap<String, Vec<ResolverRequestObservation>>,
-    member_request_outcome_targets: BTreeMap<String, BTreeSet<String>>,
-    member_request_outcome_files: BTreeMap<String, BTreeSet<String>>,
+    member_request_outcome_targets: BTreeMap<MemberRequestOutcomeKey, BTreeSet<String>>,
+    member_request_outcome_files: BTreeMap<MemberRequestOutcomeKey, BTreeSet<String>>,
     member_error_roots: BTreeMap<String, usize>,
     dependency_failure_chains: BTreeMap<String, usize>,
     tasty_supertype_failures: BTreeMap<String, usize>,
@@ -116,6 +117,68 @@ struct ResolverMetrics {
     class_member_prefixes: BTreeSet<String>,
     class_member_keys: BTreeSet<String>,
     module_resolution: ModuleResolutionProfile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MemberRequestShapeKey {
+    space: Cow<'static, str>,
+    prefix_shape: &'static str,
+    target_kind: &'static str,
+    namespace: &'static str,
+    selector: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MemberRequestOutcomeKey {
+    shape: MemberRequestShapeKey,
+    outcome: String,
+}
+
+impl MemberRequestShapeKey {
+    fn test_shape(prefix_shape: &'static str) -> Self {
+        Self {
+            space: Cow::Borrowed("Prefix"),
+            prefix_shape,
+            target_kind: "unsupported",
+            namespace: "term",
+            selector: "Unique",
+        }
+    }
+
+    fn report_row(&self) -> String {
+        format!(
+            "space={}::prefix={}::target={}::namespace={}::selector={}::site=not-exposed-by-SymbolResolver",
+            self.space, self.prefix_shape, self.target_kind, self.namespace, self.selector
+        )
+    }
+}
+
+fn sorted_member_request_shape_rows<V>(
+    shapes: &BTreeMap<MemberRequestShapeKey, V>,
+) -> Vec<(String, &V)> {
+    let mut rows = shapes
+        .iter()
+        .map(|(shape, value)| (shape.report_row(), value))
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    rows
+}
+
+fn sorted_member_request_outcome_rows<V>(
+    outcomes: &BTreeMap<MemberRequestOutcomeKey, V>,
+) -> Vec<(String, &MemberRequestOutcomeKey, &V)> {
+    let mut rows = outcomes
+        .iter()
+        .map(|(key, value)| {
+            (
+                format!("{}::outcome={}", key.shape.report_row(), key.outcome),
+                key,
+                value,
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by(|(left, _, _), (right, _, _)| left.cmp(right));
+    rows
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -680,7 +743,7 @@ struct RequestTargetMetrics {
     names: BTreeSet<String>,
     methods: BTreeSet<String>,
     outcomes: BTreeMap<String, usize>,
-    families: BTreeMap<String, RequestFamilyMetrics>,
+    families: BTreeMap<MemberRequestShapeKey, RequestFamilyMetrics>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -969,7 +1032,7 @@ impl SharedClassPath {
 
 struct RequestTargetObservation<'a> {
     target_key: String,
-    shape: String,
+    shape: MemberRequestShapeKey,
     owner: Option<&'a str>,
     name: &'a str,
     file: &'a str,
@@ -1012,8 +1075,8 @@ fn record_member_request_target(
 
 fn member_request_shape_summaries(
     metrics: &ResolverMetrics,
-) -> BTreeMap<String, RequestShapeSummary> {
-    let mut by_shape = BTreeMap::<String, RequestShapeSummary>::new();
+) -> BTreeMap<MemberRequestShapeKey, RequestShapeSummary> {
+    let mut by_shape = BTreeMap::<MemberRequestShapeKey, RequestShapeSummary>::new();
     for (key, target) in &metrics.member_request_targets {
         for (shape, family) in &target.families {
             let summary = by_shape.entry(shape.clone()).or_default();
@@ -1728,12 +1791,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             Namespace::Term => "term",
         };
         let space = request_space(store, &request.space);
-        let shape = format!(
-            "space={space}::prefix={}::target={}::namespace={namespace}::selector={}::site=not-exposed-by-SymbolResolver",
-            prefix.shape,
-            prefix.target_kind,
-            request_selector(&request.selector)
-        );
+        let shape = MemberRequestShapeKey {
+            space: space.clone(),
+            prefix_shape: prefix.shape,
+            target_kind: prefix.target_kind,
+            namespace,
+            selector: request_selector(&request.selector),
+        };
         let target_key = format!(
             "prefix={}::namespace={namespace}::name={name}::space={space}",
             prefix.identity
@@ -1833,7 +1897,17 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             MemberSpace::Explicit(owner) => owner,
             _ => request.prefix,
         };
-        let actual_target = prefix_profile(store, target_type);
+        let target_profile_started = (target_type != request.prefix)
+            .then(|| wrapper_started.map(|_| Instant::now()))
+            .flatten();
+        let distinct_target_profile =
+            distinct_member_target_profile(store, request.prefix, target_type);
+        record_audit_stage(
+            &self.metrics,
+            "symbol_identity_rendering",
+            target_profile_started,
+        );
+        let actual_target = distinct_target_profile.as_ref().unwrap_or(&prefix);
         let target_info_before = actual_target
             .symbol
             .filter(|id| store.symbols.contains(*id))
@@ -1876,7 +1950,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .iter()
                 .any(|profile| &profile.root == name && profile.completed_classes.contains(name))
         });
-        let outcome = member_outcome(store, &result, request, &actual_target, target_completed);
+        let outcome = member_outcome(store, &result, request, actual_target, target_completed);
         record_audit_stage(
             &self.metrics,
             "result_classification",
@@ -2010,7 +2084,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     prefix_kind: "Package",
                     package: prefix.identity.clone(),
                     name: name.clone(),
-                    member_space: space.clone(),
+                    member_space: space.to_string(),
                     selector: request_selector(&request.selector),
                     source_file: current_file.clone(),
                     enclosing_attempt: current_method.clone(),
@@ -2072,7 +2146,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 .push(ResolverRequestObservation {
                     target: target_key.clone(),
                     outcome: outcome.clone(),
-                    cause: member_request_cause(&outcome, &actual_target, &result),
+                    cause: member_request_cause(&outcome, actual_target, &result),
                     materialized_prefix,
                     selected_identity,
                     enclosing_attempt: method.clone(),
@@ -2107,13 +2181,19 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         if prefix.identity_known {
             metrics
                 .member_request_outcome_targets
-                .entry(format!("{shape}::outcome={outcome}"))
+                .entry(MemberRequestOutcomeKey {
+                    shape: shape.clone(),
+                    outcome: outcome.clone(),
+                })
                 .or_default()
                 .insert(target_key.clone());
         }
         metrics
             .member_request_outcome_files
-            .entry(format!("{shape}::outcome={outcome}"))
+            .entry(MemberRequestOutcomeKey {
+                shape: shape.clone(),
+                outcome: outcome.clone(),
+            })
             .or_default()
             .insert(current_file.clone());
         if let Some(symbol) = prefix.symbol {
@@ -4873,6 +4953,28 @@ fn is_external_symbol(origin: dotty_core::SymbolOrigin) -> bool {
     )
 }
 
+fn distinct_member_target_profile(
+    store: &SemanticStore,
+    prefix: dotty_core::ids::TypeId,
+    target: dotty_core::ids::TypeId,
+) -> Option<PrefixProfile> {
+    (target != prefix).then(|| prefix_profile(store, target))
+}
+
+#[test]
+fn member_target_profile_reuses_prefix_and_profiles_distinct_owner() {
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let prefix = prefix_profile(&store, definitions.int);
+
+    assert!(distinct_member_target_profile(&store, definitions.int, definitions.int).is_none());
+    assert_eq!(
+        distinct_member_target_profile(&store, definitions.int, definitions.long),
+        Some(prefix_profile(&store, definitions.long))
+    );
+    assert_eq!(prefix.target_kind, "Class");
+}
+
 fn prefix_profile(store: &SemanticStore, ty: dotty_core::ids::TypeId) -> PrefixProfile {
     fn profile(
         store: &SemanticStore,
@@ -5047,14 +5149,17 @@ fn class_resource_label(resource: &ClassResource) -> String {
     format!("{format}@{origin}")
 }
 
-fn request_space(store: &SemanticStore, space: &MemberSpace) -> String {
+fn request_space(store: &SemanticStore, space: &MemberSpace) -> Cow<'static, str> {
     match space {
-        MemberSpace::Prefix => "Prefix".to_owned(),
+        MemberSpace::Prefix => Cow::Borrowed("Prefix"),
         MemberSpace::Explicit(ty) => {
             let prefix = prefix_profile(store, *ty);
-            format!("Explicit:{}:{}", prefix.target_kind, prefix.identity)
+            Cow::Owned(format!(
+                "Explicit:{}:{}",
+                prefix.target_kind, prefix.identity
+            ))
         }
-        _ => "other".to_owned(),
+        _ => Cow::Borrowed("other"),
     }
 }
 
@@ -9605,6 +9710,148 @@ fn scope_note(category: &str) -> (&'static str, &'static str, &'static str, &'st
 }
 
 #[test]
+fn borrowed_report_sort_matches_owned_observation_sort() {
+    let observation = |source_file: &str, enclosing_attempt: &str| ModuleOperationObservation {
+        operation: "module_class_of_object",
+        source_file: source_file.to_owned(),
+        enclosing_attempt: enclosing_attempt.to_owned(),
+        object_identity: "object".to_owned(),
+        object_origin: "source",
+        module_class_identity: "object$".to_owned(),
+        result: "resolved",
+        result_state: "Complete(ClassInfo)",
+        module_state: "Complete(ClassInfo)",
+        transaction_state: "observed",
+        error_category: None,
+    };
+    let observations = vec![
+        observation("B.scala", "B.member"),
+        observation("A.scala", "A.member"),
+        observation("A.scala", "A.member"),
+    ];
+
+    let mut owned_sorted = observations.clone();
+    owned_sorted.sort();
+    let borrowed_sorted = sorted_observation_refs(&observations);
+    let owned_sorted_refs = owned_sorted.iter().collect::<Vec<_>>();
+
+    assert_eq!(borrowed_sorted, owned_sorted_refs);
+    assert_eq!(borrowed_sorted[0].source_file, "A.scala");
+    assert_eq!(borrowed_sorted[2].source_file, "B.scala");
+}
+
+#[test]
+fn typed_member_request_shapes_preserve_legacy_rows_and_order() {
+    let shapes = [
+        MemberRequestShapeKey {
+            space: Cow::Borrowed("Prefix"),
+            prefix_shape: "module-class TypeRef",
+            target_kind: "ModuleClass",
+            namespace: "term",
+            selector: "Unique",
+        },
+        MemberRequestShapeKey {
+            space: Cow::Owned("Explicit:Class:pkg.Owner".to_owned()),
+            prefix_shape: "package TypeRef",
+            target_kind: "Package",
+            namespace: "type",
+            selector: "other",
+        },
+        MemberRequestShapeKey {
+            space: Cow::Borrowed("Prefix"),
+            prefix_shape: "package TypeRef",
+            target_kind: "Package",
+            namespace: "term",
+            selector: "Unique",
+        },
+    ];
+    let mut typed_rows = shapes.iter().collect::<Vec<_>>();
+    typed_rows.sort_unstable();
+    let mut legacy_rows = shapes
+        .iter()
+        .map(MemberRequestShapeKey::report_row)
+        .collect::<Vec<_>>();
+    legacy_rows.sort_unstable();
+
+    assert_eq!(
+        shapes[0].report_row(),
+        "space=Prefix::prefix=module-class TypeRef::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver"
+    );
+    assert_eq!(
+        typed_rows
+            .into_iter()
+            .map(MemberRequestShapeKey::report_row)
+            .collect::<Vec<_>>(),
+        legacy_rows
+    );
+}
+
+#[test]
+fn explicit_member_request_owner_rows_keep_legacy_order_for_reversed_arrival() {
+    let shape = |owner| MemberRequestShapeKey {
+        space: Cow::Owned(format!("Explicit:Class:pkg.{owner}")),
+        prefix_shape: "package TypeRef",
+        target_kind: "Package",
+        namespace: "type",
+        selector: "other",
+    };
+    let owner_a = shape("A");
+    let owner_a0 = shape("A0");
+    let expected_shape_rows = {
+        let mut rows = vec![owner_a.report_row(), owner_a0.report_row()];
+        rows.sort_unstable();
+        rows
+    };
+
+    let shape_rows = |first, second| {
+        let mut shapes = BTreeMap::new();
+        shapes.insert(first, 1);
+        shapes.insert(second, 1);
+        sorted_member_request_shape_rows(&shapes)
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shape_rows(owner_a.clone(), owner_a0.clone()),
+        expected_shape_rows
+    );
+    assert_eq!(
+        shape_rows(owner_a0.clone(), owner_a.clone()),
+        expected_shape_rows
+    );
+
+    let outcome_key = |shape, outcome: &str| MemberRequestOutcomeKey {
+        shape,
+        outcome: outcome.to_owned(),
+    };
+    let outcome_a = outcome_key(owner_a.clone(), "Ambiguous");
+    let outcome_a0 = outcome_key(owner_a0.clone(), "Ambiguous");
+    let expected_outcome_rows = {
+        let mut rows = vec![
+            format!("{}::outcome=Ambiguous", owner_a.report_row()),
+            format!("{}::outcome=Ambiguous", owner_a0.report_row()),
+        ];
+        rows.sort_unstable();
+        rows
+    };
+    let outcome_rows = |first, second| {
+        let mut outcomes = BTreeMap::new();
+        outcomes.insert(first, 1);
+        outcomes.insert(second, 1);
+        sorted_member_request_outcome_rows(&outcomes)
+            .into_iter()
+            .map(|(row, _, _)| row)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        outcome_rows(outcome_a.clone(), outcome_a0.clone()),
+        expected_outcome_rows
+    );
+    assert_eq!(outcome_rows(outcome_a0, outcome_a), expected_outcome_rows);
+}
+
+#[test]
 fn local_definition_audit_is_deterministic() {
     let source =
         "object Audit { def outer: Int = { val n = 1; def local[A](x: A) = x; local(n) } }";
@@ -13657,6 +13904,13 @@ fn audit_classpath_from_environment() -> SharedClassPath {
     SharedClassPath::new(CompositeClassPath::new(entries))
 }
 
+/// Sort event references for report output without cloning their owned strings.
+fn sorted_observation_refs<T: Ord>(observations: &[T]) -> Vec<&T> {
+    let mut sorted = observations.iter().collect::<Vec<_>>();
+    sorted.sort_unstable();
+    sorted
+}
+
 fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("resolver_metrics:");
     println!(
@@ -13861,8 +14115,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     for target in &module_profile.member_targets {
         println!("  member_target={target}");
     }
-    let mut module_observations = metrics.module_package_term_observations.clone();
-    module_observations.sort();
+    let module_observations = sorted_observation_refs(&metrics.module_package_term_observations);
     println!("module_package_term_observations:");
     println!("  observations={}", module_observations.len());
     println!(
@@ -13880,8 +14133,8 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             tsv_or_dash(&observation.module_class_identity)
         );
     }
-    let mut module_operation_observations = metrics.module_operation_observations.clone();
-    module_operation_observations.sort();
+    let module_operation_observations =
+        sorted_observation_refs(&metrics.module_operation_observations);
     println!("module_operation_observations:");
     println!("  observations={}", module_operation_observations.len());
     println!(
@@ -13903,8 +14156,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             tsv_or_dash(&observation.module_class_identity)
         );
     }
-    let mut module_member_observations = metrics.module_member_observations.clone();
-    module_member_observations.sort();
+    let module_member_observations = sorted_observation_refs(&metrics.module_member_observations);
     println!("module_member_observations:");
     println!("  observations={}", module_member_observations.len());
     println!(
@@ -13924,8 +14176,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             observation.transaction_state
         );
     }
-    let mut package_term_rows = metrics.package_term_request_rows.clone();
-    package_term_rows.sort();
+    let package_term_rows = sorted_observation_refs(&metrics.package_term_request_rows);
     println!("package_term_request_rows:");
     println!("  observations={}", package_term_rows.len());
     println!(
@@ -14043,12 +14294,14 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         println!("    {name}={count}");
     }
     println!("  member_request_shapes:");
-    for (shape, count) in &metrics.member_request_shapes {
-        println!("    {shape}={count}");
+    for (row, count) in sorted_member_request_shape_rows(&metrics.member_request_shapes) {
+        println!("    {row}={count}");
     }
     println!("  member_request_unknown_prefix_identity:");
-    for (shape, count) in &metrics.member_request_unknown_identity_shapes {
-        println!("    {shape}={count}");
+    for (row, count) in
+        sorted_member_request_shape_rows(&metrics.member_request_unknown_identity_shapes)
+    {
+        println!("    {row}={count}");
     }
     println!("  member_request_outcomes:");
     let mut outcomes = BTreeMap::<String, usize>::new();
@@ -14061,13 +14314,15 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         println!("    {outcome}={count}");
     }
     println!("  member_request_outcome_distinct_targets:");
-    for (family, targets) in &metrics.member_request_outcome_targets {
+    for (family, key, targets) in
+        sorted_member_request_outcome_rows(&metrics.member_request_outcome_targets)
+    {
         println!(
             "    {family}={}::files={}",
             targets.len(),
             metrics
                 .member_request_outcome_files
-                .get(family)
+                .get(key)
                 .map_or(0, BTreeSet::len)
         );
     }
@@ -14076,11 +14331,17 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         println!("    {kind}={count}");
     }
     println!("  member_request_key_summary:");
-    for (shape, summary) in member_request_shape_summaries(metrics) {
+    let mut summaries = member_request_shape_summaries(metrics)
+        .into_iter()
+        .map(|(shape, summary)| (shape.report_row(), summary))
+        .collect::<Vec<_>>();
+    summaries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for (row, summary) in summaries {
         let distinct = summary.distinct_keys.len();
         let (repeat, known_repeat) = member_request_repeat_factors(&summary);
         println!(
-            "    {shape}: requests={}, known_requests={}, distinct_keys={distinct}, unknown_identity_requests={}, owners={}, names={}, files={}, repeated_hit_factor={repeat}, known_repeated_hit_factor={known_repeat}, outcomes={:?}",
+            "    {}: requests={}, known_requests={}, distinct_keys={distinct}, unknown_identity_requests={}, owners={}, names={}, files={}, repeated_hit_factor={repeat}, known_repeated_hit_factor={known_repeat}, outcomes={:?}",
+            row,
             summary.requests,
             summary.known_requests,
             summary.unknown_identity_requests,
@@ -20238,14 +20499,14 @@ mod resolver_profile_tests {
 
     #[test]
     fn request_shape_distribution_does_not_depend_on_arrival_order() {
-        fn profile(shapes: [&str; 2]) -> ResolverMetrics {
+        fn profile(shapes: [&'static str; 2]) -> ResolverMetrics {
             let mut metrics = ResolverMetrics::default();
             for shape in shapes {
                 record_member_request_target(
                     &mut metrics,
                     RequestTargetObservation {
                         target_key: "target=sample/Foo::name=bar".to_owned(),
-                        shape: shape.to_owned(),
+                        shape: MemberRequestShapeKey::test_shape(shape),
                         owner: Some("sample/Foo"),
                         name: "bar",
                         file: "Use.scala",
@@ -20263,14 +20524,32 @@ mod resolver_profile_tests {
         assert_eq!(forward.member_request_targets.len(), 1);
         let target = forward.member_request_targets.values().next().unwrap();
         assert_eq!(target.requests, 2);
-        assert_eq!(target.families["ThisType"].requests, 1);
-        assert_eq!(target.families["TypeRef"].requests, 1);
+        assert_eq!(
+            target.families[&MemberRequestShapeKey::test_shape("ThisType")].requests,
+            1
+        );
+        assert_eq!(
+            target.families[&MemberRequestShapeKey::test_shape("TypeRef")].requests,
+            1
+        );
         let forward_summary = member_request_shape_summaries(&forward);
         let reverse_summary = member_request_shape_summaries(&reverse);
-        assert_eq!(forward_summary["ThisType"].requests, 1);
-        assert_eq!(forward_summary["TypeRef"].requests, 1);
-        assert_eq!(forward_summary["ThisType"], reverse_summary["ThisType"]);
-        assert_eq!(forward_summary["TypeRef"], reverse_summary["TypeRef"]);
+        assert_eq!(
+            forward_summary[&MemberRequestShapeKey::test_shape("ThisType")].requests,
+            1
+        );
+        assert_eq!(
+            forward_summary[&MemberRequestShapeKey::test_shape("TypeRef")].requests,
+            1
+        );
+        assert_eq!(
+            forward_summary[&MemberRequestShapeKey::test_shape("ThisType")],
+            reverse_summary[&MemberRequestShapeKey::test_shape("ThisType")]
+        );
+        assert_eq!(
+            forward_summary[&MemberRequestShapeKey::test_shape("TypeRef")],
+            reverse_summary[&MemberRequestShapeKey::test_shape("TypeRef")]
+        );
     }
 
     #[test]
@@ -20281,7 +20560,7 @@ mod resolver_profile_tests {
                 &mut metrics,
                 RequestTargetObservation {
                     target_key: format!("prefix=<unknown>::request={request_number}"),
-                    shape: "unsupported/other".to_owned(),
+                    shape: MemberRequestShapeKey::test_shape("unsupported/other"),
                     owner: None,
                     name: "Missing",
                     file: "Use.scala",
@@ -20291,7 +20570,9 @@ mod resolver_profile_tests {
             );
         }
 
-        let summary = member_request_shape_summaries(&metrics)["unsupported/other"].clone();
+        let summary = member_request_shape_summaries(&metrics)
+            [&MemberRequestShapeKey::test_shape("unsupported/other")]
+            .clone();
         assert_eq!(summary.requests, 2);
         assert_eq!(summary.known_requests, 0);
         assert_eq!(summary.unknown_identity_requests, 2);
@@ -20363,7 +20644,7 @@ mod resolver_profile_tests {
                         "prefix={}::namespace=term::name=Missing::space=Prefix",
                         profile.identity
                     ),
-                    shape: profile.shape.to_owned(),
+                    shape: MemberRequestShapeKey::test_shape(profile.shape),
                     owner: Some(profile.identity.as_str()),
                     name: "Missing",
                     file: "Use.scala",

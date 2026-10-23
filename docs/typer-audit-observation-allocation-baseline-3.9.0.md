@@ -1,0 +1,58 @@
+# Typer audit observation allocation baseline (Scala 3.9.0)
+
+Issue: [#1484](https://github.com/scytrowski/dotty-rs/issues/1484). This baseline reuses the exact bounded four-file full-mode cohort from [#1483](typer-auditresolver-overhead-3.9.0.md): six root methods, three match probes, two serial repetitions, pinned Scala 3.9.0 and JDK 21.0.8. The source-side `AuditResolver` implementation is unchanged between the measured code commit `d7dc059ceecc38885db05a4ce3a3b93caff8b119` and the #1491 merge base `4025adf3092cfe4a0e51597acdfc91fcf5359746`; the intervening changes were profiler/docs fixes.
+
+## Baseline profile
+
+Full mode averaged **12,180.5 ms Cargo wall time** (12,176–12,185 ms), **10.765 s child user CPU**, **1.35 s system CPU**, and a maximum sampled process-tree RSS of **114,307,072 bytes (109.0 MiB)**. It emitted 3,766,458 bytes per sample. These are the exact C-mode samples recorded in `docs/typer-auditresolver-overhead-3.9.0/`.
+
+The full collector retained the following event rows in each sample:
+
+| Event vector cloned for report sorting | Rows | Owned string payload duplicated | Vector element buffer duplicated | Total requested clone bytes |
+| --- | ---: | ---: | ---: | ---: |
+| `module_package_term_observations` | 548 | 145,254 B | 83,296 B | 228,550 B |
+| `module_operation_observations` | 6,664 | 1,115,680 B | 1,386,112 B | 2,501,792 B |
+| `module_member_observations` | 3,253 | 923,113 B | 598,552 B | 1,521,665 B |
+| `package_term_request_rows` | 388 | 123,925 B | 96,224 B | 220,149 B |
+| **Total per sample** | **10,853** | **2,307,972 B** | **2,164,184 B** | **4,472,156 B** |
+
+This is a component-level allocation calculation, not a claim about total process allocations. The element buffers use `size_of` for the four Rust observation structs multiplied by row count. String payload bytes are the UTF-8 lengths of their owned fields in the saved rendered rows; cloning each `String` duplicates those bytes. Allocator metadata and size-class rounding are excluded. The cloned `Vec`s are created before sorting and their owned rows remain live through report emission. `sort_unstable` over borrowed references needs one pointer per row (86,824 requested bytes total) and no owned string copies, so the code change targets approximately **4,385,332 fewer transient requested bytes per sample** after accounting for those reference arrays.
+
+### Repetition and key counts
+
+Each sample contained 3,253 module-member observations across 439 distinct `request_key` values: 2,814 rows repeat a key; median frequency 5, p95 frequency 20, maximum 95. The separate package-term request vector contained 388 rows across 8 distinct request keys; module-package-term observations contained 548 rows across 32 request keys. Repeated observations and their transaction states remain part of the authoritative report and must not be deduplicated.
+
+The #1483 subphase profile also identifies the per-request work still present after this report-only baseline: across two C samples, source member-request preparation took 29,286 µs and observation collection 31,230 µs; the three match files added 29,898 µs and 14,022 µs respectively. Symbol identity rendering accounted for 9,858 µs in the source pass and 2,020 µs in the match pass across those two samples. These subtimers overlap resolver-call windows and are not additive to total wall time.
+
+## Increment 1: sort borrowed observations
+
+The report now sorts borrowed references into each event vector instead of cloning every observation and its owned strings. A focused test compares the borrowed order with the former owned clone-and-sort order, including duplicate rows. The four stable observation sections from both after samples are byte-identical to the baseline.
+
+| Measurement | Baseline mean | Borrowed-sort mean | Difference |
+| --- | ---: | ---: | ---: |
+| Cargo wall | 12,180.5 ms | 12,689 ms | +508.5 ms |
+| Child user CPU | 10.765 s | 11.195 s | +0.430 s |
+| Child system CPU | 1.350 s | 1.370 s | +0.020 s |
+| Peak sampled process-tree RSS | 114,307,072 B | 114,860,032 B | +552,960 B |
+
+This two-run comparison is noisy and shows no whole-process speed or RSS improvement. The allocation result is narrower and deterministic: the four sort copies previously requested about 4,472,156 bytes per sample; borrowed-reference vectors request about 86,824 bytes, for an estimated 4,385,332-byte reduction. This does not count allocator metadata or represent total process allocation. The audit suite passed (103 passed, 2 ignored), as did the typer Clippy check. Do not interpret the wall/CPU/RSS differences as a regression or improvement from only two samples.
+
+## Increment 2: reuse the member prefix profile
+
+`resolve_member` now uses the profile already rendered for `request.prefix` when the target type is the same ID. An explicit `MemberSpace::Explicit` owner with a different ID still gets its own profile. In the exact full-mode cohort, every member request used `MemberSpace::Prefix`: 3,813 source requests and 2,717 match probes per sample. The change therefore skips 6,530 redundant profile renderings per sample. A focused test covers both the reused-prefix and distinct-owner cases. All four report sections remain byte-identical to the #1483 baseline.
+
+The corrected three-run profile after this increment produced a mean Cargo wall time of **12,250 ms**, child user CPU of **10.80 s**, child system CPU of **1.37 s**, and peak sampled process-tree RSS of **115,433,472 bytes**. Against the two-run #1483 baseline (12,180.5 ms, 10.765 s user, 1.35 s system, 114,307,072 B RSS), the wall time is +69.5 ms, user CPU +35 ms, and sampled peak RSS +1,126,400 B. These results show no whole-process performance or memory improvement; the small differences are within the run-to-run variation visible in the three samples (12,386, 12,183 and 12,181 ms).
+
+The request-preparation subphase averages shifted from 14.643 to 13.353 ms per sample for source requests and from 14.949 to 14.442 ms for match requests. Those subphases include other preparation work and the differences are small relative to run variation; they are not sufficient evidence of a material speedup. The exact reduction of 6,530 redundant profile calls is established by the preserved request-shape counts, but these profiles do not demonstrate a material whole-process benefit for this cohort. The main measured benefit remained the deterministic ~4.39 MB reduction in transient requested sorting allocations from Increment 1.
+
+## Increment 3: defer member request shape rendering
+
+The full audit previously formatted a request-shape string on every member lookup, cloned it into the shape counter and per-target family map, then formatted it into two outcome-map keys. The measured source cohort contained 3,813 requests across four shapes. Their rendered UTF-8 payloads total 490,650 bytes per sample. Counting the five previous format/clone copies gives an estimated **2,453,250 requested transient bytes avoided per sample** for this shape data; this excludes allocator metadata and the separate outcome payloads. The maps now retain a typed key with borrowed static shape labels and a borrowed `Prefix` value, and only render stable text when printing the report. Explicit owner space retains its owned identity. The report shape rows, key summary, and outcome-target rows match the saved baseline byte-for-byte.
+
+The three-run profile after this change averaged **12,048.3 ms Cargo wall time**, **10.73 s child user CPU**, **1.26 s system CPU**, and **115,671,040 B** peak sampled process-tree RSS. Compared with the immediately preceding three-run profile (12,250 ms, 10.80 s, 1.37 s, 115,433,472 B), wall time improved by **201.7 ms (1.65%)** and user CPU by **70 ms**; sampled peak RSS increased by 237,568 B. Source member-request preparation averaged 12.701 ms versus 13.353 ms, and match preparation 13.940 ms versus 14.442 ms. These are bounded profile results, not a broad corpus claim. Relative to the #1483 baseline, final wall time is 132.2 ms lower while sampled RSS is 1,363,968 B higher. No process-wide allocation profiler was available, so allocation figures above are requested payload estimates for identified copies, not total allocated bytes.
+
+All four detailed observation sections and the member request shape/outcome summaries are byte-identical to the baseline for the same selected file and request; the profile runner also confirmed the same six method identities, three match probes, and result labels. I ran the semantic-only, cheap-counter, and full modes with the same pinned four-file cohort. Each retained six methods and three probes with matching identities and results; the cheap-counter wrapper remains separate from detailed `AuditResolver` capture (its sampled peak RSS was 102.9 MiB versus 115.7 MiB in full mode, with one cheap/full sample each). The focused audit test suite passed (105 passed, 2 ignored), Clippy passed for `dotty-typer` with warnings denied, and format and diff checks passed.
+
+## Measured boundary
+
+No accurate whole-process allocated-byte profiler was available for #1483. This report calculates the known clone allocations from exact emitted row counts and owned string payloads, and records whole-process wall/CPU/sampled RSS separately. The before and after profiles use the same manifest, limits, mode, machine, build profile, and serial runner. All four stable observation sections were verified byte-for-byte identical; timing metadata differs as expected.
