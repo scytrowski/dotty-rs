@@ -590,13 +590,13 @@ impl JvmPrimaryConstructorPlan {
         let dotty_core::Type::Method(signature) = store.types.get(ty) else {
             unreachable!("descriptor validated shape")
         };
-        let mut parameters = Vec::new();
-        for (i, ((id, ty), signature_param)) in self
+        let mut parameters = Vec::with_capacity(self.parameters.len());
+        let mut slot = 1u16; // Slot zero is the instance receiver.
+        for ((id, ty), signature_param) in self
             .parameters
             .iter()
             .zip(descriptor.parameters())
             .zip(&signature.params)
-            .enumerate()
         {
             let parameter = store.symbols.get(*id);
             let signature_type_matches = match (ty, store.types.try_get(signature_param.ty)) {
@@ -605,6 +605,9 @@ impl JvmPrimaryConstructorPlan {
                 }
                 (crate::JvmType::Boolean, Some(dotty_core::Type::TypeRef { .. })) => {
                     exact_type_matches(store, signature_param.ty, definitions.boolean)
+                }
+                (crate::JvmType::Long, Some(dotty_core::Type::TypeRef { .. })) => {
+                    exact_type_matches(store, signature_param.ty, definitions.long)
                 }
                 (
                     crate::JvmType::Reference(class),
@@ -624,9 +627,10 @@ impl JvmPrimaryConstructorPlan {
             parameters.push(JvmParameterLocal {
                 symbol: *id,
                 ty: *ty,
-                slot: (i + 1) as u16,
-                width: 1,
+                slot,
+                width: ty.slot_width(),
             });
+            slot += u16::from(ty.slot_width());
         }
         let access_flags = MethodAccessFlags(match self.visibility {
             Visibility::Public => ACC_PUBLIC,

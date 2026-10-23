@@ -503,6 +503,12 @@ fn lower_leaf(
             match parameter.ty() {
                 JvmType::Reference(_) => code.aload(usize::from(parameter.slot())),
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(parameter.slot())),
+                JvmType::Long => {
+                    return Err(JvmCodegenError::UnsupportedTypedExpression {
+                        tree: tree_id,
+                        node: "Long parameter expression",
+                    });
+                }
             }
             .map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
@@ -611,6 +617,12 @@ fn parameter_value_type(
                     found: None,
                 },
             )?
+        }
+        JvmType::Long => {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree,
+                node: "Long parameter expression",
+            });
         }
     };
     if found != parameter.ty() {
@@ -1470,14 +1482,20 @@ fn emit_field_assignment(
     match emit_expression(context, rhs, code, depth + 1)? {
         Flow::Diverges => Ok(Flow::Diverges),
         Flow::Value(found) if flow_assignable(context, found, field_type)? => {
+            if found == JvmType::Long {
+                return Err(JvmCodegenError::UnsupportedTypedExpression {
+                    tree: tree_id,
+                    node: "Long field assignment",
+                });
+            }
             match found {
                 JvmType::Reference(_) => code.astore(value_slot),
-                JvmType::Int | JvmType::Boolean => code.istore(value_slot),
+                JvmType::Int | JvmType::Boolean | JvmType::Long => code.istore(value_slot),
             }
             .and_then(|code| code.aload(receiver_slot))
             .and_then(|code| match found {
                 JvmType::Reference(_) => code.aload(value_slot),
-                JvmType::Int | JvmType::Boolean => code.iload(value_slot),
+                JvmType::Int | JvmType::Boolean | JvmType::Long => code.iload(value_slot),
             })
             .map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
@@ -3735,6 +3753,12 @@ fn emit_return(
                 match found {
                     JvmType::Reference(_) => code.areturn(),
                     JvmType::Int | JvmType::Boolean => code.ireturn(),
+                    JvmType::Long => {
+                        return Err(JvmCodegenError::UnsupportedTypedExpression {
+                            tree: tree_id,
+                            node: "Long return expression",
+                        });
+                    }
                 }
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -3973,10 +3997,12 @@ mod tests {
                 symbol(&mut store, SymbolKind::Method, Some(class), definitions.int);
             let mut parameters = Vec::new();
             let mut locals = Vec::new();
-            for (slot, ty) in (1u16..).zip(parameter_types.iter()) {
+            let mut slot = 1u16;
+            for ty in parameter_types {
                 let param_type = match ty {
                     JvmType::Int => definitions.int,
                     JvmType::Boolean => definitions.boolean,
+                    JvmType::Long => definitions.long,
                     JvmType::Reference(_) => {
                         panic!("test method descriptors do not accept references")
                     }
@@ -3992,8 +4018,9 @@ mod tests {
                     symbol: parameter,
                     ty: *ty,
                     slot,
-                    width: 1,
+                    width: ty.slot_width(),
                 });
+                slot += u16::from(ty.slot_width());
             }
             let descriptor_text = format!(
                 "({})I",
@@ -4002,6 +4029,7 @@ mod tests {
                     .map(|ty| match ty {
                         JvmType::Int => 'I',
                         JvmType::Boolean => 'Z',
+                        JvmType::Long => 'J',
                         JvmType::Reference(_) => {
                             panic!("test method descriptors do not accept references")
                         }
@@ -4104,6 +4132,7 @@ mod tests {
                 .map(|ty| match ty {
                     JvmType::Int => 'I',
                     JvmType::Boolean => 'Z',
+                    JvmType::Long => 'J',
                     JvmType::Reference(_) => {
                         panic!("test method descriptors do not accept references")
                     }
@@ -4112,6 +4141,7 @@ mod tests {
             let suffix = match result {
                 JvmReturnType::Value(JvmType::Int) => "I",
                 JvmReturnType::Value(JvmType::Boolean) => "Z",
+                JvmReturnType::Value(JvmType::Long) => "J",
                 JvmReturnType::Value(JvmType::Reference(_)) => {
                     panic!("test method descriptors do not accept references")
                 }

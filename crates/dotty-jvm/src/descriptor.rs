@@ -5,7 +5,7 @@ use dotty_classfile::descriptor::{FieldType, MethodDescriptor};
 use dotty_core::definitions::Definitions;
 use dotty_core::ids::{SymbolId, TypeId};
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
+use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
 use dotty_core::types::{Constant, MethodKind, Type, TypeRefTarget};
 use std::collections::HashSet;
 
@@ -19,6 +19,7 @@ use crate::{
 struct PrimitiveSymbols {
     int: SymbolId,
     boolean: SymbolId,
+    long: SymbolId,
     unit: SymbolId,
 }
 
@@ -185,25 +186,34 @@ fn descriptor_for_with_references(
         });
     }
 
-    // JVMS §4.3.3 counts `this` for an instance method. Every supported
-    // parameter occupies one slot. Bound this before allocating or converting
-    // the output parameter vector.
+    // JVMS §4.3.3 counts `this` for an instance method. Parameter widths are
+    // semantic-type dependent, so enforce the unit limit after canonical type
+    // projection and before producing descriptor metadata. Since every
+    // parameter uses at least one slot, this lower bound also keeps the output
+    // allocation bounded before any per-parameter projection work.
     let receiver_slots = usize::from(!method.flags.contains(SymbolFlags::STATIC));
-    let slots = method_type.params.len() + receiver_slots;
-    if slots > crate::JVM_MAX_PARAMETER_SLOTS {
+    let minimum_slots = method_type.params.len().checked_add(receiver_slots).ok_or(
+        JvmCodegenError::TooManyParameterSlots {
+            method: plan.method,
+            slots: usize::MAX,
+        },
+    )?;
+    if minimum_slots > crate::JVM_MAX_PARAMETER_SLOTS {
         return Err(JvmCodegenError::TooManyParameterSlots {
             method: plan.method,
-            slots,
+            slots: minimum_slots,
         });
     }
 
     let primitive_symbols = PrimitiveSymbols {
         int: builtin_symbol(store, definitions.int, PrimitiveBuiltin::Int)?,
         boolean: builtin_symbol(store, definitions.boolean, PrimitiveBuiltin::Boolean)?,
+        long: long_builtin_symbol(store, definitions.long, definitions.no_prefix)?,
         unit: builtin_symbol(store, definitions.unit, PrimitiveBuiltin::Unit)?,
     };
 
     let mut parameters = Vec::with_capacity(method_type.params.len());
+    let mut parameter_slots = receiver_slots;
     let mut seen_parameters = HashSet::new();
     for (index, (method_param, parameter_id)) in
         method_type.params.iter().zip(&plan.parameters).enumerate()
@@ -278,6 +288,18 @@ fn descriptor_for_with_references(
                 symbol_info: symbol_type,
             });
         }
+        parameter_slots = parameter_slots
+            .checked_add(usize::from(symbol_value_type.slot_width()))
+            .ok_or(JvmCodegenError::TooManyParameterSlots {
+                method: plan.method,
+                slots: usize::MAX,
+            })?;
+        if parameter_slots > crate::JVM_MAX_PARAMETER_SLOTS {
+            return Err(JvmCodegenError::TooManyParameterSlots {
+                method: plan.method,
+                slots: parameter_slots,
+            });
+        }
         parameters.push(symbol_value_type);
     }
 
@@ -343,6 +365,7 @@ fn descriptor_type(
     match ty {
         JvmType::Int => Ok("I".to_owned()),
         JvmType::Boolean => Ok("Z".to_owned()),
+        JvmType::Long => Ok("J".to_owned()),
         JvmType::Reference(class) => {
             let Some(context) = context else {
                 return Err(JvmCodegenError::ReferenceMethodDescriptorUnsupported { symbol, ty });
@@ -408,6 +431,50 @@ fn builtin_symbol(
     }
 }
 
+fn long_builtin_symbol(
+    store: &SemanticStore,
+    ty: TypeId,
+    no_prefix: TypeId,
+) -> Result<SymbolId, JvmCodegenError> {
+    let invalid = || JvmCodegenError::InvalidBuiltinDefinition {
+        builtin: PrimitiveBuiltin::Long,
+        ty,
+    };
+    let Some(Type::TypeRef { prefix, target }) = store.types.try_get(ty) else {
+        return Err(invalid());
+    };
+    let TypeRefTarget::Symbol(symbol) = target else {
+        return Err(invalid());
+    };
+    if *prefix != no_prefix || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) {
+        return Err(invalid());
+    }
+    if !store.symbols.contains(*symbol) {
+        return Err(invalid());
+    }
+    let builtin = store.symbols.get(*symbol);
+    let valid_info = match builtin.info {
+        SymbolInfo::Missing => true,
+        SymbolInfo::Complete(info) => {
+            matches!(store.types.try_get(info), Some(Type::ClassInfo(class_info)) if class_info.class == *symbol)
+        }
+        SymbolInfo::Deferred(_) | SymbolInfo::Error => false,
+    };
+    if builtin.name.namespace() != dotty_core::Namespace::Type
+        || store.names.try_resolve(builtin.name.text()) != Some("Long")
+        || builtin.kind != SymbolKind::Class
+        || builtin.owner.is_some()
+        || builtin.flags != SymbolFlags::EMPTY
+        || builtin.visibility != Visibility::Public
+        || builtin.origin != SymbolOrigin::Builtin
+        || !builtin.annotations.is_empty()
+        || !valid_info
+    {
+        return Err(invalid());
+    }
+    Ok(*symbol)
+}
+
 fn primitive_value_type(
     store: &SemanticStore,
     ty: TypeId,
@@ -421,6 +488,7 @@ fn primitive_value_type(
     match store.types.try_get(ty) {
         Some(Type::Constant(Constant::Int(_))) => Ok(JvmType::Int),
         Some(Type::Constant(Constant::Boolean(_))) => Ok(JvmType::Boolean),
+        Some(Type::Constant(Constant::Long(_))) => Ok(JvmType::Long),
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..
@@ -429,6 +497,22 @@ fn primitive_value_type(
             target: TypeRefTarget::Symbol(target),
             ..
         }) if *target == primitives.boolean => Ok(JvmType::Boolean),
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(target),
+        }) if *target == primitives.long => {
+            if *prefix != definitions.no_prefix
+                || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix))
+            {
+                return Err(JvmCodegenError::InvalidPrimitiveTypePrefix {
+                    symbol,
+                    ty,
+                    prefix: *prefix,
+                    builtin: PrimitiveBuiltin::Long,
+                });
+            }
+            Ok(JvmType::Long)
+        }
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..
@@ -587,33 +671,39 @@ fn unsupported_type_error(store: &SemanticStore, symbol: SymbolId, ty: TypeId) -
 }
 
 impl JvmType {
-    /// Primitive JVM descriptor letter (`I` or `Z`), if this is primitive.
+    /// Primitive JVM descriptor letter (`I`, `Z`, or `J`), if primitive.
     pub const fn descriptor_char(self) -> Option<char> {
         match self {
             Self::Int => Some('I'),
             Self::Boolean => Some('Z'),
+            Self::Long => Some('J'),
             Self::Reference(_) => None,
         }
     }
 
-    /// JVM operand-stack category. Both supported primitives use an
-    /// int-like, category-one slot while retaining distinct descriptors.
+    /// JVM operand-stack category. `Int` and `Boolean` are int-like; `Long`
+    /// is category two.
     pub const fn category(self) -> JvmValueCategory {
         match self {
             Self::Int | Self::Boolean => JvmValueCategory::IntLike,
+            Self::Long => JvmValueCategory::Long,
             Self::Reference(_) => JvmValueCategory::Reference,
         }
     }
 
     /// Number of JVM local-variable slots occupied by this value.
     pub const fn slot_width(self) -> u8 {
-        1
+        match self {
+            Self::Long => 2,
+            Self::Int | Self::Boolean | Self::Reference(_) => 1,
+        }
     }
 
     const fn field_type(self) -> Option<FieldType> {
         match self {
             Self::Int => Some(FieldType::Int),
             Self::Boolean => Some(FieldType::Boolean),
+            Self::Long => Some(FieldType::Long),
             Self::Reference(_) => None,
         }
     }

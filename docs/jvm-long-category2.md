@@ -10,12 +10,12 @@ revision `777528f19a58e794c9954a42f433373472ec57f8`.
 | Layer | Existing behavior |
 | --- | --- |
 | `dotty-core` / Typer | Canonical `Definitions.long` and `Constant::Long` exist. The source fixture below parses, names, and types, retaining `Long` parameter/result/local types and the exact `9000000000L` literal. |
-| `dotty-jvm` projection | `JvmType` currently represents `Int`, `Boolean`, and planned class references. Descriptor projection and local allocation therefore have no `Long` representation or width. The allocator reserves one slot per supported parameter/local. |
+| `dotty-jvm` projection | Method and constructor metadata project canonical `Definitions.long` as `JvmType::Long`, descriptor `J`, and width two. Instance parameter layouts account for the receiver and each parameter's actual width. Long expression, field, local allocation, and code emission remain unsupported. |
 | Class-file descriptors | The descriptor parser accepts `J`; the linear bytecode analyzer already counts `Long` parameters/values as two slots and tracks the unusable second local slot. |
 | Stack-map wire model | `VerificationTypeInfo::Long` uses verification tag 4 and has a two-slot local width. A stack-map frame stores one verification entry for a `Long`, not two entries. |
 | CFG analyzer | Its flow state has no `Long` value/local variant. It rejects a `Long` method parameter as `UnsupportedFlowParameter` before CFG transfer analysis. |
 
-The source characterization test is `scala_long_source_reaches_typed_plans_before_backend_rejects_it` in `tests/jvm_source_compilation.rs`. Its observer runs after successful parsing, naming, typing, and JVM plan construction. All checked source signatures and `saved` locals use the canonical `Definitions.long`; the `constant` body retains `Constant::Long(9_000_000_000)` and a source position. The test calls `unit.metadata(definitions)` within that same session and compares its failing type to `definitions.long`. Metadata projection returns `UnsupportedJvmReferenceType { kind: ExternalClass }` for that exact canonical `Long` type; final class emission returns the same error and type. The first backend blocker is therefore the `Long` metadata/type projection: builtin `scala.Long` falls through to the unsupported external-reference case. This precedes literal, local, return, field, call, and CFG lowering. No production behavior was changed to work around it.
+The source characterization test is `scala_long_source_reaches_typed_plans_before_backend_rejects_it` in `tests/jvm_source_compilation.rs`. Its observer runs after successful parsing, naming, typing, and JVM plan construction. All checked source signatures and `saved` locals use canonical `Definitions.long`; the `constant` body retains `Constant::Long(9_000_000_000)` and a source position. The focused `LongDescriptors.scala` regression verifies same-session metadata for `(J)V`, `(J)J`, and mixed `(ZIJI)J` signatures, including constructor and method local slots. Emission still fails with a typed unsupported-expression error and publishes no class file. Metadata projection is implemented while value lowering remains a later increment.
 
 ## Scala 3.9.0 oracle fixture
 
@@ -129,9 +129,9 @@ verification tag.
 
 ## Scope for follow-up issues
 
-The subsequent JVM Backend issues split implementation into descriptors and
-slot allocation (#1514), CFG category-two state (#1515), literal/local/return
-lowering (#1516), fields and constructors (#1517), calls and `If`/`While`
-control flow (#1518), and end-to-end execution (#1519). This audit does not
-implement those increments, `dup2`/`pop2`, general verifier joins, or any
-source Typer changes.
+The subsequent JVM Backend issues split implementation into CFG category-two
+state (#1515), literal/local/return lowering (#1516), fields and constructors
+(#1517), calls and `If`/`While` control flow (#1518), and end-to-end execution
+(#1519). The descriptor and parameter-width metadata increment (#1514) is
+implemented. This audit does not implement the remaining increments,
+`dup2`/`pop2`, general verifier joins, or any source Typer changes.

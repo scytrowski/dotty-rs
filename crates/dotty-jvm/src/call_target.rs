@@ -680,7 +680,7 @@ fn resolve_receiver_class(
                 }
                 return match found {
                     JvmType::Reference(class) => Ok(class),
-                    JvmType::Int | JvmType::Boolean => Err(unsupported_call(
+                    JvmType::Int | JvmType::Boolean | JvmType::Long => Err(unsupported_call(
                         receiver_id,
                         UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
                     )),
@@ -761,12 +761,11 @@ fn resolve_receiver_class(
             )?;
             match target.result() {
                 JvmReturnType::Value(JvmType::Reference(class)) => Ok(class),
-                JvmReturnType::Value(JvmType::Int | JvmType::Boolean) | JvmReturnType::Void => {
-                    Err(unsupported_call(
-                        receiver_id,
-                        UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
-                    ))
-                }
+                JvmReturnType::Value(JvmType::Int | JvmType::Boolean | JvmType::Long)
+                | JvmReturnType::Void => Err(unsupported_call(
+                    receiver_id,
+                    UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
+                )),
             }
         }
         _ => Err(unsupported_call(
@@ -842,7 +841,7 @@ fn planned_current_field_receiver_class(
         })?;
     match field_metadata.value_type() {
         JvmType::Reference(class) => Ok(class),
-        JvmType::Int | JvmType::Boolean => Err(unsupported_call(
+        JvmType::Int | JvmType::Boolean | JvmType::Long => Err(unsupported_call(
             receiver,
             UnsupportedJvmCallShapeKind::UnsupportedReferenceReceiver,
         )),
@@ -926,7 +925,7 @@ fn project_result_type(
             .ok()?
         {
             JvmType::Reference(class) => Some(JvmReturnType::Value(JvmType::Reference(class))),
-            JvmType::Int | JvmType::Boolean => None,
+            JvmType::Int | JvmType::Boolean | JvmType::Long => None,
         },
         _ => None,
     }
