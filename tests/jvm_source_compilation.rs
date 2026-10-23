@@ -7304,7 +7304,10 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             ),
             "null-literal" => matches!(
                 &error,
-                PipelineFailure::Typer(TyperError::NullLiteralTypingDeferred { .. })
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
+                    node: "non-Int/Boolean literal",
+                    ..
+                })
             ),
             "array-method-parameter" => matches!(
                 &error,

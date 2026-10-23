@@ -2024,6 +2024,46 @@ mod tests {
     }
 
     #[test]
+    fn null_conformance_preserves_failed_and_malformed_target_class_info() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class Box; class Runner");
+        let box_class = class_symbol(&parsed, &store, &index, source, "Box");
+        let box_type = nominal_type_ref(&mut store, definitions, box_class);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.store.symbols.set_info(box_class, SymbolInfo::Error);
+        assert!(matches!(
+            typer.is_subtype(definitions.null_type, box_type),
+            Err(TypeRelationError::ClassInfoUnavailable {
+                symbol,
+                state: crate::types::SymbolInfoState::Error,
+            }) if symbol == box_class
+        ));
+        assert_eq!(
+            *typer.store.symbols.info(box_class),
+            SymbolInfo::Error,
+            "the relation does not repair or complete an errored class"
+        );
+
+        typer
+            .store
+            .symbols
+            .set_info(box_class, SymbolInfo::Complete(definitions.int));
+        assert!(matches!(
+            typer.is_subtype(definitions.null_type, box_type),
+            Err(TypeRelationError::ClassInfoNotClassInfo { symbol, info })
+                if symbol == box_class && info == definitions.int
+        ));
+    }
+
+    #[test]
     fn inheritance_cycles_are_reported_for_unrelated_targets() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("class A extends B; class B extends A; class C");
@@ -29970,36 +30010,51 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_string_and_null_literals_have_dedicated_errors() {
-        for (source_text, expected_error) in [
-            ("class C { val value = \"text\" }", "string"),
-            ("class C { val value = null }", "null"),
-        ] {
-            let (parsed, mut store, packages, definitions, index, source) =
-                parse_and_name(source_text);
-            let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
-            let context = ExpressionContext {
-                lexical: index.declaration_context_of(symbol).unwrap(),
-                owner: store.symbols.get(symbol).owner.unwrap(),
-                local_scopes: None,
-            };
-            let mut typer = SourceTyper::new(
-                &parsed.ast,
-                source,
-                &index,
-                &mut store,
-                definitions,
-                &packages,
-            );
-            let result = typer.type_expression(rhs, context);
+    fn unsupported_string_literal_is_deferred_but_null_has_its_canonical_type() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = \"text\" }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::StringLiteralTypingDeferred { .. })
+        ));
+        assert!(typer.typed_ast().iter().next().is_none());
 
-            match (expected_error, result) {
-                ("string", Err(TyperError::StringLiteralTypingDeferred { .. }))
-                | ("null", Err(TyperError::NullLiteralTypingDeferred { .. })) => {}
-                (variant, other) => panic!("expected {variant} literal deferral, got {other:?}"),
-            }
-            assert!(typer.typed_ast().iter().next().is_none());
-        }
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { val value = null }");
+        let (symbol, _, rhs) = val_definition_and_rhs(&parsed, &store, &index, source, "value");
+        let context = ExpressionContext {
+            lexical: index.declaration_context_of(symbol).unwrap(),
+            owner: store.symbols.get(symbol).owner.unwrap(),
+            local_scopes: None,
+        };
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let typed = typer.type_expression(rhs, context).unwrap();
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.null_type);
+        assert!(matches!(
+            typer.typed_ast().get(typed).kind,
+            TreeKind::Literal(_)
+        ));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! shares.
 //!
 //! Descriptor/signature lowering (a JVM `I` or a source `Int`) needs a
-//! stable `TypeId` for each JVM primitive plus `Object`/`Any`/`Nothing`, and
+//! stable `TypeId` for each JVM primitive plus `Object`/`Any`/`Nothing`/`Null`, and
 //! must not mint a fresh symbol every time one is encountered — two `Int`
 //! occurrences in the same session have to resolve to the exact same
 //! `TypeId`, or e.g. overload resolution and type equality would see them as
@@ -201,7 +201,7 @@ fn has_incompatible_boolean_operator_flags(flags: SymbolFlags) -> bool {
 }
 
 /// The builtin symbols and types every adapter (classfile/TASTy/source)
-/// lowers primitives and `Object`/`Any`/`Nothing` references against.
+/// lowers primitives and canonical source types against.
 ///
 /// Exactly one `Definitions` should exist per [`SemanticStore`] /
 /// compilation session. `SemanticStore` itself does not own a `Definitions`
@@ -237,6 +237,9 @@ pub struct Definitions {
     pub any_type: TypeId,
     /// The canonical source `Nothing` reference type.
     pub nothing_type: TypeId,
+    /// The canonical source `Null` reference type. This is distinct from the
+    /// JVM verifier's null value and from `Nothing`.
+    pub null_type: TypeId,
 
     /// `java.lang.Object`, the JVM upper bound (`Any`'s reference-type
     /// counterpart, `AnyRef`, is not distinguished from it yet).
@@ -247,6 +250,8 @@ pub struct Definitions {
     /// Scala's bottom type, the lower bound the same lowering uses when a
     /// wildcard does not specify one (e.g. `? extends Number`).
     pub nothing_class: SymbolId,
+    /// The canonical source `scala.Null` class identity.
+    pub null_class: SymbolId,
     /// The identity of `scala.&`, Dotty's `defn.andType`: the special type
     /// alias an applied source-level intersection `A & B` names. No file
     /// declares it, so [`declare_special_aliases`](Self::declare_special_aliases)
@@ -285,11 +290,13 @@ impl Definitions {
         let object_class = Self::builtin_symbol(store, "Object");
         let any_class = Self::builtin_symbol(store, "Any");
         let nothing_class = Self::builtin_symbol(store, "Nothing");
+        let null_class = Self::builtin_symbol(store, "Null");
         let and_type = Self::builtin_alias(store, "&");
         let or_type = Self::builtin_alias(store, "|");
         let object_type = store.types.alloc(Type::type_ref(no_prefix, object_class));
         let any_type = store.types.alloc(Type::type_ref(no_prefix, any_class));
         let nothing_type = store.types.alloc(Type::type_ref(no_prefix, nothing_class));
+        let null_type = store.types.alloc(Type::type_ref(no_prefix, null_class));
 
         let mut definitions = Self {
             no_prefix,
@@ -305,9 +312,11 @@ impl Definitions {
             object_type,
             any_type,
             nothing_type,
+            null_type,
             object_class,
             any_class,
             nothing_class,
+            null_class,
             and_type,
             or_type,
             boolean_primitive_operators: None,
@@ -1153,6 +1162,7 @@ impl Definitions {
             self.object_type,
             self.any_type,
             self.nothing_type,
+            self.null_type,
         ]
         .into_iter()
         .find(|ty| {
@@ -1295,6 +1305,28 @@ mod tests {
         assert_ne!(definitions.object_class, definitions.any_class);
         assert_ne!(definitions.object_class, definitions.nothing_class);
         assert_ne!(definitions.any_class, definitions.nothing_class);
+    }
+
+    #[test]
+    fn bootstrap_gives_null_one_canonical_builtin_type_and_symbol() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+
+        assert_ne!(definitions.null_type, definitions.nothing_type);
+        assert_ne!(definitions.null_class, definitions.nothing_class);
+        let null_symbol = store.symbols.get(definitions.null_class);
+        assert_eq!(store.names.resolve(null_symbol.name.text()), "Null");
+        assert_eq!(null_symbol.origin, SymbolOrigin::Builtin);
+        assert_eq!(null_symbol.kind, SymbolKind::Class);
+        assert_eq!(
+            store.types.get(definitions.null_type).reference_symbol(),
+            Some(definitions.null_class)
+        );
+        let null_name = Name::new(store.names.intern("Null"), Namespace::Type);
+        assert_eq!(
+            definitions.source_builtin_type(&store, null_name),
+            Some(definitions.null_type)
+        );
     }
 
     #[test]

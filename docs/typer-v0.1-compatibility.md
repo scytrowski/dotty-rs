@@ -116,9 +116,9 @@ mapping as the relation.
 
 String constants support exact equality, but the current `Definitions` has no
 canonical String type, so string-to-String conformance remains unsupported.
-UTF-16-only strings, Null, and Class constants remain outside the supported
-relation subset and return `TypeRelationError::UnsupportedType`. `Class`
-constants are not treated as nominal class views. `require_stable_selection_prefix`
+UTF-16-only strings and Class constants remain outside the supported relation
+subset and return `TypeRelationError::UnsupportedType`. `Class` constants are
+not treated as nominal class views. `require_stable_selection_prefix`
 continues to accept supported constant types as stable prefixes. TASTy decoding
 maps wire constant types to the same `Type::Constant` representation. Expected
 expression adaptation preserves an exact constant only when the normalized
@@ -127,8 +127,19 @@ all other expectations use normal expression widening before conformance.
 This is intentionally limited to literal constants and does not add general
 bidirectional typing.
 
-`null`, class literals, and general constant folding remain unsupported until
-their own source and relation contracts are specified.
+Source `null` expressions are represented by the canonical
+`Definitions.null_type` `TypeRef`, rather than `Type::Constant(Constant::Null)`.
+The typer supports an explicitly annotated `Null` result, an inferred bare
+`null` result, local values annotated with a non-generic top-level class from
+the current source unit, and `If` joins between `null` and such a class in
+either branch order. `Null` also conforms to canonical `Object`; the existing
+top-type rule permits it where `Any` is expected. Primitive targets such as
+`Int` and `Boolean` are rejected. Direct `Type::Constant(Constant::Null)`
+relations remain unsupported, as do generic or external class targets,
+general union erasure, flow narrowing, and `-Yexplicit-nulls`.
+
+Class literals and general constant folding remain unsupported until their own
+source and relation contracts are specified.
 
 ## Pattern typing foundation
 
