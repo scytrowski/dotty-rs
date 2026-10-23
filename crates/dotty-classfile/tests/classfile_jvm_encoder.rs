@@ -2202,6 +2202,141 @@ fn integer_arithmetic_instructions_execute_with_jvm_signed_semantics() {
 }
 
 #[test]
+fn long_branch_and_loop_frames_verify_and_execute_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let mut class = ClassFileBuilder::new("LongControlFlow", version).unwrap();
+    class
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    class
+        .add_instance_method("<init>", "()V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    class
+        .add_instance_method("choose", "(ZJJ)J", |code| {
+            let otherwise = code.new_label()?;
+            let done = code.new_label()?;
+            code.iload(1)?;
+            code.ifeq(otherwise.clone())?;
+            code.lload(2)?;
+            code.goto(done.clone())?;
+            code.mark(otherwise)?;
+            code.lload(4)?;
+            code.mark(done)?;
+            code.lreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    class
+        .add_instance_method("repeat", "(IJJ)J", |code| {
+            let head = code.new_label()?;
+            let done = code.new_label()?;
+            code.lload(2)?;
+            code.lstore(6)?;
+            code.mark(head.clone())?;
+            code.iload(1)?;
+            code.ifeq(done.clone())?;
+            code.iload(1)?;
+            code.iconst(1)?;
+            code.isub()?;
+            code.istore(1)?;
+            code.goto(head)?;
+            code.mark(done)?;
+            code.lload(6)?;
+            code.lreturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let bytes = class.encode().unwrap();
+    let decoded = decode_and_validate(&bytes);
+    for (name, max_locals) in [("choose", 6), ("repeat", 8)] {
+        let method = decoded
+            .methods
+            .iter()
+            .find(|method| decoded.constant_pool.utf8(method.name_index) == Ok(name))
+            .unwrap();
+        assert_eq!(code(method).max_stack, 2);
+        assert_eq!(code(method).max_locals, max_locals);
+        assert!(code(method).attributes.iter().any(|attribute| {
+            matches!(attribute, Attribute::Other(attribute)
+                if decoded.constant_pool.utf8(attribute.name_index) == Ok("StackMapTable"))
+        }));
+    }
+
+    let class_path = directory.path().join("LongControlFlow.class");
+    fs::write(&class_path, bytes)
+        .unwrap_or_else(|error| panic!("write {}: {error}", class_path.display()));
+    let harness_path = directory.path().join("LongControlFlowHarness.java");
+    fs::write(
+        &harness_path,
+        "public final class LongControlFlowHarness {\n    public static void main(String[] args) {\n        LongControlFlow value = new LongControlFlow();\n        if (value.choose(true, 41L, 99L) != 41L || value.choose(false, 41L, 99L) != 99L) throw new AssertionError(\"branch long join\");\n        if (value.repeat(0, 77L, 88L) != 77L || value.repeat(5, 77L, 88L) != 77L) throw new AssertionError(\"loop long local\");\n        System.out.println(\"long CFG frames ok\");\n    }\n}\n",
+    )
+    .unwrap_or_else(|error| panic!("write {}: {error}", harness_path.display()));
+    let directory_arg = directory.path().to_string_lossy().into_owned();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            &directory_arg,
+            "-d",
+            &directory_arg,
+            harness_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for long CFG harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let javap = run(
+        "javap",
+        &["-v", "-classpath", &directory_arg, "LongControlFlow"],
+    );
+    assert!(
+        javap.status.success(),
+        "javap -v rejected generated long CFG class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap_output.contains("StackMapTable"), "{javap_output}");
+    assert!(javap_output.contains("long"), "{javap_output}");
+
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            &directory_arg,
+            "LongControlFlowHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected or failed to execute long CFG class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "long CFG frames ok"
+    );
+}
+
+#[test]
 fn int_bitwise_instructions_execute_and_verify_with_jvm_semantics() {
     let directory = TempDir::new();
     let version = ClassFileVersion {

@@ -88,6 +88,7 @@ distinguishes:
 | --- | --- | --- |
 | `Top` | Unusable local after no assignment or a local join | `Top` |
 | `Integer` | JVM int-like primitive | `Integer` |
+| `Long` / `LongTail` | One category-two local value occupying a head slot and an inaccessible tail slot | One `Long` entry; the tail has no separate entry |
 | `Null` | The JVM null verification type, with no class identity | `Null_variable_info` (tag 5) |
 | `Initialized(class)` | Initialized reference with exact validated JVM internal class name | `Object(cp_index)` |
 | `Uninitialized(allocation_site)` | Fresh instance at one specific `new` instruction | `Uninitialized(new_pc)`; prohibited at CFG joins in this increment |
@@ -97,6 +98,16 @@ Class-file analysis must remain Scala-independent. Its identity is a validated
 JVM internal name or validated `CONSTANT_Class`, never `SymbolId`. The JVM
 adapter may map its canonical source class identity to that internal name
 before invoking class-file analysis.
+
+CFG analysis also supports the bounded category-two transfer for Long
+constants, descriptor parameters, local loads/stores, returns, branch joins,
+and loop backedges. It stores one logical `Long` on the operand stack while
+counting two physical stack slots. Locals track `Long` and `LongTail`
+separately, invalidate overlapping pairs on stores, and merge an uncertain
+pair to `Top`. Frame projection emits one Long verification entry and skips
+the tail while preserving genuine Top holes. Long arithmetic, `lcmp`,
+`dup2`/`pop2`, conversions, and Long field or method transfer remain
+unsupported.
 
 For an ordinary non-static, non-constructor method, the initial local 0 is
 `Initialized(emitting_class)`. Static methods start with descriptor-derived

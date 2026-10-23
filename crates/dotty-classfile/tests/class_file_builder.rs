@@ -527,6 +527,69 @@ fn builds_branched_integer_methods_with_one_stack_map_table_each() {
 }
 
 #[test]
+fn builds_instance_long_branch_and_loop_frames_with_physical_slot_counts() {
+    let mut builder = ClassFileBuilder::new(
+        "example/LongControlFlow",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_instance_method("choose", "(ZJJ)J", |code| {
+            let otherwise = code.new_label()?;
+            let done = code.new_label()?;
+            code.iload(1)?;
+            code.ifeq(otherwise.clone())?;
+            code.lload(2)?;
+            code.goto(done.clone())?;
+            code.mark(otherwise)?;
+            code.lload(4)?;
+            code.mark(done)?;
+            code.lreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_instance_method("repeat", "(IJJ)J", |code| {
+            let head = code.new_label()?;
+            let done = code.new_label()?;
+            code.lload(2)?;
+            code.lstore(6)?;
+            code.mark(head.clone())?;
+            code.iload(1)?;
+            code.ifeq(done.clone())?;
+            code.iload(1)?;
+            code.iconst(1)?;
+            code.isub()?;
+            code.istore(1)?;
+            code.goto(head)?;
+            code.mark(done)?;
+            code.lload(6)?;
+            code.lreturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let encoded = builder.encode().unwrap();
+    let class_file = decode(&encoded);
+    for (name, max_locals) in [("choose", 6), ("repeat", 8)] {
+        let code = code_attribute(method_named(&class_file, name));
+        assert_eq!((code.max_stack, code.max_locals), (2, max_locals));
+        let [Attribute::Other(stack_map)] = code.attributes.as_slice() else {
+            panic!("{name} should have a StackMapTable");
+        };
+        assert_eq!(utf8(&class_file, stack_map.name_index), "StackMapTable");
+        assert!(
+            stack_map.bytes.contains(&4),
+            "{name}: {:?}",
+            stack_map.bytes
+        );
+    }
+}
+
+#[test]
 fn class_builder_accepts_prebuilt_symbolic_branch_code() {
     let mut builder = ClassFileBuilder::new(
         "example/Prebuilt",
@@ -1695,8 +1758,9 @@ fn rejects_unsupported_branch_frames_stack_merges_uninitialized_locals_and_termi
     assert!(matches!(
         category_two.encode(),
         Err(ClassFileBuildError::Analysis(
-            dotty_classfile::bytecode::AnalysisError::UnsupportedFlowInstruction {
-                kind: dotty_classfile::bytecode::UnsupportedFlowInstructionKind::CategoryTwo,
+            dotty_classfile::bytecode::AnalysisError::StackTypeMismatch {
+                expected: dotty_classfile::bytecode::ValueKind::Int,
+                actual: dotty_classfile::bytecode::ValueKind::Long,
                 ..
             }
         ))
