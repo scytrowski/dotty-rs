@@ -325,6 +325,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                  input_cache: list[dict],
                  file_paths: list[str], commit: str,
                  scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path) -> None:
+    timing_only = runs[0]["summary"].get("timing_mode") == "timing_only"
     output_started_ns = time.monotonic_ns()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run-timings.tsv").write_text(
@@ -354,7 +355,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         for name, count in result["loads"].items():
             load_totals[name] = load_totals.get(name, 0) + count
         for name, count in result["resolver_counts"].items():
-            resolver_count_totals[name] = resolver_count_totals.get(name, 0) + count
+            if not timing_only:
+                resolver_count_totals[name] = resolver_count_totals.get(name, 0) + count
         load_root_rows.extend((run_index, row) for row in result["load_roots"])
         for path, data in result["files"].items():
             file_samples.setdefault(path, []).append(data.get("total_ms", 0))
@@ -365,11 +367,12 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 file_row_data.append((int(millis), path, phase.removesuffix("_ms"), str(run_index), outcome))
                 phase_totals[phase] = phase_totals.get(phase, 0) + millis
         for (path, tree), data in result["methods"].items():
-            resolver = result["resolver"].get((path, tree), {})
+            resolver = {} if timing_only else result["resolver"].get((path, tree), {})
             method_samples.append((data["elapsed_ms"], path, tree, data["method"]))
-            method_resolver_samples.setdefault((path, tree, data["method"]), []).append((
-                int(resolver.get("member_calls", 0)), int(resolver.get("member_inner_us", 0)),
-            ))
+            if not timing_only:
+                method_resolver_samples.setdefault((path, tree, data["method"]), []).append((
+                    int(resolver.get("member_calls", 0)), int(resolver.get("member_inner_us", 0)),
+                ))
             method_row_data.append((data["elapsed_ms"], path, tree, "\t".join(str(value) for value in [
                 run_index, path, tree, data["line"], data["method"], data["elapsed_ms"],
                 resolver.get("module_identity_calls", "not_captured"), resolver_duration_ms(resolver, "module_identity"), resolver_duration_us(resolver, "module_identity"),
@@ -526,7 +529,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     phase_sum = sum(phase_totals.values())
     for phase, total in sorted(phase_totals.items(), key=lambda item: (-item[1], item[0])):
         lines.append(f"| `{phase}` | {total} | {100 * total / max(1, phase_sum):.1f}% |")
-    lines += ["", "## Resolver operation families", "", "Durations measure delegated resolver calls; nested class/TASTy loading remains inclusive inside those calls. AuditResolver wrapper time is reported separately.", "", "| Operation | Calls | Delegated ms |", "| --- | ---: | ---: |"]
+    lines += ["", "## Resolver operation families", "", ("Resolver counters and timings were not captured in timing-only mode." if timing_only else "Durations measure delegated resolver calls; nested class/TASTy loading remains inclusive inside those calls. AuditResolver wrapper time is reported separately."), "", "| Operation | Calls | Delegated ms |", "| --- | ---: | ---: |"]
     resolver_sort_key = lambda item: (item[1][1] is None and item[1][2] is None, -(item[1][2] if item[1][2] is not None else (item[1][1] or 0) * 1000), item[0])
     for operation, (calls, millis, micros) in sorted(resolver_operations.items(), key=resolver_sort_key):
         calls_text = "not captured" if calls is None else str(calls)
@@ -560,11 +563,11 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"| `{root['root']}` | `{root['file']}::{root['method']}` (run {run}) | {root['distinct_classes']} | {root['full_completions']} | {root['completed_cache_hits']} |"
         for run, root in sorted_roots[:10]
     ]
-    lines += ["", "## Three confirmed hot method roots", "", "Ranked by mean inclusive method-attempt time. These attempts stop at the first typer blocker, so they characterize current audit work rather than successful full-method typing. Member resolver time is nested within method time and is shown only as attribution, not added again.", "", "| Rank | Mean inclusive ms | Member calls | Delegated member ms | Exact root |", "| ---: | ---: | ---: | ---: | --- |"]
+    lines += ["", "## Three measured method roots", "", "Ranked by mean inclusive method-attempt time. These attempts stop at the first typer blocker, so they characterize current audit work rather than successful full-method typing. " + ("Resolver attribution was not captured in timing-only mode." if timing_only else "Member resolver time is nested within method time and is shown only as attribution, not added again."), "", "| Rank | Mean inclusive ms | Member calls | Delegated member ms | Exact root |", "| ---: | ---: | ---: | ---: | --- |"]
     for rank, (mean, _maximum, path, tree, name, _runs_count) in enumerate(top_hot_paths, 1):
         calls_and_time = method_resolver_samples.get((path, tree, name), [])
-        mean_calls = statistics.mean(calls for calls, _elapsed in calls_and_time) if calls_and_time else 0
-        mean_resolver_ms = statistics.mean(elapsed for _calls, elapsed in calls_and_time) / 1000 if calls_and_time else 0
+        mean_calls = statistics.mean(calls for calls, _elapsed in calls_and_time) if calls_and_time else None
+        mean_resolver_ms = statistics.mean(elapsed for _calls, elapsed in calls_and_time) / 1000 if calls_and_time else None
         source_lines = [
             data["line"]
             for run in runs
@@ -573,11 +576,14 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         ]
         source_line = source_lines[0] if source_lines else 0
         pointer = f"{path}:{source_line}" if source_line else f"{path}#tree={tree}"
-        lines.append(f"| {rank} | {mean:.1f} | {mean_calls:.1f} | {mean_resolver_ms:.1f} | `{pointer}` `{name}` (tree {tree}) |")
-    lines += [
+        calls_text = f"{mean_calls:.1f}" if mean_calls is not None else "not captured"
+        resolver_text = f"{mean_resolver_ms:.1f}" if mean_resolver_ms is not None else "not captured"
+        lines.append(f"| {rank} | {mean:.1f} | {calls_text} | {resolver_text} | `{pointer}` `{name}` (tree {tree}) |")
+    if not timing_only:
+        lines += [
         "",
         "All three hot roots spend nearly all observed method time in delegated `resolve_member`; this bounded profile therefore supports a focused follow-up that attributes resolver-internal work (prefix/package traversal, classpath lookup, and member selection) per request family. Recheck repeated request keys before proposing request-local reuse. Do not add cross-session semantic caches or claim an optimization speedup from this baseline.",
-    ]
+        ]
     lines += [
         "",
         "Per-method resolver durations are emitted in microseconds. A zero call count means that operation did not run for that method; zero elapsed time with calls is below timer resolution, not proof of zero cost.",

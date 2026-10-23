@@ -117,6 +117,28 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
             self.assertNotIn("PROFILE_REPORT_", summary)
             self.assertGreaterEqual(int(timing_line.split("took about ", 1)[1].split(" ms", 1)[0]), 30)
 
+    def test_timing_only_report_marks_resolver_attribution_uncaptured(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            run = {
+                "files": {"compiler/A.scala": {"total_ms": 20, "outcome": "complete", "typing_ms": 20}},
+                "methods": {("compiler/A.scala", "8"): {"elapsed_ms": 20, "line": 12, "method": "foo"}},
+                "resolver": {("compiler/A.scala", "8"): {"member_calls": 0, "member_inner_us": 0}},
+                "summary": {"wall_ms": "20", "timing_mode": "timing_only", "method_limit_per_file": "1"},
+                "loads": {}, "resolver_counts": {"resolver_member_requests": 0}, "load_roots": [],
+                "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {},
+            }
+            sequential_profile.write_report(
+                Path(temporary), [run], [20], ["warm"], [{"mode": "warm-read-through", "before_bytes": 0}],
+                ["compiler/A.scala"], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary),
+            )
+
+            summary = (Path(temporary) / "summary.md").read_text()
+            methods = (Path(temporary) / "methods.tsv").read_text()
+            self.assertIn("Resolver counters and timings were not captured", summary)
+            self.assertIn("Resolver attribution was not captured", summary)
+            self.assertIn("not_captured", methods)
+            self.assertNotIn("Three confirmed hot method roots", summary)
+
 
 if __name__ == "__main__":
     unittest.main()
