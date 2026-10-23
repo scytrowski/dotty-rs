@@ -318,6 +318,9 @@ constructor-safety, hierarchy-join, and descriptor boundaries.
   bounded same-unit `Base -> Object`, `Middle -> Base`, and `Leaf -> Middle`
   chain; a source-typed `If` joins distinct initialized references only when
   they are ancestor-related and both fit its canonical result class.
+  The current `null` and reference-identity boundary, including the distinct
+  JVMS `Null` verifier value, is audited in
+  [jvm-null-reference-identity.md](jvm-null-reference-identity.md).
 
 ## Combined constructor and dispatch evidence
 
