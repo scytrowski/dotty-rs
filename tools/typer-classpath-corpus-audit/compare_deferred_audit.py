@@ -248,7 +248,17 @@ def main():
     args = parser.parse_args()
     baseline = args.baseline.read_text(encoding='utf-8')
     current = args.current.read_text(encoding='utf-8')
-    depth, fanout = gate(baseline, current)
+    gate_error = None
+    try:
+        depth, fanout = gate(baseline, current)
+    except ValueError as error:
+        gate_error = str(error)
+        depth = scalar(current, 'dependency_load_profile', 'p95_dependency_depth')
+        fanout = scalar(
+            current,
+            'dependency_load_profile',
+            'max_distinct_fully_completed_classes_per_request',
+        )
     rows = cohort_rows(baseline, current)
     if args.rows:
         with args.rows.open('w', encoding='utf-8', newline='') as output:
@@ -258,10 +268,21 @@ def main():
                              'shells_observed', 'completions_observed', 'resolved_requests',
                              'current_first_blocker', 'full_method_typed'))
             writer.writerows(rows)
-    print(f'Gate passed: p95 completion depth {depth}/6; maximum completed fanout {fanout}/16.')
-    print(f'Previously successful target keys retained: {len(successful_targets(baseline))}/{len(successful_targets(current))}.')
+    if gate_error:
+        print(f'Gate failed: {gate_error}')
+    else:
+        print(f'Gate passed: p95 completion depth {depth}/6; maximum completed fanout {fanout}/16.')
+    baseline_successes = successful_targets(baseline)
+    current_successes = successful_targets(current)
+    retained = baseline_successes & current_successes
+    print(
+        'Previously successful target keys retained: '
+        f'{len(retained)}/{len(baseline_successes)}; '
+        f'current distinct successes: {len(current_successes)}.'
+    )
     print('Frozen cohort rows:', dict(sorted(collections.Counter(row[0] for row in rows).items())))
+    return 1 if gate_error else 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
