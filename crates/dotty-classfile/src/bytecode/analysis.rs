@@ -2788,6 +2788,9 @@ impl Frame {
                 FieldType::Int | FieldType::Boolean => {
                     self.pop_expected(instruction, ValueKind::Int)?;
                 }
+                FieldType::Long => {
+                    self.pop_expected(instruction, ValueKind::Long)?;
+                }
                 FieldType::Object(name) if is_valid_internal_name(name) => {
                     let (_, actual, is_null) =
                         self.pop_typed_with_null(instruction, ValueKind::Reference)?;
@@ -2907,6 +2910,9 @@ impl Frame {
                 FieldType::Int | FieldType::Boolean => {
                     self.pop_expected(instruction, ValueKind::Int)?;
                 }
+                FieldType::Long => {
+                    self.pop_expected(instruction, ValueKind::Long)?;
+                }
                 FieldType::Object(name) => {
                     let (_, actual, is_null) =
                         self.pop_typed_with_null(instruction, ValueKind::Reference)?;
@@ -2944,6 +2950,9 @@ impl Frame {
             None => {}
             Some(FieldType::Int | FieldType::Boolean) => {
                 self.push(instruction, ValueKind::Int)?;
+            }
+            Some(FieldType::Long) => {
+                self.push(instruction, ValueKind::Long)?;
             }
             Some(FieldType::Object(name)) => {
                 self.push_object(instruction, ClassIdentity(Arc::from(name.as_str())))?;
@@ -2991,6 +3000,9 @@ impl Frame {
             match ty {
                 FieldType::Int | FieldType::Boolean => {
                     self.pop_expected(instruction, ValueKind::Int)?;
+                }
+                FieldType::Long => {
+                    self.pop_expected(instruction, ValueKind::Long)?;
                 }
                 FieldType::Object(name) => {
                     let (_, actual, is_null) =
@@ -3041,6 +3053,9 @@ impl Frame {
             None => {}
             Some(FieldType::Int | FieldType::Boolean) => {
                 self.push(instruction, ValueKind::Int)?;
+            }
+            Some(FieldType::Long) => {
+                self.push(instruction, ValueKind::Long)?;
             }
             Some(FieldType::Object(name)) => {
                 self.push_object(instruction, ClassIdentity(Arc::from(name.as_str())))?;
@@ -3386,7 +3401,7 @@ impl CfgCodeAnalyzer {
     /// and switch flows are not supported. Use
     /// [`Self::analyze_with_current_class`] to enable exact initialized
     /// receiver moves, primitive field accesses, and exact `invokevirtual`
-    /// calls with supported object/int-like descriptors. Null is preserved as
+    /// calls with supported object, int-like, or Long descriptors. Null is preserved as
     /// its own verifier value and accepted for supported reference fields,
     /// arguments, and returns. No byte offsets or stack-map frames are
     /// produced.
@@ -3408,9 +3423,10 @@ impl CfgCodeAnalyzer {
     /// The existing [`Self::analyze`] entry point retains its receiver
     /// placeholder behavior. This context enables exact initialized-reference
     /// moves, `dup`/`pop`, `getfield`/`putfield` for `int`, `boolean`, and
-    /// `long` fields,
-    /// and `invokevirtual` methods with exact object or int-like parameters and
-    /// exact object, int-like, or void results. Non-null reference arguments
+    /// `long` fields, and `invokevirtual` methods with exact object, int-like,
+    /// or Long parameters and exact object, int-like, Long, or void results.
+    /// Constructor calls accept the same parameter categories. Long arguments
+    /// and results use category-two stack transfer. Non-null reference arguments
     /// and receivers must match their declared class names exactly; null is
     /// assignable to a supported reference type. No other hierarchy
     /// conversions are inferred by this entry point. Use
@@ -3423,8 +3439,8 @@ impl CfgCodeAnalyzer {
     /// may be evaluated while a different allocation remains pending.
     /// Uninitialized values may not escape to locals, ordinary operands,
     /// branches, or block boundaries. Field owners must match the exact
-    /// receiver. Other invocation kinds, reference fields, arrays, and
-    /// category-two method types remain unsupported.
+    /// receiver. Static calls, reference fields, arrays, and category-two
+    /// static invocation transfers remain unsupported.
     pub fn analyze_with_current_class(
         graph: &ControlFlowGraph,
         method_name: &str,
@@ -3936,7 +3952,7 @@ fn validate_flow_virtual_signature(
     }
     for (parameter, ty) in descriptor.parameters.iter().enumerate() {
         match ty {
-            FieldType::Int | FieldType::Boolean => {}
+            FieldType::Int | FieldType::Boolean | FieldType::Long => {}
             FieldType::Object(name) if is_valid_internal_name(name) => {}
             FieldType::Object(name) => {
                 return Err(AnalysisError::InvalidReferencedMethodClassName {
@@ -3956,7 +3972,7 @@ fn validate_flow_virtual_signature(
         }
     }
     match descriptor.return_type.as_ref() {
-        None | Some(FieldType::Int | FieldType::Boolean) => {}
+        None | Some(FieldType::Int | FieldType::Boolean | FieldType::Long) => {}
         Some(FieldType::Object(name)) if is_valid_internal_name(name) => {}
         Some(FieldType::Object(name)) => {
             return Err(AnalysisError::InvalidReferencedMethodClassName {
@@ -5263,6 +5279,116 @@ mod tests {
     }
 
     #[test]
+    fn transfers_long_virtual_and_constructor_arguments_and_results() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/Counter").unwrap();
+        let wide_owner = builder.class("example/WideBox").unwrap();
+        let mix = builder
+            .method_ref("example/Counter", "mix", "(IJZJ)J")
+            .unwrap();
+        let take_long = builder
+            .method_ref("example/Counter", "takeLong", "(J)J")
+            .unwrap();
+        let constructor = builder
+            .method_ref("example/WideBox", "<init>", "(J)V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut mixed = CodeSequence::new();
+        mixed
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ILoad(LocalIndex::new(1)))
+            .instruction(Instruction::LLoad(LocalIndex::new(2)))
+            .instruction(Instruction::ILoad(LocalIndex::new(4)))
+            .instruction(Instruction::LLoad(LocalIndex::new(5)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(mix),
+            )))
+            .instruction(Instruction::LReturn);
+        let mixed_graph = ControlFlowGraph::build(&mixed).unwrap();
+        let mixed_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &mixed_graph,
+            "mixedLongCall",
+            "(IJZJ)J",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(mixed_flow.max_stack, 7);
+        assert_eq!(mixed_flow.max_locals, 7);
+
+        let mut chained = CodeSequence::new();
+        chained
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::LLoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(take_long),
+            )))
+            .instruction(Instruction::LReturn);
+        let chained_graph = ControlFlowGraph::build(&chained).unwrap();
+        let chained_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &chained_graph,
+            "chainedLongCall",
+            "(J)J",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(chained_flow.max_stack, 3);
+        assert_eq!(chained_flow.max_locals, 3);
+
+        let mut construct = CodeSequence::new();
+        construct
+            .instruction(Instruction::New(ClassReference::new(operand(wide_owner))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::LLoad(LocalIndex::new(1)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let construct_graph = ControlFlowGraph::build(&construct).unwrap();
+        let construct_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &construct_graph,
+            "constructLongArgument",
+            "(J)V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(construct_flow.max_stack, 4);
+        assert_eq!(construct_flow.max_locals, 3);
+
+        let mut wrong_category = CodeSequence::new();
+        wrong_category
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(take_long),
+            )))
+            .instruction(Instruction::LReturn);
+        let wrong_category_graph = ControlFlowGraph::build(&wrong_category).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_category_graph,
+                "wrongLongArgumentCategory",
+                "()J",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Long,
+                actual: ValueKind::Int,
+            })
+        ));
+    }
+
+    #[test]
     fn rejects_wrong_uninitialized_and_swapped_virtual_reference_arguments() {
         let mut builder = ConstantPoolBuilder::new();
         let class_index = builder.class("example/Counter").unwrap();
@@ -5400,9 +5526,6 @@ mod tests {
             .unwrap();
         let byte_parameter = builder
             .method_ref("example/Counter", "acceptByte", "(B)V")
-            .unwrap();
-        let long_result = builder
-            .method_ref("example/Counter", "wide", "()J")
             .unwrap();
         let array_result = builder
             .method_ref("example/Counter", "array", "()[I")
@@ -5546,13 +5669,6 @@ mod tests {
                     instruction: 1,
                     parameter: 0,
                     actual: FieldType::Array(Box::new(FieldType::Int)),
-                },
-            ),
-            (
-                long_result,
-                AnalysisError::UnsupportedFlowMethodReturn {
-                    instruction: 1,
-                    actual: FieldType::Long,
                 },
             ),
             (
