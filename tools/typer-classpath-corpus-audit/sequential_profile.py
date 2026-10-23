@@ -931,6 +931,7 @@ def main() -> int:
                 print(output, file=sys.stderr)
                 fail(f"profile run {index} failed with exit code {return_code}; see {log_path}")
             parsed = parse_run(output)
+            parsed["cargo_wall_ms"] = wall_ms
             parsed["process_metrics"] = process_metrics
             results.append(parsed)
             wall_times.append(wall_ms)
