@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -70,13 +71,13 @@ struct ResolverMetrics {
     member_error_distinct_targets: BTreeMap<String, BTreeSet<String>>,
     member_error_files: BTreeMap<String, BTreeSet<String>>,
     member_error_source_origins: BTreeMap<String, BTreeMap<String, usize>>,
-    member_request_shapes: BTreeMap<String, usize>,
-    member_request_unknown_identity_shapes: BTreeMap<String, usize>,
+    member_request_shapes: BTreeMap<MemberRequestShapeKey, usize>,
+    member_request_unknown_identity_shapes: BTreeMap<MemberRequestShapeKey, usize>,
     member_request_targets: BTreeMap<String, RequestTargetMetrics>,
     member_requests_by_method: BTreeMap<String, BTreeMap<String, usize>>,
     resolver_requests_by_method: BTreeMap<String, Vec<ResolverRequestObservation>>,
-    member_request_outcome_targets: BTreeMap<String, BTreeSet<String>>,
-    member_request_outcome_files: BTreeMap<String, BTreeSet<String>>,
+    member_request_outcome_targets: BTreeMap<MemberRequestOutcomeKey, BTreeSet<String>>,
+    member_request_outcome_files: BTreeMap<MemberRequestOutcomeKey, BTreeSet<String>>,
     member_error_roots: BTreeMap<String, usize>,
     dependency_failure_chains: BTreeMap<String, usize>,
     tasty_supertype_failures: BTreeMap<String, usize>,
@@ -116,6 +117,40 @@ struct ResolverMetrics {
     class_member_prefixes: BTreeSet<String>,
     class_member_keys: BTreeSet<String>,
     module_resolution: ModuleResolutionProfile,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MemberRequestShapeKey {
+    space: Cow<'static, str>,
+    prefix_shape: &'static str,
+    target_kind: &'static str,
+    namespace: &'static str,
+    selector: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct MemberRequestOutcomeKey {
+    shape: MemberRequestShapeKey,
+    outcome: String,
+}
+
+impl MemberRequestShapeKey {
+    fn test_shape(prefix_shape: &'static str) -> Self {
+        Self {
+            space: Cow::Borrowed("Prefix"),
+            prefix_shape,
+            target_kind: "unsupported",
+            namespace: "term",
+            selector: "Unique",
+        }
+    }
+
+    fn report_row(&self) -> String {
+        format!(
+            "space={}::prefix={}::target={}::namespace={}::selector={}::site=not-exposed-by-SymbolResolver",
+            self.space, self.prefix_shape, self.target_kind, self.namespace, self.selector
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -680,7 +715,7 @@ struct RequestTargetMetrics {
     names: BTreeSet<String>,
     methods: BTreeSet<String>,
     outcomes: BTreeMap<String, usize>,
-    families: BTreeMap<String, RequestFamilyMetrics>,
+    families: BTreeMap<MemberRequestShapeKey, RequestFamilyMetrics>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -969,7 +1004,7 @@ impl SharedClassPath {
 
 struct RequestTargetObservation<'a> {
     target_key: String,
-    shape: String,
+    shape: MemberRequestShapeKey,
     owner: Option<&'a str>,
     name: &'a str,
     file: &'a str,
@@ -1012,8 +1047,8 @@ fn record_member_request_target(
 
 fn member_request_shape_summaries(
     metrics: &ResolverMetrics,
-) -> BTreeMap<String, RequestShapeSummary> {
-    let mut by_shape = BTreeMap::<String, RequestShapeSummary>::new();
+) -> BTreeMap<MemberRequestShapeKey, RequestShapeSummary> {
+    let mut by_shape = BTreeMap::<MemberRequestShapeKey, RequestShapeSummary>::new();
     for (key, target) in &metrics.member_request_targets {
         for (shape, family) in &target.families {
             let summary = by_shape.entry(shape.clone()).or_default();
@@ -1728,12 +1763,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             Namespace::Term => "term",
         };
         let space = request_space(store, &request.space);
-        let shape = format!(
-            "space={space}::prefix={}::target={}::namespace={namespace}::selector={}::site=not-exposed-by-SymbolResolver",
-            prefix.shape,
-            prefix.target_kind,
-            request_selector(&request.selector)
-        );
+        let shape = MemberRequestShapeKey {
+            space: space.clone(),
+            prefix_shape: prefix.shape,
+            target_kind: prefix.target_kind,
+            namespace,
+            selector: request_selector(&request.selector),
+        };
         let target_key = format!(
             "prefix={}::namespace={namespace}::name={name}::space={space}",
             prefix.identity
@@ -2020,7 +2056,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     prefix_kind: "Package",
                     package: prefix.identity.clone(),
                     name: name.clone(),
-                    member_space: space.clone(),
+                    member_space: space.to_string(),
                     selector: request_selector(&request.selector),
                     source_file: current_file.clone(),
                     enclosing_attempt: current_method.clone(),
@@ -2117,13 +2153,19 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         if prefix.identity_known {
             metrics
                 .member_request_outcome_targets
-                .entry(format!("{shape}::outcome={outcome}"))
+                .entry(MemberRequestOutcomeKey {
+                    shape: shape.clone(),
+                    outcome: outcome.clone(),
+                })
                 .or_default()
                 .insert(target_key.clone());
         }
         metrics
             .member_request_outcome_files
-            .entry(format!("{shape}::outcome={outcome}"))
+            .entry(MemberRequestOutcomeKey {
+                shape: shape.clone(),
+                outcome: outcome.clone(),
+            })
             .or_default()
             .insert(current_file.clone());
         if let Some(symbol) = prefix.symbol {
@@ -5079,14 +5121,17 @@ fn class_resource_label(resource: &ClassResource) -> String {
     format!("{format}@{origin}")
 }
 
-fn request_space(store: &SemanticStore, space: &MemberSpace) -> String {
+fn request_space(store: &SemanticStore, space: &MemberSpace) -> Cow<'static, str> {
     match space {
-        MemberSpace::Prefix => "Prefix".to_owned(),
+        MemberSpace::Prefix => Cow::Borrowed("Prefix"),
         MemberSpace::Explicit(ty) => {
             let prefix = prefix_profile(store, *ty);
-            format!("Explicit:{}:{}", prefix.target_kind, prefix.identity)
+            Cow::Owned(format!(
+                "Explicit:{}:{}",
+                prefix.target_kind, prefix.identity
+            ))
         }
-        _ => "other".to_owned(),
+        _ => Cow::Borrowed("other"),
     }
 }
 
@@ -9668,6 +9713,52 @@ fn borrowed_report_sort_matches_owned_observation_sort() {
 }
 
 #[test]
+fn typed_member_request_shapes_preserve_legacy_rows_and_order() {
+    let shapes = [
+        MemberRequestShapeKey {
+            space: Cow::Borrowed("Prefix"),
+            prefix_shape: "module-class TypeRef",
+            target_kind: "ModuleClass",
+            namespace: "term",
+            selector: "Unique",
+        },
+        MemberRequestShapeKey {
+            space: Cow::Owned("Explicit:Class:pkg.Owner".to_owned()),
+            prefix_shape: "package TypeRef",
+            target_kind: "Package",
+            namespace: "type",
+            selector: "other",
+        },
+        MemberRequestShapeKey {
+            space: Cow::Borrowed("Prefix"),
+            prefix_shape: "package TypeRef",
+            target_kind: "Package",
+            namespace: "term",
+            selector: "Unique",
+        },
+    ];
+    let mut typed_rows = shapes.iter().collect::<Vec<_>>();
+    typed_rows.sort_unstable();
+    let mut legacy_rows = shapes
+        .iter()
+        .map(MemberRequestShapeKey::report_row)
+        .collect::<Vec<_>>();
+    legacy_rows.sort_unstable();
+
+    assert_eq!(
+        shapes[0].report_row(),
+        "space=Prefix::prefix=module-class TypeRef::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver"
+    );
+    assert_eq!(
+        typed_rows
+            .into_iter()
+            .map(MemberRequestShapeKey::report_row)
+            .collect::<Vec<_>>(),
+        legacy_rows
+    );
+}
+
+#[test]
 fn local_definition_audit_is_deterministic() {
     let source =
         "object Audit { def outer: Int = { val n = 1; def local[A](x: A) = x; local(n) } }";
@@ -14111,11 +14202,11 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     }
     println!("  member_request_shapes:");
     for (shape, count) in &metrics.member_request_shapes {
-        println!("    {shape}={count}");
+        println!("    {}={count}", shape.report_row());
     }
     println!("  member_request_unknown_prefix_identity:");
     for (shape, count) in &metrics.member_request_unknown_identity_shapes {
-        println!("    {shape}={count}");
+        println!("    {}={count}", shape.report_row());
     }
     println!("  member_request_outcomes:");
     let mut outcomes = BTreeMap::<String, usize>::new();
@@ -14128,13 +14219,14 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         println!("    {outcome}={count}");
     }
     println!("  member_request_outcome_distinct_targets:");
-    for (family, targets) in &metrics.member_request_outcome_targets {
+    for (key, targets) in &metrics.member_request_outcome_targets {
+        let family = format!("{}::outcome={}", key.shape.report_row(), key.outcome);
         println!(
             "    {family}={}::files={}",
             targets.len(),
             metrics
                 .member_request_outcome_files
-                .get(family)
+                .get(key)
                 .map_or(0, BTreeSet::len)
         );
     }
@@ -14147,7 +14239,8 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         let distinct = summary.distinct_keys.len();
         let (repeat, known_repeat) = member_request_repeat_factors(&summary);
         println!(
-            "    {shape}: requests={}, known_requests={}, distinct_keys={distinct}, unknown_identity_requests={}, owners={}, names={}, files={}, repeated_hit_factor={repeat}, known_repeated_hit_factor={known_repeat}, outcomes={:?}",
+            "    {}: requests={}, known_requests={}, distinct_keys={distinct}, unknown_identity_requests={}, owners={}, names={}, files={}, repeated_hit_factor={repeat}, known_repeated_hit_factor={known_repeat}, outcomes={:?}",
+            shape.report_row(),
             summary.requests,
             summary.known_requests,
             summary.unknown_identity_requests,
@@ -20305,14 +20398,14 @@ mod resolver_profile_tests {
 
     #[test]
     fn request_shape_distribution_does_not_depend_on_arrival_order() {
-        fn profile(shapes: [&str; 2]) -> ResolverMetrics {
+        fn profile(shapes: [&'static str; 2]) -> ResolverMetrics {
             let mut metrics = ResolverMetrics::default();
             for shape in shapes {
                 record_member_request_target(
                     &mut metrics,
                     RequestTargetObservation {
                         target_key: "target=sample/Foo::name=bar".to_owned(),
-                        shape: shape.to_owned(),
+                        shape: MemberRequestShapeKey::test_shape(shape),
                         owner: Some("sample/Foo"),
                         name: "bar",
                         file: "Use.scala",
@@ -20330,14 +20423,32 @@ mod resolver_profile_tests {
         assert_eq!(forward.member_request_targets.len(), 1);
         let target = forward.member_request_targets.values().next().unwrap();
         assert_eq!(target.requests, 2);
-        assert_eq!(target.families["ThisType"].requests, 1);
-        assert_eq!(target.families["TypeRef"].requests, 1);
+        assert_eq!(
+            target.families[&MemberRequestShapeKey::test_shape("ThisType")].requests,
+            1
+        );
+        assert_eq!(
+            target.families[&MemberRequestShapeKey::test_shape("TypeRef")].requests,
+            1
+        );
         let forward_summary = member_request_shape_summaries(&forward);
         let reverse_summary = member_request_shape_summaries(&reverse);
-        assert_eq!(forward_summary["ThisType"].requests, 1);
-        assert_eq!(forward_summary["TypeRef"].requests, 1);
-        assert_eq!(forward_summary["ThisType"], reverse_summary["ThisType"]);
-        assert_eq!(forward_summary["TypeRef"], reverse_summary["TypeRef"]);
+        assert_eq!(
+            forward_summary[&MemberRequestShapeKey::test_shape("ThisType")].requests,
+            1
+        );
+        assert_eq!(
+            forward_summary[&MemberRequestShapeKey::test_shape("TypeRef")].requests,
+            1
+        );
+        assert_eq!(
+            forward_summary[&MemberRequestShapeKey::test_shape("ThisType")],
+            reverse_summary[&MemberRequestShapeKey::test_shape("ThisType")]
+        );
+        assert_eq!(
+            forward_summary[&MemberRequestShapeKey::test_shape("TypeRef")],
+            reverse_summary[&MemberRequestShapeKey::test_shape("TypeRef")]
+        );
     }
 
     #[test]
@@ -20348,7 +20459,7 @@ mod resolver_profile_tests {
                 &mut metrics,
                 RequestTargetObservation {
                     target_key: format!("prefix=<unknown>::request={request_number}"),
-                    shape: "unsupported/other".to_owned(),
+                    shape: MemberRequestShapeKey::test_shape("unsupported/other"),
                     owner: None,
                     name: "Missing",
                     file: "Use.scala",
@@ -20358,7 +20469,9 @@ mod resolver_profile_tests {
             );
         }
 
-        let summary = member_request_shape_summaries(&metrics)["unsupported/other"].clone();
+        let summary = member_request_shape_summaries(&metrics)
+            [&MemberRequestShapeKey::test_shape("unsupported/other")]
+            .clone();
         assert_eq!(summary.requests, 2);
         assert_eq!(summary.known_requests, 0);
         assert_eq!(summary.unknown_identity_requests, 2);
@@ -20430,7 +20543,7 @@ mod resolver_profile_tests {
                         "prefix={}::namespace=term::name=Missing::space=Prefix",
                         profile.identity
                     ),
-                    shape: profile.shape.to_owned(),
+                    shape: MemberRequestShapeKey::test_shape(profile.shape),
                     owner: Some(profile.identity.as_str()),
                     name: "Missing",
                     file: "Use.scala",
