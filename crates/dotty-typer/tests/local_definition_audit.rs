@@ -20,7 +20,7 @@ use dotty_namer::{NamerError, name_compilation_unit};
 use dotty_parser::parse_compilation_unit;
 use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
 use dotty_typer::{SourceTyper, TyperError};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12946,6 +12946,23 @@ fn audit_source_inner_filtered(
         );
     }
     let postprocess_started = Instant::now();
+    let source_line_index_started = Instant::now();
+    let source_lines = SourceLineIndex::new(text);
+    let source_line_index_time = source_line_index_started.elapsed();
+    let method_ownership_index_started = Instant::now();
+    let method_ancestors = method_ancestors_by_tree(&parsed.ast);
+    let method_ranges_by_tree = method_ranges_by_tree(&parsed.ast);
+    let root_failures_by_method =
+        root_failures_by_method(&root_failures, &method_ancestors, &method_ranges_by_tree);
+    let method_ownership_index_time = method_ownership_index_started.elapsed();
+    let resolver_trace_index_started = Instant::now();
+    let resolver_traces = request_metrics
+        .as_ref()
+        .map_or_else(BTreeMap::new, |metrics| {
+            index_resolver_traces_by_method(&metrics.borrow().resolver_requests_by_method, path)
+        });
+    let resolver_trace_index_time = resolver_trace_index_started.elapsed();
+    let resolver_trace_observations = resolver_traces.values().map(Vec::len).sum::<usize>();
     for (tree, node) in parsed.ast.iter() {
         let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind else {
             continue;
@@ -13033,7 +13050,7 @@ fn audit_source_inner_filtered(
             .span()
             .range()
             .start() as usize;
-        let line = text[..start].bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let line = source_lines.line_at(start);
         let site = format!("{path}:{line}:{name}");
         if typer.source_typed_index().get(source, tree).is_some() {
             if import_prefix_only {
@@ -13072,6 +13089,7 @@ fn audit_source_inner_filtered(
                     arena: &parsed.ast,
                     typer: &typer,
                     source_text: text,
+                    source_lines: &source_lines,
                     path,
                     classpath: probe_classpath.clone(),
                     projection_cache: &mut impure_projection_cache,
@@ -13111,60 +13129,53 @@ fn audit_source_inner_filtered(
                 import_qualifier_path,
                 import_tree_index,
                 unsupported_type_tree,
-            ) = root_failures
-                .iter()
-                .filter(|failure| {
-                    failure.range.start() <= range.start() && range.end() <= failure.range.end()
-                })
-                .min_by_key(|failure| failure.range.end().saturating_sub(failure.range.start()))
-                .map(|failure| {
-                    (
-                        failure.failure.clone(),
-                        failure.missing_type_tree,
-                        failure.singleton_reference_tree,
-                        failure.local_method_signature.clone(),
-                        failure.local_value_declaration,
-                        Some(failure.enclosing_method_tree),
-                        failure.import_qualifier_path.clone(),
-                        failure.import_tree_index,
-                        failure.unsupported_type_tree,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        FailureClassification {
-                            bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
-                            family: FailureFamily::Other,
-                        },
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                });
+            ) = nearest_enclosing_root_failure(
+                tree.index(),
+                range,
+                &method_ancestors,
+                &root_failures_by_method,
+            )
+            .0
+            .map(|failure| {
+                (
+                    failure.failure.clone(),
+                    failure.missing_type_tree,
+                    failure.singleton_reference_tree,
+                    failure.local_method_signature.clone(),
+                    failure.local_value_declaration,
+                    Some(failure.enclosing_method_tree),
+                    failure.import_qualifier_path.clone(),
+                    failure.import_tree_index,
+                    failure.unsupported_type_tree,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    FailureClassification {
+                        bucket: "NoSuccessfulEnclosingMethodTyping".to_owned(),
+                        family: FailureFamily::Other,
+                    },
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            });
             if import_prefix_only {
                 if kind.bucket == "ImportQualifierNotFound"
-                    && let (Some(import_tree_index), Some(qualifier), Some(metrics)) = (
+                    && let (Some(import_tree_index), Some(qualifier), Some(_)) = (
                         import_tree_index,
                         import_qualifier_path.as_deref(),
                         request_metrics.as_ref(),
                     )
                 {
-                    let request_method = blocker_method_tree
-                        .map(|method_tree| format!("{path}#tree={method_tree}::"));
-                    let trace = request_method.map_or_else(Vec::new, |prefix| {
-                        metrics
-                            .borrow()
-                            .resolver_requests_by_method
-                            .iter()
-                            .filter(|(method, _)| method.starts_with(&prefix))
-                            .flat_map(|(_, requests)| requests.iter().cloned())
-                            .collect()
-                    });
+                    let trace = blocker_method_tree
+                        .and_then(|method_tree| resolver_traces.get(&method_tree))
+                        .map_or(&[][..], Vec::as_slice);
                     if let Some(observation) = import_prefix_observation(
                         &parsed.ast,
                         typer.store(),
@@ -13176,7 +13187,7 @@ fn audit_source_inner_filtered(
                         blocker_method_tree,
                         import_tree_index,
                         qualifier,
-                        &trace,
+                        trace,
                         source_package_paths,
                     ) {
                         audit.import_prefix_profile.observations.push(observation);
@@ -13207,6 +13218,7 @@ fn audit_source_inner_filtered(
                     arena: &parsed.ast,
                     typer: &typer,
                     source_text: text,
+                    source_lines: &source_lines,
                     path,
                     classpath: probe_classpath.clone(),
                     projection_cache: &mut impure_projection_cache,
@@ -13241,6 +13253,7 @@ fn audit_source_inner_filtered(
                             &typer.store().names,
                             path,
                             text,
+                            &source_lines,
                             tree,
                             reference_tree,
                         )
@@ -13250,23 +13263,14 @@ fn audit_source_inner_filtered(
                     });
                 audit.singleton_reference_profile.record(detail);
             }
-            if let Some(metrics) = &request_metrics {
-                let request_method =
-                    blocker_method_tree.map(|method_tree| format!("{path}#tree={method_tree}::"));
-                let trace = request_method.map_or_else(Vec::new, |prefix| {
-                    metrics
-                        .borrow()
-                        .resolver_requests_by_method
-                        .iter()
-                        .filter(|(method, _)| method.starts_with(&prefix))
-                        .flat_map(|(_, requests)| requests.iter().cloned())
-                        .collect()
-                });
+            if request_metrics.is_some() {
                 audit.resolution_blocker_profile.record_attempt(
                     &kind.bucket,
                     path,
                     tree.index(),
-                    &trace,
+                    blocker_method_tree
+                        .and_then(|method_tree| resolver_traces.get(&method_tree))
+                        .map_or(&[][..], Vec::as_slice),
                     import_qualifier_path.as_deref(),
                 );
             }
@@ -13406,22 +13410,25 @@ fn audit_source_inner_filtered(
         }
         return audit;
     }
+    let source_function_started = Instant::now();
     collect_source_function_method_outcomes(
         SourceFunctionMethodAudit {
             arena: &parsed.ast,
             source,
             path,
-            source_text: text,
+            source_lines: &source_lines,
             names: &typer.store().names,
             methods: &local_method_trees,
-            root_failures: &root_failures,
+            method_ancestors: &method_ancestors,
+            root_failures_by_method: &root_failures_by_method,
             typer: &typer,
         },
         &mut audit.source_function_method_outcomes,
         &mut audit.source_function_outcomes,
     );
-    drop(typer);
+    let source_function_time = source_function_started.elapsed();
     let postprocess_time = postprocess_started.elapsed();
+    drop(typer);
     let mut match_time = Duration::ZERO;
     if let Some(classpath) = probe_classpath {
         let match_started = Instant::now();
@@ -13446,6 +13453,22 @@ fn audit_source_inner_filtered(
         audit.match_profile.typed_case_successes = successes;
     }
     if profile_timing {
+        eprintln!(
+            "AUDIT_POSTPROCESS file={path} source_bytes={} newline_count={} line_queries={} indexed_method_spans={} root_failure_count={} enclosing_failure_queries={} failure_candidates_checked={} trace_methods={} trace_observations={} source_line_index_us={} method_ownership_index_us={} resolver_trace_index_us={} source_function_method_outcomes_us={}",
+            text.len(),
+            source_lines.newline_offsets.len(),
+            source_lines.lookups.get(),
+            method_ancestors.len(),
+            root_failures.len(),
+            root_failures_by_method.lookups.get(),
+            root_failures_by_method.candidates_checked.get(),
+            resolver_traces.len(),
+            resolver_trace_observations,
+            source_line_index_time.as_micros(),
+            method_ownership_index_time.as_micros(),
+            resolver_trace_index_time.as_micros(),
+            source_function_time.as_micros(),
+        );
         eprintln!(
             "AUDIT_FILE_TIMING file={path} outcome=complete parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} match_ms={} total_ms={}",
             parse_time.as_millis(),
@@ -16983,6 +17006,461 @@ fn local_method_trees(
         .collect()
 }
 
+/// Maps source byte offsets to 1-based line numbers without rescanning each prefix.
+struct SourceLineIndex {
+    newline_offsets: Vec<usize>,
+    lookups: Cell<usize>,
+}
+
+impl SourceLineIndex {
+    fn new(source: &str) -> Self {
+        Self {
+            newline_offsets: source
+                .bytes()
+                .enumerate()
+                .filter_map(|(offset, byte)| (byte == b'\n').then_some(offset))
+                .collect(),
+            lookups: Cell::new(0),
+        }
+    }
+
+    fn line_at(&self, byte_offset: usize) -> usize {
+        self.lookups.set(self.lookups.get() + 1);
+        self.newline_offsets
+            .partition_point(|newline_offset| *newline_offset < byte_offset)
+            + 1
+    }
+}
+
+fn index_resolver_traces_by_method(
+    traces: &BTreeMap<String, Vec<ResolverRequestObservation>>,
+    path: &str,
+) -> BTreeMap<u32, Vec<ResolverRequestObservation>> {
+    let method_prefix = format!("{path}#tree=");
+    let mut indexed = BTreeMap::<u32, Vec<ResolverRequestObservation>>::new();
+    for (method, requests) in traces {
+        let Some((tree_index, _)) = method
+            .strip_prefix(&method_prefix)
+            .and_then(|rest| rest.split_once("::"))
+        else {
+            continue;
+        };
+        let Ok(tree_index) = tree_index.parse::<u32>() else {
+            continue;
+        };
+        indexed
+            .entry(tree_index)
+            .or_default()
+            .extend(requests.iter().cloned());
+    }
+    indexed
+}
+
+fn method_ancestors_by_tree(arena: &dotty_core::AstArena<Untyped>) -> BTreeMap<u32, Vec<u32>> {
+    let methods = arena
+        .iter()
+        .filter_map(|(tree, node)| {
+            matches!(node.kind, TreeKind::DefDef(_))
+                .then_some((tree.index(), node.position?.span().range()))
+        })
+        .collect::<Vec<_>>();
+    method_ancestor_index(&methods)
+}
+
+fn method_ranges_by_tree(arena: &dotty_core::AstArena<Untyped>) -> BTreeMap<u32, TextRange> {
+    arena
+        .iter()
+        .filter_map(|(tree, node)| {
+            matches!(node.kind, TreeKind::DefDef(_))
+                .then_some((tree.index(), node.position?.span().range()))
+        })
+        .collect()
+}
+
+fn method_ancestor_index(methods: &[(u32, TextRange)]) -> BTreeMap<u32, Vec<u32>> {
+    let mut methods = methods.to_vec();
+    methods.sort_by_key(|(tree, range)| (range.start(), std::cmp::Reverse(range.end()), *tree));
+
+    let mut stack = Vec::<(u32, TextRange)>::new();
+    let mut ancestors = BTreeMap::new();
+    for (tree, range) in methods {
+        while stack.last().is_some_and(|(_, parent)| {
+            parent.start() > range.start()
+                || parent.end() < range.end()
+                || (parent.start() == range.start() && parent.end() == range.end())
+        }) {
+            stack.pop();
+        }
+        let mut tree_ancestors = Vec::with_capacity(stack.len() + 1);
+        tree_ancestors.push(tree);
+        tree_ancestors.extend(stack.iter().rev().map(|(ancestor, _)| *ancestor));
+        ancestors.insert(tree, tree_ancestors);
+        stack.push((tree, range));
+    }
+    ancestors
+}
+
+struct RootFailureIndex<'a> {
+    by_method: BTreeMap<u32, Vec<(usize, &'a RootFailure)>>,
+    unindexed: Vec<(usize, &'a RootFailure)>,
+    all: Vec<(usize, &'a RootFailure)>,
+    requires_linear_fallback: bool,
+    lookups: Cell<usize>,
+    candidates_checked: Cell<usize>,
+}
+
+fn root_failures_by_method<'a>(
+    failures: &'a [RootFailure],
+    method_ancestors: &BTreeMap<u32, Vec<u32>>,
+    method_ranges: &BTreeMap<u32, TextRange>,
+) -> RootFailureIndex<'a> {
+    let mut by_method = BTreeMap::<u32, Vec<(usize, &RootFailure)>>::new();
+    let mut unindexed = Vec::new();
+    for (order, failure) in failures.iter().enumerate() {
+        by_method
+            .entry(failure.enclosing_method_tree)
+            .or_default()
+            .push((order, failure));
+        if !method_ancestors.contains_key(&failure.enclosing_method_tree) {
+            unindexed.push((order, failure));
+        }
+    }
+    let ambiguous_methods = ambiguous_method_ranges(method_ranges);
+    let requires_linear_fallback = failures.iter().any(|failure| {
+        ambiguous_methods.contains(&failure.enclosing_method_tree)
+            || method_ranges
+                .get(&failure.enclosing_method_tree)
+                .is_none_or(|method_range| {
+                    failure.range.start() < method_range.start()
+                        || failure.range.end() > method_range.end()
+                })
+    });
+    RootFailureIndex {
+        by_method,
+        unindexed,
+        all: failures.iter().enumerate().collect(),
+        requires_linear_fallback,
+        lookups: Cell::new(0),
+        candidates_checked: Cell::new(0),
+    }
+}
+
+fn ambiguous_method_ranges(method_ranges: &BTreeMap<u32, TextRange>) -> BTreeSet<u32> {
+    let mut ranges = method_ranges
+        .iter()
+        .map(|(tree, range)| (*tree, *range))
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|(tree, range)| (range.start(), std::cmp::Reverse(range.end()), *tree));
+    let mut stack = Vec::<(u32, TextRange)>::new();
+    let mut ambiguous = BTreeSet::new();
+    for (tree, range) in ranges {
+        while stack
+            .last()
+            .is_some_and(|(_, parent)| parent.end() <= range.start())
+        {
+            stack.pop();
+        }
+        for (ancestor, parent) in &stack {
+            if parent.start() == range.start()
+                || parent.end() == range.end()
+                || range.end() > parent.end()
+            {
+                ambiguous.insert(*ancestor);
+                ambiguous.insert(tree);
+            }
+        }
+        stack.push((tree, range));
+    }
+    ambiguous
+}
+
+fn nearest_enclosing_root_failure<'a>(
+    method_tree: u32,
+    method_range: TextRange,
+    method_ancestors: &BTreeMap<u32, Vec<u32>>,
+    failures: &RootFailureIndex<'a>,
+) -> (Option<&'a RootFailure>, usize) {
+    failures.lookups.set(failures.lookups.get() + 1);
+    let Some(ancestors) = method_ancestors.get(&method_tree) else {
+        return (None, 0);
+    };
+    // Preserve the old range-based behavior for malformed ASTs where an enclosing
+    // DefDef has no source span and therefore cannot appear in the ancestor index.
+    if failures.requires_linear_fallback {
+        return nearest_enclosing_root_failure_linear(method_range, failures);
+    }
+    let indexed_candidates = ancestors
+        .iter()
+        .filter_map(|ancestor| failures.by_method.get(ancestor));
+    let mut candidates_checked = 0;
+    let mut nearest: Option<(usize, &'a RootFailure)> = None;
+    for &(order, failure) in indexed_candidates
+        .flatten()
+        .chain(failures.unindexed.iter())
+    {
+        candidates_checked += 1;
+        if failure.range.start() <= method_range.start()
+            && method_range.end() <= failure.range.end()
+            && nearest.is_none_or(|(nearest_order, nearest_failure)| {
+                (failure.range.len(), order) < (nearest_failure.range.len(), nearest_order)
+            })
+        {
+            nearest = Some((order, failure));
+        }
+    }
+    failures
+        .candidates_checked
+        .set(failures.candidates_checked.get() + candidates_checked);
+    (nearest.map(|(_, failure)| failure), candidates_checked)
+}
+
+fn nearest_enclosing_root_failure_linear<'a>(
+    method_range: TextRange,
+    failures: &RootFailureIndex<'a>,
+) -> (Option<&'a RootFailure>, usize) {
+    let mut nearest: Option<(usize, &'a RootFailure)> = None;
+    for &(order, failure) in &failures.all {
+        if failure.range.start() <= method_range.start()
+            && method_range.end() <= failure.range.end()
+            && nearest.is_none_or(|(nearest_order, nearest_failure)| {
+                (failure.range.len(), order) < (nearest_failure.range.len(), nearest_order)
+            })
+        {
+            nearest = Some((order, failure));
+        }
+    }
+    let candidates_checked = failures.all.len();
+    failures
+        .candidates_checked
+        .set(failures.candidates_checked.get() + candidates_checked);
+    (nearest.map(|(_, failure)| failure), candidates_checked)
+}
+
+#[test]
+fn source_line_index_handles_utf8_crlf_and_line_boundaries() {
+    let source = "α\r\nbeta\n終";
+    let index = SourceLineIndex::new(source);
+
+    assert_eq!(index.line_at(0), 1);
+    assert_eq!(index.line_at("α\r\n".len()), 2);
+    assert_eq!(index.line_at("α\r\nbeta\n".len()), 3);
+    assert_eq!(index.line_at(source.len()), 3);
+    assert_eq!(index.line_at(source.len() + 10), 3);
+}
+
+#[test]
+fn resolver_trace_index_groups_only_exact_source_methods_in_stable_order() {
+    let request = |target: &str| ResolverRequestObservation {
+        target: target.to_owned(),
+        outcome: "none".to_owned(),
+        cause: None,
+        materialized_prefix: None,
+        selected_identity: None,
+        enclosing_attempt: "attempt".to_owned(),
+    };
+    let traces = BTreeMap::from([
+        (
+            "compiler/A.scala#tree=8::A.outer".to_owned(),
+            vec![request("first"), request("second")],
+        ),
+        (
+            "compiler/A.scala#tree=80::A.sibling".to_owned(),
+            vec![request("other method")],
+        ),
+        (
+            "compiler/B.scala#tree=8::B.outer".to_owned(),
+            vec![request("other file")],
+        ),
+    ]);
+
+    let indexed = index_resolver_traces_by_method(&traces, "compiler/A.scala");
+
+    assert_eq!(
+        indexed[&8]
+            .iter()
+            .map(|request| request.target.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(indexed[&80][0].target, "other method");
+}
+
+#[test]
+fn method_ancestor_index_tracks_nested_methods_and_siblings() {
+    let range = |start, end| TextRange::new(start, end).expect("valid fixture range");
+    let indexed = method_ancestor_index(&[
+        (10, range(0, 100)),
+        (11, range(10, 40)),
+        (12, range(20, 30)),
+        (13, range(50, 80)),
+    ]);
+
+    assert_eq!(indexed[&10], [10]);
+    assert_eq!(indexed[&11], [11, 10]);
+    assert_eq!(indexed[&12], [12, 11, 10]);
+    assert_eq!(indexed[&13], [13, 10]);
+}
+
+#[test]
+fn enclosing_failure_index_prefers_smallest_covering_failure() {
+    let range = |start, end| TextRange::new(start, end).expect("valid fixture range");
+    let failure = |owner, start, end, bucket: &str| RootFailure {
+        range: range(start, end),
+        enclosing_method_tree: owner,
+        failure: FailureClassification {
+            bucket: bucket.to_owned(),
+            family: FailureFamily::Other,
+        },
+        import_qualifier_path: None,
+        import_tree_index: None,
+        unsupported_type_tree: None,
+        missing_type_tree: None,
+        singleton_reference_tree: None,
+        local_method_signature: None,
+        local_value_declaration: None,
+    };
+    let failures = [
+        failure(10, 0, 100, "outer"),
+        failure(11, 10, 40, "inner"),
+        failure(99, 20, 30, "missing-span-owner"),
+    ];
+    let methods = [
+        (10, range(0, 100)),
+        (11, range(10, 40)),
+        (12, range(20, 30)),
+        (13, range(50, 80)),
+    ];
+    let method_ancestors = method_ancestor_index(&methods);
+    let method_ranges = methods.into_iter().collect();
+    let failures_by_method = root_failures_by_method(&failures, &method_ancestors, &method_ranges);
+
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(18, 33), &method_ancestors, &failures_by_method)
+            .0
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("inner")
+    );
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(20, 30), &method_ancestors, &failures_by_method)
+            .0
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("missing-span-owner")
+    );
+    assert_eq!(
+        nearest_enclosing_root_failure(13, range(50, 60), &method_ancestors, &failures_by_method)
+            .0
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("outer")
+    );
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(20, 50), &method_ancestors, &failures_by_method)
+            .0
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("outer")
+    );
+}
+
+#[test]
+fn enclosing_failure_index_preserves_ties_for_equal_method_ranges() {
+    let range = |start, end| TextRange::new(start, end).expect("valid fixture range");
+    let failure = |owner, bucket: &str| RootFailure {
+        range: range(0, 100),
+        enclosing_method_tree: owner,
+        failure: FailureClassification {
+            bucket: bucket.to_owned(),
+            family: FailureFamily::Other,
+        },
+        import_qualifier_path: None,
+        import_tree_index: None,
+        unsupported_type_tree: None,
+        missing_type_tree: None,
+        singleton_reference_tree: None,
+        local_method_signature: None,
+        local_value_declaration: None,
+    };
+    let failures = [failure(10, "first"), failure(11, "second")];
+    let methods = [
+        (10, range(0, 100)),
+        (11, range(0, 100)),
+        (12, range(20, 30)),
+    ];
+    let ancestors = method_ancestor_index(&methods);
+    let method_ranges = methods.into_iter().collect();
+    let indexed = root_failures_by_method(&failures, &ancestors, &method_ranges);
+
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(20, 30), &ancestors, &indexed)
+            .0
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("first")
+    );
+}
+
+#[test]
+fn enclosing_failure_index_falls_back_for_inconsistent_owner_span() {
+    let range = |start, end| TextRange::new(start, end).expect("valid fixture range");
+    let failure = RootFailure {
+        range: range(0, 100),
+        enclosing_method_tree: 10,
+        failure: FailureClassification {
+            bucket: "covering".to_owned(),
+            family: FailureFamily::Other,
+        },
+        import_qualifier_path: None,
+        import_tree_index: None,
+        unsupported_type_tree: None,
+        missing_type_tree: None,
+        singleton_reference_tree: None,
+        local_method_signature: None,
+        local_value_declaration: None,
+    };
+    let failures = [failure];
+    let methods = [(10, range(0, 0)), (12, range(20, 30))];
+    let ancestors = method_ancestor_index(&methods);
+    let method_ranges = methods.into_iter().collect();
+    let indexed = root_failures_by_method(&failures, &ancestors, &method_ranges);
+
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(20, 30), &ancestors, &indexed)
+            .0
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("covering")
+    );
+}
+
+#[test]
+fn enclosing_failure_index_keeps_valid_body_ranges_on_indexed_path() {
+    let range = |start, end| TextRange::new(start, end).expect("valid fixture range");
+    let failure = RootFailure {
+        range: range(10, 90),
+        enclosing_method_tree: 10,
+        failure: FailureClassification {
+            bucket: "body-failure".to_owned(),
+            family: FailureFamily::Other,
+        },
+        import_qualifier_path: None,
+        import_tree_index: None,
+        unsupported_type_tree: None,
+        missing_type_tree: None,
+        singleton_reference_tree: None,
+        local_method_signature: None,
+        local_value_declaration: None,
+    };
+    let failures = [failure];
+    let methods = [(10, range(0, 100)), (12, range(20, 30))];
+    let ancestors = method_ancestor_index(&methods);
+    let method_ranges = methods.into_iter().collect();
+    let indexed = root_failures_by_method(&failures, &ancestors, &method_ranges);
+
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(20, 30), &ancestors, &indexed)
+            .0
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("body-failure")
+    );
+    assert_eq!(indexed.candidates_checked.get(), 1);
+}
+
 fn function_with_mods_observation(
     arena: &dotty_core::AstArena<Untyped>,
     names: &dotty_core::names::NameInterner,
@@ -17104,6 +17582,7 @@ struct ImpureFunctionBaselineAuditContext<'ctx, 'store> {
     arena: &'ctx dotty_core::AstArena<Untyped>,
     typer: &'ctx SourceTyper<'store>,
     source_text: &'ctx str,
+    source_lines: &'ctx SourceLineIndex,
     path: &'ctx str,
     classpath: Option<SharedClassPath>,
     projection_cache: &'ctx mut BTreeMap<u32, ImpureFunctionProjection>,
@@ -17120,6 +17599,7 @@ fn record_impure_function_baseline_outcome(
         arena,
         typer,
         source_text,
+        source_lines,
         path,
         classpath,
         projection_cache,
@@ -17167,11 +17647,7 @@ fn record_impure_function_baseline_outcome(
     let syntax = source_text
         .get(span.start() as usize..span.end() as usize)
         .expect("pinned function source span is valid");
-    let line = source_text[..span.start() as usize]
-        .bytes()
-        .filter(|byte| *byte == b'\n')
-        .count()
-        + 1;
+    let line = source_lines.line_at(span.start() as usize);
     let span_text = format!("{}..{}", span.start(), span.end());
     assert_eq!(line, baseline.line, "pinned function line changed");
     assert_eq!(span_text, baseline.span, "pinned function span changed");
@@ -17351,10 +17827,11 @@ struct SourceFunctionMethodAudit<'a, 'typer> {
     arena: &'a dotty_core::AstArena<Untyped>,
     source: SourceId,
     path: &'a str,
-    source_text: &'a str,
+    source_lines: &'a SourceLineIndex,
     names: &'a dotty_core::names::NameInterner,
     methods: &'a [(dotty_core::TreeId<Untyped>, TextRange)],
-    root_failures: &'a [RootFailure],
+    method_ancestors: &'a BTreeMap<u32, Vec<u32>>,
+    root_failures_by_method: &'a RootFailureIndex<'a>,
     typer: &'a SourceTyper<'typer>,
 }
 
@@ -17524,11 +18001,7 @@ fn collect_source_function_method_outcomes(
             .names
             .resolve(definition.name.as_name().text())
             .to_owned();
-        let line = audit.source_text.as_bytes()[..method_range.start() as usize]
-            .iter()
-            .filter(|byte| **byte == b'\n')
-            .count()
-            + 1;
+        let line = audit.source_lines.line_at(method_range.start() as usize);
         let Some((form, _, _, _)) =
             BASELINE_METHODS
                 .iter()
@@ -17548,17 +18021,16 @@ fn collect_source_function_method_outcomes(
         let blocker = if typed {
             "Typed"
         } else {
-            audit
-                .root_failures
-                .iter()
-                .filter(|failure| {
-                    failure.range.start() <= method_range.start()
-                        && method_range.end() <= failure.range.end()
-                })
-                .min_by_key(|failure| failure.range.len())
-                .map_or("NoSuccessfulEnclosingMethodTyping", |failure| {
-                    failure.failure.bucket.as_str()
-                })
+            nearest_enclosing_root_failure(
+                method_tree.index(),
+                *method_range,
+                audit.method_ancestors,
+                audit.root_failures_by_method,
+            )
+            .0
+            .map_or("NoSuccessfulEnclosingMethodTyping", |failure| {
+                failure.failure.bucket.as_str()
+            })
         };
         records.insert(format!(
             "{}:{line}:{method_name} baseline_form={form} first_blocker={blocker}",
@@ -18042,6 +18514,7 @@ fn singleton_reference_detail(
     names: &dotty_core::NameInterner,
     path: &str,
     source_text: &str,
+    source_lines: &SourceLineIndex,
     method: dotty_core::TreeId<Untyped>,
     reference_index: u32,
 ) -> Option<SingletonReferenceDetail> {
@@ -18060,11 +18533,7 @@ fn singleton_reference_detail(
     };
     let method_name = names.resolve(method_def.name.as_name().text());
     let method_range = method_node.position?.span().range();
-    let method_line = source_text.as_bytes()[..method_range.start() as usize]
-        .iter()
-        .filter(|byte| **byte == b'\n')
-        .count()
-        + 1;
+    let method_line = source_lines.line_at(method_range.start() as usize);
 
     let (declaration, declaration_shape, snippet) = arena
         .iter()
