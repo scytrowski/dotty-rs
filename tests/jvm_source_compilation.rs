@@ -7958,27 +7958,21 @@ fn null_identity_jdk21_acceptance_fixture_is_canonical_verified_and_deterministi
         1,
         "empty returns aconst_null without an invented object"
     );
-    let javap = Command::new("javap")
-        .args([
-            "-classpath",
-            output.path().to_str().unwrap(),
-            "-c",
-            "-v",
-            "Runner",
-        ])
-        .output()
-        .expect("start required javap JVM audit");
-    assert!(javap.status.success(), "javap -c -v Runner succeeds");
-    let javap = String::from_utf8_lossy(&javap.stdout);
-    assert!(javap.contains("if_acmpeq") && javap.contains("if_acmpne"));
-    assert!(javap.contains("aconst_null"));
-    assert!(!javap.contains("java/lang/Object.eq"));
-    assert!(!javap.contains("java/lang/Object.ne"));
-    assert!(!javap.contains("equals"));
-    assert!(!javap.contains("checkcast"));
-
     if require_jdk_or_skip() {
         let classpath = output.path().to_str().expect("UTF-8 test path");
+        let javap = Command::new("javap")
+            .args(["-classpath", classpath, "-c", "-v", "Runner"])
+            .output()
+            .expect("start required javap JVM audit");
+        assert!(javap.status.success(), "javap -c -v Runner succeeds");
+        let javap = String::from_utf8_lossy(&javap.stdout);
+        assert!(javap.contains("if_acmpeq") && javap.contains("if_acmpne"));
+        assert!(javap.contains("aconst_null"));
+        assert!(!javap.contains("java/lang/Object.eq"));
+        assert!(!javap.contains("java/lang/Object.ne"));
+        assert!(!javap.contains("equals"));
+        assert!(!javap.contains("checkcast"));
+
         let harness = output.path().join("NullReferenceIdentityHarness.java");
         fs::write(
             &harness,
