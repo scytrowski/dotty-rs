@@ -13,6 +13,7 @@ class OwnedHolder(seed: Int):
 
 class Runner:
   def makeCounter(seed: Int): Counter = new Counter(seed)
+  def makeHolder(seed: Int): Holder = new Holder(new Counter(seed))
   def create(seed: Int): Holder = new Holder(new Counter(seed))
   def fromFactory(seed: Int): Holder = new Holder(makeCounter(seed))
   def existing(counter: Counter): Holder = new Holder(counter)
@@ -24,4 +25,5 @@ class Runner:
     new Holder(current)
   def fromNull(): Holder = new Holder(null)
   def read(seed: Int): Int = create(seed).value().get()
+  def chainedFactory(seed: Int): Int = makeHolder(seed).value().get()
   def readOwned(seed: Int): Int = new OwnedHolder(seed).get()

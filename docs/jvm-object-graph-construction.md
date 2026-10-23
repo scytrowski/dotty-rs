@@ -20,6 +20,10 @@ class, constructor, method, parameter, and local symbols. In particular:
 - `new Holder(makeCounter(seed))` keeps `Runner.makeCounter` as the selected
   method. The typer does not rewrite a call result into a constructor or lose
   its method identity.
+- `makeHolder(seed).value().get()` keeps the exact `Runner.makeHolder`,
+  `Holder.value`, and `Counter.get` method targets in order. The factory body
+  independently retains the nested `Holder.<init>(new Counter(seed))` tree,
+  with the exact `Counter.<init>` target and `makeHolder` seed parameter.
 - `new Holder(counter)` refers to the exact source method parameter symbol.
   An immutable local alias and `new Holder(current)` over a mutable local both
   retain their exact local symbols. The
@@ -79,6 +83,8 @@ preserves:
 - `makeCounter(seed).get()` calls the factory, then invokes `Counter.get` on
   its initialized result.
 - `create(counter).value().get()` chains calls on initialized results.
+- `makeHolder(seed).value().get()` chains calls on a reference returned by a
+  method whose body itself contains nested constructor applications.
 - An exact reference parameter can be passed to `new Holder(counter)`.
 
 The positive source regression decodes the emitted owners and descriptors and,

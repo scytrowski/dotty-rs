@@ -2272,6 +2272,10 @@ fn object_graph_construction_audit_keeps_frontend_identity_before_emission_bound
                 audit_method_named(unit, runner, "makeCounter").method,
                 "Runner",
             ),
+            (
+                audit_method_named(unit, runner, "makeHolder").method,
+                "Runner",
+            ),
             (audit_method_named(unit, runner, "create").method, "Runner"),
         ] {
             assert_eq!(owner_name(symbol), owner, "selected symbol {symbol:?}");
@@ -2293,6 +2297,48 @@ fn object_graph_construction_audit_keeps_frontend_identity_before_emission_bound
         assert!(chain_targets.contains(&audit_method_named(unit, runner, "create").method));
         assert!(chain_targets.contains(&audit_method_named(unit, holder, "value").method));
         assert!(chain_targets.contains(&audit_method_named(unit, counter, "get").method));
+        let factory_chain_targets = targets("chainedFactory");
+        assert!(
+            factory_chain_targets.contains(&audit_method_named(unit, runner, "makeHolder").method)
+        );
+        assert!(factory_chain_targets.contains(&audit_method_named(unit, holder, "value").method));
+        assert!(factory_chain_targets.contains(&audit_method_named(unit, counter, "get").method));
+        let chained_factory = audit_method_named(unit, runner, "chainedFactory");
+        let TreeKind::Apply(get_call) = &unit.typed_ast.get(chained_factory.body.unwrap()).kind
+        else {
+            panic!("chainedFactory ends in the typed Counter.get application")
+        };
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(get_call.function).ty),
+            Some(audit_method_named(unit, counter, "get").method)
+        );
+        let TreeKind::Select(get_selection) = &unit.typed_ast.get(get_call.function).kind else {
+            panic!("Counter.get remains selected on the value() result")
+        };
+        let TreeKind::Apply(value_call) = &unit.typed_ast.get(get_selection.qualifier).kind else {
+            panic!("Holder.value is applied once to the factory result")
+        };
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(value_call.function).ty),
+            Some(audit_method_named(unit, holder, "value").method)
+        );
+        let TreeKind::Select(value_selection) = &unit.typed_ast.get(value_call.function).kind
+        else {
+            panic!("Holder.value remains selected on the makeHolder result")
+        };
+        let TreeKind::Apply(factory_call) = &unit.typed_ast.get(value_selection.qualifier).kind
+        else {
+            panic!("Runner.makeHolder is applied once as the receiver")
+        };
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(factory_call.function).ty),
+            Some(audit_method_named(unit, runner, "makeHolder").method)
+        );
+        assert_eq!(
+            unit.typed_ast.get(chained_factory.body.unwrap()).ty,
+            definitions.int,
+            "the chained method result retains its canonical Int type"
+        );
         let direct_new_receiver_targets = targets("readOwned");
         assert!(direct_new_receiver_targets.contains(&owned_holder_constructor));
         assert!(
@@ -2410,6 +2456,37 @@ fn object_graph_construction_audit_keeps_frontend_identity_before_emission_bound
         assert_eq!(
             audit_type_symbol(unit, unit.typed_ast.get(outer.args[0]).ty),
             Some(counter)
+        );
+
+        let make_holder = audit_method_named(unit, runner, "makeHolder");
+        let TreeKind::Apply(outer) = &unit.typed_ast.get(make_holder.body.unwrap()).kind else {
+            panic!("makeHolder retains its typed Holder constructor application")
+        };
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(outer.function).ty),
+            Some(holder_constructor)
+        );
+        assert_eq!(outer.args.len(), 1);
+        let TreeKind::Apply(inner) = &unit.typed_ast.get(outer.args[0]).kind else {
+            panic!("makeHolder retains the nested Counter constructor application")
+        };
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(inner.function).ty),
+            Some(counter_constructor)
+        );
+        assert_eq!(inner.args.len(), 1);
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(inner.args[0]).ty),
+            Some(make_holder.parameters[0]),
+            "nested constructor argument keeps the exact makeHolder seed symbol"
+        );
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(outer.args[0]).ty),
+            Some(counter)
+        );
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(make_holder.body.unwrap()).ty),
+            Some(holder)
         );
 
         let dotty_core::SourceDefinition::Canonical {
