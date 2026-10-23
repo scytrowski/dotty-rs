@@ -9605,6 +9605,37 @@ fn scope_note(category: &str) -> (&'static str, &'static str, &'static str, &'st
 }
 
 #[test]
+fn borrowed_report_sort_matches_owned_observation_sort() {
+    let observation = |source_file: &str, enclosing_attempt: &str| ModuleOperationObservation {
+        operation: "module_class_of_object",
+        source_file: source_file.to_owned(),
+        enclosing_attempt: enclosing_attempt.to_owned(),
+        object_identity: "object".to_owned(),
+        object_origin: "source",
+        module_class_identity: "object$".to_owned(),
+        result: "resolved",
+        result_state: "Complete(ClassInfo)",
+        module_state: "Complete(ClassInfo)",
+        transaction_state: "observed",
+        error_category: None,
+    };
+    let observations = vec![
+        observation("B.scala", "B.member"),
+        observation("A.scala", "A.member"),
+        observation("A.scala", "A.member"),
+    ];
+
+    let mut owned_sorted = observations.clone();
+    owned_sorted.sort();
+    let borrowed_sorted = sorted_observation_refs(&observations);
+    let owned_sorted_refs = owned_sorted.iter().collect::<Vec<_>>();
+
+    assert_eq!(borrowed_sorted, owned_sorted_refs);
+    assert_eq!(borrowed_sorted[0].source_file, "A.scala");
+    assert_eq!(borrowed_sorted[2].source_file, "B.scala");
+}
+
+#[test]
 fn local_definition_audit_is_deterministic() {
     let source =
         "object Audit { def outer: Int = { val n = 1; def local[A](x: A) = x; local(n) } }";
@@ -13657,6 +13688,13 @@ fn audit_classpath_from_environment() -> SharedClassPath {
     SharedClassPath::new(CompositeClassPath::new(entries))
 }
 
+/// Sort event references for report output without cloning their owned strings.
+fn sorted_observation_refs<T: Ord>(observations: &[T]) -> Vec<&T> {
+    let mut sorted = observations.iter().collect::<Vec<_>>();
+    sorted.sort_unstable();
+    sorted
+}
+
 fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("resolver_metrics:");
     println!(
@@ -13861,8 +13899,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     for target in &module_profile.member_targets {
         println!("  member_target={target}");
     }
-    let mut module_observations = metrics.module_package_term_observations.clone();
-    module_observations.sort();
+    let module_observations = sorted_observation_refs(&metrics.module_package_term_observations);
     println!("module_package_term_observations:");
     println!("  observations={}", module_observations.len());
     println!(
@@ -13880,8 +13917,8 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             tsv_or_dash(&observation.module_class_identity)
         );
     }
-    let mut module_operation_observations = metrics.module_operation_observations.clone();
-    module_operation_observations.sort();
+    let module_operation_observations =
+        sorted_observation_refs(&metrics.module_operation_observations);
     println!("module_operation_observations:");
     println!("  observations={}", module_operation_observations.len());
     println!(
@@ -13903,8 +13940,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             tsv_or_dash(&observation.module_class_identity)
         );
     }
-    let mut module_member_observations = metrics.module_member_observations.clone();
-    module_member_observations.sort();
+    let module_member_observations = sorted_observation_refs(&metrics.module_member_observations);
     println!("module_member_observations:");
     println!("  observations={}", module_member_observations.len());
     println!(
@@ -13924,8 +13960,7 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
             observation.transaction_state
         );
     }
-    let mut package_term_rows = metrics.package_term_request_rows.clone();
-    package_term_rows.sort();
+    let package_term_rows = sorted_observation_refs(&metrics.package_term_request_rows);
     println!("package_term_request_rows:");
     println!("  observations={}", package_term_rows.len());
     println!(

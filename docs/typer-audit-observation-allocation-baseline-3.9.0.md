@@ -24,6 +24,19 @@ Each sample contained 3,253 module-member observations across 439 distinct `requ
 
 The #1483 subphase profile also identifies the per-request work still present after this report-only baseline: across two C samples, source member-request preparation took 29,286 µs and observation collection 31,230 µs; the three match files added 29,898 µs and 14,022 µs respectively. Symbol identity rendering accounted for 9,858 µs in the source pass and 2,020 µs in the match pass across those two samples. These subtimers overlap resolver-call windows and are not additive to total wall time.
 
+## Increment 1: sort borrowed observations
+
+The report now sorts borrowed references into each event vector instead of cloning every observation and its owned strings. A focused test compares the borrowed order with the former owned clone-and-sort order, including duplicate rows. The four stable observation sections from both after samples are byte-identical to the baseline.
+
+| Measurement | Baseline mean | Borrowed-sort mean | Difference |
+| --- | ---: | ---: | ---: |
+| Cargo wall | 12,180.5 ms | 12,689 ms | +508.5 ms |
+| Child user CPU | 10.765 s | 11.195 s | +0.430 s |
+| Child system CPU | 1.350 s | 1.370 s | +0.020 s |
+| Peak sampled process-tree RSS | 114,307,072 B | 114,860,032 B | +552,960 B |
+
+This two-run comparison is noisy and shows no whole-process speed or RSS improvement. The allocation result is narrower and deterministic: the four sort copies previously requested about 4,472,156 bytes per sample; borrowed-reference vectors request about 86,824 bytes, for an estimated 4,385,332-byte reduction. This does not count allocator metadata or represent total process allocation. The audit suite passed (103 passed, 2 ignored), as did the typer Clippy check. Do not interpret the wall/CPU/RSS differences as a regression or improvement from only two samples.
+
 ## Measured boundary
 
 No accurate whole-process allocated-byte profiler was available for #1483. This baseline instead calculates the known clone allocations from exact emitted row counts and owned string payloads, and records whole-process wall/CPU/sampled RSS separately. The after profile will reuse the same manifest, limits, mode, machine, build profile, and serial runner. Equality will be checked for all four report sections; their stable rows must remain byte-for-byte identical. Timing metadata is the only expected output variation.
