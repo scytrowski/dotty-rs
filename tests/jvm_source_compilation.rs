@@ -1467,6 +1467,92 @@ class Branch:
 }
 
 #[test]
+fn canonical_long_descriptors_and_category_two_parameter_slots_are_projected() {
+    let source = fs::read_to_string(fixture_path("LongDescriptors.scala"))
+        .expect("read focused Long descriptor fixture");
+    let output = TestOutputDirectory::new("scala-long-descriptor-metadata");
+    let mut observed = false;
+    let result = compile_source_batch_with_source_observer(
+        &source,
+        "LongDescriptors.scala",
+        output.path(),
+        SourceId::from_index(1514),
+        SourceUnitCardinality::ExactlyOne,
+        &mut |_, _, unit, definitions| {
+            observed = true;
+            let class = audit_class_named(unit, "LongDescriptors");
+            let metadata = unit
+                .metadata(definitions)
+                .expect("canonical Long signatures project to metadata");
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .expect("fixture class has metadata");
+            let constructor = class_metadata
+                .constructor()
+                .expect("explicit Long constructor has metadata");
+            assert_eq!(constructor.descriptor().as_str(), "(J)V");
+            assert_eq!(
+                constructor
+                    .parameters()
+                    .iter()
+                    .map(|parameter| (parameter.ty(), parameter.slot(), parameter.width()))
+                    .collect::<Vec<_>>(),
+                vec![(JvmType::Long, 1, 2)]
+            );
+
+            let echo = class_metadata
+                .methods()
+                .iter()
+                .find(|method| method.name() == "echo")
+                .expect("echo method metadata");
+            assert_eq!(echo.descriptor().as_str(), "(J)J");
+            assert_eq!(
+                echo.parameters()
+                    .iter()
+                    .map(|parameter| (parameter.ty(), parameter.slot(), parameter.width()))
+                    .collect::<Vec<_>>(),
+                vec![(JvmType::Long, 1, 2)]
+            );
+
+            let mixed = class_metadata
+                .methods()
+                .iter()
+                .find(|method| method.name() == "mixed")
+                .expect("mixed method metadata");
+            assert_eq!(mixed.descriptor().as_str(), "(ZIJI)J");
+            assert_eq!(
+                mixed
+                    .parameters()
+                    .iter()
+                    .map(|parameter| (parameter.ty(), parameter.slot(), parameter.width()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (JvmType::Boolean, 1, 1),
+                    (JvmType::Int, 2, 1),
+                    (JvmType::Long, 3, 2),
+                    (JvmType::Int, 5, 1),
+                ]
+            );
+        },
+    );
+    assert!(
+        observed,
+        "source reaches JVM metadata projection: {result:?}"
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::UnsupportedTypedExpression { .. }
+        ))
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "unsupported Long body does not publish a partial class"
+    );
+}
+
+#[test]
 fn scala_long_source_reaches_typed_plans_before_backend_rejects_it() {
     let source = fs::read_to_string(fixture_path("LongCategoryTwo.scala"))
         .expect("read Scala Long category-two audit fixture");
@@ -3642,6 +3728,7 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
                     .map(|parameter| {
                         let category = match parameter.ty().category() {
                             dotty_jvm::JvmValueCategory::IntLike => "intlike",
+                            dotty_jvm::JvmValueCategory::Long => "long",
                             dotty_jvm::JvmValueCategory::Reference => "reference",
                         };
                         format!(

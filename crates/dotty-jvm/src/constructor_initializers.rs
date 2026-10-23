@@ -127,6 +127,12 @@ impl JvmConstructorFieldInitializerPlan {
                     } => match value_type {
                         JvmType::Int | JvmType::Boolean => code.iload(usize::from(*slot)),
                         JvmType::Reference(_) => code.aload(usize::from(*slot)),
+                        JvmType::Long => {
+                            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                                tree: field.initializer,
+                                node: "Long constructor parameter initializer",
+                            });
+                        }
                     },
                     JvmConstructorInitializerInstruction::IntAdd => code.iadd(),
                     JvmConstructorInitializerInstruction::BooleanNot => {
@@ -281,7 +287,7 @@ pub(crate) fn append_direct_super_constructor_call(
         }
         match instructions.as_slice() {
             [JvmConstructorInitializerInstruction::Constant(value)] => {
-                encoded_arguments.push((*value, None, found));
+                encoded_arguments.push((*value, None, found, binding.typed));
             }
             [
                 JvmConstructorInitializerInstruction::LoadParameter {
@@ -296,7 +302,7 @@ pub(crate) fn append_direct_super_constructor_call(
                         found: Some(*value_type),
                     });
                 }
-                encoded_arguments.push((0, Some(*slot), found));
+                encoded_arguments.push((0, Some(*slot), found, binding.typed));
             }
             _ => {
                 return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
@@ -309,11 +315,17 @@ pub(crate) fn append_direct_super_constructor_call(
 
     code.aload(0)
         .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
-    for (value, slot, value_type) in encoded_arguments {
+    for (value, slot, value_type, argument) in encoded_arguments {
         let result = match slot {
             Some(slot) => match value_type {
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(slot)),
                 JvmType::Reference(_) => code.aload(usize::from(slot)),
+                JvmType::Long => {
+                    return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
+                        tree: proof.typed_application(),
+                        argument,
+                    });
+                }
             },
             None => code.iconst(value),
         };

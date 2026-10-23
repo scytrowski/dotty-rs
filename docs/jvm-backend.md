@@ -17,8 +17,9 @@ classpath-aware JVM backend.
 
 The current `Long` and JVM category-two support boundary is recorded in
 [`jvm-long-category2.md`](jvm-long-category2.md), including the Scala 3.9.0
-source fixture, the existing linear/stack-map support, and the unsupported CFG
-and JVM projection paths.
+source fixture, method and constructor descriptor metadata (`J`) with
+category-two parameter offsets, existing linear/stack-map support, and the
+still unsupported CFG and expression lowering paths.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -519,10 +520,12 @@ frontend dependency boundary while rejecting mixed source/typed roots.
 
 Formal parameter identities stay in the plan's explicit order and are checked
 against the canonical method owner, completed parameter info, and descriptor
-types. Instance local slot zero is reserved for `this`; supported `Int` and
-`Boolean` parameters occupy one slot each, beginning at slot one. Each output
-parameter records its type, first slot, and width so later category-two types
-can extend the layout contract without changing identity semantics.
+types. Instance local slot zero is reserved for `this`; `Int` and `Boolean`
+parameters occupy one slot and `Long` occupies two, beginning at slot one for
+instance methods. Descriptor validation enforces the 255-unit JVM parameter
+limit including the instance receiver. Each output parameter records its
+type, first slot, and width. This metadata support does not enable Long
+expression, field, or local emission.
 
 `JvmCompilationUnit::resolve_same_class_call` accepts a complete typed
 `Apply` tree plus the planned caller class and method. It resolves only a
