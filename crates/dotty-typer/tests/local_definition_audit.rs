@@ -32,6 +32,7 @@ struct ResolverMetrics {
     rollback_count: usize,
     rollback_operation_observations: usize,
     rollback_member_observations: usize,
+    profiled_root_method_attempts: usize,
     current_file: String,
     current_method: String,
     module_identity_inner_time: Duration,
@@ -6848,8 +6849,9 @@ fn pinned_scala39_local_definition_audit() {
             "partial"
         };
         eprintln!(
-            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} completed_files={completed_files} status={completed_status} timing_mode={timing_mode} method_limit_per_file={method_limit} methods_attempted={} methods_typed={} resolver_package_requests={} resolver_member_requests={} wall_ms={} classpath_setup_ms={} file_discovery_ms={} source_read_ms={} source_processing_and_merge_ms={}",
+            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} completed_files={completed_files} status={completed_status} timing_mode={timing_mode} method_limit_per_file={method_limit} local_methods_in_inventory={} profiled_root_method_attempts={} typed_local_defdefs={} resolver_package_requests={} resolver_member_requests={} wall_ms={} classpath_setup_ms={} file_discovery_ms={} source_read_ms={} source_processing_and_merge_ms={}",
             audit.local_method_attempts.len(),
+            resolver_metrics.borrow().profiled_root_method_attempts,
             audit.typed_local_defdefs,
             resolver_metrics.borrow().resolver_package_requests,
             resolver_metrics.borrow().resolver_member_requests,
@@ -11589,8 +11591,24 @@ fn audit_source_inner_filtered(
     }));
     let typing_started = Instant::now();
     for (method, method_tree, rhs, range) in root_methods {
+        if profile_timing && let Some(metrics) = &request_metrics {
+            metrics.borrow_mut().profiled_root_method_attempts += 1;
+        }
         let method_started = Instant::now();
         let method_label = profile_timing.then(|| audit_symbol_path(typer.store(), method));
+        let method_line = profile_timing.then(|| {
+            parsed
+                .ast
+                .try_get(method_tree)
+                .and_then(|node| node.position)
+                .and_then(|position| {
+                    usize::try_from(position.span().range().start())
+                        .ok()
+                        .and_then(|start| text.get(..start))
+                        .map(|prefix| prefix.lines().count() + 1)
+                })
+                .unwrap_or(0)
+        });
         let resolver_before = profile_timing.then(|| {
             let metrics = request_metrics
                 .as_ref()
@@ -11615,8 +11633,9 @@ fn audit_source_inner_filtered(
         });
         if let Some(method_label) = &method_label {
             eprintln!(
-                "AUDIT_METHOD_START file={path} tree={} method={method_label}",
-                method_tree.index()
+                "AUDIT_METHOD_START file={path} tree={} line={} method={method_label}",
+                method_tree.index(),
+                method_line.unwrap_or(0)
             );
         }
         if let Some(metrics) = &request_metrics {
@@ -11640,8 +11659,9 @@ fn audit_source_inner_filtered(
                 method_tree.index()
             );
             eprintln!(
-                "AUDIT_METHOD_TIMING file={path} tree={} method={} elapsed_ms={}",
+                "AUDIT_METHOD_TIMING file={path} tree={} line={} method={} elapsed_ms={}",
                 method_tree.index(),
+                method_line.unwrap_or(0),
                 method_label.as_deref().unwrap_or("<unknown>"),
                 method_started.elapsed().as_millis()
             );

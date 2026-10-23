@@ -56,7 +56,7 @@ class SequentialProfileTests(unittest.TestCase):
 
     def test_profile_log_extracts_file_phases_methods_resolver_and_run_setup(self):
         log = """AUDIT_FILE_PHASE file=compiler/A.scala phase=parse ms=12
-AUDIT_METHOD_TIMING file=compiler/A.scala tree=8 method=foo elapsed_ms=44
+AUDIT_METHOD_TIMING file=compiler/A.scala tree=8 line=12 method=foo elapsed_ms=44
 AUDIT_METHOD_RESULT file=compiler/A.scala tree=8 result=success
 AUDIT_MATCH_PROBES available=6 executed=0
 AUDIT_MATCH_PROBE file=compiler/A.scala method_symbol=17 case_tree=21 family=literal
@@ -77,6 +77,7 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["summary"]["classpath_setup_ms"], "10")
         self.assertEqual(parsed["files"]["compiler/A.scala"]["typing_ms"], 45)
         self.assertEqual(parsed["methods"][("compiler/A.scala", "8")]["method"], "foo")
+        self.assertEqual(parsed["methods"][("compiler/A.scala", "8")]["line"], 12)
         self.assertEqual(parsed["outcomes"][("compiler/A.scala", "8")], "success")
         self.assertEqual(parsed["match_probes"][0], {"available": "6", "executed": "0"})
         self.assertEqual(parsed["match_probe_ids"], [("compiler/A.scala", "17", "21", "literal")])

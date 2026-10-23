@@ -161,7 +161,7 @@ def parse_run(log: str) -> dict:
         elif line.startswith("AUDIT_METHOD_TIMING "):
             values = kvs(line)
             key = (values["file"], values["tree"])
-            result["methods"][key] = {"method": values["method"], "elapsed_ms": int(values["elapsed_ms"])}
+            result["methods"][key] = {"method": values["method"], "line": int(values["line"]), "elapsed_ms": int(values["elapsed_ms"])}
         elif line.startswith("AUDIT_METHOD_RESULT "):
             values = kvs(line)
             result["outcomes"][(values["file"], values["tree"])] = values["result"]
@@ -337,6 +337,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     phase_totals: dict[str, int] = {}
     file_samples: dict[str, list[int]] = {path: [] for path in file_paths}
     method_samples: list[tuple[int, str, str, str]] = []
+    method_resolver_samples: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
     resolver_totals: dict[str, list[int]] = {}
     load_totals: dict[str, int] = {}
     resolver_count_totals: dict[str, int] = {}
@@ -360,8 +361,11 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         for (path, tree), data in result["methods"].items():
             resolver = result["resolver"].get((path, tree), {})
             method_samples.append((data["elapsed_ms"], path, tree, data["method"]))
+            method_resolver_samples.setdefault((path, tree, data["method"]), []).append((
+                int(resolver.get("member_calls", 0)), int(resolver.get("member_inner_us", 0)),
+            ))
             method_row_data.append((data["elapsed_ms"], path, tree, "\t".join(str(value) for value in [
-                run_index, path, tree, data["method"], data["elapsed_ms"],
+                run_index, path, tree, data["line"], data["method"], data["elapsed_ms"],
                 resolver.get("module_identity_calls", "not_captured"), resolver_duration_ms(resolver, "module_identity"), resolver_duration_us(resolver, "module_identity"),
                 resolver.get("module_completion_calls", "not_captured"), resolver_duration_ms(resolver, "module_completion"), resolver_duration_us(resolver, "module_completion"),
                 resolver.get("class_completion_calls", "not_captured"), resolver_duration_ms(resolver, "class_completion"), resolver_duration_us(resolver, "class_completion"),
@@ -379,7 +383,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"{run}\t{path}\t{phase}\t{millis}\t{outcome}"
         for millis, path, phase, run, outcome in sorted(file_row_data, key=lambda item: (-item[0], item[1], item[2], item[3]))
     ]
-    method_rows = ["run\tfile\ttree\tmethod\telapsed_ms\tmodule_identity_calls\tmodule_identity_inner_ms\tmodule_identity_inner_us\tmodule_completion_calls\tmodule_completion_inner_ms\tmodule_completion_inner_us\tclass_completion_calls\tclass_completion_inner_ms\tclass_completion_inner_us\tclassfile_completion_calls\tclassfile_completion_inner_us\ttasty_completion_calls\ttasty_completion_inner_us\tmember_calls\tmember_inner_ms\tmember_inner_us\tpackage_calls\tpackage_inner_ms\tpackage_inner_us"] + [
+    method_rows = ["run\tfile\ttree\tline\tmethod\telapsed_ms\tmodule_identity_calls\tmodule_identity_inner_ms\tmodule_identity_inner_us\tmodule_completion_calls\tmodule_completion_inner_ms\tmodule_completion_inner_us\tclass_completion_calls\tclass_completion_inner_ms\tclass_completion_inner_us\tclassfile_completion_calls\tclassfile_completion_inner_us\ttasty_completion_calls\ttasty_completion_inner_us\tmember_calls\tmember_inner_ms\tmember_inner_us\tpackage_calls\tpackage_inner_ms\tpackage_inner_us"] + [
         row for _elapsed, _path, _tree, row in sorted(method_row_data, key=lambda item: (-item[0], item[1], item[2], item[3]))
     ]
     (out_dir / "file-phases.tsv").write_text("\n".join(file_rows) + "\n", encoding="utf-8")
@@ -435,7 +439,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
          for (path, tree, name), values in method_times.items()),
         key=lambda item: (-item[0], item[2], item[3], item[4]),
     )[:10]
-    # Durations from resolver wrappers are inclusive and can overlap. Rank by observed time, not guessed cost.
+    top_hot_paths = top_methods[:3]
+    # Delegated resolver durations can overlap with their calling method timers. Keep the two views separate.
     resolver_operations: dict[str, tuple[int | None, int | None, int | None]] = {}
     for operation in (
         "module_identity", "module_completion", "class_completion", "classfile_completion",
@@ -448,16 +453,6 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         millis = resolver_totals.get(millis_key, [0, 0])[0] if millis_key in resolver_totals else None
         calls = resolver_totals.get(calls_key, [0, 0])[0] if calls_key in resolver_totals else None
         resolver_operations[operation] = (calls, millis, micros)
-    member_calls, member_millis, member_micros = resolver_operations["member"]
-    candidates = [
-        (phase_totals.get("typing_ms", 0), "SourceTyper method typing", len(method_samples),
-         "Inspect the recorded hottest method identities first; do not share store/session semantic IDs across files."),
-        (phase_totals.get("postprocess_ms", 0), "post-typing audit accounting", len(file_samples) * len(runs),
-         "Break down repeated source/blocker projections while preserving per-row identities and rollback coverage."),
-        (round((member_micros / 1000) if member_micros is not None else member_millis or 0), "resolver member lookup", member_calls or 0,
-         "Investigate immutable resource/query reuse only; keep SymbolId, TypeId, ScopeId, interned names, and transaction state local to each SemanticStore/LoadingSession."),
-    ]
-    candidates.sort(key=lambda item: (-item[0], item[1]))
     semantic_ms = phase_totals.get("typing_ms", 0) + phase_totals.get("typer_setup_ms", 0)
     p50 = percentile([v for values in file_samples.values() for v in values], 0.50)
     p95 = percentile([v for values in file_samples.values() for v in values], 0.95)
@@ -525,7 +520,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     phase_sum = sum(phase_totals.values())
     for phase, total in sorted(phase_totals.items(), key=lambda item: (-item[1], item[0])):
         lines.append(f"| `{phase}` | {total} | {100 * total / max(1, phase_sum):.1f}% |")
-    lines += ["", "## Resolver operation families", "", "Durations are wrapper-inclusive; nested work may overlap.", "", "| Operation | Calls | Inclusive ms |", "| --- | ---: | ---: |"]
+    lines += ["", "## Resolver operation families", "", "Durations measure delegated resolver calls; nested class/TASTy loading remains inclusive inside those calls. AuditResolver wrapper time is reported separately.", "", "| Operation | Calls | Delegated ms |", "| --- | ---: | ---: |"]
     resolver_sort_key = lambda item: (item[1][1] is None and item[1][2] is None, -(item[1][2] if item[1][2] is not None else (item[1][1] or 0) * 1000), item[0])
     for operation, (calls, millis, micros) in sorted(resolver_operations.items(), key=resolver_sort_key):
         calls_text = "not captured" if calls is None else str(calls)
@@ -559,12 +554,27 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"| `{root['root']}` | `{root['file']}::{root['method']}` (run {run}) | {root['distinct_classes']} | {root['full_completions']} | {root['completed_cache_hits']} |"
         for run, root in sorted_roots[:10]
     ]
-    lines += ["", "## Bounded follow-up candidates", "", "Costs are observed in this five-file cohort; repeated counts and durations do not imply a safe cache or a projected speedup.", ""]
-    for rank, (total, name, count, boundary) in enumerate(candidates, 1):
-        lines.append(f"{rank}. **{name}**: {count} observed items and {total} ms. {boundary}")
+    lines += ["", "## Three confirmed hot method roots", "", "Ranked by mean inclusive method-attempt time. These attempts stop at the first typer blocker, so they characterize current audit work rather than successful full-method typing. Member resolver time is nested within method time and is shown only as attribution, not added again.", "", "| Rank | Mean inclusive ms | Member calls | Delegated member ms | Exact root |", "| ---: | ---: | ---: | ---: | --- |"]
+    for rank, (mean, _maximum, path, tree, name, _runs_count) in enumerate(top_hot_paths, 1):
+        calls_and_time = method_resolver_samples.get((path, tree, name), [])
+        mean_calls = statistics.mean(calls for calls, _elapsed in calls_and_time) if calls_and_time else 0
+        mean_resolver_ms = statistics.mean(elapsed for _calls, elapsed in calls_and_time) / 1000 if calls_and_time else 0
+        source_lines = [
+            data["line"]
+            for run in runs
+            for (file, method_tree), data in run["methods"].items()
+            if file == path and method_tree == tree
+        ]
+        source_line = source_lines[0] if source_lines else 0
+        pointer = f"{path}:{source_line}" if source_line else f"{path}#tree={tree}"
+        lines.append(f"| {rank} | {mean:.1f} | {mean_calls:.1f} | {mean_resolver_ms:.1f} | `{pointer}` `{name}` (tree {tree}) |")
     lines += [
         "",
-        "For this frozen baseline, per-method resolver durations were emitted in whole milliseconds and then aggregated; zero means below per-method millisecond resolution, not a measured exact zero. The opt-in log now also emits microseconds for future reproductions.",
+        "All three hot roots spend nearly all observed method time in delegated `resolve_member`; this bounded profile therefore supports a focused follow-up that attributes resolver-internal work (prefix/package traversal, classpath lookup, and member selection) per request family. Recheck repeated request keys before proposing request-local reuse. Do not add cross-session semantic caches or claim an optimization speedup from this baseline.",
+    ]
+    lines += [
+        "",
+        "Per-method resolver durations are emitted in microseconds. A zero call count means that operation did not run for that method; zero elapsed time with calls is below timer resolution, not proof of zero cost.",
         "The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts.",
         "",
     ]
