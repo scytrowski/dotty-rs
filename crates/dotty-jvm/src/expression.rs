@@ -2886,7 +2886,9 @@ fn emit_short_circuit_boolean_intrinsic(
 
     let initialized_on_skip = context.initialized_locals.clone();
     context.reference_assignment_restricted_region_depth += 1;
+    context.long_control_flow_depth += 1;
     let argument_flow = emit_expression(context, *argument, code, depth + 1)?;
+    context.long_control_flow_depth -= 1;
     context.reference_assignment_restricted_region_depth -= 1;
     if argument_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {

@@ -1730,6 +1730,14 @@ fn unsupported_long_discard_and_control_flow_fail_without_artifacts() {
             "LongBranch.scala",
             "class LongBranch:\n  def choose(flag: Boolean, left: Long, right: Long): Long = if flag then left else right\n",
         ),
+        (
+            "LongAndAssignment.scala",
+            "class LongAndAssignment:\n  def update(flag: Boolean, value: Long): Long =\n    var saved: Long = 0L\n    flag && { saved = value; true }\n    saved\n",
+        ),
+        (
+            "LongOrAssignment.scala",
+            "class LongOrAssignment:\n  def update(flag: Boolean, value: Long): Long =\n    var saved: Long = 0L\n    flag || { saved = value; true }\n    saved\n",
+        ),
     ] {
         let output = TestOutputDirectory::new(name);
         let error = compile_source(source, name, output.path())
