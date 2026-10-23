@@ -21,13 +21,18 @@ use dotty_tasty_unpickler::tasty_unpickler::TastyUnpickler;
 use dotty_typer::{SourceTyper, TyperError};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ResolverMetrics {
     timing_enabled: bool,
+    audit_wrapper_timings: BTreeMap<&'static str, AuditWrapperTiming>,
+    rollback_count: usize,
+    rollback_operation_observations: usize,
+    rollback_member_observations: usize,
+    profiled_root_method_attempts: usize,
     current_file: String,
     current_method: String,
     module_identity_inner_time: Duration,
@@ -106,6 +111,27 @@ struct ResolverMetrics {
     class_member_prefixes: BTreeSet<String>,
     class_member_keys: BTreeSet<String>,
     module_resolution: ModuleResolutionProfile,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct AuditWrapperTiming {
+    calls: usize,
+    wall_time: Duration,
+    delegated_time: Duration,
+}
+
+fn record_audit_wrapper_timing(
+    metrics: &Rc<RefCell<ResolverMetrics>>,
+    operation: &'static str,
+    started: Option<Instant>,
+    delegated_time: Duration,
+) {
+    let Some(started) = started else { return };
+    let mut metrics = metrics.borrow_mut();
+    let timing = metrics.audit_wrapper_timings.entry(operation).or_default();
+    timing.calls += 1;
+    timing.wall_time += started.elapsed();
+    timing.delegated_time += delegated_time;
 }
 
 fn merge_module_resolution_profile(
@@ -397,6 +423,118 @@ impl<E: ClassPathEntry> Drop for AuditResolver<E> {
     }
 }
 
+/// A resolver adapter for measuring SourceTyper with only wall-clock timing.
+/// It preserves the loading session handoff without collecting audit-only
+/// identity, request, classpath-probe, or class-load-profile observations.
+struct TimingOnlyResolver<E: ClassPathEntry> {
+    inner: Option<ClasspathSymbolResolver<E>>,
+    session_out: Rc<RefCell<Option<LoadingSession>>>,
+}
+
+impl<E: ClassPathEntry> Drop for TimingOnlyResolver<E> {
+    fn drop(&mut self) {
+        if let Some(resolver) = self.inner.take() {
+            *self.session_out.borrow_mut() = Some(resolver.into_session());
+        }
+    }
+}
+
+impl<E: ClassPathEntry> SymbolResolver for TimingOnlyResolver<E> {
+    fn package_object_collision(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: dotty_core::Name,
+    ) -> Result<bool, ResolutionError> {
+        self.inner
+            .as_mut()
+            .expect("timing-only resolver is available")
+            .package_object_collision(store, package, name)
+    }
+
+    fn module_class_of_object(
+        &self,
+        store: &SemanticStore,
+        object: SymbolId,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner
+            .as_ref()
+            .expect("timing-only resolver is available")
+            .module_class_of_object(store, object)
+    }
+
+    fn complete_module_class(
+        &mut self,
+        store: &mut SemanticStore,
+        module_class: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.inner
+            .as_mut()
+            .expect("timing-only resolver is available")
+            .complete_module_class(store, module_class)
+    }
+
+    fn complete_class(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.inner
+            .as_mut()
+            .expect("timing-only resolver is available")
+            .complete_class(store, symbol)
+    }
+
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        self.inner
+            .as_ref()
+            .expect("timing-only resolver is available")
+            .checkpoint()
+    }
+
+    fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        self.inner
+            .as_mut()
+            .expect("timing-only resolver is available")
+            .rollback_to(store, checkpoint)
+    }
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner
+            .as_mut()
+            .expect("timing-only resolver is available")
+            .resolve_member(store, request)
+    }
+
+    fn resolve_package(
+        &mut self,
+        store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<SymbolId>, ResolutionError> {
+        self.inner
+            .as_mut()
+            .expect("timing-only resolver is available")
+            .resolve_package(store, path)
+    }
+
+    fn enter_synthetic_package_member(
+        &mut self,
+        store: &mut SemanticStore,
+        package: SymbolId,
+        name: dotty_core::Name,
+        member: SymbolId,
+    ) -> Result<bool, ResolutionError> {
+        self.inner
+            .as_mut()
+            .expect("timing-only resolver is available")
+            .enter_synthetic_package_member(store, package, name, member)
+    }
+}
+
 #[derive(Clone)]
 struct SharedClassPath(Arc<CachedClassPath>);
 
@@ -408,6 +546,13 @@ struct CachedClassPath {
     missing_class_cache_hits: AtomicUsize,
     package_query_calls: AtomicUsize,
     package_query_cache_hits: AtomicUsize,
+    profile_resource_metrics: bool,
+    resource_inner_calls: AtomicUsize,
+    resource_positive: AtomicUsize,
+    resource_negative: AtomicUsize,
+    resource_errors: AtomicUsize,
+    resource_bytes_returned: AtomicUsize,
+    resource_inner_wall_ns: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,10 +561,25 @@ struct ClassPathCacheMetrics {
     missing_class_cache_hits: usize,
     package_query_calls: usize,
     package_query_cache_hits: usize,
+    resource_inner_calls: usize,
+    resource_positive: usize,
+    resource_negative: usize,
+    resource_errors: usize,
+    resource_bytes_returned: usize,
+    resource_inner_wall_ns: u64,
 }
 
 impl SharedClassPath {
     fn new(inner: CompositeClassPath) -> Self {
+        let profile_resource_metrics = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some()
+            && std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() != Ok("1");
+        Self::new_with_resource_profile(inner, profile_resource_metrics)
+    }
+
+    fn new_with_resource_profile(
+        inner: CompositeClassPath,
+        profile_resource_metrics: bool,
+    ) -> Self {
         Self(Arc::new(CachedClassPath {
             inner,
             missing_classes: Mutex::new(HashSet::new()),
@@ -428,6 +588,13 @@ impl SharedClassPath {
             missing_class_cache_hits: AtomicUsize::new(0),
             package_query_calls: AtomicUsize::new(0),
             package_query_cache_hits: AtomicUsize::new(0),
+            profile_resource_metrics,
+            resource_inner_calls: AtomicUsize::new(0),
+            resource_positive: AtomicUsize::new(0),
+            resource_negative: AtomicUsize::new(0),
+            resource_errors: AtomicUsize::new(0),
+            resource_bytes_returned: AtomicUsize::new(0),
+            resource_inner_wall_ns: AtomicU64::new(0),
         }))
     }
 
@@ -437,6 +604,12 @@ impl SharedClassPath {
             missing_class_cache_hits: self.0.missing_class_cache_hits.load(Ordering::Relaxed),
             package_query_calls: self.0.package_query_calls.load(Ordering::Relaxed),
             package_query_cache_hits: self.0.package_query_cache_hits.load(Ordering::Relaxed),
+            resource_inner_calls: self.0.resource_inner_calls.load(Ordering::Relaxed),
+            resource_positive: self.0.resource_positive.load(Ordering::Relaxed),
+            resource_negative: self.0.resource_negative.load(Ordering::Relaxed),
+            resource_errors: self.0.resource_errors.load(Ordering::Relaxed),
+            resource_bytes_returned: self.0.resource_bytes_returned.load(Ordering::Relaxed),
+            resource_inner_wall_ns: self.0.resource_inner_wall_ns.load(Ordering::Relaxed),
         }
     }
 }
@@ -543,15 +716,45 @@ impl ClassPathEntry for SharedClassPath {
             return Ok(None);
         }
 
-        let result = self.0.inner.find_class(name)?;
-        if result.is_none() {
-            self.0
-                .missing_classes
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(name.clone());
+        if self.0.profile_resource_metrics {
+            let started = Instant::now();
+            let result = self.0.inner.find_class(name);
+            self.0.resource_inner_wall_ns.fetch_add(
+                started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                Ordering::Relaxed,
+            );
+            self.0.resource_inner_calls.fetch_add(1, Ordering::Relaxed);
+            match &result {
+                Ok(Some(resource)) => {
+                    self.0.resource_positive.fetch_add(1, Ordering::Relaxed);
+                    self.0
+                        .resource_bytes_returned
+                        .fetch_add(resource.bytes().len(), Ordering::Relaxed);
+                }
+                Ok(None) => {
+                    self.0.resource_negative.fetch_add(1, Ordering::Relaxed);
+                    self.0
+                        .missing_classes
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(name.clone());
+                }
+                Err(_) => {
+                    self.0.resource_errors.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            result
+        } else {
+            let result = self.0.inner.find_class(name)?;
+            if result.is_none() {
+                self.0
+                    .missing_classes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(name.clone());
+            }
+            Ok(result)
         }
-        Ok(result)
     }
 
     fn contains_package(
@@ -657,8 +860,34 @@ fn shared_audit_classpath_caches_negative_resource_and_package_probes() {
             missing_class_cache_hits: 1,
             package_query_calls: 4,
             package_query_cache_hits: 2,
+            resource_inner_calls: 0,
+            resource_positive: 0,
+            resource_negative: 0,
+            resource_errors: 0,
+            resource_bytes_returned: 0,
+            resource_inner_wall_ns: 0,
         }
     );
+}
+
+#[test]
+fn shared_audit_classpath_profiles_inner_positive_and_negative_resource_responses() {
+    let classpath = SharedClassPath::new_with_resource_profile(
+        CompositeClassPath::new(vec![Box::new(PrefixOnlyAuditEntry)]),
+        true,
+    );
+    let missing = BinaryName::from_internal("missing/Type");
+    assert!(classpath.find_class(&missing).unwrap().is_none());
+    assert!(classpath.find_class(&missing).unwrap().is_none());
+
+    let metrics = classpath.cache_metrics();
+    assert_eq!(metrics.find_class_calls, 2);
+    assert_eq!(metrics.resource_inner_calls, 1);
+    assert_eq!(metrics.resource_positive, 0);
+    assert_eq!(metrics.resource_negative, 1);
+    assert_eq!(metrics.resource_errors, 0);
+    assert_eq!(metrics.resource_bytes_returned, 0);
+    assert_eq!(metrics.missing_class_cache_hits, 1);
 }
 
 #[test]
@@ -697,10 +926,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &SemanticStore,
         object: SymbolId,
     ) -> Result<Option<SymbolId>, ResolutionError> {
-        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let resolver_started = wrapper_started;
         let result = self.resolver().module_class_of_object(store, object);
-        if let Some(started) = resolver_started {
-            self.metrics.borrow_mut().module_identity_inner_time += started.elapsed();
+        let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
+        if resolver_started.is_some() {
+            self.metrics.borrow_mut().module_identity_inner_time += resolver_elapsed;
         }
         let (source_file, enclosing_attempt) = {
             let mut metrics = self.metrics.borrow_mut();
@@ -725,6 +956,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         // The corpus profile concerns first-blocker method attempts. Avoid
         // building stable symbol paths for unrelated source/setup lookups.
         if enclosing_attempt.is_empty() {
+            record_audit_wrapper_timing(
+                &self.metrics,
+                "module_identity",
+                wrapper_started,
+                resolver_elapsed,
+            );
             return result;
         }
         let object_identity = if store.symbols.contains(object) {
@@ -798,6 +1035,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 transaction_state: "observed",
                 error_category,
             });
+        drop(metrics);
+        record_audit_wrapper_timing(
+            &self.metrics,
+            "module_identity",
+            wrapper_started,
+            resolver_elapsed,
+        );
         result
     }
 
@@ -806,7 +1050,8 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         module_class: SymbolId,
     ) -> Result<bool, ResolutionError> {
-        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let resolver_started = wrapper_started;
         let module_class_identity = if store.symbols.contains(module_class) {
             audit_binary_candidate(store, module_class)
                 .unwrap_or_else(|| "<unknown-module-class>".to_owned())
@@ -825,8 +1070,9 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let result = self
             .resolver_mut()
             .complete_module_class(store, module_class);
-        if let Some(started) = resolver_started {
-            self.metrics.borrow_mut().module_completion_inner_time += started.elapsed();
+        let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
+        if resolver_started.is_some() {
+            self.metrics.borrow_mut().module_completion_inner_time += resolver_elapsed;
         }
         let profiles = self.resolver_mut().take_load_profiles();
         let result_state = module_class_observed_state(store, module_class);
@@ -869,6 +1115,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     error_category,
                 });
         }
+        drop(metrics);
+        record_audit_wrapper_timing(
+            &self.metrics,
+            "module_completion",
+            wrapper_started,
+            resolver_elapsed,
+        );
         result
     }
 
@@ -877,7 +1130,8 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         symbol: SymbolId,
     ) -> Result<bool, ResolutionError> {
-        let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let resolver_started = wrapper_started;
         let format_origin = resolver_started.map(|_| symbol_origin_category(store, symbol));
         let request = if store.symbols.contains(symbol) {
             format!("completion::{}", audit_symbol_path(store, symbol))
@@ -913,11 +1167,16 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 profile,
             });
         }
+        drop(metrics);
+        record_audit_wrapper_timing(&self.metrics, "class_completion", wrapper_started, elapsed);
         result
     }
 
     fn checkpoint(&self) -> ResolverCheckpoint {
+        let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
+        let resolver_started = wrapper_started;
         let inner_checkpoint = self.resolver().checkpoint();
+        let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
         let mut metrics = self.metrics.borrow_mut();
         metrics.next_module_operation_checkpoint = metrics
             .next_module_operation_checkpoint
@@ -931,10 +1190,18 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         metrics
             .module_operation_checkpoints
             .insert(token, (inner_checkpoint, offsets.0, offsets.1));
+        drop(metrics);
+        record_audit_wrapper_timing(
+            &self.metrics,
+            "checkpoint",
+            wrapper_started,
+            resolver_elapsed,
+        );
         ResolverCheckpoint::new(token)
     }
 
     fn rollback_to(&mut self, store: &mut SemanticStore, checkpoint: ResolverCheckpoint) {
+        let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let metrics = self.metrics.borrow_mut();
         let Some((inner_checkpoint, operation_offset, member_offset)) = metrics
             .module_operation_checkpoints
@@ -943,9 +1210,22 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         else {
             return;
         };
+        let rolled_back_operations = metrics
+            .module_operation_observations
+            .len()
+            .saturating_sub(operation_offset);
+        let rolled_back_members = metrics
+            .module_member_observations
+            .len()
+            .saturating_sub(member_offset);
         drop(metrics);
+        let resolver_started = wrapper_started.map(|_| Instant::now());
         self.resolver_mut().rollback_to(store, inner_checkpoint);
+        let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
         let mut metrics = self.metrics.borrow_mut();
+        metrics.rollback_count += 1;
+        metrics.rollback_operation_observations += rolled_back_operations;
+        metrics.rollback_member_observations += rolled_back_members;
         for observation in metrics
             .module_operation_observations
             .iter_mut()
@@ -973,6 +1253,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             checkpoint.token(),
             (inner_checkpoint, operation_offset, member_offset),
         );
+        drop(metrics);
+        record_audit_wrapper_timing(
+            &self.metrics,
+            "rollback_to",
+            wrapper_started,
+            resolver_elapsed,
+        );
     }
 
     fn resolve_member(
@@ -980,6 +1267,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         request: &MemberRequest,
     ) -> Result<Option<SymbolId>, ResolutionError> {
+        let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let prefix = prefix_profile(store, request.prefix);
         let module_class = match prefix.target_kind {
             "ModuleClass" => prefix.symbol,
@@ -1129,8 +1417,9 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             .flatten();
         let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.resolver_mut().resolve_member(store, request);
-        if let Some(started) = resolver_started {
-            self.metrics.borrow_mut().member_lookup_inner_time += started.elapsed();
+        let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
+        if resolver_started.is_some() {
+            self.metrics.borrow_mut().member_lookup_inner_time += resolver_elapsed;
         }
         let load_profiles = self.resolver_mut().take_load_profiles();
         let module_profile = self.resolver_mut().take_module_resolution_profile();
@@ -1506,6 +1795,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 }
             }
         }
+        drop(metrics);
+        record_audit_wrapper_timing(
+            &self.metrics,
+            "member_lookup",
+            wrapper_started,
+            resolver_elapsed,
+        );
         result
     }
 
@@ -1514,10 +1810,12 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         store: &mut SemanticStore,
         path: &[&str],
     ) -> Result<Option<SymbolId>, ResolutionError> {
+        let wrapper_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.resolver_mut().resolve_package(store, path);
-        if let Some(started) = resolver_started {
-            self.metrics.borrow_mut().package_lookup_inner_time += started.elapsed();
+        let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
+        if resolver_started.is_some() {
+            self.metrics.borrow_mut().package_lookup_inner_time += resolver_elapsed;
         }
         let mut metrics = self.metrics.borrow_mut();
         metrics.resolver_package_requests += 1;
@@ -1624,6 +1922,13 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
             Ok(None) => metrics.package_unresolved += 1,
             Err(_) => metrics.package_errors += 1,
         }
+        drop(metrics);
+        record_audit_wrapper_timing(
+            &self.metrics,
+            "package_lookup",
+            wrapper_started,
+            resolver_elapsed,
+        );
         result
     }
 
@@ -6303,10 +6608,8 @@ fn pinned_scala39_local_definition_audit() {
     }
     let mut audit = Audit::default();
     let mut processed_files = 0;
-    for (index, file) in files.iter().enumerate() {
-        if index % 25 == 0 {
-            eprintln!("audited {index}/{} Scala files", files.len());
-        }
+    let mut completed_files = 0;
+    for file in &files {
         let relative = file
             .strip_prefix(&root)
             .unwrap_or(file)
@@ -6327,7 +6630,15 @@ fn pinned_scala39_local_definition_audit() {
                     source_read_started.map_or(Duration::ZERO, |started| started.elapsed());
                 audit.files_attempted += 1;
                 audit.file_read_failed_files += 1;
-                audit.file_read_failed_paths.insert(relative);
+                audit.file_read_failed_paths.insert(relative.clone());
+                completed_files += 1;
+                report_audit_file_progress(
+                    completed_files,
+                    expected_files,
+                    &relative,
+                    "read_error",
+                    selected_files.is_some(),
+                );
                 continue;
             }
         };
@@ -6345,6 +6656,14 @@ fn pinned_scala39_local_definition_audit() {
         ));
         audit_merge_time +=
             source_processing_and_merge_started.map_or(Duration::ZERO, |started| started.elapsed());
+        completed_files += 1;
+        report_audit_file_progress(
+            completed_files,
+            expected_files,
+            &relative,
+            "processed",
+            selected_files.is_some(),
+        );
     }
 
     if let Some(output_path) = std::env::var_os("DOTTY_AUDIT_TASTY_PARENT_PROVENANCE_OUTPUT") {
@@ -6517,19 +6836,47 @@ fn pinned_scala39_local_definition_audit() {
             profile_files.len(),
             "every requested profile path must match a Scala source file"
         );
+        let method_limit = std::env::var("DOTTY_AUDIT_PROFILE_METHOD_LIMIT")
+            .unwrap_or_else(|_| "unlimited".to_owned());
+        let timing_mode = if std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1") {
+            "timing_only"
+        } else {
+            "detailed"
+        };
+        let (resolver_package_requests, resolver_member_requests) = if timing_mode == "timing_only"
+        {
+            ("not_captured".to_owned(), "not_captured".to_owned())
+        } else {
+            let metrics = resolver_metrics.borrow();
+            (
+                metrics.resolver_package_requests.to_string(),
+                metrics.resolver_member_requests.to_string(),
+            )
+        };
+        let completed_status = if completed_files == expected_files {
+            "complete"
+        } else {
+            "partial"
+        };
         eprintln!(
-            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} methods_attempted={} methods_typed={} resolver_package_requests={} resolver_member_requests={} wall_ms={} classpath_setup_ms={} file_discovery_ms={} source_read_ms={} source_processing_and_merge_ms={}",
+            "AUDIT_PROFILE_SUMMARY files={processed_files} expected_files={expected_files} completed_files={completed_files} status={completed_status} timing_mode={timing_mode} method_limit_per_file={method_limit} local_methods_in_inventory={} profiled_root_method_attempts={} typed_local_defdefs={} resolver_package_requests={} resolver_member_requests={} wall_ms={} classpath_setup_ms={} file_discovery_ms={} source_read_ms={} source_processing_and_merge_ms={}",
             audit.local_method_attempts.len(),
+            resolver_metrics.borrow().profiled_root_method_attempts,
             audit.typed_local_defdefs,
-            resolver_metrics.borrow().resolver_package_requests,
-            resolver_metrics.borrow().resolver_member_requests,
+            resolver_package_requests,
+            resolver_member_requests,
             audit_started.elapsed().as_millis(),
             classpath_setup_time.as_millis(),
             file_discovery_time.as_millis(),
             source_read_time.as_millis(),
             audit_merge_time.as_millis()
         );
-        print_resolver_metrics(&resolver_metrics.borrow());
+        if timing_mode == "timing_only" {
+            eprintln!("AUDIT_RESOLVER_METRICS status=not_captured mode=timing_only");
+        } else {
+            print_resolver_metrics(&resolver_metrics.borrow());
+            print_classpath_resource_metrics(&classpath);
+        }
         return;
     }
 
@@ -10380,6 +10727,8 @@ fn probe_supported_match_cases_in_index(
     classpath: SharedClassPath,
     profile: &mut MatchProfile,
 ) -> BTreeMap<String, usize> {
+    let match_started = Instant::now();
+    let match_resource_before = classpath.cache_metrics();
     let MatchProbeContext {
         arena,
         source,
@@ -10459,24 +10808,39 @@ fn probe_supported_match_cases_in_index(
 
     let packages = Packages::new();
     let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
+    let timing_only_profile =
+        profile_timing && std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1");
     let probe_metrics = Rc::new(RefCell::new(ResolverMetrics {
-        timing_enabled: profile_timing,
+        timing_enabled: profile_timing && !timing_only_profile,
         ..ResolverMetrics::default()
     }));
     let mut typer = SourceTyper::new(arena, source, index, store, definitions, &packages);
-    let resolver = ClasspathSymbolResolver::new(classpath.clone(), definitions, session)
-        .with_load_profile_collection();
+    let timing_only = std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1");
+    let mut resolver = ClasspathSymbolResolver::new(classpath.clone(), definitions, session);
+    if !timing_only {
+        resolver = resolver.with_load_profile_collection();
+        if !profile_timing
+            || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1")
+        {
+            resolver = resolver.with_module_resolution_profile_collection();
+        }
+    }
     // Match probes only contribute typed-case outcomes. The detailed audit
     // resolver records per-request target paths and classpath evidence, but
     // those observations are discarded here; wrapping every resolver call
     // made this verification pass substantially slower. Retain that wrapper
     // only for explicit diagnostic profiles.
-    typer = if profile_timing {
+    typer = if profile_timing && !timing_only {
         typer.with_resolver(Box::new(AuditResolver {
             inner: Some(resolver),
             metrics: Rc::clone(&probe_metrics),
-            class_path_probe: Some(classpath),
+            class_path_probe: Some(classpath.clone()),
             session_out: None,
+        }))
+    } else if timing_only {
+        typer.with_resolver(Box::new(TimingOnlyResolver {
+            inner: Some(resolver),
+            session_out: Rc::new(RefCell::new(None)),
         }))
     } else {
         typer.with_resolver(Box::new(resolver))
@@ -10503,6 +10867,7 @@ fn probe_supported_match_cases_in_index(
     let profile_probe_limit = std::env::var("DOTTY_AUDIT_PROFILE_MATCH_LIMIT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok());
+    let available_profile_probes = probes.len();
     let probes = probes
         .into_iter()
         .take(if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
@@ -10511,6 +10876,26 @@ fn probe_supported_match_cases_in_index(
             usize::MAX
         })
         .collect::<Vec<_>>();
+    let probe_count = probes.len();
+    if profile_timing {
+        eprintln!(
+            "AUDIT_MATCH_PROBES available={} executed={}",
+            available_profile_probes,
+            probes.len()
+        );
+        for (method, match_tree, family, _, _) in &probes {
+            let TreeKind::Match(matched) = &arena.get(*match_tree).kind else {
+                continue;
+            };
+            if let Some(case_tree) = matched.cases.first() {
+                eprintln!(
+                    "AUDIT_MATCH_PROBE file={path} method_symbol={} case_tree={} family={family}",
+                    method.index(),
+                    case_tree.index()
+                );
+            }
+        }
+    }
     let mut method_contexts = HashMap::<SymbolId, dotty_typer::ExpressionContext>::new();
     let mut selector_outcomes = HashMap::new();
     let mut selector_keys = HashSet::new();
@@ -10554,7 +10939,7 @@ fn probe_supported_match_cases_in_index(
             };
             selector_outcomes.insert(key, (error_name, boundary));
         }
-        if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+        if profile_timing && !timing_only_profile {
             let metrics = probe_metrics.borrow();
             eprintln!(
                 "AUDIT_MATCH_SELECTOR file={path} elapsed_ms={} module_identity_calls={}",
@@ -10565,6 +10950,7 @@ fn probe_supported_match_cases_in_index(
             );
         }
     }
+    let selector_count = selector_keys.len();
     for (method, match_tree, family, guarded, protocol) in probes {
         let probe_started = Instant::now();
         let resolver_calls_before = probe_metrics.borrow().module_identity_resolver_calls;
@@ -10574,6 +10960,13 @@ fn probe_supported_match_cases_in_index(
         let selector_key = (method, matched.selector);
         if let Some((error_name, boundary)) = selector_outcomes.get(&selector_key) {
             record_typed_match_case_failure(profile, path, &family, error_name, *boundary);
+            if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+                eprintln!(
+                    "AUDIT_MATCH_RESULT file={path} method_symbol={} case_tree={} family={family} result=selector_error:{error_name}",
+                    method.index(),
+                    matched.cases.first().map_or(0, |case| case.index())
+                );
+            }
             continue;
         }
         // A method context owns a typer-local scope frame. Reusing the context
@@ -10585,10 +10978,10 @@ fn probe_supported_match_cases_in_index(
                 .expression_context_for(method)
                 .and_then(|context| typer.type_expression(match_tree, context)),
         };
-        if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+        if profile_timing && !timing_only_profile {
             let metrics = probe_metrics.borrow();
             eprintln!(
-                "AUDIT_MATCH_PROBE file={path} family={family} elapsed_ms={} module_identity_calls={}",
+                "AUDIT_MATCH_PROBE_TIMING file={path} family={family} elapsed_ms={} module_identity_calls={}",
                 probe_started.elapsed().as_millis(),
                 metrics
                     .module_identity_resolver_calls
@@ -10597,6 +10990,13 @@ fn probe_supported_match_cases_in_index(
         }
         match outcome {
             Ok(_) => {
+                if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+                    eprintln!(
+                        "AUDIT_MATCH_RESULT file={path} method_symbol={} case_tree={} family={family} result=success",
+                        method.index(),
+                        matched.cases.first().map_or(0, |case| case.index())
+                    );
+                }
                 let bucket = family_success_bucket(&family).to_owned();
                 *successes.entry(bucket.clone()).or_default() += 1;
                 profile
@@ -10638,8 +11038,33 @@ fn probe_supported_match_cases_in_index(
                     }
                     _ => None,
                 };
+                if std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some() {
+                    eprintln!(
+                        "AUDIT_MATCH_RESULT file={path} method_symbol={} case_tree={} family={family} result=error:{error_name}",
+                        method.index(),
+                        matched.cases.first().map_or(0, |case| case.index())
+                    );
+                }
                 record_typed_match_case_failure(profile, path, &family, &error_name, boundary);
             }
+        }
+    }
+    if profile_timing {
+        eprintln!(
+            "AUDIT_MATCH_PHASE file={path} elapsed_ms={} selectors={} probes={}",
+            match_started.elapsed().as_millis(),
+            selector_count,
+            probe_count
+        );
+        if timing_only_profile {
+            eprintln!("AUDIT_MATCH_RESOLVER file={path} status=not_captured");
+        } else {
+            print_match_resolver_metrics(
+                path,
+                &probe_metrics.borrow(),
+                match_resource_before,
+                classpath.cache_metrics(),
+            );
         }
     }
     successes
@@ -10841,6 +11266,8 @@ fn audit_source_inner_filtered(
     focused_method_tree_filter: Option<&BTreeSet<u32>>,
 ) -> Audit {
     let profile_timing = std::env::var_os("DOTTY_AUDIT_PROFILE_FILES").is_some();
+    let timing_only_profile =
+        profile_timing && std::env::var("DOTTY_AUDIT_TIMING_ONLY").as_deref() == Ok("1");
     let file_started = Instant::now();
     let mut parse_time = Duration::ZERO;
     let mut inventory_time = Duration::ZERO;
@@ -10860,7 +11287,7 @@ fn audit_source_inner_filtered(
             if profile_timing {
                 parse_time = stage_started.elapsed();
                 eprintln!(
-                    "AUDIT_FILE_TIMING file={path} outcome=scanner_error parse_ms={} inventory_ms=0 namer_ms=0 typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                    "AUDIT_FILE_TIMING file={path} outcome=scanner_error parse_ms={} inventory_ms=0 namer_ms=0 typer_setup_ms=0 typing_ms=0 postprocess_ms=0 match_ms=0 total_ms={}",
                     parse_time.as_millis(),
                     file_started.elapsed().as_millis()
                 );
@@ -10965,7 +11392,7 @@ fn audit_source_inner_filtered(
             }
             if profile_timing {
                 eprintln!(
-                    "AUDIT_FILE_TIMING file={path} outcome=namer_error parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                    "AUDIT_FILE_TIMING file={path} outcome=namer_error parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 match_ms=0 total_ms={}",
                     parse_time.as_millis(),
                     inventory_time.as_millis(),
                     namer_time.as_millis(),
@@ -10987,7 +11414,7 @@ fn audit_source_inner_filtered(
     if !import_prefix_only && audit.local_defdefs == 0 && audit.patdef_profile.total == 0 {
         if profile_timing {
             eprintln!(
-                "AUDIT_FILE_TIMING file={path} outcome=no_local_definitions parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                "AUDIT_FILE_TIMING file={path} outcome=no_local_definitions parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 match_ms=0 total_ms={}",
                 parse_time.as_millis(),
                 inventory_time.as_millis(),
                 namer_time.as_millis(),
@@ -11158,19 +11585,29 @@ fn audit_source_inner_filtered(
             classpath.clone(),
             definitions,
             LoadingSession::with_packages(packages),
-        )
-        .with_load_profile_collection();
-        if !profile_timing
-            || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1")
+        );
+        if !timing_only_profile {
+            resolver = resolver.with_load_profile_collection();
+        }
+        if !timing_only_profile
+            && (!profile_timing
+                || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1"))
         {
             resolver = resolver.with_module_resolution_profile_collection();
         }
-        typer = typer.with_resolver(Box::new(AuditResolver {
-            inner: Some(resolver),
-            metrics,
-            class_path_probe: Some(classpath),
-            session_out: Some(Rc::clone(&resolver_session_out)),
-        }));
+        if timing_only_profile {
+            typer = typer.with_resolver(Box::new(TimingOnlyResolver {
+                inner: Some(resolver),
+                session_out: Rc::clone(&resolver_session_out),
+            }));
+        } else {
+            typer = typer.with_resolver(Box::new(AuditResolver {
+                inner: Some(resolver),
+                metrics,
+                class_path_probe: Some(classpath),
+                session_out: Some(Rc::clone(&resolver_session_out)),
+            }));
+        }
     }
     if profile_timing {
         typer_setup_time = typer_setup_started.elapsed();
@@ -11193,9 +11630,25 @@ fn audit_source_inner_filtered(
     }));
     let typing_started = Instant::now();
     for (method, method_tree, rhs, range) in root_methods {
+        if profile_timing && let Some(metrics) = &request_metrics {
+            metrics.borrow_mut().profiled_root_method_attempts += 1;
+        }
         let method_started = Instant::now();
         let method_label = profile_timing.then(|| audit_symbol_path(typer.store(), method));
-        let resolver_before = profile_timing.then(|| {
+        let method_line = profile_timing.then(|| {
+            parsed
+                .ast
+                .try_get(method_tree)
+                .and_then(|node| node.position)
+                .and_then(|position| {
+                    usize::try_from(position.span().range().start())
+                        .ok()
+                        .and_then(|start| text.get(..start))
+                        .map(|prefix| prefix.lines().count() + 1)
+                })
+                .unwrap_or(0)
+        });
+        let resolver_before = (profile_timing && !timing_only_profile).then(|| {
             let metrics = request_metrics
                 .as_ref()
                 .expect("classpath profiling requires resolver metrics")
@@ -11219,11 +11672,12 @@ fn audit_source_inner_filtered(
         });
         if let Some(method_label) = &method_label {
             eprintln!(
-                "AUDIT_METHOD_START file={path} tree={} method={method_label}",
-                method_tree.index()
+                "AUDIT_METHOD_START file={path} tree={} line={} method={method_label}",
+                method_tree.index(),
+                method_line.unwrap_or(0)
             );
         }
-        if let Some(metrics) = &request_metrics {
+        if !timing_only_profile && let Some(metrics) = &request_metrics {
             metrics.borrow_mut().current_method = format!(
                 "{}#tree={}::{}",
                 path,
@@ -11235,76 +11689,92 @@ fn audit_source_inner_filtered(
             .expression_context_for(method)
             .and_then(|context| typer.type_expression(rhs, context));
         if profile_timing {
+            let result_label = match &outcome {
+                Ok(_) => "success".to_owned(),
+                Err(error) => format!("error:{}", typer_error_name(error)),
+            };
             eprintln!(
-                "AUDIT_METHOD_TIMING file={path} tree={} method={} elapsed_ms={}",
+                "AUDIT_METHOD_RESULT file={path} tree={} result={result_label}",
+                method_tree.index()
+            );
+            eprintln!(
+                "AUDIT_METHOD_TIMING file={path} tree={} line={} method={} elapsed_ms={}",
                 method_tree.index(),
+                method_line.unwrap_or(0),
                 method_label.as_deref().unwrap_or("<unknown>"),
                 method_started.elapsed().as_millis()
             );
-            let metrics = request_metrics
-                .as_ref()
-                .expect("classpath profiling requires resolver metrics")
-                .borrow();
-            let before = resolver_before.expect("profiled resolver counters must be captured");
-            eprintln!(
-                "AUDIT_METHOD_RESOLVER file={path} tree={} module_identity_calls={} module_identity_inner_ms={} module_identity_inner_us={} module_completion_calls={} module_completion_inner_ms={} module_completion_inner_us={} class_completion_calls={} class_completion_inner_ms={} class_completion_inner_us={} classfile_completion_calls={} classfile_completion_inner_us={} tasty_completion_calls={} tasty_completion_inner_us={} member_calls={} member_inner_ms={} member_inner_us={} package_calls={} package_inner_ms={} package_inner_us={}",
-                method_tree.index(),
-                metrics.module_identity_resolver_calls - before.0,
-                metrics
-                    .module_identity_inner_time
-                    .saturating_sub(before.4)
-                    .as_millis(),
-                metrics
-                    .module_identity_inner_time
-                    .saturating_sub(before.4)
-                    .as_micros(),
-                metrics.module_completion_resolver_calls - before.1,
-                metrics
-                    .module_completion_inner_time
-                    .saturating_sub(before.5)
-                    .as_millis(),
-                metrics
-                    .module_completion_inner_time
-                    .saturating_sub(before.5)
-                    .as_micros(),
-                metrics.class_completion_calls - before.9,
-                metrics
-                    .class_completion_inner_time
-                    .saturating_sub(before.6)
-                    .as_millis(),
-                metrics
-                    .class_completion_inner_time
-                    .saturating_sub(before.6)
-                    .as_micros(),
-                metrics.classfile_completion_calls - before.10,
-                metrics
-                    .classfile_completion_inner_time
-                    .saturating_sub(before.12)
-                    .as_micros(),
-                metrics.tasty_completion_calls - before.11,
-                metrics
-                    .tasty_completion_inner_time
-                    .saturating_sub(before.13)
-                    .as_micros(),
-                metrics.resolver_member_requests - before.2,
-                metrics
-                    .member_lookup_inner_time
-                    .saturating_sub(before.7)
-                    .as_millis(),
-                metrics
-                    .member_lookup_inner_time
-                    .saturating_sub(before.7)
-                    .as_micros(),
-                metrics.resolver_package_requests - before.3,
-                metrics
-                    .package_lookup_inner_time
-                    .saturating_sub(before.8)
-                    .as_millis(),
-                metrics
-                    .package_lookup_inner_time
-                    .saturating_sub(before.8)
-                    .as_micros()
-            );
+            if timing_only_profile {
+                eprintln!(
+                    "AUDIT_METHOD_RESOLVER_SKIPPED file={path} tree={} reason=timing_only",
+                    method_tree.index()
+                );
+            } else {
+                let metrics = request_metrics
+                    .as_ref()
+                    .expect("classpath profiling requires resolver metrics")
+                    .borrow();
+                let before = resolver_before.expect("profiled resolver counters must be captured");
+                eprintln!(
+                    "AUDIT_METHOD_RESOLVER file={path} tree={} module_identity_calls={} module_identity_inner_ms={} module_identity_inner_us={} module_completion_calls={} module_completion_inner_ms={} module_completion_inner_us={} class_completion_calls={} class_completion_inner_ms={} class_completion_inner_us={} classfile_completion_calls={} classfile_completion_inner_us={} tasty_completion_calls={} tasty_completion_inner_us={} member_calls={} member_inner_ms={} member_inner_us={} package_calls={} package_inner_ms={} package_inner_us={}",
+                    method_tree.index(),
+                    metrics.module_identity_resolver_calls - before.0,
+                    metrics
+                        .module_identity_inner_time
+                        .saturating_sub(before.4)
+                        .as_millis(),
+                    metrics
+                        .module_identity_inner_time
+                        .saturating_sub(before.4)
+                        .as_micros(),
+                    metrics.module_completion_resolver_calls - before.1,
+                    metrics
+                        .module_completion_inner_time
+                        .saturating_sub(before.5)
+                        .as_millis(),
+                    metrics
+                        .module_completion_inner_time
+                        .saturating_sub(before.5)
+                        .as_micros(),
+                    metrics.class_completion_calls - before.9,
+                    metrics
+                        .class_completion_inner_time
+                        .saturating_sub(before.6)
+                        .as_millis(),
+                    metrics
+                        .class_completion_inner_time
+                        .saturating_sub(before.6)
+                        .as_micros(),
+                    metrics.classfile_completion_calls - before.10,
+                    metrics
+                        .classfile_completion_inner_time
+                        .saturating_sub(before.12)
+                        .as_micros(),
+                    metrics.tasty_completion_calls - before.11,
+                    metrics
+                        .tasty_completion_inner_time
+                        .saturating_sub(before.13)
+                        .as_micros(),
+                    metrics.resolver_member_requests - before.2,
+                    metrics
+                        .member_lookup_inner_time
+                        .saturating_sub(before.7)
+                        .as_millis(),
+                    metrics
+                        .member_lookup_inner_time
+                        .saturating_sub(before.7)
+                        .as_micros(),
+                    metrics.resolver_package_requests - before.3,
+                    metrics
+                        .package_lookup_inner_time
+                        .saturating_sub(before.8)
+                        .as_millis(),
+                    metrics
+                        .package_lookup_inner_time
+                        .saturating_sub(before.8)
+                        .as_micros()
+                );
+            }
         }
         if let Some(metrics) = &request_metrics {
             let mut metrics = metrics.borrow_mut();
@@ -11914,7 +12384,10 @@ fn audit_source_inner_filtered(
         &mut audit.source_function_outcomes,
     );
     drop(typer);
+    let postprocess_time = postprocess_started.elapsed();
+    let mut match_time = Duration::ZERO;
     if let Some(classpath) = probe_classpath {
+        let match_started = Instant::now();
         let session = resolver_session_out
             .borrow_mut()
             .take()
@@ -11932,22 +12405,57 @@ fn audit_source_inner_filtered(
             classpath,
             &mut audit.match_profile,
         );
+        match_time = match_started.elapsed();
         audit.match_profile.typed_case_successes = successes;
     }
     if profile_timing {
-        let postprocess_time = postprocess_started.elapsed();
         eprintln!(
-            "AUDIT_FILE_TIMING file={path} outcome=complete parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} total_ms={}",
+            "AUDIT_FILE_TIMING file={path} outcome=complete parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} match_ms={} total_ms={}",
             parse_time.as_millis(),
             inventory_time.as_millis(),
             namer_time.as_millis(),
             typer_setup_time.as_millis(),
             typing_time.as_millis(),
             postprocess_time.as_millis(),
+            match_time.as_millis(),
             file_started.elapsed().as_millis()
         );
     }
     audit
+}
+
+fn report_audit_file_progress(
+    completed_files: usize,
+    expected_files: usize,
+    path: &str,
+    outcome: &str,
+    report_every_file: bool,
+) {
+    if should_report_audit_file_progress(completed_files, expected_files, report_every_file) {
+        eprintln!(
+            "AUDIT_PROGRESS completed_files={completed_files} total_files={expected_files} file={path} outcome={outcome}"
+        );
+    }
+}
+
+fn should_report_audit_file_progress(
+    completed_files: usize,
+    expected_files: usize,
+    report_every_file: bool,
+) -> bool {
+    completed_files > 0
+        && (report_every_file
+            || completed_files.is_multiple_of(25)
+            || completed_files == expected_files)
+}
+
+#[test]
+fn audit_progress_uses_completed_selection_counts() {
+    assert!(!should_report_audit_file_progress(0, 1_236, false));
+    assert!(should_report_audit_file_progress(25, 1_236, false));
+    assert!(should_report_audit_file_progress(1, 4, true));
+    assert!(should_report_audit_file_progress(4, 4, false));
+    assert!(should_report_audit_file_progress(1_236, 1_236, false));
 }
 
 fn print_match_readiness(readiness: &MatchReadiness) {
@@ -12769,6 +13277,21 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         metrics.tasty_completion_calls,
         metrics.tasty_completion_inner_time.as_micros()
     );
+    println!(
+        "AUDIT_ROLLBACK count={} operation_observations={} member_observations={}",
+        metrics.rollback_count,
+        metrics.rollback_operation_observations,
+        metrics.rollback_member_observations
+    );
+    for (operation, timing) in &metrics.audit_wrapper_timings {
+        let wall_us = timing.wall_time.as_micros();
+        let delegated_us = timing.delegated_time.as_micros();
+        println!(
+            "AUDIT_RESOLVER_WRAPPER operation={operation} calls={} wall_us={wall_us} delegated_us={delegated_us} exclusive_us={}",
+            timing.calls,
+            wall_us.saturating_sub(delegated_us)
+        );
+    }
     let module_profile = &metrics.module_resolution;
     let completed_module_classes = completed_module_class_targets(metrics);
     println!("module_resolution_profile:");
@@ -13090,6 +13613,81 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!("  incomplete_prefix_classpath_binary_recovery:");
     for (key, count) in &metrics.incomplete_prefix_binary_resources {
         println!("    {key}={count}");
+    }
+}
+
+fn print_classpath_resource_metrics(classpath: &SharedClassPath) {
+    let metrics = classpath.cache_metrics();
+    println!(
+        "AUDIT_CLASSPATH_RESOURCES requests={} inner_calls={} positive={} negative={} errors={} negative_cache_hits={} returned_bytes={} inner_wall_us={} bytes_semantics=logical_resource_bytes_not_physical_io",
+        metrics.find_class_calls,
+        metrics.resource_inner_calls,
+        metrics.resource_positive,
+        metrics.resource_negative,
+        metrics.resource_errors,
+        metrics.missing_class_cache_hits,
+        metrics.resource_bytes_returned,
+        metrics.resource_inner_wall_ns / 1_000
+    );
+}
+
+fn print_match_resolver_metrics(
+    path: &str,
+    metrics: &ResolverMetrics,
+    before: ClassPathCacheMetrics,
+    after: ClassPathCacheMetrics,
+) {
+    println!(
+        "AUDIT_MATCH_RESOLVER file={path} status=captured package_calls={} member_calls={} module_identity_calls={} module_completion_calls={} class_completion_calls={} classfile_completion_calls={} tasty_completion_calls={} package_inner_us={} member_inner_us={} module_identity_inner_us={} module_completion_inner_us={} class_completion_inner_us={} classfile_completion_inner_us={} tasty_completion_inner_us={} rollback_count={} rollback_operation_observations={} rollback_member_observations={} classpath_requests={} classpath_inner_calls={} classpath_positive={} classpath_negative={} classpath_errors={} classpath_negative_cache_hits={} classpath_returned_bytes={} classpath_inner_wall_us={}",
+        metrics.resolver_package_requests,
+        metrics.resolver_member_requests,
+        metrics.module_identity_resolver_calls,
+        metrics.module_completion_resolver_calls,
+        metrics.class_completion_calls,
+        metrics.classfile_completion_calls,
+        metrics.tasty_completion_calls,
+        metrics.package_lookup_inner_time.as_micros(),
+        metrics.member_lookup_inner_time.as_micros(),
+        metrics.module_identity_inner_time.as_micros(),
+        metrics.module_completion_inner_time.as_micros(),
+        metrics.class_completion_inner_time.as_micros(),
+        metrics.classfile_completion_inner_time.as_micros(),
+        metrics.tasty_completion_inner_time.as_micros(),
+        metrics.rollback_count,
+        metrics.rollback_operation_observations,
+        metrics.rollback_member_observations,
+        after
+            .find_class_calls
+            .saturating_sub(before.find_class_calls),
+        after
+            .resource_inner_calls
+            .saturating_sub(before.resource_inner_calls),
+        after
+            .resource_positive
+            .saturating_sub(before.resource_positive),
+        after
+            .resource_negative
+            .saturating_sub(before.resource_negative),
+        after.resource_errors.saturating_sub(before.resource_errors),
+        after
+            .missing_class_cache_hits
+            .saturating_sub(before.missing_class_cache_hits),
+        after
+            .resource_bytes_returned
+            .saturating_sub(before.resource_bytes_returned),
+        after
+            .resource_inner_wall_ns
+            .saturating_sub(before.resource_inner_wall_ns)
+            / 1_000,
+    );
+    for (operation, timing) in &metrics.audit_wrapper_timings {
+        let wall_us = timing.wall_time.as_micros();
+        let delegated_us = timing.delegated_time.as_micros();
+        println!(
+            "AUDIT_MATCH_RESOLVER_WRAPPER file={path} operation={operation} calls={} wall_us={wall_us} delegated_us={delegated_us} exclusive_us={}",
+            timing.calls,
+            wall_us.saturating_sub(delegated_us)
+        );
     }
 }
 

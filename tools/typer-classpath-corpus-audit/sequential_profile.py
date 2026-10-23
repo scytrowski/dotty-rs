@@ -7,6 +7,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import tempfile
 import statistics
 import subprocess
 import sys
@@ -21,6 +23,9 @@ DEFAULT_MANIFEST = REPO_ROOT / "docs/typer-sequential-profile-manifest-3.9.0.tsv
 AUDIT_TEST = [
     "cargo", "test", "-p", "dotty-typer", "--test", "local_definition_audit",
     "--locked", "pinned_scala39_local_definition_audit", "--", "--ignored", "--nocapture",
+]
+PREBUILD_TEST = [
+    "cargo", "test", "-p", "dotty-typer", "--test", "local_definition_audit", "--locked", "--no-run",
 ]
 LOAD_ROOT_RE = re.compile(
     r"^    root=(.*?)::file=(.*?)::method=(.*?)::request=(.*?)::depth=(\d+)"
@@ -129,10 +134,20 @@ def evict_input_pages(paths: list[Path]) -> None:
             os.close(descriptor)
 
 
+def warm_input_pages(paths: list[Path]) -> int:
+    started = time.monotonic_ns()
+    for path in paths:
+        with path.open("rb") as source:
+            while source.read(1024 * 1024):
+                pass
+    return (time.monotonic_ns() - started) // 1_000_000
+
+
 def parse_run(log: str) -> dict:
     result: dict = {
-        "files": {}, "methods": {}, "resolver": {}, "summary": {},
-        "loads": {}, "resolver_counts": {}, "load_roots": [],
+        "files": {}, "methods": {}, "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {}, "resolver": {}, "match_phases": [], "match_resolver": [], "match_resolver_wrappers": [], "summary": {},
+        "loads": {}, "resolver_counts": {}, "load_roots": [], "wrappers": {}, "rollback": {},
+        "classpath_resources": {},
     }
     for line in log.splitlines():
         if line.startswith("AUDIT_PROFILE_SUMMARY "):
@@ -150,7 +165,36 @@ def parse_run(log: str) -> dict:
         elif line.startswith("AUDIT_METHOD_TIMING "):
             values = kvs(line)
             key = (values["file"], values["tree"])
-            result["methods"][key] = {"method": values["method"], "elapsed_ms": int(values["elapsed_ms"])}
+            result["methods"][key] = {"method": values["method"], "line": int(values["line"]), "elapsed_ms": int(values["elapsed_ms"])}
+        elif line.startswith("AUDIT_METHOD_RESULT "):
+            values = kvs(line)
+            result["outcomes"][(values["file"], values["tree"])] = values["result"]
+        elif line.startswith("AUDIT_MATCH_PROBES "):
+            result["match_probes"].append(kvs(line))
+        elif line.startswith("AUDIT_MATCH_PROBE "):
+            values = kvs(line)
+            result["match_probe_ids"].append((values["file"], values["method_symbol"], values["case_tree"], values["family"]))
+        elif line.startswith("AUDIT_MATCH_RESULT "):
+            values = kvs(line)
+            key = (values["file"], values["method_symbol"], values["case_tree"], values["family"])
+            result["match_outcomes"][key] = values["result"]
+        elif line.startswith("AUDIT_MATCH_RESOLVER "):
+            values = kvs(line)
+            result["match_resolver"].append(values)
+        elif line.startswith("AUDIT_MATCH_PHASE "):
+            values = kvs(line)
+            result["match_phases"].append(values)
+        elif line.startswith("AUDIT_MATCH_RESOLVER_WRAPPER "):
+            values = kvs(line)
+            result["match_resolver_wrappers"].append(values)
+        elif line.startswith("AUDIT_RESOLVER_WRAPPER "):
+            values = kvs(line)
+            operation = values.pop("operation")
+            result["wrappers"][operation] = {key: int(value) for key, value in values.items()}
+        elif line.startswith("AUDIT_ROLLBACK "):
+            result["rollback"] = {key: int(value) for key, value in kvs(line).items()}
+        elif line.startswith("AUDIT_CLASSPATH_RESOURCES "):
+            result["classpath_resources"] = kvs(line)
         elif line.startswith("AUDIT_METHOD_RESOLVER "):
             values = kvs(line)
             key = (values["file"], values["tree"])
@@ -193,6 +237,106 @@ def parse_run(log: str) -> dict:
     return result
 
 
+def process_tree_rss_bytes(root_pid: int) -> int:
+    """Return sampled aggregate RSS for root_pid and current descendants."""
+    process_table: dict[int, tuple[int, int]] = {}
+    try:
+        entries = Path("/proc").iterdir()
+    except OSError:
+        return 0
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="ascii")
+            fields = stat[stat.rfind(")") + 2 :].split()
+            pid = int(entry.name)
+            parent = int(fields[1])
+            resident_pages = int(fields[21])
+            process_table[pid] = (parent, max(0, resident_pages) * os.sysconf("SC_PAGE_SIZE"))
+        except (OSError, ValueError, IndexError):
+            continue
+    tree = {root_pid}
+    changed = True
+    while changed:
+        changed = False
+        for pid, (parent, _rss) in process_table.items():
+            if parent in tree and pid not in tree:
+                tree.add(pid)
+                changed = True
+    return sum(process_table[pid][1] for pid in tree if pid in process_table)
+
+
+def run_measured(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str, dict[str, int | float | str]]:
+    """Run one serial audit; sample aggregate descendant RSS and collect child CPU."""
+    before = os.times()
+    started = time.monotonic_ns()
+    sampled_peak_rss = 0
+    sample_count = 0
+    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as capture:
+        process = subprocess.Popen(command, cwd=cwd, env=env, text=True, stdout=capture,
+                                   stderr=subprocess.STDOUT)
+        while process.poll() is None:
+            sampled_peak_rss = max(sampled_peak_rss, process_tree_rss_bytes(process.pid))
+            sample_count += 1
+            time.sleep(0.1)
+        return_code = process.wait()
+        wall_ms = (time.monotonic_ns() - started) // 1_000_000
+        capture_read_started = time.monotonic_ns()
+        capture.seek(0)
+        output = capture.read()
+        capture_read_ms = (time.monotonic_ns() - capture_read_started) // 1_000_000
+    after = os.times()
+    return return_code, output, {
+        "cargo_wall_ms": int(wall_ms),
+        "child_cpu_user_s": max(0.0, after.children_user - before.children_user),
+        "child_cpu_system_s": max(0.0, after.children_system - before.children_system),
+        "sampled_peak_tree_rss_bytes": sampled_peak_rss,
+        "rss_sample_count": sample_count,
+        "rss_sample_interval_ms": 100,
+        "captured_log_bytes": len(output.encode("utf-8")),
+        "capture_read_ms": int(capture_read_ms),
+    }
+
+
+def prebuild_test(cwd: Path, env: dict[str, str]) -> tuple[int, str]:
+    """Build the exact audit integration-test binary outside measured samples."""
+    started = time.monotonic_ns()
+    completed = subprocess.run(PREBUILD_TEST, cwd=cwd, env=env, text=True,
+                               capture_output=True, check=False)
+    elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
+    output = completed.stdout + completed.stderr
+    if completed.returncode:
+        fail(f"audit test binary prebuild failed with exit code {completed.returncode}:\n{output}")
+    return int(elapsed_ms), output
+
+
+def read_saved_runs(directory: Path) -> list[dict]:
+    timing_path = directory / "run-timings.tsv"
+    if not timing_path.is_file():
+        fail(f"comparison profile is missing {timing_path}")
+    import csv
+    results = []
+    with timing_path.open(encoding="utf-8", newline="") as stream:
+        for row in csv.DictReader(stream, delimiter="\t"):
+            path = directory / f"run-{row['run']}.log"
+            if not path.is_file():
+                fail(f"comparison profile is missing {path}")
+            parsed = parse_run(path.read_text(encoding="utf-8"))
+            parsed["cargo_wall_ms"] = int(row["cargo_wall_ms"])
+            parsed["process_metrics"] = {
+                "child_cpu_user_s": float(row.get("child_cpu_user_s", "nan")),
+                "child_cpu_system_s": float(row.get("child_cpu_system_s", "nan")),
+                "sampled_peak_tree_rss_bytes": int(row.get("sampled_peak_tree_rss_bytes", 0)),
+                "rss_sample_count": int(row.get("rss_sample_count", 0)),
+                "rss_sample_interval_ms": int(row.get("rss_sample_interval_ms", 100)),
+            }
+            results.append(parsed)
+    if not results:
+        fail(f"comparison profile contains no runs: {directory}")
+    return results
+
+
 def percentile(values: list[float], p: float) -> float:
     if not values:
         return 0.0
@@ -204,14 +348,19 @@ def percentile(values: list[float], p: float) -> float:
 def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_states: list[str],
                  input_cache: list[dict],
                  file_paths: list[str], commit: str,
-                 scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path) -> None:
+                 scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path,
+                 prebuild_wall_ms: int) -> None:
+    timing_only = runs[0]["summary"].get("timing_mode") == "timing_only"
     output_started_ns = time.monotonic_ns()
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run-timings.tsv").write_text(
-        "run\tcargo_target_cache_state\tinput_cache_mode\tinput_cache_before_resident_bytes\tinput_cache_after_evict_resident_bytes\tcargo_wall_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
+        "run\tcargo_target_cache_state\tinput_cache_mode\tinput_cache_before_resident_bytes\tinput_cache_after_setup_resident_bytes\tinput_warmup_ms\tcargo_wall_ms\tchild_cpu_user_s\tchild_cpu_system_s\tsampled_peak_tree_rss_bytes\trss_sample_count\trss_sample_interval_ms\tcaptured_log_bytes\tcapture_read_ms\tsaved_log_write_ms\taudit_wall_ms\trunner_overhead_ms\tclasspath_setup_ms\tfile_discovery_ms\tsource_read_ms\tsource_processing_and_merge_ms\n"
         + "".join(
-            f"{i}\t{cache_state}\t{input_state['mode']}\t{input_state['before_bytes']}\t{input_state['after_evict_bytes']}\t"
-            f"{wall}\t{int(r['summary']['wall_ms'])}\t{wall-int(r['summary']['wall_ms'])}\t"
+            f"{i}\t{cache_state}\t{input_state['mode']}\t{input_state['before_bytes']}\t{input_state.get('after_setup_bytes', 'unknown')}\t{input_state.get('warmup_ms', 'not_warmed')}\t"
+            f"{wall}\t{r.get('process_metrics', {}).get('child_cpu_user_s', 'unavailable')}\t{r.get('process_metrics', {}).get('child_cpu_system_s', 'unavailable')}\t"
+            f"{r.get('process_metrics', {}).get('sampled_peak_tree_rss_bytes', 'unavailable')}\t{r.get('process_metrics', {}).get('rss_sample_count', 'unavailable')}\t{r.get('process_metrics', {}).get('rss_sample_interval_ms', 'unavailable')}\t"
+            f"{r.get('process_metrics', {}).get('captured_log_bytes', 'unavailable')}\t{r.get('process_metrics', {}).get('capture_read_ms', 'unavailable')}\t{r.get('process_metrics', {}).get('saved_log_write_ms', 'unavailable')}\t"
+            f"{int(r['summary']['wall_ms'])}\t{wall-int(r['summary']['wall_ms'])}\t"
             f"{r['summary'].get('classpath_setup_ms', '0')}\t{r['summary'].get('file_discovery_ms', '0')}\t"
             f"{r['summary'].get('source_read_ms', '0')}\t{r['summary'].get('source_processing_and_merge_ms', r['summary'].get('source_audit_merge_ms', '0'))}\n"
             for i, (r, wall, cache_state, input_state) in enumerate(zip(runs, run_walls, cache_states, input_cache), 1)
@@ -220,9 +369,14 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     phase_totals: dict[str, int] = {}
     file_samples: dict[str, list[int]] = {path: [] for path in file_paths}
     method_samples: list[tuple[int, str, str, str]] = []
+    method_resolver_samples: dict[tuple[str, str, str], list[tuple[int, int]]] = {}
     resolver_totals: dict[str, list[int]] = {}
     load_totals: dict[str, int] = {}
     resolver_count_totals: dict[str, int] = {}
+    match_resolver_totals: dict[str, int] = {}
+    match_wrapper_totals: dict[str, dict[str, int]] = {}
+    match_resolver_rows: list[str] = []
+    match_phase_rows: list[str] = []
     load_root_rows: list[tuple[int, dict]] = []
     file_row_data: list[tuple[int, str, str, str, str]] = []
     method_row_data: list[tuple[int, str, str, str]] = []
@@ -230,8 +384,36 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         for name, count in result["loads"].items():
             load_totals[name] = load_totals.get(name, 0) + count
         for name, count in result["resolver_counts"].items():
-            resolver_count_totals[name] = resolver_count_totals.get(name, 0) + count
+            if not timing_only:
+                resolver_count_totals[name] = resolver_count_totals.get(name, 0) + count
         load_root_rows.extend((run_index, row) for row in result["load_roots"])
+        for row in result.get("match_phases", []):
+            match_phase_rows.append(
+                f"{run_index}\t{row.get('file', '')}\t{row.get('elapsed_ms', 'unknown')}\t"
+                f"{row.get('selectors', 'unknown')}\t{row.get('probes', 'unknown')}"
+            )
+        for row in result.get("match_resolver", []):
+            match_resolver_rows.append(f"{run_index}\t" + "\t".join(
+                row.get(name, "unknown") for name in (
+                    "file", "status", "package_calls", "member_calls", "module_identity_calls",
+                    "module_completion_calls", "class_completion_calls", "classfile_completion_calls",
+                    "tasty_completion_calls", "package_inner_us", "member_inner_us",
+                    "module_identity_inner_us", "module_completion_inner_us", "class_completion_inner_us",
+                    "classfile_completion_inner_us", "tasty_completion_inner_us", "rollback_count",
+                    "rollback_operation_observations", "rollback_member_observations", "classpath_requests",
+                    "classpath_inner_calls", "classpath_positive", "classpath_negative", "classpath_errors",
+                    "classpath_negative_cache_hits", "classpath_returned_bytes", "classpath_inner_wall_us",
+                )
+            ))
+            if row.get("status") == "captured":
+                for key, value in row.items():
+                    if key not in {"file", "status"}:
+                        match_resolver_totals[key] = match_resolver_totals.get(key, 0) + int(value)
+        for row in result.get("match_resolver_wrappers", []):
+            operation = row["operation"]
+            totals = match_wrapper_totals.setdefault(operation, {key: 0 for key in ("calls", "wall_us", "delegated_us", "exclusive_us")})
+            for key in totals:
+                totals[key] += int(row[key])
         for path, data in result["files"].items():
             file_samples.setdefault(path, []).append(data.get("total_ms", 0))
             outcome = data.get("outcome", "unknown")
@@ -241,10 +423,14 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 file_row_data.append((int(millis), path, phase.removesuffix("_ms"), str(run_index), outcome))
                 phase_totals[phase] = phase_totals.get(phase, 0) + millis
         for (path, tree), data in result["methods"].items():
-            resolver = result["resolver"].get((path, tree), {})
+            resolver = {} if timing_only else result["resolver"].get((path, tree), {})
             method_samples.append((data["elapsed_ms"], path, tree, data["method"]))
+            if not timing_only:
+                method_resolver_samples.setdefault((path, tree, data["method"]), []).append((
+                    int(resolver.get("member_calls", 0)), int(resolver.get("member_inner_us", 0)),
+                ))
             method_row_data.append((data["elapsed_ms"], path, tree, "\t".join(str(value) for value in [
-                run_index, path, tree, data["method"], data["elapsed_ms"],
+                run_index, path, tree, data["line"], data["method"], data["elapsed_ms"],
                 resolver.get("module_identity_calls", "not_captured"), resolver_duration_ms(resolver, "module_identity"), resolver_duration_us(resolver, "module_identity"),
                 resolver.get("module_completion_calls", "not_captured"), resolver_duration_ms(resolver, "module_completion"), resolver_duration_us(resolver, "module_completion"),
                 resolver.get("class_completion_calls", "not_captured"), resolver_duration_ms(resolver, "class_completion"), resolver_duration_us(resolver, "class_completion"),
@@ -262,11 +448,61 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"{run}\t{path}\t{phase}\t{millis}\t{outcome}"
         for millis, path, phase, run, outcome in sorted(file_row_data, key=lambda item: (-item[0], item[1], item[2], item[3]))
     ]
-    method_rows = ["run\tfile\ttree\tmethod\telapsed_ms\tmodule_identity_calls\tmodule_identity_inner_ms\tmodule_identity_inner_us\tmodule_completion_calls\tmodule_completion_inner_ms\tmodule_completion_inner_us\tclass_completion_calls\tclass_completion_inner_ms\tclass_completion_inner_us\tclassfile_completion_calls\tclassfile_completion_inner_us\ttasty_completion_calls\ttasty_completion_inner_us\tmember_calls\tmember_inner_ms\tmember_inner_us\tpackage_calls\tpackage_inner_ms\tpackage_inner_us"] + [
+    method_rows = ["run\tfile\ttree\tline\tmethod\telapsed_ms\tmodule_identity_calls\tmodule_identity_inner_ms\tmodule_identity_inner_us\tmodule_completion_calls\tmodule_completion_inner_ms\tmodule_completion_inner_us\tclass_completion_calls\tclass_completion_inner_ms\tclass_completion_inner_us\tclassfile_completion_calls\tclassfile_completion_inner_us\ttasty_completion_calls\ttasty_completion_inner_us\tmember_calls\tmember_inner_ms\tmember_inner_us\tpackage_calls\tpackage_inner_ms\tpackage_inner_us"] + [
         row for _elapsed, _path, _tree, row in sorted(method_row_data, key=lambda item: (-item[0], item[1], item[2], item[3]))
     ]
     (out_dir / "file-phases.tsv").write_text("\n".join(file_rows) + "\n", encoding="utf-8")
+    (out_dir / "match-phases.tsv").write_text(
+        "run\tfile\telapsed_ms\tselectors\tprobes\n" + "\n".join(match_phase_rows) + ("\n" if match_phase_rows else ""),
+        encoding="utf-8",
+    )
+    (out_dir / "match-resolver.tsv").write_text(
+        "run\tfile\tstatus\tpackage_calls\tmember_calls\tmodule_identity_calls\tmodule_completion_calls\tclass_completion_calls\tclassfile_completion_calls\ttasty_completion_calls\tpackage_inner_us\tmember_inner_us\tmodule_identity_inner_us\tmodule_completion_inner_us\tclass_completion_inner_us\tclassfile_completion_inner_us\ttasty_completion_inner_us\trollback_count\trollback_operation_observations\trollback_member_observations\tclasspath_requests\tclasspath_inner_calls\tclasspath_positive\tclasspath_negative\tclasspath_errors\tclasspath_negative_cache_hits\tclasspath_returned_bytes\tclasspath_inner_wall_us\n"
+        + "\n".join(match_resolver_rows) + ("\n" if match_resolver_rows else ""), encoding="utf-8")
+    (out_dir / "match-resolver-wrappers.tsv").write_text(
+        "run\tfile\toperation\tcalls\twall_us\tdelegated_us\texclusive_us\n" + "".join(
+            f"{run_index}\t{row['file']}\t{row['operation']}\t{row['calls']}\t{row['wall_us']}\t{row['delegated_us']}\t{row['exclusive_us']}\n"
+            for run_index, result in enumerate(runs, 1) for row in result.get("match_resolver_wrappers", [])
+        ), encoding="utf-8")
     (out_dir / "methods.tsv").write_text("\n".join(method_rows) + "\n", encoding="utf-8")
+    outcome_rows = ["run\tfile\ttree\tresult"] + [
+        f"{run_index}\t{path}\t{tree}\t{result}"
+        for run_index, run in enumerate(runs, 1)
+        for (path, tree), result in sorted(run.get("outcomes", {}).items())
+    ]
+    (out_dir / "method-outcomes.tsv").write_text("\n".join(outcome_rows) + "\n", encoding="utf-8")
+    match_probe_rows = ["run\tfile\tmethod_symbol\tcase_tree\tfamily\tresult"] + [
+        f"{run_index}\t{file}\t{method_symbol}\t{case_tree}\t{family}\t"
+        f"{run['match_outcomes'].get((file, method_symbol, case_tree, family), 'missing')}"
+        for run_index, run in enumerate(runs, 1)
+        for file, method_symbol, case_tree, family in run.get("match_probe_ids", [])
+    ]
+    (out_dir / "match-probe-counts.tsv").write_text(
+        "run\tavailable\texecuted\n" + "".join(
+            f"{run_index}\t{probe.get('available', 'unknown')}\t{probe.get('executed', 'unknown')}\n"
+            for run_index, run in enumerate(runs, 1) for probe in run.get("match_probes", [])
+        ), encoding="utf-8")
+    (out_dir / "match-probes.tsv").write_text("\n".join(match_probe_rows) + "\n", encoding="utf-8")
+    wrapper_rows = ["run\toperation\tcalls\twall_us\tdelegated_us\texclusive_us"] + [
+        f"{run_index}\t{operation}\t{values.get('calls', 0)}\t{values.get('wall_us', 0)}\t"
+        f"{values.get('delegated_us', 0)}\t{values.get('exclusive_us', 0)}"
+        for run_index, run in enumerate(runs, 1)
+        for operation, values in sorted(run.get("wrappers", {}).items())
+    ]
+    (out_dir / "audit-wrapper.tsv").write_text("\n".join(wrapper_rows) + "\n", encoding="utf-8")
+    rollback_rows = ["run\tcount\toperation_observations\tmember_observations"] + [
+        f"{run_index}\t{run.get('rollback', {}).get('count', 0)}\t"
+        f"{run.get('rollback', {}).get('operation_observations', 0)}\t{run.get('rollback', {}).get('member_observations', 0)}"
+        for run_index, run in enumerate(runs, 1)
+    ]
+    (out_dir / "rollback.tsv").write_text("\n".join(rollback_rows) + "\n", encoding="utf-8")
+    classpath_rows = ["run\trequests\tinner_calls\tpositive\tnegative\terrors\tnegative_cache_hits\treturned_bytes\tinner_wall_us"] + [
+        f"{run_index}\t" + "\t".join(run.get("classpath_resources", {}).get(name, "unknown") for name in (
+            "requests", "inner_calls", "positive", "negative", "errors", "negative_cache_hits", "returned_bytes", "inner_wall_us",
+        ))
+        for run_index, run in enumerate(runs, 1)
+    ]
+    (out_dir / "classpath-resources.tsv").write_text("\n".join(classpath_rows) + "\n", encoding="utf-8")
 
     top_files = sorted(
         ((statistics.mean(vals), path) for path, vals in file_samples.items() if vals),
@@ -280,7 +516,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
          for (path, tree, name), values in method_times.items()),
         key=lambda item: (-item[0], item[2], item[3], item[4]),
     )[:10]
-    # Durations from resolver wrappers are inclusive and can overlap. Rank by observed time, not guessed cost.
+    top_hot_paths = top_methods[:3]
+    # Delegated resolver durations can overlap with their calling method timers. Keep the two views separate.
     resolver_operations: dict[str, tuple[int | None, int | None, int | None]] = {}
     for operation in (
         "module_identity", "module_completion", "class_completion", "classfile_completion",
@@ -293,16 +530,6 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         millis = resolver_totals.get(millis_key, [0, 0])[0] if millis_key in resolver_totals else None
         calls = resolver_totals.get(calls_key, [0, 0])[0] if calls_key in resolver_totals else None
         resolver_operations[operation] = (calls, millis, micros)
-    member_calls, member_millis, member_micros = resolver_operations["member"]
-    candidates = [
-        (phase_totals.get("typing_ms", 0), "SourceTyper method typing", len(method_samples),
-         "Inspect the recorded hottest method identities first; do not share store/session semantic IDs across files."),
-        (phase_totals.get("postprocess_ms", 0), "post-typing audit accounting", len(file_samples) * len(runs),
-         "Break down repeated source/blocker projections while preserving per-row identities and rollback coverage."),
-        (round((member_micros / 1000) if member_micros is not None else member_millis or 0), "resolver member lookup", member_calls or 0,
-         "Investigate immutable resource/query reuse only; keep SymbolId, TypeId, ScopeId, interned names, and transaction state local to each SemanticStore/LoadingSession."),
-    ]
-    candidates.sort(key=lambda item: (-item[0], item[1]))
     semantic_ms = phase_totals.get("typing_ms", 0) + phase_totals.get("typer_setup_ms", 0)
     p50 = percentile([v for values in file_samples.values() for v in values], 0.50)
     p95 = percentile([v for values in file_samples.values() for v in values], 0.95)
@@ -323,9 +550,12 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     except OSError:
         pass
     input_cache_summary = ", ".join(
-        f"{index}={state['mode']} ({state['before_bytes']} bytes resident before)"
+        f"{index}={state['mode']} (warmup {state.get('warmup_ms', 'unknown')} ms; resident bytes before/after setup {state['before_bytes']}/{state.get('after_setup_bytes', 'unknown')})"
         for index, state in enumerate(input_cache, 1)
     )
+    cpu_user_s = [float(run.get("process_metrics", {}).get("child_cpu_user_s", float("nan"))) for run in runs]
+    cpu_system_s = [float(run.get("process_metrics", {}).get("child_cpu_system_s", float("nan"))) for run in runs]
+    sampled_rss = [int(run.get("process_metrics", {}).get("sampled_peak_tree_rss_bytes", 0)) for run in runs]
     lines = [
         "# Sequential Typer corpus profile",
         "",
@@ -337,12 +567,16 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"- JDK: `{jdk_version}` at `{java_home}`",
         f"- Host: `{cpu_model}`, {mem_total} memory; build profile `test`; Cargo/test concurrency fixed at 1",
         f"- Manifest files: {len(file_paths)}; profiled method observations per run: {len(runs[0]['methods'])}; repetitions: {len(runs)}",
+        f"- Exact audit integration-test binary prebuilt outside measured samples in {prebuild_wall_ms} ms; measured invocations that rebuild are rejected.",
+        f"- Timing mode: `{runs[0]['summary'].get('timing_mode', 'unknown')}`; root method limit per file: `{runs[0]['summary'].get('method_limit_per_file', 'unknown')}`. Exact path/tree/method identities and outcomes are in [`methods.tsv`](methods.tsv) and [`method-outcomes.tsv`](method-outcomes.tsv); match-probe selection is in [`match-probes.tsv`](match-probes.tsv). Wrapper, rollback, and classpath-resource data are in [`audit-wrapper.tsv`](audit-wrapper.tsv), [`rollback.tsv`](rollback.tsv), and [`classpath-resources.tsv`](classpath-resources.tsv).",
         f"- Cargo target cache by repetition: {', '.join(f'{index}={state}' for index, state in enumerate(cache_states, 1))}. `cold` means no compiled local_definition_audit test binary existed in the selected target directory.",
-        f"- Input page-cache measurements: {input_cache_summary}. Cold mode evicts only the selected Scala sources, pinned Scala JARs, and JDK jmods with POSIX_FADV_DONTNEED, then checks their resident bytes using `fincore`; it does not clear the system-wide cache.",
-        "- `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup and harness/report-log overhead.",
+        f"- Input page-cache measurements: {input_cache_summary}. Warm mode reads the selected Scala sources, pinned Scala JARs, and JDK jmods before each sample, then records residency with `fincore`. Cold mode evicts only these selected inputs with POSIX_FADV_DONTNEED; it does not clear the system-wide cache.",
+        "- `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup, sampler overhead, and test-side log emission. Captured bytes plus the Python log read/write times are recorded in `run-timings.tsv`; the cost of emitting each diagnostic line remains inside the process timing.",
+        f"- Process measurements: child CPU user/system mean {statistics.mean(cpu_user_s):.2f}/{statistics.mean(cpu_system_s):.2f} s; maximum sampled aggregate Cargo-process-tree RSS {max(sampled_rss, default=0) / (1024 * 1024):.1f} MiB. RSS sums per-process resident sets and can double-count shared mappings; 100 ms sampling may miss short peaks. CPU comes from child process accounting.",
         "- Classpath setup includes JDK module and Scala JAR adapter construction. No artifact decode timing is reported separately: class/module completion timers are inclusive at the resolver boundary.",
         "- Cache evidence: classloader profiles report completed-cache hits, full completions, identity shell creation/reuse, and hierarchy requests. They do not expose all lookup cache misses; those are not inferred.",
-        "- Rollback/retry observations are recorded by existing resolver rows. Time spent in failed probes is included in method and resolver inclusive timing and is not independently subtractable.",
+        "- `audit-wrapper.tsv` separates the measured AuditResolver wrapper interval from delegated resolver time; `exclusive_us` is the difference and includes observation bookkeeping/formatting. Timing-only runs bypass AuditResolver and report no wrapper rows. Rollback counts and affected observation-range lengths are in `rollback.tsv`.",
+        "- `classpath-resources.tsv` counts logical resource responses and returned bytes, not physical JAR reads/decompressions: the classloader interface does not expose those physical events. `inner_wall_us` measures the aggregate ClassPathEntry lookup interval only in detailed mode; cached negative requests are counted separately.",
         "- Semantic/report ratio compares `typer_setup + typing` against generation of all profile TSV/Markdown artifacts. It does not time the full-corpus normalized report writer, which this focused run does not invoke.",
         "",
         "## Repetition timings",
@@ -364,7 +598,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     phase_sum = sum(phase_totals.values())
     for phase, total in sorted(phase_totals.items(), key=lambda item: (-item[1], item[0])):
         lines.append(f"| `{phase}` | {total} | {100 * total / max(1, phase_sum):.1f}% |")
-    lines += ["", "## Resolver operation families", "", "Durations are wrapper-inclusive; nested work may overlap.", "", "| Operation | Calls | Inclusive ms |", "| --- | ---: | ---: |"]
+    lines += ["", "## Resolver operation families", "", ("Resolver counters and timings were not captured in timing-only mode." if timing_only else "Durations measure delegated resolver calls; nested class/TASTy loading remains inclusive inside those calls. AuditResolver wrapper time is reported separately."), "", "| Operation | Calls | Delegated ms |", "| --- | ---: | ---: |"]
     resolver_sort_key = lambda item: (item[1][1] is None and item[1][2] is None, -(item[1][2] if item[1][2] is not None else (item[1][1] or 0) * 1000), item[0])
     for operation, (calls, millis, micros) in sorted(resolver_operations.items(), key=resolver_sort_key):
         calls_text = "not captured" if calls is None else str(calls)
@@ -377,25 +611,84 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         else:
             time_text = f"{millis:.3f}"
         lines.append(f"| `{operation}` | {calls_text} | {time_text} |")
+    lines += ["", "## Match-probe pass attribution", "", "Match selector and case typing run in a separate SourceTyper pass. These resolver and classpath observations are reported separately from root-method typing.", "", "| Operation | Calls | Delegated µs |", "| --- | ---: | ---: |"]
+    match_operations = (
+        ("package", "package_calls", "package_inner_us"),
+        ("member", "member_calls", "member_inner_us"),
+        ("module_identity", "module_identity_calls", "module_identity_inner_us"),
+        ("module_completion", "module_completion_calls", "module_completion_inner_us"),
+        ("class_completion", "class_completion_calls", "class_completion_inner_us"),
+        ("classfile_completion", "classfile_completion_calls", "classfile_completion_inner_us"),
+        ("tasty_completion", "tasty_completion_calls", "tasty_completion_inner_us"),
+    )
+    for operation, calls_key, time_key in match_operations:
+        calls = "not captured" if timing_only else str(match_resolver_totals.get(calls_key, 0))
+        elapsed = "not captured" if timing_only else str(match_resolver_totals.get(time_key, 0))
+        lines.append(f"| `{operation}` | {calls} | {elapsed} |")
+    rollback_cells = "not captured" if timing_only else (
+        f"{match_resolver_totals.get('rollback_count', 0)} calls; "
+        f"{match_resolver_totals.get('rollback_operation_observations', 0)} operation and "
+        f"{match_resolver_totals.get('rollback_member_observations', 0)} member observations"
+    )
+    resource_cells = "not captured" if timing_only else (
+        f"{match_resolver_totals.get('classpath_positive', 0)} positive / "
+        f"{match_resolver_totals.get('classpath_negative', 0)} negative; "
+        f"{match_resolver_totals.get('classpath_returned_bytes', 0)} logical bytes; "
+        f"{match_resolver_totals.get('classpath_inner_wall_us', 0)} µs inner lookup"
+    )
+    lines += ["", f"- Rollback/checkpoint-range metrics: {rollback_cells}.",
+              f"- Match-pass classpath responses: {resource_cells}.",
+              "- Per-file phase and resolver rows: [`match-phases.tsv`](match-phases.tsv), [`match-resolver.tsv`](match-resolver.tsv), and [`match-resolver-wrappers.tsv`](match-resolver-wrappers.tsv)."]
+    if match_wrapper_totals:
+        lines += ["", "Match-pass AuditResolver wrapper intervals:", "", "| Operation | Calls | Wall µs | Delegated µs | Exclusive µs |", "| --- | ---: | ---: | ---: | ---: |"]
+        for operation, values in sorted(match_wrapper_totals.items()):
+            lines.append(f"| `{operation}` | {values['calls']} | {values['wall_us']} | {values['delegated_us']} | {values['exclusive_us']} |")
     lines += ["", "## Classpath load counts", "", "| Observation | Count across runs |", "| --- | ---: |"]
     for name in sorted(load_totals):
         lines.append(f"| `{name}` | {load_totals[name]} |")
     lines += ["", "## Resolver request counts", "", "| Family | Count across runs |", "| --- | ---: |"]
     for name in sorted(resolver_count_totals):
         lines.append(f"| `{name}` | {resolver_count_totals[name]} |")
+    lines += ["", "## AuditResolver wrapper time", "", "Times include wrapper bookkeeping and exclude the delegated interval in the `exclusive_us` column.", "", "| Operation | Calls | Wall ms | Delegated ms | Exclusive ms |", "| --- | ---: | ---: | ---: | ---: |"]
+    wrapper_totals: dict[str, dict[str, int]] = {}
+    for result in runs:
+        for operation, values in result.get("wrappers", {}).items():
+            aggregate = wrapper_totals.setdefault(operation, {key: 0 for key in values})
+            for key, value in values.items():
+                aggregate[key] += value
+    for operation, values in sorted(wrapper_totals.items(), key=lambda item: (-item[1].get("wall_us", 0), item[0])):
+        lines.append(f"| `{operation}` | {values.get('calls', 0)} | {values.get('wall_us', 0) / 1000:.3f} | {values.get('delegated_us', 0) / 1000:.3f} | {values.get('exclusive_us', 0) / 1000:.3f} |")
     lines += ["", "## Largest classpath request roots", "", "Existing resolver observations sorted these by completed-class fanout; paths and method/tree identities are unchanged.", "", "| Root | File and method | Classes touched | Completions | Cache hits |", "| --- | --- | ---: | ---: | ---: |"]
     sorted_roots = sorted(load_root_rows, key=lambda item: (-item[1]["distinct_classes"], item[1]["root"], item[1]["file"], item[1]["method"], item[0]))
     lines += [
         f"| `{root['root']}` | `{root['file']}::{root['method']}` (run {run}) | {root['distinct_classes']} | {root['full_completions']} | {root['completed_cache_hits']} |"
         for run, root in sorted_roots[:10]
     ]
-    lines += ["", "## Bounded follow-up candidates", "", "Costs are observed in this five-file cohort; repeated counts and durations do not imply a safe cache or a projected speedup.", ""]
-    for rank, (total, name, count, boundary) in enumerate(candidates, 1):
-        lines.append(f"{rank}. **{name}**: {count} observed items and {total} ms. {boundary}")
+    lines += ["", "## Three measured method roots", "", "Ranked by mean inclusive method-attempt time. These attempts stop at the first typer blocker, so they characterize current audit work rather than successful full-method typing. " + ("Resolver attribution was not captured in timing-only mode." if timing_only else "Member resolver time is nested within method time and is shown only as attribution, not added again."), "", "| Rank | Mean inclusive ms | Member calls | Delegated member ms | Exact root |", "| ---: | ---: | ---: | ---: | --- |"]
+    for rank, (mean, _maximum, path, tree, name, _runs_count) in enumerate(top_hot_paths, 1):
+        calls_and_time = method_resolver_samples.get((path, tree, name), [])
+        mean_calls = statistics.mean(calls for calls, _elapsed in calls_and_time) if calls_and_time else None
+        mean_resolver_ms = statistics.mean(elapsed for _calls, elapsed in calls_and_time) / 1000 if calls_and_time else None
+        source_lines = [
+            data["line"]
+            for run in runs
+            for (file, method_tree), data in run["methods"].items()
+            if file == path and method_tree == tree
+        ]
+        source_line = source_lines[0] if source_lines else 0
+        pointer = f"{path}:{source_line}" if source_line else f"{path}#tree={tree}"
+        calls_text = f"{mean_calls:.1f}" if mean_calls is not None else "not captured"
+        resolver_text = f"{mean_resolver_ms:.1f}" if mean_resolver_ms is not None else "not captured"
+        lines.append(f"| {rank} | {mean:.1f} | {calls_text} | {resolver_text} | `{pointer}` `{name}` (tree {tree}) |")
+    if not timing_only:
+        lines += [
+        "",
+        "All three hot roots spend nearly all observed method time in delegated `resolve_member`; this bounded profile therefore supports a focused follow-up that attributes resolver-internal work (prefix/package traversal, classpath lookup, and member selection) per request family. Recheck repeated request keys before proposing request-local reuse. Do not add cross-session semantic caches or claim an optimization speedup from this baseline.",
+        ]
     lines += [
         "",
-        "For this frozen baseline, per-method resolver durations were emitted in whole milliseconds and then aggregated; zero means below per-method millisecond resolution, not a measured exact zero. The opt-in log now also emits microseconds for future reproductions.",
-        "The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts.",
+        ("Resolver per-method durations are emitted in microseconds. A zero call count means that operation did not run for that method; zero elapsed time with calls is below timer resolution, not proof of zero cost." if not timing_only else "Resolver per-method call counts and durations are not available in timing-only mode."),
+        ("The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts." if not timing_only else "Classloader and AuditResolver counters are omitted in timing-only mode by design."),
         "",
     ]
     (out_dir / "resolver-operations.tsv").write_text(
@@ -430,6 +723,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--runs", type=int, default=2)
+    parser.add_argument("--method-limit-per-file", type=int, help="type only the first N stable root-method trees in each selected file")
+    parser.add_argument("--match-limit-per-file", type=int, help="type at most N supported-match probes per selected file")
+    parser.add_argument("--timing-only", action="store_true", help="skip AuditResolver/class-load instrumentation while retaining phase and method timers")
+    parser.add_argument("--compare-with", type=Path, help="compare exact selected identities/outcomes against another completed profile directory")
     parser.add_argument("--output-dir", type=Path, default=REPO_ROOT / "target/typer-sequential-profile")
     parser.add_argument("--summarize-existing", action="store_true", help="rebuild reports from run-N.log without rerunning the audit")
     parser.add_argument("--measured-commit", help="override source commit when summarizing saved logs")
@@ -441,6 +738,10 @@ def main() -> int:
         fail("--measured-commit is only valid with --summarize-existing")
     if args.cold_inputs_first_run and args.summarize_existing:
         fail("--cold-inputs-first-run cannot be combined with --summarize-existing")
+    if args.method_limit_per_file is not None and args.method_limit_per_file < 1:
+        fail("--method-limit-per-file must be positive")
+    if args.match_limit_per_file is not None and args.match_limit_per_file < 0:
+        fail("--match-limit-per-file must not be negative")
     scala_root = Path(os.environ.get("SCALA39_ROOT", ""))
     java_home = Path(os.environ.get("JAVA_HOME", ""))
     if not scala_root.is_dir() or not java_home.is_dir():
@@ -473,6 +774,14 @@ def main() -> int:
     env["SCALA39_JDK_RELEASE"] = expected_release
     env["SCALA39_CLASSPATH"] = os.pathsep.join(str(artifact_root / item) for item in artifacts)
     env["DOTTY_AUDIT_PROFILE_FILES"] = ",".join(selected)
+    if args.method_limit_per_file is not None:
+        env["DOTTY_AUDIT_PROFILE_METHOD_LIMIT"] = str(args.method_limit_per_file)
+    if args.match_limit_per_file is not None:
+        env["DOTTY_AUDIT_PROFILE_MATCH_LIMIT"] = str(args.match_limit_per_file)
+    if args.timing_only:
+        env["DOTTY_AUDIT_TIMING_ONLY"] = "1"
+    else:
+        env.pop("DOTTY_AUDIT_TIMING_ONLY", None)
     env["CARGO_BUILD_JOBS"] = "1"
     env["RUST_TEST_THREADS"] = "1"
     out_dir = args.output_dir.resolve()
@@ -482,7 +791,12 @@ def main() -> int:
     cache_states: list[str] = []
     input_cache: list[dict] = []
     if args.summarize_existing:
+        prebuild_path = out_dir / "prebuild.tsv"
+        if not prebuild_path.is_file():
+            fail(f"no prebuild record for saved samples: {prebuild_path}")
         import csv
+        with prebuild_path.open(encoding="utf-8", newline="") as stream:
+            prebuild_wall_ms = int(next(csv.DictReader(stream, delimiter="\t"))["prebuild_wall_ms"])
         timing_path = out_dir / "run-timings.tsv"
         if not timing_path.is_file():
             fail(f"no existing timing table: {timing_path}")
@@ -491,60 +805,128 @@ def main() -> int:
                 log_path = out_dir / f"run-{row['run']}.log"
                 if not log_path.is_file():
                     fail(f"no saved profile log: {log_path}")
-                results.append(parse_run(log_path.read_text(encoding="utf-8")))
+                parsed = parse_run(log_path.read_text(encoding="utf-8"))
+                parsed["process_metrics"] = {
+                    "child_cpu_user_s": float(row.get("child_cpu_user_s", "nan")),
+                    "child_cpu_system_s": float(row.get("child_cpu_system_s", "nan")),
+                    "sampled_peak_tree_rss_bytes": int(row.get("sampled_peak_tree_rss_bytes", 0)),
+                    "rss_sample_count": int(row.get("rss_sample_count", 0)),
+                    "rss_sample_interval_ms": int(row.get("rss_sample_interval_ms", 100)),
+                    "captured_log_bytes": int(row.get("captured_log_bytes", 0)),
+                    "capture_read_ms": int(row.get("capture_read_ms", 0)),
+                    "saved_log_write_ms": int(row.get("saved_log_write_ms", 0)),
+                }
+                results.append(parsed)
                 wall_times.append(int(row["cargo_wall_ms"]))
                 cache_states.append(row.get("cargo_target_cache_state", "unknown"))
                 input_cache.append({
                     "mode": row.get("input_cache_mode", "unmeasured"),
                     "before_bytes": row.get("input_cache_before_resident_bytes", "unknown"),
-                    "after_evict_bytes": row.get("input_cache_after_evict_resident_bytes", "not_evicted"),
+                    "after_setup_bytes": row.get("input_cache_after_setup_resident_bytes", "unknown"),
+                    "warmup_ms": row.get("input_warmup_ms", "not_warmed"),
                 })
     else:
         target_dir = Path(env.get("CARGO_TARGET_DIR", REPO_ROOT / "target")).resolve()
-        inputs = profile_input_paths(scala_root, java_home, artifact_root, selected) if args.cold_inputs_first_run else []
+        inputs = profile_input_paths(scala_root, java_home, artifact_root, selected)
+        prebuild_wall_ms, prebuild_output = prebuild_test(REPO_ROOT, env)
+        (out_dir / "prebuild.tsv").write_text(
+            "prebuild_wall_ms\texit_status\tbuild_log_bytes\n"
+            f"{prebuild_wall_ms}\t0\t{len(prebuild_output.encode('utf-8'))}\n",
+            encoding="utf-8",
+        )
         for index in range(1, args.runs + 1):
             print(f"starting serial profile run {index}/{args.runs}", flush=True)
             cache_state = cargo_target_cache_state(target_dir)
             cache_states.append(cache_state)
-            if inputs:
+            if args.cold_inputs_first_run:
                 before_bytes = resident_bytes(inputs)
                 if index == 1:
                     evict_input_pages(inputs)
-                    after_evict_bytes = resident_bytes(inputs)
-                    input_mode = "evicted" if after_evict_bytes == 0 else "partial-eviction"
+                    after_setup_bytes = resident_bytes(inputs)
+                    input_mode = "evicted" if after_setup_bytes == 0 else "partial-eviction"
                 else:
-                    after_evict_bytes = "not_evicted"
+                    after_setup_bytes = "not_measured"
                     input_mode = "warm-observed"
-                input_cache.append({"mode": input_mode, "before_bytes": before_bytes, "after_evict_bytes": after_evict_bytes})
+                input_cache.append({"mode": input_mode, "before_bytes": before_bytes, "after_setup_bytes": after_setup_bytes, "warmup_ms": 0})
             else:
-                input_cache.append({"mode": "unmeasured", "before_bytes": "unknown", "after_evict_bytes": "not_evicted"})
-            started = time.monotonic_ns()
-            completed = subprocess.run(AUDIT_TEST, cwd=REPO_ROOT, env=env, text=True, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT, check=False)
-            wall_ms = (time.monotonic_ns() - started) // 1_000_000
+                warmup_ms = warm_input_pages(inputs)
+                after_setup_bytes = resident_bytes(inputs) if shutil.which("fincore") else "unavailable"
+                input_cache.append({"mode": "warm-read-through", "before_bytes": "unknown", "after_setup_bytes": after_setup_bytes, "warmup_ms": warmup_ms})
+            return_code, output, process_metrics = run_measured(AUDIT_TEST, REPO_ROOT, env)
             log_path = out_dir / f"run-{index}.log"
-            log_path.write_text(completed.stdout, encoding="utf-8")
-            if completed.returncode:
-                print(completed.stdout, file=sys.stderr)
-                fail(f"profile run {index} failed with exit code {completed.returncode}; see {log_path}")
-            results.append(parse_run(completed.stdout))
+            log_write_started = time.monotonic_ns()
+            log_path.write_text(output, encoding="utf-8")
+            process_metrics["saved_log_write_ms"] = (time.monotonic_ns() - log_write_started) // 1_000_000
+            if re.search(r"^\s*Compiling\s+", output, re.MULTILINE):
+                fail(f"profile run {index} rebuilt a Cargo target inside the measurement; see {out_dir / f'run-{index}.log'}")
+            wall_ms = process_metrics["cargo_wall_ms"]
+            if return_code:
+                print(output, file=sys.stderr)
+                fail(f"profile run {index} failed with exit code {return_code}; see {log_path}")
+            parsed = parse_run(output)
+            parsed["process_metrics"] = process_metrics
+            results.append(parsed)
             wall_times.append(wall_ms)
             print(f"run {index}/{args.runs}: target_cache={cache_state} cargo_wall_ms={wall_ms} audit_wall_ms={results[-1]['summary']['wall_ms']}", flush=True)
     if not results:
         fail("no profile runs to summarize")
     expected_methods = {(key, value["method"]) for key, value in results[0]["methods"].items()}
+    expected_outcomes = results[0]["outcomes"]
+    expected_match_probes = results[0]["match_probes"]
+    expected_match_probe_ids = results[0]["match_probe_ids"]
+    expected_match_outcomes = results[0]["match_outcomes"]
     expected_files = set(results[0]["files"])
     if expected_files != set(selected):
         fail("profile logs do not match the checked-in manifest file set")
     for index, result in enumerate(results[1:], 2):
         if {(key, value["method"]) for key, value in result["methods"].items()} != expected_methods:
             fail(f"profile run {index} did not preserve the same method identities")
+        if result["outcomes"] != expected_outcomes:
+            fail(f"profile run {index} did not preserve the same method semantic outcomes")
+        if result["match_probes"] != expected_match_probes:
+            fail(f"profile run {index} did not preserve the same match-probe selection")
+        if result["match_probe_ids"] != expected_match_probe_ids:
+            fail(f"profile run {index} did not preserve the same exact match-probe identities")
+        if result["match_outcomes"] != expected_match_outcomes:
+            fail(f"profile run {index} did not preserve the same match-probe semantic outcomes")
         if set(result["files"]) != expected_files:
             fail(f"profile run {index} did not preserve the same selected files")
+    if args.compare_with:
+        comparison_runs = read_saved_runs(args.compare_with.resolve())
+        reference = comparison_runs[0]
+        for index, result in enumerate(results, 1):
+            if set(result["files"]) != set(reference["files"]):
+                fail(f"comparison run {index} selected a different file set")
+            if {(key, value["method"]) for key, value in result["methods"].items()} != {
+                (key, value["method"]) for key, value in reference["methods"].items()
+            }:
+                fail(f"comparison run {index} selected different method identities")
+            if result["outcomes"] != reference["outcomes"]:
+                fail(f"comparison run {index} changed method semantic outcomes")
+            if result["match_probe_ids"] != reference["match_probe_ids"]:
+                fail(f"comparison run {index} selected different exact match probes")
+            if result["match_outcomes"] != reference["match_outcomes"]:
+                fail(f"comparison run {index} changed match-probe semantic outcomes")
+        comparison_rows = ["timing_mode\truns\tmean_cargo_wall_ms\tmethod_count\tmatch_probe_count"]
+        comparison_rows.append(
+            f"{comparison_runs[0]['summary'].get('timing_mode', 'unknown')}\t{len(comparison_runs)}\t"
+            f"{statistics.mean(run['cargo_wall_ms'] for run in comparison_runs):.1f}\t"
+            f"{len(reference['methods'])}\t{len(reference['match_probe_ids'])}"
+        )
+        comparison_rows.append(
+            f"{results[0]['summary'].get('timing_mode', 'unknown')}\t{len(results)}\t"
+            f"{statistics.mean(wall_times):.1f}\t{len(results[0]['methods'])}\t{len(results[0]['match_probe_ids'])}"
+        )
+        (out_dir / "variant-comparison.tsv").write_text("\n".join(comparison_rows) + "\n", encoding="utf-8")
     commit = args.measured_commit or subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         fail("--measured-commit must be a full 40-character Git SHA")
-    write_report(out_dir, results, wall_times, cache_states, input_cache, selected, commit, scala_root, java_home, match.group(1), artifact_root)
+    write_report(out_dir, results, wall_times, cache_states, input_cache, selected, commit, scala_root, java_home, match.group(1), artifact_root, prebuild_wall_ms)
+    if args.compare_with:
+        summary_path = out_dir / "summary.md"
+        summary = summary_path.read_text(encoding="utf-8")
+        summary += "\n## Instrumentation variant comparison\n\n`variant-comparison.tsv` records detailed versus timing-only wall time. Exact method identities, method outcomes, match-probe identities, and match outcomes were checked for equality against the comparison directory. This is an observer-effect comparison, not a code optimization speedup.\n"
+        summary_path.write_text(summary, encoding="utf-8")
     print(f"profile report: {out_dir / 'summary.md'}")
     return 0
 

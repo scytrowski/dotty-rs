@@ -1,0 +1,7 @@
+run	file	method_symbol	case_tree	family	result
+1	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	43	143	extractor-looking	selector_error:TermNameNotFound
+1	compiler/src/dotty/tools/dotc/ast/tpd.scala	49	196	extractor-looking	selector_error:TypeNameNotFound
+1	compiler/src/dotty/tools/dotc/core/Types.scala	282	204	typed	selector_error:SymbolResolution
+2	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	43	143	extractor-looking	selector_error:TermNameNotFound
+2	compiler/src/dotty/tools/dotc/ast/tpd.scala	49	196	extractor-looking	selector_error:TypeNameNotFound
+2	compiler/src/dotty/tools/dotc/core/Types.scala	282	204	typed	selector_error:SymbolResolution

@@ -1,0 +1,17 @@
+run	measure	count
+1	completed_cache_hits	0
+1	full_completions	0
+1	hierarchy_loads	0
+1	identity_shell_creations	0
+1	identity_shell_reuses	0
+1	member_type_references	0
+1	on_demand_completions	0
+1	top_level_class_loads	12
+2	completed_cache_hits	0
+2	full_completions	0
+2	hierarchy_loads	0
+2	identity_shell_creations	0
+2	identity_shell_reuses	0
+2	member_type_references	0
+2	on_demand_completions	0
+2	top_level_class_loads	12

@@ -1,0 +1,5 @@
+path	role
+compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	recent_hot_path_suspect
+compiler/src/dotty/tools/dotc/ast/tpd.scala	historically_expensive_compiler_file
+compiler/src/dotty/tools/dotc/core/Types.scala	resolver_heavy_control
+library/src/scala/annotation/compileTimeOnly.scala	light_control_file

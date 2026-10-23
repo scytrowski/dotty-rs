@@ -1,0 +1,13 @@
+run	file	tree	line	method	elapsed_ms	module_identity_calls	module_identity_inner_ms	module_identity_inner_us	module_completion_calls	module_completion_inner_ms	module_completion_inner_us	class_completion_calls	class_completion_inner_ms	class_completion_inner_us	classfile_completion_calls	classfile_completion_inner_us	tasty_completion_calls	tasty_completion_inner_us	member_calls	member_inner_ms	member_inner_us	package_calls	package_inner_ms	package_inner_us
+2	compiler/src/dotty/tools/dotc/ast/tpd.scala	1790	262	dotty.tools.dotc.ast.tpd$.DefDef	2074	867	0	659	0	0	0	0	0	0	0	0	0	0	470	2067	2067130	20	0	82
+1	compiler/src/dotty/tools/dotc/ast/tpd.scala	1790	262	dotty.tools.dotc.ast.tpd$.DefDef	2053	867	0	679	0	0	0	0	0	0	0	0	0	0	470	2046	2046311	20	0	87
+2	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	204	42	dotty.tools.backend.jvm.GenericSignatures$.mayNeedSignature	1875	700	0	523	0	0	0	0	0	0	0	0	0	0	570	1865	1865547	276	0	318
+1	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	204	42	dotty.tools.backend.jvm.GenericSignatures$.mayNeedSignature	1873	700	0	547	0	0	0	0	0	0	0	0	0	0	570	1863	1863384	276	0	296
+2	compiler/src/dotty/tools/dotc/core/Types.scala	1031	284	dotty.tools.dotc.core.Types$.Type.derivesFrom	1867	3486	2	2495	0	0	0	0	0	0	0	0	0	0	1687	1844	1844299	158	0	295
+1	compiler/src/dotty/tools/dotc/core/Types.scala	1031	284	dotty.tools.dotc.core.Types$.Type.derivesFrom	1866	3486	2	2555	0	0	0	0	0	0	0	0	0	0	1687	1843	1843042	158	0	292
+1	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	1723	54	dotty.tools.backend.jvm.GenericSignatures$.javaSig0	96	744	0	541	0	0	0	0	0	0	0	0	0	0	616	90	90395	306	0	173
+2	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	1723	54	dotty.tools.backend.jvm.GenericSignatures$.javaSig0	96	744	0	528	0	0	0	0	0	0	0	0	0	0	616	90	90886	306	0	175
+1	compiler/src/dotty/tools/dotc/ast/tpd.scala	1971	327	dotty.tools.dotc.ast.tpd$.ClassDef	73	867	0	638	0	0	0	0	0	0	0	0	0	0	470	68	68570	20	0	25
+2	compiler/src/dotty/tools/dotc/ast/tpd.scala	1971	327	dotty.tools.dotc.ast.tpd$.ClassDef	73	867	0	619	0	0	0	0	0	0	0	0	0	0	470	68	68031	20	0	27
+1	compiler/src/dotty/tools/dotc/core/Types.scala	349	121	dotty.tools.dotc.core.Types$.Type.testProvisional	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0
+2	compiler/src/dotty/tools/dotc/core/Types.scala	349	121	dotty.tools.dotc.core.Types$.Type.testProvisional	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0	0
