@@ -1472,6 +1472,8 @@ fn scala_long_source_reaches_typed_plans_before_backend_rejects_it() {
         .expect("read Scala Long category-two audit fixture");
     let output = TestOutputDirectory::new("scala-long-category-two-audit");
     let mut observed = false;
+    let mut canonical_long = None;
+    let mut metadata_failure = None;
     let result = compile_source_batch_with_source_observer(
         &source,
         "LongCategoryTwo.scala",
@@ -1480,6 +1482,11 @@ fn scala_long_source_reaches_typed_plans_before_backend_rejects_it() {
         SourceUnitCardinality::AtLeastTwo,
         &mut |_, _, unit, definitions| {
             observed = true;
+            canonical_long = Some(definitions.long);
+            metadata_failure = Some(
+                unit.metadata(definitions)
+                    .expect_err("Long projection is not yet supported"),
+            );
             let long_box = audit_class_named(unit, "LongBox");
             let runner = audit_class_named(unit, "Runner");
 
@@ -1559,17 +1566,28 @@ fn scala_long_source_reaches_typed_plans_before_backend_rejects_it() {
         observed,
         "parser, namer and typer completed before code generation: {result:?}"
     );
+    let canonical_long = canonical_long.expect("observer records this session's Long type");
     assert!(
         matches!(
-            result,
-            Err(PipelineFailure::Codegen(
-                JvmCodegenError::UnsupportedJvmReferenceType {
-                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass,
-                    ..
-                }
-            ))
+            metadata_failure,
+            Some(JvmCodegenError::UnsupportedJvmReferenceType { ty, kind })
+                if ty == canonical_long
+                    && kind == dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass
         ),
-        "the first backend failure is the external superclass boundary: {result:?}"
+        "metadata projection misclassifies canonical Long as an external reference"
+    );
+    let emission_failure = result.expect_err("backend emission rejects Long projection");
+    let PipelineFailure::Codegen(emission_failure) = emission_failure else {
+        panic!("expected a backend projection failure, got {emission_failure:?}")
+    };
+    assert!(
+        matches!(
+            emission_failure,
+            JvmCodegenError::UnsupportedJvmReferenceType { ty, kind }
+                if ty == canonical_long
+                    && kind == dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass
+        ),
+        "the first emission failure is the same unsupported canonical Long projection"
     );
     assert!(
         output.class_files().is_empty(),
