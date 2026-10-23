@@ -211,6 +211,12 @@ operations, and earlier initialized primitive fields keep their existing
 behavior. Reference field reads, `this` escape, nested allocations, calls, and
 control flow in field initializers remain unsupported.
 
+The source-to-emission boundary for nested allocations, reference constructor
+arguments, and a reference field initialized by `new` is recorded in the
+[object graph construction audit](jvm-object-graph-construction.md). That audit
+also distinguishes the supported direct-new and completed-call receiver forms
+from constructor-argument forms that currently fail in codegen.
+
 No general Scala type erasure, reference boxing, Unit operand-stack
 representation, raw bytecode, source pipeline orchestration, TASTy integration,
 or macro support is part of this contract.
