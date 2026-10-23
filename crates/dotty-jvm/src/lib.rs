@@ -102,6 +102,9 @@ pub enum JvmExpressionFlow {
         /// JVM operand category exposed to parent lowering.
         category: JvmValueCategory,
     },
+    /// A JVM verifier `Null` value whose source expression has an approved
+    /// reference context, but which has not acquired a class identity.
+    Null,
     /// The expression completes normally and leaves no value on the operand
     /// stack, matching Scala `Unit`.
     Unit,

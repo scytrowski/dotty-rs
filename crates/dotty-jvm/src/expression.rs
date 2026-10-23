@@ -21,6 +21,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Flow {
     Value(JvmType),
+    /// The verifier stack contains `Null`, with no invented class identity.
+    Null,
     Unit,
     Diverges,
 }
@@ -225,6 +227,10 @@ pub(super) fn lower_value_expression(
     context.visit(tree_id, 0)?;
     match lower_leaf(&mut context, tree_id, code)? {
         Flow::Value(value) => Ok(value.category()),
+        Flow::Null => Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree: tree_id,
+            node: "null without an explicit reference context",
+        }),
         Flow::Unit => Err(JvmCodegenError::UnsupportedTypedExpression {
             tree: tree_id,
             node: "Unit in value-producing lowering",
@@ -339,6 +345,14 @@ fn append_method_return(
             .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
         return Ok(());
     }
+    if matches!(
+        (method.descriptor().result(), flow),
+        (JvmReturnType::Value(JvmType::Reference(_)), Flow::Null)
+    ) {
+        code.areturn()
+            .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
+        return Ok(());
+    }
     match (method.descriptor().result(), flow) {
         (JvmReturnType::Value(expected), Flow::Value(found)) if expected == found => {
             code.ireturn()
@@ -363,6 +377,14 @@ fn append_method_return(
                 tree: body,
                 expected,
                 found: Some(found),
+            });
+        }
+        (expected, Flow::Null) => {
+            return Err(JvmCodegenError::MethodBodyTypeMismatch {
+                method: method.symbol(),
+                tree: body,
+                expected,
+                found: None,
             });
         }
     }
@@ -773,7 +795,16 @@ fn emit_expression(
         }
     };
     match shape {
-        ExpressionShape::Leaf => lower_leaf(context, tree_id, code),
+        ExpressionShape::Leaf => {
+            if matches!(
+                &context.tree(tree_id)?.kind,
+                TreeKind::Literal(literal) if literal.value == Constant::Null
+            ) {
+                emit_null_literal(context, tree_id, expected_type, code)
+            } else {
+                lower_leaf(context, tree_id, code)
+            }
+        }
         ExpressionShape::Select => {
             if let Some(field) = selected_field_symbol(context, tree_id)? {
                 let TreeKind::Select(select) = &context.tree(tree_id)?.kind else {
@@ -794,6 +825,80 @@ fn emit_expression(
             tree: tree_id,
             node,
         }),
+    }
+}
+
+fn emit_null_literal(
+    context: &mut JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+    expected_type: Option<TypeId>,
+    code: &mut CodeBuilder,
+) -> Result<Flow, JvmCodegenError> {
+    let tree_type = context.tree(tree)?.ty;
+    if tree_type != context.definitions.null_type {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "null literal without the canonical source Null type",
+        });
+    }
+    let Some(expected_type) = expected_type else {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "null literal without an explicit reference context",
+        });
+    };
+    let Some((unit, _, _)) = context.call_context else {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "null literal outside a validated planned reference context",
+        });
+    };
+    if !matches!(
+        planned_reference_type(unit, expected_type, context.definitions)?,
+        JvmType::Reference(_)
+    ) {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "null literal with a non-reference expected type",
+        });
+    }
+    code.aconst_null()
+        .map_err(|error| JvmCodegenError::CodeBuilder { tree, error })?;
+    Ok(Flow::Null)
+}
+
+fn planned_reference_type(
+    unit: &JvmCompilationUnit<'_>,
+    ty: TypeId,
+    definitions: &Definitions,
+) -> Result<JvmType, JvmCodegenError> {
+    let is_same_symbol = |candidate: TypeId, canonical: TypeId| {
+        matches!(
+            (unit.store.types.try_get(candidate), unit.store.types.try_get(canonical)),
+            (
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(candidate),
+                    ..
+                }),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(canonical),
+                    ..
+                })
+            ) if candidate == canonical
+        )
+    };
+    if is_same_symbol(ty, definitions.int) {
+        return Ok(JvmType::Int);
+    }
+    if is_same_symbol(ty, definitions.boolean) {
+        return Ok(JvmType::Boolean);
+    }
+    match unit.reference_type(ty, definitions) {
+        Err(JvmCodegenError::UnsupportedJvmReferenceType {
+            kind: crate::UnsupportedJvmReferenceTypeKind::UnsupportedPrefix,
+            ..
+        }) => crate::reference::project_constructor_type(unit, ty, definitions),
+        result => result,
     }
 }
 
@@ -1086,6 +1191,15 @@ fn emit_assignment(
     let flow = emit_expression_with_expected(context, rhs, expected_type, code, depth + 1)?;
     match flow {
         Flow::Diverges => Ok(Flow::Diverges),
+        Flow::Null if matches!(local.ty(), JvmType::Reference(_)) => {
+            code.astore(usize::from(local.slot())).map_err(|error| {
+                JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                }
+            })?;
+            Ok(Flow::Unit)
+        }
         Flow::Value(found)
             if matches!(local.ty(), JvmType::Reference(_))
                 && matches!(found, JvmType::Reference(_)) =>
@@ -1355,6 +1469,10 @@ fn emit_block(
                 code.pop()
                     .map_err(|error| JvmCodegenError::CodeBuilder { tree: stat, error })?;
             }
+            Flow::Null => {
+                code.pop()
+                    .map_err(|error| JvmCodegenError::CodeBuilder { tree: stat, error })?;
+            }
             Flow::Unit => {
                 let stat_type = context.tree(stat)?.ty;
                 if !is_unit_type(context.store, stat_type, context.definitions) {
@@ -1387,6 +1505,26 @@ fn emit_block(
                 && flow_assignable(context, value, expected)?
             {
                 Ok(flow)
+            } else {
+                Err(JvmCodegenError::BlockResultTypeMismatch {
+                    tree: tree_id,
+                    declared: declared_type,
+                    found: public_flow(flow),
+                })
+            }
+        }
+        Flow::Null => {
+            let block_matches =
+                block_types_match(context, tree_id, expr, declared_type, expression_type)?;
+            let expected = contextual_block_value_type(
+                context,
+                tree_id,
+                declared_type,
+                block_expected_type,
+                Some(expr),
+            )?;
+            if block_matches && matches!(expected, Some(JvmType::Reference(_))) {
+                Ok(Flow::Value(expected.expect("checked Some above")))
             } else {
                 Err(JvmCodegenError::BlockResultTypeMismatch {
                     tree: tree_id,
@@ -1453,6 +1591,7 @@ fn emit_local_declaration(
     let flow = emit_expression_with_expected(context, rhs, expected_type, code, depth + 1)?;
     let assignable = match flow {
         Flow::Value(found) => flow_assignable(context, found, local.ty())?,
+        Flow::Null => matches!(local.ty(), JvmType::Reference(_)),
         Flow::Unit | Flow::Diverges => false,
     };
     if !assignable {
@@ -1991,6 +2130,7 @@ fn emit_object_creation(
         let found = emit_expression(context, argument, code, depth + 1)?;
         let assignable = match found {
             Flow::Value(found) => flow_assignable(context, found, expected)?,
+            Flow::Null => false,
             Flow::Unit | Flow::Diverges => false,
         };
         if !assignable {
@@ -2000,6 +2140,7 @@ fn emit_object_creation(
                 expected,
                 found: match found {
                     Flow::Value(value) => Some(value),
+                    Flow::Null => None,
                     Flow::Unit | Flow::Diverges => None,
                 },
             });
@@ -2590,6 +2731,7 @@ fn emit_if_body(
             tree: condition,
             found: match condition_flow {
                 Flow::Value(value_type) => Some(value_type),
+                Flow::Null => None,
                 Flow::Unit | Flow::Diverges => None,
             },
         });
@@ -2610,7 +2752,7 @@ fn emit_if_body(
     let then_flow =
         emit_expression_with_expected(context, then_branch, expected_type, code, depth + 1)?;
     let initialized_then = context.initialized_locals.clone();
-    let join_label = if matches!(then_flow, Flow::Value(_) | Flow::Unit) {
+    let join_label = if matches!(then_flow, Flow::Value(_) | Flow::Null | Flow::Unit) {
         let join_label = code
             .new_label()
             .map_err(|error| JvmCodegenError::CodeBuilder {
@@ -2645,12 +2787,14 @@ fn emit_if_body(
         expected_type,
     )?;
     context.initialized_locals = match (then_flow, else_flow) {
-        (Flow::Value(_) | Flow::Unit, Flow::Value(_) | Flow::Unit) => initialized_then
-            .intersection(&initialized_else)
-            .copied()
-            .collect(),
-        (Flow::Value(_) | Flow::Unit, Flow::Diverges) => initialized_then,
-        (Flow::Diverges, Flow::Value(_) | Flow::Unit) => initialized_else,
+        (Flow::Value(_) | Flow::Null | Flow::Unit, Flow::Value(_) | Flow::Null | Flow::Unit) => {
+            initialized_then
+                .intersection(&initialized_else)
+                .copied()
+                .collect()
+        }
+        (Flow::Value(_) | Flow::Null | Flow::Unit, Flow::Diverges) => initialized_then,
+        (Flow::Diverges, Flow::Value(_) | Flow::Null | Flow::Unit) => initialized_else,
         (Flow::Diverges, Flow::Diverges) => initialized_before_branches,
     };
     if let Some(join_label) = join_label {
@@ -2728,6 +2872,7 @@ fn emit_while_body(
             tree: condition,
             found: match condition_flow {
                 Flow::Value(value) => Some(value),
+                Flow::Null => None,
                 Flow::Unit | Flow::Diverges => None,
             },
         });
@@ -2748,6 +2893,12 @@ fn emit_while_body(
                     tree: tree_id,
                     error,
                 })?;
+        }
+        Flow::Null => {
+            return Err(JvmCodegenError::UnsupportedTypedExpression {
+                tree: body,
+                node: "null-valued while body",
+            });
         }
         Flow::Unit => {
             code.goto(header)
@@ -2859,6 +3010,36 @@ fn merge_if_flows(
         (Flow::Value(value), Flow::Diverges) | (Flow::Diverges, Flow::Value(value)) => {
             Flow::Value(value)
         }
+        (Flow::Null, Flow::Diverges) | (Flow::Diverges, Flow::Null) => Flow::Null,
+        (Flow::Null, Flow::Null) => Flow::Null,
+        (Flow::Null, Flow::Value(value)) | (Flow::Value(value), Flow::Null) => {
+            let Some(expected @ JvmType::Reference(_)) = expected else {
+                return Err(JvmCodegenError::IfResultTypeMismatch {
+                    tree,
+                    expected,
+                    found: Some(value),
+                });
+            };
+            if expression_flow_assignable(context, Flow::Null, expected)?
+                && flow_assignable(context, value, expected)?
+            {
+                Flow::Value(expected)
+            } else {
+                return Err(JvmCodegenError::IfBranchTypeMismatch {
+                    tree,
+                    branch: else_tree,
+                    expected,
+                    found: Some(value),
+                });
+            }
+        }
+        (Flow::Null, Flow::Unit) | (Flow::Unit, Flow::Null) => {
+            return Err(JvmCodegenError::IfResultTypeMismatch {
+                tree,
+                expected,
+                found: None,
+            });
+        }
         (Flow::Unit, Flow::Unit | Flow::Diverges) | (Flow::Diverges, Flow::Unit) => Flow::Unit,
         (Flow::Diverges, Flow::Diverges) => Flow::Diverges,
         (Flow::Value(value), Flow::Unit) | (Flow::Unit, Flow::Value(value)) => {
@@ -2877,6 +3058,9 @@ fn merge_if_flows(
         {
             Ok(Flow::Value(expected))
         }
+        Flow::Null if matches!(expected, Some(JvmType::Reference(_))) => {
+            Ok(Flow::Value(expected.expect("checked Some above")))
+        }
         Flow::Unit if is_unit_type(context.store, result_ty, context.definitions) => Ok(Flow::Unit),
         Flow::Diverges => Ok(Flow::Diverges),
         found => Err(JvmCodegenError::IfResultTypeMismatch {
@@ -2884,6 +3068,7 @@ fn merge_if_flows(
             expected,
             found: match found {
                 Flow::Value(value) => Some(value),
+                Flow::Null => None,
                 Flow::Unit | Flow::Diverges => None,
             },
         }),
@@ -2918,6 +3103,11 @@ fn validate_branch(
         Flow::Value(_) if is_nothing_type(context.store, tree_ty, context.definitions) => {
             Err(JvmCodegenError::UnsupportedBottomFlow { tree })
         }
+        Flow::Null if tree_ty == context.definitions.null_type => Ok(()),
+        Flow::Null => Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "null branch without the canonical source Null type",
+        }),
         Flow::Value(_) => Ok(()),
     }
 }
@@ -2969,6 +3159,19 @@ fn emit_return(
                 expected,
                 found: None,
             }),
+            Flow::Null if matches!(expected, JvmReturnType::Value(JvmType::Reference(_))) => {
+                code.areturn()
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                Ok(Flow::Diverges)
+            }
+            Flow::Null => Err(JvmCodegenError::ReturnValueTypeMismatch {
+                tree: tree_id,
+                expected,
+                found: None,
+            }),
             Flow::Value(found) => {
                 let assignable = match expected {
                     JvmReturnType::Value(expected) => flow_assignable(context, found, expected)?,
@@ -3014,6 +3217,7 @@ fn public_flow(flow: Flow) -> JvmExpressionFlow {
             value_type,
             category: value_type.category(),
         },
+        Flow::Null => JvmExpressionFlow::Null,
         Flow::Unit => JvmExpressionFlow::Unit,
         Flow::Diverges => JvmExpressionFlow::Diverges,
     }
@@ -3025,10 +3229,23 @@ fn call_argument_assignable(
     expected: JvmType,
     definitions: &Definitions,
 ) -> Result<bool, JvmCodegenError> {
-    let Flow::Value(found) = found else {
-        return Ok(false);
-    };
-    reference_assignable(Some(unit), found, expected, definitions)
+    match found {
+        Flow::Value(found) => reference_assignable(Some(unit), found, expected, definitions),
+        Flow::Null => Ok(matches!(expected, JvmType::Reference(_))),
+        Flow::Unit | Flow::Diverges => Ok(false),
+    }
+}
+
+fn expression_flow_assignable(
+    context: &JvmLoweringContext<'_>,
+    found: Flow,
+    expected: JvmType,
+) -> Result<bool, JvmCodegenError> {
+    match found {
+        Flow::Value(found) => flow_assignable(context, found, expected),
+        Flow::Null => Ok(matches!(expected, JvmType::Reference(_))),
+        Flow::Unit | Flow::Diverges => Ok(false),
+    }
 }
 
 fn flow_assignable(
