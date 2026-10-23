@@ -2,9 +2,10 @@
 
 This is an audit checkpoint for Scala 3.9.0 default-null semantics and the
 Java SE 21 verifier contract. It records current source and classfile boundaries
-and successor ownership. The source typing increment in #1469 and low-level
-reference branch support in #1471 are implemented below; source identity-call
-support remains separate work.
+and successor ownership. Source `Null` typing (#1469), low-level reference
+branch support (#1471), and bounded source `AnyRef.eq/ne` selection (#1472)
+are implemented. Bytecode lowering and runtime identity behavior remain
+separate work.
 
 ## Reference evidence
 
@@ -65,19 +66,23 @@ remains explicitly unverified.
 preserves the candidate source shape: a `Box`, identity methods, a nullable
 `if` result, and a null-sensitive read. The focused Typer regression runs it
 through the real lexer, parser, namer, and source Typer in one semantic session.
-Lexing, parsing, and naming succeed. The present first failures are:
+Lexing, parsing, naming, and the supported identity expressions succeed:
 
-| Method | First failing stage | Current result |
-| --- | --- | --- |
-| `same(a, b)` | Typer member lookup | `MemberNotFound` for `eq` on `Box` |
-| `different(a, b)` | Typer member lookup | `MemberNotFound` for `ne` on `Box` |
-| `choose(flag, value)` | Typer | Accepted with a typed `Box` result; the `null` branch retains canonical source `Null` |
-| `readOrDefault(flag, value)` | Typer member lookup | `MemberNotFound` for `eq` on `Box` |
+| Method | Typer result |
+| --- | --- |
+| `same(a, b)` | Selects canonical `AnyRef.eq` and returns `Boolean` |
+| `different(a, b)` | Selects canonical `AnyRef.ne` and returns `Boolean` |
+| `isMissing(a)` | Selects `AnyRef.eq`; its RHS keeps canonical source `Null` |
+| `choose(flag, value)` | Returns `Box`; the `null` branch retains canonical source `Null` |
+| `readOrDefault(flag, value)` | Types the `eq null` check and `value()` call; this adds no flow-sensitive narrowing |
 
-Each failed expression leaves no typed root in the source typed index. The
-current error ordering matters: `readOrDefault` reaches the identity selection
-first; its null-sensitive branch and dereference are not evidence of existing
-null flow analysis. No code generation is attempted after these Typer failures.
+The fixture also checks identity selection through a local receiver and the
+same parameter on both sides. The negative Typer regression rejects a foreign
+same-spelled method, a wrong-arity declaration, primitive and trait receivers,
+a generic receiver, an incompatible operand, and builtin `Object`. A
+`Box == Box` expression remains a separate unresolved member and is not
+rewritten to `eq`. No code generation is attempted by this source-semantic
+increment.
 
 In default Scala 3.9 semantics, `null` has source type `Null` and conforms to
 reference types. This increment supports explicit `Null` results, inferred bare
@@ -96,9 +101,18 @@ add a guard. `-Yexplicit-nulls` remains excluded.
 `Nothing`, `Any`, and `Object`. Source `Constant::Null` literals use that type.
 The typer's bounded relation accepts `Null` for `Object` and current-unit,
 non-generic top-level source classes with canonical prefixes; it rejects
-primitive targets and unsupported class shapes. `AnyRef` aliases and inherited
-`Object.eq`/`Object.ne` source method identities are not implemented, so member
-resolution still cannot select canonical identity method IDs.
+primitive targets and unsupported class shapes. Scala 3.9 defines `AnyRef` as
+an alias of `Object`, with compiler-owned final `eq/ne` identities of
+signature `(AnyRef): Boolean`. `Definitions` stores these IDs in a dedicated
+semantic scope. They are absent from the ordinary `object_class` `ClassInfo`
+scope: this repository currently uses one `object_class` identity for both the
+Scala source reference bound and the JVM class identity, and these source
+methods are not Java `Object` bytecode members. The Typer selects them only
+for canonical, non-generic, top-level classes declared in the current source
+unit whose sole modeled parent is `Object`, after verifying that no
+same-spelled declaration shadows the compiler identity. Primitive, trait,
+generic, external, `Object`, and other unsupported receiver shapes stay
+rejected. `eq/ne` are not selected by name alone and do not rewrite `==/!=`.
 
 At the classfile layer:
 
@@ -176,7 +190,7 @@ claims.
 | #1469 | `dotty-core`/`dotty-typer`: canonical source `Null` identity and limited default Scala 3.9 typing | Implemented in this increment |
 | #1470 | `dotty-classfile`: Scala-independent `Null` verifier flow, joins, and stack-map generation | This audit; may run alongside #1469 |
 | #1471 | `dotty-classfile`: reference compare/null branch instructions, symbolic assembly, and CFG transfer | Implemented with #1470 Null flow available |
-| #1472 | `dotty-core`/`dotty-typer`: canonical `AnyRef.eq/ne` member IDs and normal Typer selection | This audit; may run alongside #1471 and non-null parts of #1469 |
+| #1472 | `dotty-core`/`dotty-typer`: canonical `AnyRef.eq/ne` IDs and bounded source Typer selection | Implemented; uses the pinned source audit, #1469 Null, and #1471 branch contract |
 | #1473 | `dotty-jvm`: source-typed null lowering in explicit reference contexts | #1469 and #1470 |
 | #1474 | `dotty-jvm`: identity-only `eq/ne` lowering and Boolean materialization | #1471, #1472, and #1473 (therefore #1470) |
 | #1475 | Real source/JDK 21+ end-to-end acceptance, verifier frames, deterministic classes, and negative first-stage diagnostics | #1469–#1474 |

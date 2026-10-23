@@ -75,22 +75,25 @@ typing does not return JVM descriptors or bytecode.
 
 `Definitions::bootstrap` in `dotty-core/src/definitions.rs` creates one
 synthetic builtin symbol named `Object` and a canonical `object_type`, alongside
-distinct `Any` and `Nothing` symbols. The current field documentation calls
-that identity `java.lang.Object` and explicitly says `AnyRef` is not yet
-distinguished. Evidence of the coupling is localized: typer member lookup and
-subtyping special-case `definitions.object_class`; source annotation traversal
-also recognizes it. The core manifest itself has no dependency, and the JVM
-backend separately maps its supported generated-class parent to the JVM name
+distinct `Any` and `Nothing` symbols. It also retains Scala 3.9's canonical
+`AnyRef.eq/ne` source identities in a dedicated semantic scope. That scope is
+not the ordinary `object_class` declaration scope: the current identity still
+represents both Scala's source reference bound and JVM `java.lang.Object`,
+while `eq/ne` are compiler semantic intrinsics, not Java Object methods. The
+Typer uses these IDs only for its bounded current-unit class subset. Evidence
+of the remaining coupling is localized: typer member lookup and subtyping
+special-case `definitions.object_class`; source annotation traversal also
+recognizes it. The core manifest itself has no dependency, and the JVM backend
+separately maps its supported generated-class parent to the JVM name
 `java/lang/Object`.
 
 This is a semantic modeling risk, not a dependency leak today. Scala reference
 semantics and a target runtime's root object need not be identical in every
-future platform/library profile. No API split is justified by the present
-supported subset: current source typing can bootstrap and type a small program
-with `NoResolver`, and JVM lowering receives the existing canonical identity
-as input. Revisit the distinction if source `AnyRef` behavior or a non-JVM
-standard-library profile needs semantics that differ from the current builtin;
-keep that work separate from this boundary guardrail.
+future platform/library profile. The dedicated operator scope avoids adding
+Scala-only methods to ordinary JVM Object metadata, while the underlying
+AnyRef/Object type identity remains shared. Revisit the distinction if a
+non-JVM standard-library profile needs a separate reference root; do not infer
+runtime methods from the compiler's source identities.
 
 ## No-JDK frontend regression
 

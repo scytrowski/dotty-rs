@@ -58,40 +58,79 @@ impl SourceTyper<'_> {
             }
         }
         let receiver = self.this_type_receiver_view(receiver)?;
-        let members = self
-            .lookup_overload_members_journaled(receiver, operator, info_journal)
-            .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-        if members.is_empty() {
-            return Err(TyperError::MemberNotFound {
-                source: self.source,
-                tree_index,
-                receiver,
-                name: operator,
-            });
-        }
-        if members
-            .iter()
-            .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
-        {
-            return Err(TyperError::MixedApplicationCandidateKinds {
-                source: self.source,
-                tree_index,
-                candidates: members.iter().map(|member| member.symbol).collect(),
-            });
-        }
-        let mut candidates = members
-            .into_iter()
-            .map(|member| {
-                let callable = self.member_type_on_journaled(&member, info_journal)?;
-                self.validate_overload_callable(member.symbol, callable)?;
-                Ok(ApplicationCandidate {
-                    symbol: member.symbol,
-                    callable,
-                    member: Some(member),
-                    rejection: None,
+        let mut candidates = if self.any_ref_identity_operator_name(operator) {
+            let Some(symbol) = self.any_ref_identity_symbol_for_receiver(receiver, operator) else {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            };
+            let source_members = self
+                .lookup_overload_members_journaled(receiver, operator, info_journal)
+                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            // A same-spelled source or trait declaration cannot stand in for
+            // the compiler's final AnyRef identity symbol.
+            if !source_members.is_empty() {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            }
+            let SymbolInfo::Complete(callable) = self.store.symbols.get(symbol).info else {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            };
+            self.validate_overload_callable(symbol, callable)?;
+            vec![ApplicationCandidate {
+                symbol,
+                callable,
+                member: None,
+                rejection: None,
+            }]
+        } else {
+            let members = self
+                .lookup_overload_members_journaled(receiver, operator, info_journal)
+                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            if members.is_empty() {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            }
+            if members
+                .iter()
+                .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
+            {
+                return Err(TyperError::MixedApplicationCandidateKinds {
+                    source: self.source,
+                    tree_index,
+                    candidates: members.iter().map(|member| member.symbol).collect(),
+                });
+            }
+            members
+                .into_iter()
+                .map(|member| {
+                    let callable = self.member_type_on_journaled(&member, info_journal)?;
+                    self.validate_overload_callable(member.symbol, callable)?;
+                    Ok(ApplicationCandidate {
+                        symbol: member.symbol,
+                        callable,
+                        member: Some(member),
+                        rejection: None,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, TyperError>>()?;
+                .collect::<Result<Vec<_>, TyperError>>()?
+        };
 
         let typed =
             self.type_value_expression_inner(argument_tree, context, info_journal, new_mappings)?;

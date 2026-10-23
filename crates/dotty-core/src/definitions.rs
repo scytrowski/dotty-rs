@@ -421,8 +421,7 @@ impl Definitions {
             return None;
         }
         let scope_data = store.scopes.get(scope);
-        if scope_data.owner != Some(self.object_class)
-            || scope_data.entered_symbols().count() != 2
+        if scope_data.owner != Some(self.object_class) || scope_data.entered_symbols().count() != 2
         {
             return None;
         }
@@ -1500,7 +1499,9 @@ mod tests {
     fn any_ref_identity_operators_have_canonical_scoped_source_signatures() {
         let mut store = SemanticStore::new();
         let mut definitions = Definitions::bootstrap(&mut store);
-        let operators = definitions.any_ref_identity_operator_symbols(&store).unwrap();
+        let operators = definitions
+            .any_ref_identity_operator_symbols(&store)
+            .unwrap();
         assert_eq!(definitions.any_ref_identity_operator_ids(), Some(operators));
         assert_eq!(
             definitions.ensure_any_ref_identity_operators(&mut store),
