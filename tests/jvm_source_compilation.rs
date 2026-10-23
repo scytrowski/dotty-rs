@@ -2287,6 +2287,10 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
                 .unwrap_or_else(|| panic!("Runner.{method} has a typed body"));
             typed_tree_targets(unit, body)
         };
+        let final_expression = |body: TreeId<Typed>| match &unit.typed_ast.get(body).kind {
+            TreeKind::Block(block) => block.expr,
+            _ => body,
+        };
         let create_targets = targets("create");
         assert!(create_targets.contains(&holder_constructor));
         assert!(create_targets.contains(&counter_constructor));
@@ -2422,7 +2426,9 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
         );
 
         let create = audit_method_named(unit, runner, "create");
-        let TreeKind::Apply(outer) = &unit.typed_ast.get(create.body.unwrap()).kind else {
+        let create_body = create.body.unwrap();
+        let create_result = final_expression(create_body);
+        let TreeKind::Apply(outer) = &unit.typed_ast.get(create_result).kind else {
             panic!("create remains the typed Holder constructor application")
         };
         assert_eq!(
@@ -2437,7 +2443,7 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
             Some(counter)
         );
         assert_eq!(
-            audit_type_symbol(unit, unit.typed_ast.get(create.body.unwrap()).ty),
+            audit_type_symbol(unit, unit.typed_ast.get(create_body).ty),
             Some(holder)
         );
 
@@ -2459,7 +2465,9 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
         );
 
         let make_holder = audit_method_named(unit, runner, "makeHolder");
-        let TreeKind::Apply(outer) = &unit.typed_ast.get(make_holder.body.unwrap()).kind else {
+        let make_holder_body = make_holder.body.unwrap();
+        let make_holder_result = final_expression(make_holder_body);
+        let TreeKind::Apply(outer) = &unit.typed_ast.get(make_holder_result).kind else {
             panic!("makeHolder retains its typed Holder constructor application")
         };
         assert_eq!(
@@ -2485,7 +2493,7 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
             Some(counter)
         );
         assert_eq!(
-            audit_type_symbol(unit, unit.typed_ast.get(make_holder.body.unwrap()).ty),
+            audit_type_symbol(unit, unit.typed_ast.get(make_holder_body).ty),
             Some(holder)
         );
 
@@ -2620,6 +2628,122 @@ fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
         4,
         "all classfiles are published"
     );
+}
+
+#[test]
+fn object_graph_chained_receivers_emit_once_and_verify_deterministically() {
+    let source = fs::read_to_string(fixture_path("ObjectGraphConstruction.scala"))
+        .expect("read the source-backed object graph fixture");
+    let output = TestOutputDirectory::new("object-graph-chained-receivers");
+    let artifacts = compile_source_batch(
+        &source,
+        "ObjectGraphConstruction.scala",
+        output.path(),
+        SourceId::from_index(1498),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("real object graph source emits chained reference receivers");
+
+    let repeated_output = TestOutputDirectory::new("object-graph-chained-receivers-repeat");
+    let repeated = compile_source_batch(
+        &source,
+        "ObjectGraphConstruction.scala",
+        repeated_output.path(),
+        SourceId::from_index(1499),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh frontend session emits the same source batch");
+    assert_eq!(artifacts.len(), repeated.len());
+    for (first, second) in artifacts.iter().zip(&repeated) {
+        assert_eq!(first.class.internal_name(), second.class.internal_name());
+        assert_eq!(first.class.bytes(), second.class.bytes());
+    }
+
+    let runner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner is emitted");
+    let runner = decode_emitted_class(runner_artifact);
+    runner
+        .validate_references()
+        .expect("all chained receiver constant-pool references resolve");
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "read"),
+        &[
+            (0xb6, "Runner", "create", "(I)LHolder;"),
+            (0xb6, "Holder", "value", "()LCounter;"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "chainedFactory"),
+        &[
+            (0xb6, "Runner", "makeHolder", "(I)LHolder;"),
+            (0xb6, "Holder", "value", "()LCounter;"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "readOwned"),
+        &[
+            (0xb7, "OwnedHolder", "<init>", "(I)V"),
+            (0xb6, "OwnedHolder", "get", "()I"),
+        ],
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 class output path");
+        let harness = output
+            .path()
+            .join("ObjectGraphChainedReceiversHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class ObjectGraphChainedReceiversHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    int expectedCalls = 0;
+    for (int seed : new int[] {10, 0, -3}) {
+      if (runner.read(seed) != seed) throw new AssertionError("create/value/get result");
+      if (runner.receiverCallCount() != ++expectedCalls) throw new AssertionError("create evaluated once");
+      if (runner.chainedFactory(seed) != seed) throw new AssertionError("factory/value/get result");
+      if (runner.receiverCallCount() != ++expectedCalls) throw new AssertionError("factory evaluated once");
+      if (runner.readOwned(seed) != seed) throw new AssertionError("new OwnedHolder/get result");
+    }
+  }
+}
+"#,
+        )
+        .expect("write chained receiver runtime harness");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for chained receiver harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected chained receiver harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "ObjectGraphChainedReceiversHarness",
+            ])
+            .output()
+            .expect("start java verifier for chained receiver harness");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected chained receiver classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
 }
 
 #[test]

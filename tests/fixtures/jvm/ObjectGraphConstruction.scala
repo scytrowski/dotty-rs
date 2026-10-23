@@ -12,9 +12,15 @@ class OwnedHolder(seed: Int):
   def get(): Int = inner.get()
 
 class Runner:
+  private var receiverCalls: Int = 0
   def makeCounter(seed: Int): Counter = new Counter(seed)
-  def makeHolder(seed: Int): Holder = new Holder(new Counter(seed))
-  def create(seed: Int): Holder = new Holder(new Counter(seed))
+  def makeHolder(seed: Int): Holder =
+    receiverCalls = receiverCalls + 1
+    new Holder(new Counter(seed))
+  def create(seed: Int): Holder =
+    receiverCalls = receiverCalls + 1
+    new Holder(new Counter(seed))
+  def receiverCallCount(): Int = receiverCalls
   def fromFactory(seed: Int): Holder = new Holder(makeCounter(seed))
   def existing(counter: Counter): Holder = new Holder(counter)
   def fromImmutable(counter: Counter): Holder =
