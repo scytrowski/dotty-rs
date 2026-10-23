@@ -79,26 +79,47 @@ those values are excluded because that binary's build provenance is
 uncertain. Focused CI records per-sample wall/phase timing and process-tree RSS
 without enforcing a single-run latency threshold.
 
-## Full-corpus DoD status: pending
+## Full-corpus DoD status: local run completed; gates fail
 
-The authoritative hosted workflow remains manual and requires an explicit
-`run-full-audit` input. It performs two sequential full pinned 1,236-file,
-3,297-method passes, verifies determinism, reconciles frozen TASTy parent roots,
-and uploads reports and sidecars. The GitHub Actions integration available in
-this implementation session cannot dispatch a workflow, and the local `gh`
-credential is invalid; therefore no full run ID, artifact URL, current full
-semantic reconciliation or measured full-corpus peak RSS can truthfully be
-reported here. No full audit was started locally. This gate remains pending and
-issue #1487 must remain open until an authorized workflow dispatch completes
-and its artifacts are reconciled.
+At the user's request, the full audit was run locally against the pinned Scala
+3.9.0 artifacts with one Cargo job and one Rust test thread. Two sequential
+passes each covered 1,236 files and 3,297 local methods. They took 1,739.42 s
+and 1,733.53 s (58:00.750 total); the normalized reports were byte-identical
+with SHA-256
+`0794c286758fc84ac7f3eea618ffd4455b4c0aa867012fe0bacdeb88d09db645`. Peak RSS
+was unavailable because `/usr/bin/time` is not installed. The raw report is
+678 MB and remains in the local temporary audit directory; it is not checked
+into the repository.
+
+The corpus gate correctly rejected this run. It found 22 previously successful
+type-target keys missing from the current success set, and the maximum eager
+completed-class fanout is 29, above the required 16. The p95 dependency depth
+is 0 (limit 6), with maximum depth 8 and 63 distinct classes touched by the
+worst request. External class-symbol successes rose from 358 to 18,138, but
+that aggregate increase does not erase the 22 missing target keys. In
+particular, `dotty.tools.io.AbstractFile` has current type-request errors.
+These results are evidence of incomplete DoD, not a passing audit.
+
+The audit runner stopped before assembling its final Markdown and cohort
+sidecars because the gate failed. The comparison tool now reads report sections
+incrementally instead of materializing millions of lines; on the retained raw
+report, the gate comparison took 1.96 s and reported the same failures.
+
+The opt-in frozen TASTy profile also ran locally. Its stale assertions were
+updated to the observed result: 7 unresolved roots / 17 weighted observations,
+34 recovered roots / 362 observations, and no newly unresolved roots. The
+reconciliation script passed; it attributes 252 current source observations to
+10 roots, including 5 roots absent from the frozen set. This does not resolve
+the two corpus-gate failures above.
 
 | DoD item | Status | Evidence / blocker |
 | --- | --- | --- |
 | Paired measurements and sprint comparison | Partial | Existing bounded before/after profiles collated above; historical host metadata is incomplete for some pairs. |
 | Deterministic focused CI gate and tooling tests | Implemented; CI pending | New workflow verifies pinned inputs, two-pass determinism, normalized baseline, timing/RSS artifacts and audit-tool tests. |
-| Two complete hosted full-corpus passes and artifacts | **Pending** | Workflow dispatch is unavailable from this session; no run or artifacts are claimed. |
-| Current full-corpus semantic/provenance/safety reconciliation | **Pending** | Requires the hosted full-audit artifacts. |
-| Measured residual hotspot and bounded next step | Partial | Existing profile points to real delegated member resolution, not observer overhead. Next step: use the full hosted profile to split that resolver cost before proposing another optimization. |
+| Two complete full-corpus passes and deterministic output | **Local evidence complete** | 1,236 files / 3,297 methods per pass; hashes match. Temporary raw reports are not repository artifacts. |
+| No lost successful targets and completed-class fanout <=16 | **Failed** | 22 missing successful type-target keys; maximum fanout 29. |
+| Current TASTy parent profile and provenance reconciliation | **Local evidence complete** | Profile and reconciliation passed after refreshing stale frozen assertions. |
+| Measured residual hotspot and bounded next step | Partial | The full-corpus evidence now identifies eager hierarchy fanout (`List` reaches 29 completed classes) and missing successful type targets. Resolve those semantic causes before proposing another audit-speed optimization. |
 
 ### Reproduction
 
