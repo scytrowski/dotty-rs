@@ -2218,7 +2218,7 @@ fn sibling_batch_rejects_a_base_without_its_required_parent_constructor_proof() 
 }
 
 #[test]
-fn object_graph_construction_audit_keeps_frontend_identity_before_emission_boundary() {
+fn object_graph_construction_audit_emits_after_frontend_identity_validation() {
     let source = fs::read_to_string(fixture_path("ObjectGraphConstruction.scala"))
         .expect("read the bounded object-graph source fixture");
     let output = TestOutputDirectory::new("object-graph-construction-audit");
@@ -2612,15 +2612,13 @@ fn object_graph_construction_audit_keeps_frontend_identity_before_emission_bound
         observed,
         "the real frontend completed before backend emission"
     );
-    assert!(matches!(
-        result,
-        Err(PipelineFailure::Codegen(
-            JvmCodegenError::UnsupportedJvmReferenceFieldInitializer { .. }
-        ))
-    ));
-    assert!(
-        output.class_files().is_empty(),
-        "audit failure publishes no classfiles"
+    let artifacts =
+        result.expect("the audited object graph now emits its direct-new field initializer");
+    assert_eq!(artifacts.len(), 4, "the complete source batch is emitted");
+    assert_eq!(
+        output.class_files().len(),
+        4,
+        "all classfiles are published"
     );
 }
 
@@ -2703,6 +2701,7 @@ fn object_graph_direct_new_and_completed_call_receivers_remain_supported() {
     if (new Link(null).wrapSelf() == null) throw new AssertionError("this constructor argument");
   }
 }
+
 "#,
         )
         .expect("write direct-new and chained receiver harness");
@@ -2735,6 +2734,106 @@ fn object_graph_direct_new_and_completed_call_receivers_remain_supported() {
     }
 }
 
+#[test]
+fn reference_field_initializer_constructs_one_verified_child_after_super() {
+    let source = "class Counter(seed: Int):\n  private val value: Int = seed\n  def get(): Int = value\nclass OwnedHolder(seed: Int):\n  private val inner: Counter = new Counter(seed)\n  def get(): Int = inner.get()\n  def innerCounter(): Counter = inner\nclass Client:\n  def make(seed: Int): OwnedHolder = new OwnedHolder(seed)\n";
+    let output = TestOutputDirectory::new("reference-field-initialized-by-new");
+    let artifacts = compile_source_classes(
+        source,
+        "ReferenceFieldInitializedByNew.scala",
+        output.path(),
+    )
+    .expect("a private planned reference field accepts one checked new expression");
+    let repeated_output = TestOutputDirectory::new("reference-field-initialized-by-new-repeat");
+    let repeated = compile_source_classes(
+        source,
+        "ReferenceFieldInitializedByNew.scala",
+        repeated_output.path(),
+    )
+    .expect("a fresh source session compiles the field initializer deterministically");
+    assert_eq!(artifacts.len(), repeated.len());
+    for (first, second) in artifacts.iter().zip(&repeated) {
+        assert_eq!(first.class.internal_name(), second.class.internal_name());
+        assert_eq!(first.class.bytes(), second.class.bytes());
+    }
+
+    let owned_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "OwnedHolder")
+        .expect("OwnedHolder is emitted");
+    let owned = decode_emitted_class(owned_artifact);
+    let field = owned
+        .fields
+        .iter()
+        .find(|field| owned.constant_pool.utf8(field.name_index) == Ok("inner"))
+        .expect("inner reference field is emitted");
+    assert_eq!(
+        owned.constant_pool.utf8(field.descriptor_index),
+        Ok("LCounter;")
+    );
+    assert!(field.access_flags.is_private());
+    assert!(field.access_flags.is_final());
+    let constructor = emitted_method_code(&owned, "<init>");
+    assert_opcode_sequence(
+        constructor,
+        &[0x2a, 0xb7, 0x2a, 0xbb, 0x59, 0x1b, 0xb7, 0xb5, 0xb1],
+    );
+    assert_invocation_sequence(
+        &owned,
+        constructor,
+        &[
+            (0xb7, "java/lang/Object", "<init>", "()V"),
+            (0xb7, "Counter", "<init>", "(I)V"),
+        ],
+    );
+    assert_field_reference(
+        &owned,
+        constructor,
+        0xb5,
+        "OwnedHolder",
+        "inner",
+        "LCounter;",
+    );
+    assert_eq!(code_max_stack(&owned, "<init>"), 4);
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 output path");
+        let harness = output
+            .path()
+            .join("ReferenceFieldInitializedByNewHarness.java");
+        fs::write(
+            &harness,
+            "public final class ReferenceFieldInitializedByNewHarness { public static void main(String[] args) { Client client = new Client(); OwnedHolder positive = client.make(10); OwnedHolder zero = client.make(0); OwnedHolder negative = client.make(-3); OwnedHolder separate = client.make(10); if (positive.get() != 10 || zero.get() != 0 || negative.get() != -3) throw new AssertionError(\"field constructor values\"); if (positive.innerCounter() == separate.innerCounter()) throw new AssertionError(\"each field initializer creates one distinct Counter\"); if (positive.innerCounter().get() != 10 || separate.innerCounter().get() != 10) throw new AssertionError(\"field references retain their own initialized values\"); } }\n",
+        )
+        .expect("write field initializer runtime harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected the field initializer harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "ReferenceFieldInitializedByNewHarness",
+            ])
+            .output()
+            .expect("start java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected the field initializer classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
 fn audit_symbol_name(unit: &JvmCompilationUnit<'_>, symbol: SymbolId) -> String {
     let info = unit.store.symbols.get(symbol);
     let name = unit.store.names.resolve(info.name.text());
@@ -7805,12 +7904,16 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter\nclass Other\nclass Client:\n  def wrong(flag: Boolean, counter: Counter, other: Other): Counter = if flag then counter else other\n",
         ),
         (
-            "reference-field",
-            "class Counter\nclass Holder:\n  private val counter: Counter = new Counter()\n",
+            "reference-field-initialized-by-factory",
+            "class Counter(seed: Int)\nclass Factory(seed: Int):\n  def make(): Counter = new Counter(seed)\nclass Holder(seed: Int):\n  private val counter: Counter = make()\n",
         ),
         (
-            "reference-field-initialized-by-new",
-            "class Counter(seed: Int)\nclass Holder(seed: Int):\n  private val counter: Counter = new Counter(seed)\n",
+            "reference-field-initialized-by-branch-argument",
+            "class Counter(seed: Int)\nclass Holder(seed: Int, flag: Boolean):\n  private val counter: Counter = new Counter(if flag then seed else 0)\n",
+        ),
+        (
+            "reference-field-initialized-by-nested-new",
+            "class Counter(seed: Int)\nclass Holder(counter: Counter)\nclass Owner(seed: Int):\n  private val holder: Holder = new Holder(new Counter(seed))\n",
         ),
         (
             "generic-class",
@@ -7895,10 +7998,18 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                     )
                 )
             }
-            "reference-field-initialized-by-new" => matches!(
+            "reference-field-initialized-by-factory" => matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::TermNameNotFound { .. })
+                    | PipelineFailure::Codegen(
+                        JvmCodegenError::UnsupportedJvmReferenceFieldInitializer { .. }
+                    )
+            ),
+            "reference-field-initialized-by-branch-argument"
+            | "reference-field-initialized-by-nested-new" => matches!(
                 &error,
                 PipelineFailure::Codegen(
-                    JvmCodegenError::UnsupportedJvmReferenceFieldInitializer { .. }
+                    JvmCodegenError::UnsupportedConstructorFieldInitializer { .. }
                 )
             ),
             "reference-var-reassignment" => matches!(
@@ -7923,13 +8034,6 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "different-reference-if-result" => matches!(
                 &error,
                 PipelineFailure::Codegen(JvmCodegenError::UnsupportedSiblingUnionProjection { .. })
-            ),
-            "reference-field" => matches!(
-                &error,
-                PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
-                    | PipelineFailure::Codegen(
-                        JvmCodegenError::UnsupportedJvmReferenceFieldInitializer { .. }
-                    )
             ),
             "generic-class" => matches!(
                 &error,

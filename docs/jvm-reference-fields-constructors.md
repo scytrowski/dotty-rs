@@ -21,7 +21,7 @@ visibility, types, and canonical `TermRef` targets.
 | `class Holder(initial: Counter)` | The source parameter symbol belongs to `Holder` and is private. The constructor-owned parameter is a distinct canonical `Parameter` symbol owned by `<init>`, public, and its constructor signature parameter type is a `TypeRef` to `Counter`. Both preserve the source range. | Planned source classes accept the exact reference descriptor and retain its canonical `SymbolId` through constructor metadata. |
 | `new Holder(c)` in `Client.wrap(c: Counter)` | The typed constructor selection is a `TermRef` to `Holder.<init>`, the result is `TypeRef` to `Holder`, and the argument is a `TermRef` to the exact canonical `Client.wrap` parameter. | Emits the exact `(LCounter;)V` constructor call. |
 | `def read(): Int = ref.get()` | Types successfully. The selected method `TermRef` targets the canonical `Counter.get`; its qualifier is an `Ident` whose `TermRef` targets exactly `Holder.ref`. Result type is `Int`. | Supported when the exact field and target class are planned in the same unit; lowering emits the checked field read and virtual call. |
-| `private val inner: Counter = new Counter(seed)` | Types successfully as a constructor application using the exact constructor-owned `seed` parameter. | `UnsupportedJvmReferenceFieldInitializer`; reference field initializers currently accept only the bounded constructor-parameter copy form. |
+| `private val inner: Counter = new Counter(seed)` | Types successfully as a canonical constructor application using the exact constructor-owned `seed` parameter. | Supported for one planned public concrete class allocation with primitive literal or exact primitive constructor-parameter arguments; the child is initialized before the field store. |
 
 `Counter`, `Holder`, `MutableHolder`, and `Client` each retain a `ClassInfo`
 whose class identity matches its symbol, whose declarations scope is the scope
@@ -42,24 +42,29 @@ checked against exact `Object(Counter)` and `Object(Holder)` stack-map entries.
 
 The enabled source subset is a straight-line primary constructor which first
 invokes the direct superclass constructor, then initializes a reference field
-from one exact reference-valued constructor parameter:
+from either one exact reference-valued constructor parameter or one completed
+direct allocation:
 
 ```scala
 class Holder(initial: Counter):
   private val ref: Counter = initial
+
+class OwnedHolder(seed: Int):
+  private val inner: Counter = new Counter(seed)
 ```
 
 The initializer should lower to `aload <constructor-parameter-slot>` followed
 by `aload_0; swap; putfield Holder.ref:LCounter;` (or an equivalent verified
-stack order). The JVM adapter must resolve the canonical constructor-owned
-parameter and field symbols, exact class identity, owner, and descriptor. The
-field write must not read the field first, use `this` as the value, call a
-method, allocate an object, branch, or let `this` escape. The field is
-initialized exactly once by that assignment. Plain `private` reference fields,
-including mutable fields, can be planned and emitted when the constructor
-initializer is this exact parameter reference. `private[this]`, arbitrary
-initializer expressions, `this` escape, and unplanned reference values remain
-gated until their visibility or lowering semantics are explicitly planned.
+stack order). The JVM adapter must resolve canonical constructor-owned
+parameters and field symbols, exact class identity, owner, and descriptor. For
+the allocation form it emits `aload_0; new Counter; dup; <primitive args>;
+invokespecial Counter.<init>; putfield OwnedHolder.inner`. Only primitive
+literals and exact parameters of the enclosing constructor are accepted as
+child arguments. Nested `new`, method calls, branches, and arbitrary argument
+expressions remain unsupported. Each field is initialized exactly once in
+source order. Plain `private` reference fields, including mutable fields, can
+use either supported form; `private[this]`, `this` escape, and unplanned
+reference values remain gated.
 
 The whole-class emitter currently puts `Object.<init>()V` before the planned
 field initializer fragments (`dotty-jvm/src/emission.rs`). Thus the bytecode
@@ -75,36 +80,36 @@ reference before the transition.
 
 The current constructor initializer planner accepts a bounded expression
 subset over primitive values and fields already initialized in source order.
-Reference RHS support currently allows an exact constructor parameter copy;
-`new Counter(seed)` remains rejected with
-`UnsupportedJvmReferenceFieldInitializer`. Future reference RHS forms must
-preserve source ordering and reject forward/self-field reads. They must also
-reject `this` escape and branches in `<init>` until initialization and
-exception behavior have a verifier-backed plan. A failed lowering must leave
-semantic and plan state valid.
+Reference RHS support allows an exact constructor parameter copy or one
+completed direct allocation of a planned public class with primitive literal
+or exact enclosing-constructor parameter arguments. Factory calls, nested
+allocations, branches, and other reference expressions are rejected with a
+typed codegen error. A failed lowering must leave semantic and plan state
+valid.
 
 ## Exact bytecode and verifier contract
 
-For a future field descriptor `LCounter;`, `getfield` and `putfield` require
+For a field descriptor such as `LCounter;`, `getfield` and `putfield` require
 resolved `CONSTANT_Fieldref` entries and parsed field descriptors. In this
 compiler's bounded subset:
 
 - `getfield Holder.ref:LCounter;` consumes only an initialized exact
   `Object(Holder)` receiver and pushes exact `Object(Counter)`.
 - `putfield Holder.ref:LCounter;` consumes an initialized exact
-  `Object(Holder)` receiver and a value of exact `Object(Counter)`.
+  `Object(Holder)` receiver and a value assignable to the declared field class;
+  direct-new initialization stores only the matching, already initialized
+  allocation result.
 - No check may accept a value because it is merely category `Reference`, or
-  guess `Object`, a superclass, or an interface. The JVMS allows broader
-  assignment compatibility in operations where the hierarchy is known; exact
-  identity here is the deliberate no-hierarchy restriction.
+  guess `Object`, a superclass, or an interface. Field assignment uses only
+  exact identity or the compilation unit's validated class hierarchy.
 - A constructor call `invokespecial Counter.<init>(LDep;)V` requires the
   uninitialized allocation identity for exactly `Counter`, an exact initialized
   `Object(Dep)` argument, and normal completion before the allocation aliases
-  become `Object(Counter)`. A subtype, different class, missing plan, or
-  name-only match is insufficient.
-- For the supported constructor-field write, the receiver is exact initialized
-  `Object(Holder)` after the direct-super call, and the stored value is exact
-  initialized `Object(Counter)` from the constructor parameter.
+  become `Object(Counter)`. A different class, missing plan, or name-only match
+  is insufficient.
+- For a supported constructor-field write, the receiver is exact initialized
+  `Object(Holder)` after the direct-super call. A parameter copy or the
+  matching initialized allocation supplies the field value.
 
 Current class-aware CFG analysis records exact identities for ordinary
 reference calls and tracks up to two allocation-site identities in a bounded

@@ -35,20 +35,30 @@ pub(super) fn resolve(
         .ok_or(JvmCodegenError::MissingClassPlan {
             class: caller_class,
         })?;
-    if !caller_plan
-        .methods
-        .iter()
-        .any(|plan| plan.method == caller_method)
-    {
-        return Err(JvmCodegenError::CallerMethodNotInJvmPlan {
-            class: caller_class,
-            method: caller_method,
-        });
-    }
+    let synthetic_constructor_caller = match &caller_plan.initialization {
+        JvmClassInitializationPlan::PrimaryConstructor(constructor)
+            if constructor.symbol() == caller_method
+                && caller_plan
+                    .fields
+                    .iter()
+                    .any(|field| field.initializer == Some(apply_tree)) =>
+        {
+            Some(JvmMethodPlan {
+                method: caller_method,
+                parameters: constructor.parameters().to_vec(),
+                locals: Vec::new(),
+                body: None,
+            })
+        }
+        JvmClassInitializationPlan::ImplicitNoArg
+        | JvmClassInitializationPlan::Unsupported
+        | JvmClassInitializationPlan::PrimaryConstructor(_) => None,
+    };
     let caller_method_plan = caller_plan
         .methods
         .iter()
         .find(|plan| plan.method == caller_method)
+        .or(synthetic_constructor_caller.as_ref())
         .ok_or(JvmCodegenError::CallerMethodNotInJvmPlan {
             class: caller_class,
             method: caller_method,

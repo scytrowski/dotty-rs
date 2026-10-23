@@ -826,7 +826,7 @@ pub enum JvmCodegenError {
         expected: JvmType,
         found: Option<JvmType>,
     },
-    /// A reference field initializer is not an identifier for a typed parameter.
+    /// A reference field initializer is outside the exact parameter-copy or bounded direct-new forms.
     UnsupportedJvmReferenceFieldInitializer {
         field: SymbolId,
         initializer: TreeId<Typed>,

@@ -44,6 +44,13 @@ pub enum JvmConstructorInitializerInstruction {
     LoadThis,
     /// Push an int-like constant using the class-file builder's compact encoding.
     Constant(i32),
+    /// Allocate one planned class for a reference-valued field initializer.
+    NewObject {
+        /// Checked JVM internal name of the allocated class.
+        owner: String,
+    },
+    /// Duplicate the new object's uninitialized allocation-site value.
+    Dup,
     /// Load an exact constructor-owned primitive or planned-reference parameter.
     LoadParameter {
         /// Canonical constructor-owned parameter identity.
@@ -57,6 +64,13 @@ pub enum JvmConstructorInitializerInstruction {
     IntAdd,
     /// Invert a canonical Boolean value.
     BooleanNot,
+    /// Initialize the exact allocation with its checked primary constructor.
+    InvokeSpecial {
+        /// Checked JVM internal name owning the selected constructor.
+        owner: String,
+        /// Exact descriptor of the selected constructor.
+        descriptor: String,
+    },
     /// Read a previously initialized current-class field.
     GetField {
         /// Canonical field identity.
@@ -102,6 +116,10 @@ impl JvmConstructorFieldInitializerPlan {
                 let result = match instruction {
                     JvmConstructorInitializerInstruction::LoadThis => code.aload(0),
                     JvmConstructorInitializerInstruction::Constant(value) => code.iconst(*value),
+                    JvmConstructorInitializerInstruction::NewObject { owner } => {
+                        code.new_object(owner.clone())
+                    }
+                    JvmConstructorInitializerInstruction::Dup => code.dup(),
                     JvmConstructorInitializerInstruction::LoadParameter {
                         slot,
                         value_type,
@@ -113,6 +131,9 @@ impl JvmConstructorFieldInitializerPlan {
                     JvmConstructorInitializerInstruction::IntAdd => code.iadd(),
                     JvmConstructorInitializerInstruction::BooleanNot => {
                         code.iconst(1).and_then(|code| code.ixor())
+                    }
+                    JvmConstructorInitializerInstruction::InvokeSpecial { owner, descriptor } => {
+                        code.invokespecial(owner.clone(), "<init>", descriptor.clone())
                     }
                     JvmConstructorInitializerInstruction::GetField {
                         name, descriptor, ..
@@ -480,6 +501,14 @@ impl ConstructorInitializerContext<'_> {
                 self.lower_reference(tree_id, symbol, Some(select.qualifier), instructions)
             }
             TreeKind::Apply(application) => {
+                if self.is_constructor_application(tree_id, application)? {
+                    return self.lower_new_reference_initializer(
+                        tree_id,
+                        application,
+                        instructions,
+                        depth,
+                    );
+                }
                 let intrinsic =
                     resolve_int_intrinsic(self.store, self.typed_ast, tree_id, self.definitions)
                         .map_err(|error| JvmCodegenError::IntIntrinsicResolution {
@@ -632,6 +661,130 @@ impl ConstructorInitializerContext<'_> {
             descriptor: field.descriptor().to_owned(),
         });
         Ok(value_type)
+    }
+
+    fn is_constructor_application(
+        &self,
+        tree_id: TreeId<Typed>,
+        application: &dotty_core::ast::Apply<Typed>,
+    ) -> Result<bool, JvmCodegenError> {
+        if application.kind != dotty_core::ast::ApplyKind::Regular {
+            return Ok(false);
+        }
+        let Some(function) = self.typed_ast.try_get(application.function) else {
+            return Err(JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                field: self.current_field,
+                tree: tree_id,
+                node: "missing constructor function tree",
+            });
+        };
+        let TreeKind::Select(select) = &function.kind else {
+            return Ok(false);
+        };
+        if select.backquoted || self.store.names.try_resolve(select.name.text()) != Some("<init>") {
+            return Ok(false);
+        }
+        let Some(qualifier) = self.typed_ast.try_get(select.qualifier) else {
+            return Err(JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                field: self.current_field,
+                tree: tree_id,
+                node: "missing constructor allocation tree",
+            });
+        };
+        Ok(matches!(qualifier.kind, TreeKind::New(_)))
+    }
+
+    fn lower_new_reference_initializer(
+        &mut self,
+        tree_id: TreeId<Typed>,
+        application: &dotty_core::ast::Apply<Typed>,
+        instructions: &mut Vec<JvmConstructorInitializerInstruction>,
+        depth: usize,
+    ) -> Result<JvmType, JvmCodegenError> {
+        let target = self.unit.resolve_constructor_call(
+            self.class,
+            self.constructor.symbol(),
+            tree_id,
+            self.definitions,
+        )?;
+        if !target.access_flags().is_public()
+            || !matches!(target.result_type(), JvmType::Reference(_))
+            || application.args.len() != target.argument_types().len()
+        {
+            return self.unsupported(tree_id, "unsupported reference constructor target");
+        }
+
+        let mut argument_instructions = Vec::new();
+        for (argument, expected) in application
+            .args
+            .iter()
+            .copied()
+            .zip(target.argument_types().iter().copied())
+        {
+            if !matches!(expected, JvmType::Int | JvmType::Boolean) {
+                return self.unsupported(argument, "reference constructor argument type");
+            }
+            let argument_tree = self.typed_ast.try_get(argument).ok_or(
+                JvmCodegenError::UnsupportedConstructorFieldInitializer {
+                    field: self.current_field,
+                    tree: argument,
+                    node: "missing reference constructor argument",
+                },
+            )?;
+            match &argument_tree.kind {
+                TreeKind::Literal(_) => {}
+                TreeKind::Ident(_) => {
+                    let symbol = self.term_ref_symbol(argument, argument_tree.ty)?;
+                    if !self
+                        .constructor
+                        .parameters()
+                        .iter()
+                        .any(|parameter| parameter.symbol() == symbol)
+                    {
+                        return self.unsupported(
+                            argument,
+                            "reference constructor argument is not an exact constructor parameter",
+                        );
+                    }
+                }
+                _ => {
+                    return self.unsupported(
+                        argument,
+                        "reference constructor argument is not a primitive literal or parameter",
+                    );
+                }
+            }
+            let mut lowered_argument = Vec::new();
+            let found = self.lower_expression(argument, &mut lowered_argument, depth + 1)?;
+            if found != expected {
+                return self.type_mismatch(argument, expected, found);
+            }
+            if !matches!(
+                lowered_argument.as_slice(),
+                [JvmConstructorInitializerInstruction::Constant(_)]
+                    | [JvmConstructorInitializerInstruction::LoadParameter {
+                        value_type: JvmType::Int | JvmType::Boolean,
+                        ..
+                    }]
+            ) {
+                return self.unsupported(
+                    argument,
+                    "reference constructor argument is not a primitive literal or parameter",
+                );
+            }
+            argument_instructions.extend(lowered_argument);
+        }
+
+        instructions.push(JvmConstructorInitializerInstruction::NewObject {
+            owner: target.owner_internal_name().to_owned(),
+        });
+        instructions.push(JvmConstructorInitializerInstruction::Dup);
+        instructions.extend(argument_instructions);
+        instructions.push(JvmConstructorInitializerInstruction::InvokeSpecial {
+            owner: target.owner_internal_name().to_owned(),
+            descriptor: target.descriptor().as_str().to_owned(),
+        });
+        Ok(target.result_type())
     }
 
     fn validate_field_receiver(
