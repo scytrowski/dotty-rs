@@ -61,11 +61,14 @@ AUDIT_METHOD_RESULT file=compiler/A.scala tree=8 result=success
 AUDIT_MATCH_PROBES available=6 executed=0
 AUDIT_MATCH_PROBE file=compiler/A.scala method_symbol=17 case_tree=21 family=literal
 AUDIT_MATCH_RESULT file=compiler/A.scala method_symbol=17 case_tree=21 family=literal result=success
+AUDIT_MATCH_PHASE file=compiler/A.scala elapsed_ms=46 selectors=1 probes=1
+AUDIT_MATCH_RESOLVER file=compiler/A.scala status=captured package_calls=1 member_calls=4 module_identity_calls=2 module_completion_calls=0 class_completion_calls=0 classfile_completion_calls=0 tasty_completion_calls=0 package_inner_us=100 member_inner_us=11700 module_identity_inner_us=200 module_completion_inner_us=0 class_completion_inner_us=0 classfile_completion_inner_us=0 tasty_completion_inner_us=0 rollback_count=1 rollback_operation_observations=2 rollback_member_observations=3 classpath_requests=8 classpath_inner_calls=7 classpath_positive=4 classpath_negative=3 classpath_errors=0 classpath_negative_cache_hits=1 classpath_returned_bytes=900 classpath_inner_wall_us=70
+AUDIT_MATCH_RESOLVER_WRAPPER file=compiler/A.scala operation=member_lookup calls=4 wall_us=12000 delegated_us=11700 exclusive_us=300
 AUDIT_RESOLVER_WRAPPER operation=member_lookup calls=3 wall_us=500 delegated_us=300 exclusive_us=200
 AUDIT_ROLLBACK count=2 operation_observations=4 member_observations=6
 AUDIT_CLASSPATH_RESOURCES requests=10 inner_calls=7 positive=4 negative=3 errors=0 negative_cache_hits=3 returned_bytes=900 inner_wall_us=70 bytes_semantics=logical_resource_bytes_not_physical_io
 AUDIT_METHOD_RESOLVER file=compiler/A.scala tree=8 module_identity_calls=2 module_identity_inner_ms=3 module_identity_inner_us=3400 module_completion_calls=1 module_completion_inner_ms=6 module_completion_inner_us=6400 class_completion_calls=2 class_completion_inner_ms=8 class_completion_inner_us=8200 classfile_completion_calls=1 classfile_completion_inner_us=5100 tasty_completion_calls=1 tasty_completion_inner_us=3100 member_calls=4 member_inner_ms=11 member_inner_us=11700 package_calls=1 package_inner_ms=1 package_inner_us=1500
-AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete parse_ms=12 inventory_ms=5 namer_ms=2 typer_setup_ms=3 typing_ms=45 postprocess_ms=1 total_ms=68
+AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete parse_ms=12 inventory_ms=5 namer_ms=2 typer_setup_ms=3 typing_ms=45 postprocess_ms=1 match_ms=46 total_ms=68
 AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 file_discovery_ms=2 source_read_ms=1 source_audit_merge_ms=68
   full_completions=2
   completed_cache_hits=1
@@ -82,6 +85,11 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["match_probes"][0], {"available": "6", "executed": "0"})
         self.assertEqual(parsed["match_probe_ids"], [("compiler/A.scala", "17", "21", "literal")])
         self.assertEqual(parsed["match_outcomes"][("compiler/A.scala", "17", "21", "literal")], "success")
+        self.assertEqual(parsed["files"]["compiler/A.scala"]["match_ms"], 46)
+        self.assertEqual(parsed["match_phases"][0]["selectors"], "1")
+        self.assertEqual(parsed["match_resolver"][0]["member_calls"], "4")
+        self.assertEqual(parsed["match_resolver"][0]["classpath_positive"], "4")
+        self.assertEqual(parsed["match_resolver_wrappers"][0]["exclusive_us"], "300")
         self.assertEqual(parsed["wrappers"]["member_lookup"]["exclusive_us"], 200)
         self.assertEqual(parsed["rollback"]["operation_observations"], 4)
         self.assertEqual(parsed["classpath_resources"]["returned_bytes"], "900")
@@ -109,7 +117,7 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
                     [{"files": {}, "methods": {}, "resolver": {}, "summary": {"wall_ms": "0"}, "loads": {},
                       "resolver_counts": {}, "load_roots": []}],
                     [0], ["cold"], [{"mode": "evicted", "before_bytes": 1024, "after_evict_bytes": 0}],
-                    [], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary),
+                    [], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary), 0,
                 )
 
             summary = (Path(temporary) / "summary.md").read_text()
@@ -129,7 +137,7 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
             }
             sequential_profile.write_report(
                 Path(temporary), [run], [20], ["warm"], [{"mode": "warm-read-through", "before_bytes": 0}],
-                ["compiler/A.scala"], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary),
+                ["compiler/A.scala"], "0" * 40, Path(temporary), Path(temporary), "21.0.8", Path(temporary), 0,
             )
 
             summary = (Path(temporary) / "summary.md").read_text()

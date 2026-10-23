@@ -24,6 +24,9 @@ AUDIT_TEST = [
     "cargo", "test", "-p", "dotty-typer", "--test", "local_definition_audit",
     "--locked", "pinned_scala39_local_definition_audit", "--", "--ignored", "--nocapture",
 ]
+PREBUILD_TEST = [
+    "cargo", "test", "-p", "dotty-typer", "--test", "local_definition_audit", "--locked", "--no-run",
+]
 LOAD_ROOT_RE = re.compile(
     r"^    root=(.*?)::file=(.*?)::method=(.*?)::request=(.*?)::depth=(\d+)"
     r"::distinct_classes=(\d+)::full_completions=(\d+)::shells_created=(\d+)"
@@ -142,7 +145,7 @@ def warm_input_pages(paths: list[Path]) -> int:
 
 def parse_run(log: str) -> dict:
     result: dict = {
-        "files": {}, "methods": {}, "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {}, "resolver": {}, "summary": {},
+        "files": {}, "methods": {}, "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {}, "resolver": {}, "match_phases": [], "match_resolver": [], "match_resolver_wrappers": [], "summary": {},
         "loads": {}, "resolver_counts": {}, "load_roots": [], "wrappers": {}, "rollback": {},
         "classpath_resources": {},
     }
@@ -175,6 +178,15 @@ def parse_run(log: str) -> dict:
             values = kvs(line)
             key = (values["file"], values["method_symbol"], values["case_tree"], values["family"])
             result["match_outcomes"][key] = values["result"]
+        elif line.startswith("AUDIT_MATCH_RESOLVER "):
+            values = kvs(line)
+            result["match_resolver"].append(values)
+        elif line.startswith("AUDIT_MATCH_PHASE "):
+            values = kvs(line)
+            result["match_phases"].append(values)
+        elif line.startswith("AUDIT_MATCH_RESOLVER_WRAPPER "):
+            values = kvs(line)
+            result["match_resolver_wrappers"].append(values)
         elif line.startswith("AUDIT_RESOLVER_WRAPPER "):
             values = kvs(line)
             operation = values.pop("operation")
@@ -287,6 +299,18 @@ def run_measured(command: list[str], cwd: Path, env: dict[str, str]) -> tuple[in
     }
 
 
+def prebuild_test(cwd: Path, env: dict[str, str]) -> tuple[int, str]:
+    """Build the exact audit integration-test binary outside measured samples."""
+    started = time.monotonic_ns()
+    completed = subprocess.run(PREBUILD_TEST, cwd=cwd, env=env, text=True,
+                               capture_output=True, check=False)
+    elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
+    output = completed.stdout + completed.stderr
+    if completed.returncode:
+        fail(f"audit test binary prebuild failed with exit code {completed.returncode}:\n{output}")
+    return int(elapsed_ms), output
+
+
 def read_saved_runs(directory: Path) -> list[dict]:
     timing_path = directory / "run-timings.tsv"
     if not timing_path.is_file():
@@ -324,7 +348,8 @@ def percentile(values: list[float], p: float) -> float:
 def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_states: list[str],
                  input_cache: list[dict],
                  file_paths: list[str], commit: str,
-                 scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path) -> None:
+                 scala_root: Path, java_home: Path, jdk_version: str, artifact_root: Path,
+                 prebuild_wall_ms: int) -> None:
     timing_only = runs[0]["summary"].get("timing_mode") == "timing_only"
     output_started_ns = time.monotonic_ns()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -348,6 +373,10 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     resolver_totals: dict[str, list[int]] = {}
     load_totals: dict[str, int] = {}
     resolver_count_totals: dict[str, int] = {}
+    match_resolver_totals: dict[str, int] = {}
+    match_wrapper_totals: dict[str, dict[str, int]] = {}
+    match_resolver_rows: list[str] = []
+    match_phase_rows: list[str] = []
     load_root_rows: list[tuple[int, dict]] = []
     file_row_data: list[tuple[int, str, str, str, str]] = []
     method_row_data: list[tuple[int, str, str, str]] = []
@@ -358,6 +387,33 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
             if not timing_only:
                 resolver_count_totals[name] = resolver_count_totals.get(name, 0) + count
         load_root_rows.extend((run_index, row) for row in result["load_roots"])
+        for row in result.get("match_phases", []):
+            match_phase_rows.append(
+                f"{run_index}\t{row.get('file', '')}\t{row.get('elapsed_ms', 'unknown')}\t"
+                f"{row.get('selectors', 'unknown')}\t{row.get('probes', 'unknown')}"
+            )
+        for row in result.get("match_resolver", []):
+            match_resolver_rows.append(f"{run_index}\t" + "\t".join(
+                row.get(name, "unknown") for name in (
+                    "file", "status", "package_calls", "member_calls", "module_identity_calls",
+                    "module_completion_calls", "class_completion_calls", "classfile_completion_calls",
+                    "tasty_completion_calls", "package_inner_us", "member_inner_us",
+                    "module_identity_inner_us", "module_completion_inner_us", "class_completion_inner_us",
+                    "classfile_completion_inner_us", "tasty_completion_inner_us", "rollback_count",
+                    "rollback_operation_observations", "rollback_member_observations", "classpath_requests",
+                    "classpath_inner_calls", "classpath_positive", "classpath_negative", "classpath_errors",
+                    "classpath_negative_cache_hits", "classpath_returned_bytes", "classpath_inner_wall_us",
+                )
+            ))
+            if row.get("status") == "captured":
+                for key, value in row.items():
+                    if key not in {"file", "status"}:
+                        match_resolver_totals[key] = match_resolver_totals.get(key, 0) + int(value)
+        for row in result.get("match_resolver_wrappers", []):
+            operation = row["operation"]
+            totals = match_wrapper_totals.setdefault(operation, {key: 0 for key in ("calls", "wall_us", "delegated_us", "exclusive_us")})
+            for key in totals:
+                totals[key] += int(row[key])
         for path, data in result["files"].items():
             file_samples.setdefault(path, []).append(data.get("total_ms", 0))
             outcome = data.get("outcome", "unknown")
@@ -396,6 +452,18 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         row for _elapsed, _path, _tree, row in sorted(method_row_data, key=lambda item: (-item[0], item[1], item[2], item[3]))
     ]
     (out_dir / "file-phases.tsv").write_text("\n".join(file_rows) + "\n", encoding="utf-8")
+    (out_dir / "match-phases.tsv").write_text(
+        "run\tfile\telapsed_ms\tselectors\tprobes\n" + "\n".join(match_phase_rows) + ("\n" if match_phase_rows else ""),
+        encoding="utf-8",
+    )
+    (out_dir / "match-resolver.tsv").write_text(
+        "run\tfile\tstatus\tpackage_calls\tmember_calls\tmodule_identity_calls\tmodule_completion_calls\tclass_completion_calls\tclassfile_completion_calls\ttasty_completion_calls\tpackage_inner_us\tmember_inner_us\tmodule_identity_inner_us\tmodule_completion_inner_us\tclass_completion_inner_us\tclassfile_completion_inner_us\ttasty_completion_inner_us\trollback_count\trollback_operation_observations\trollback_member_observations\tclasspath_requests\tclasspath_inner_calls\tclasspath_positive\tclasspath_negative\tclasspath_errors\tclasspath_negative_cache_hits\tclasspath_returned_bytes\tclasspath_inner_wall_us\n"
+        + "\n".join(match_resolver_rows) + ("\n" if match_resolver_rows else ""), encoding="utf-8")
+    (out_dir / "match-resolver-wrappers.tsv").write_text(
+        "run\tfile\toperation\tcalls\twall_us\tdelegated_us\texclusive_us\n" + "".join(
+            f"{run_index}\t{row['file']}\t{row['operation']}\t{row['calls']}\t{row['wall_us']}\t{row['delegated_us']}\t{row['exclusive_us']}\n"
+            for run_index, result in enumerate(runs, 1) for row in result.get("match_resolver_wrappers", [])
+        ), encoding="utf-8")
     (out_dir / "methods.tsv").write_text("\n".join(method_rows) + "\n", encoding="utf-8")
     outcome_rows = ["run\tfile\ttree\tresult"] + [
         f"{run_index}\t{path}\t{tree}\t{result}"
@@ -499,6 +567,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"- JDK: `{jdk_version}` at `{java_home}`",
         f"- Host: `{cpu_model}`, {mem_total} memory; build profile `test`; Cargo/test concurrency fixed at 1",
         f"- Manifest files: {len(file_paths)}; profiled method observations per run: {len(runs[0]['methods'])}; repetitions: {len(runs)}",
+        f"- Exact audit integration-test binary prebuilt outside measured samples in {prebuild_wall_ms} ms; measured invocations that rebuild are rejected.",
         f"- Timing mode: `{runs[0]['summary'].get('timing_mode', 'unknown')}`; root method limit per file: `{runs[0]['summary'].get('method_limit_per_file', 'unknown')}`. Exact path/tree/method identities and outcomes are in [`methods.tsv`](methods.tsv) and [`method-outcomes.tsv`](method-outcomes.tsv); match-probe selection is in [`match-probes.tsv`](match-probes.tsv). Wrapper, rollback, and classpath-resource data are in [`audit-wrapper.tsv`](audit-wrapper.tsv), [`rollback.tsv`](rollback.tsv), and [`classpath-resources.tsv`](classpath-resources.tsv).",
         f"- Cargo target cache by repetition: {', '.join(f'{index}={state}' for index, state in enumerate(cache_states, 1))}. `cold` means no compiled local_definition_audit test binary existed in the selected target directory.",
         f"- Input page-cache measurements: {input_cache_summary}. Warm mode reads the selected Scala sources, pinned Scala JARs, and JDK jmods before each sample, then records residency with `fincore`. Cold mode evicts only these selected inputs with POSIX_FADV_DONTNEED; it does not clear the system-wide cache.",
@@ -542,6 +611,38 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         else:
             time_text = f"{millis:.3f}"
         lines.append(f"| `{operation}` | {calls_text} | {time_text} |")
+    lines += ["", "## Match-probe pass attribution", "", "Match selector and case typing run in a separate SourceTyper pass. These resolver and classpath observations are reported separately from root-method typing.", "", "| Operation | Calls | Delegated µs |", "| --- | ---: | ---: |"]
+    match_operations = (
+        ("package", "package_calls", "package_inner_us"),
+        ("member", "member_calls", "member_inner_us"),
+        ("module_identity", "module_identity_calls", "module_identity_inner_us"),
+        ("module_completion", "module_completion_calls", "module_completion_inner_us"),
+        ("class_completion", "class_completion_calls", "class_completion_inner_us"),
+        ("classfile_completion", "classfile_completion_calls", "classfile_completion_inner_us"),
+        ("tasty_completion", "tasty_completion_calls", "tasty_completion_inner_us"),
+    )
+    for operation, calls_key, time_key in match_operations:
+        calls = "not captured" if timing_only else str(match_resolver_totals.get(calls_key, 0))
+        elapsed = "not captured" if timing_only else str(match_resolver_totals.get(time_key, 0))
+        lines.append(f"| `{operation}` | {calls} | {elapsed} |")
+    rollback_cells = "not captured" if timing_only else (
+        f"{match_resolver_totals.get('rollback_count', 0)} calls; "
+        f"{match_resolver_totals.get('rollback_operation_observations', 0)} operation and "
+        f"{match_resolver_totals.get('rollback_member_observations', 0)} member observations"
+    )
+    resource_cells = "not captured" if timing_only else (
+        f"{match_resolver_totals.get('classpath_positive', 0)} positive / "
+        f"{match_resolver_totals.get('classpath_negative', 0)} negative; "
+        f"{match_resolver_totals.get('classpath_returned_bytes', 0)} logical bytes; "
+        f"{match_resolver_totals.get('classpath_inner_wall_us', 0)} µs inner lookup"
+    )
+    lines += ["", f"- Rollback/checkpoint-range metrics: {rollback_cells}.",
+              f"- Match-pass classpath responses: {resource_cells}.",
+              "- Per-file phase and resolver rows: [`match-phases.tsv`](match-phases.tsv), [`match-resolver.tsv`](match-resolver.tsv), and [`match-resolver-wrappers.tsv`](match-resolver-wrappers.tsv)."]
+    if match_wrapper_totals:
+        lines += ["", "Match-pass AuditResolver wrapper intervals:", "", "| Operation | Calls | Wall µs | Delegated µs | Exclusive µs |", "| --- | ---: | ---: | ---: | ---: |"]
+        for operation, values in sorted(match_wrapper_totals.items()):
+            lines.append(f"| `{operation}` | {values['calls']} | {values['wall_us']} | {values['delegated_us']} | {values['exclusive_us']} |")
     lines += ["", "## Classpath load counts", "", "| Observation | Count across runs |", "| --- | ---: |"]
     for name in sorted(load_totals):
         lines.append(f"| `{name}` | {load_totals[name]} |")
@@ -690,7 +791,12 @@ def main() -> int:
     cache_states: list[str] = []
     input_cache: list[dict] = []
     if args.summarize_existing:
+        prebuild_path = out_dir / "prebuild.tsv"
+        if not prebuild_path.is_file():
+            fail(f"no prebuild record for saved samples: {prebuild_path}")
         import csv
+        with prebuild_path.open(encoding="utf-8", newline="") as stream:
+            prebuild_wall_ms = int(next(csv.DictReader(stream, delimiter="\t"))["prebuild_wall_ms"])
         timing_path = out_dir / "run-timings.tsv"
         if not timing_path.is_file():
             fail(f"no existing timing table: {timing_path}")
@@ -722,6 +828,12 @@ def main() -> int:
     else:
         target_dir = Path(env.get("CARGO_TARGET_DIR", REPO_ROOT / "target")).resolve()
         inputs = profile_input_paths(scala_root, java_home, artifact_root, selected)
+        prebuild_wall_ms, prebuild_output = prebuild_test(REPO_ROOT, env)
+        (out_dir / "prebuild.tsv").write_text(
+            "prebuild_wall_ms\texit_status\tbuild_log_bytes\n"
+            f"{prebuild_wall_ms}\t0\t{len(prebuild_output.encode('utf-8'))}\n",
+            encoding="utf-8",
+        )
         for index in range(1, args.runs + 1):
             print(f"starting serial profile run {index}/{args.runs}", flush=True)
             cache_state = cargo_target_cache_state(target_dir)
@@ -741,11 +853,13 @@ def main() -> int:
                 after_setup_bytes = resident_bytes(inputs) if shutil.which("fincore") else "unavailable"
                 input_cache.append({"mode": "warm-read-through", "before_bytes": "unknown", "after_setup_bytes": after_setup_bytes, "warmup_ms": warmup_ms})
             return_code, output, process_metrics = run_measured(AUDIT_TEST, REPO_ROOT, env)
-            wall_ms = process_metrics["cargo_wall_ms"]
             log_path = out_dir / f"run-{index}.log"
             log_write_started = time.monotonic_ns()
             log_path.write_text(output, encoding="utf-8")
             process_metrics["saved_log_write_ms"] = (time.monotonic_ns() - log_write_started) // 1_000_000
+            if re.search(r"^\s*Compiling\s+", output, re.MULTILINE):
+                fail(f"profile run {index} rebuilt a Cargo target inside the measurement; see {out_dir / f'run-{index}.log'}")
+            wall_ms = process_metrics["cargo_wall_ms"]
             if return_code:
                 print(output, file=sys.stderr)
                 fail(f"profile run {index} failed with exit code {return_code}; see {log_path}")
@@ -807,7 +921,7 @@ def main() -> int:
     commit = args.measured_commit or subprocess.check_output(["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], text=True).strip()
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         fail("--measured-commit must be a full 40-character Git SHA")
-    write_report(out_dir, results, wall_times, cache_states, input_cache, selected, commit, scala_root, java_home, match.group(1), artifact_root)
+    write_report(out_dir, results, wall_times, cache_states, input_cache, selected, commit, scala_root, java_home, match.group(1), artifact_root, prebuild_wall_ms)
     if args.compare_with:
         summary_path = out_dir / "summary.md"
         summary = summary_path.read_text(encoding="utf-8")

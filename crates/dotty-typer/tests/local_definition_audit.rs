@@ -10727,6 +10727,8 @@ fn probe_supported_match_cases_in_index(
     classpath: SharedClassPath,
     profile: &mut MatchProfile,
 ) -> BTreeMap<String, usize> {
+    let match_started = Instant::now();
+    let match_resource_before = classpath.cache_metrics();
     let MatchProbeContext {
         arena,
         source,
@@ -10832,7 +10834,7 @@ fn probe_supported_match_cases_in_index(
         typer.with_resolver(Box::new(AuditResolver {
             inner: Some(resolver),
             metrics: Rc::clone(&probe_metrics),
-            class_path_probe: Some(classpath),
+            class_path_probe: Some(classpath.clone()),
             session_out: None,
         }))
     } else if timing_only {
@@ -10874,6 +10876,7 @@ fn probe_supported_match_cases_in_index(
             usize::MAX
         })
         .collect::<Vec<_>>();
+    let probe_count = probes.len();
     if profile_timing {
         eprintln!(
             "AUDIT_MATCH_PROBES available={} executed={}",
@@ -10947,6 +10950,7 @@ fn probe_supported_match_cases_in_index(
             );
         }
     }
+    let selector_count = selector_keys.len();
     for (method, match_tree, family, guarded, protocol) in probes {
         let probe_started = Instant::now();
         let resolver_calls_before = probe_metrics.borrow().module_identity_resolver_calls;
@@ -11043,6 +11047,24 @@ fn probe_supported_match_cases_in_index(
                 }
                 record_typed_match_case_failure(profile, path, &family, &error_name, boundary);
             }
+        }
+    }
+    if profile_timing {
+        eprintln!(
+            "AUDIT_MATCH_PHASE file={path} elapsed_ms={} selectors={} probes={}",
+            match_started.elapsed().as_millis(),
+            selector_count,
+            probe_count
+        );
+        if timing_only_profile {
+            eprintln!("AUDIT_MATCH_RESOLVER file={path} status=not_captured");
+        } else {
+            print_match_resolver_metrics(
+                path,
+                &probe_metrics.borrow(),
+                match_resource_before,
+                classpath.cache_metrics(),
+            );
         }
     }
     successes
@@ -11265,7 +11287,7 @@ fn audit_source_inner_filtered(
             if profile_timing {
                 parse_time = stage_started.elapsed();
                 eprintln!(
-                    "AUDIT_FILE_TIMING file={path} outcome=scanner_error parse_ms={} inventory_ms=0 namer_ms=0 typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                    "AUDIT_FILE_TIMING file={path} outcome=scanner_error parse_ms={} inventory_ms=0 namer_ms=0 typer_setup_ms=0 typing_ms=0 postprocess_ms=0 match_ms=0 total_ms={}",
                     parse_time.as_millis(),
                     file_started.elapsed().as_millis()
                 );
@@ -11370,7 +11392,7 @@ fn audit_source_inner_filtered(
             }
             if profile_timing {
                 eprintln!(
-                    "AUDIT_FILE_TIMING file={path} outcome=namer_error parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                    "AUDIT_FILE_TIMING file={path} outcome=namer_error parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 match_ms=0 total_ms={}",
                     parse_time.as_millis(),
                     inventory_time.as_millis(),
                     namer_time.as_millis(),
@@ -11392,7 +11414,7 @@ fn audit_source_inner_filtered(
     if !import_prefix_only && audit.local_defdefs == 0 && audit.patdef_profile.total == 0 {
         if profile_timing {
             eprintln!(
-                "AUDIT_FILE_TIMING file={path} outcome=no_local_definitions parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 total_ms={}",
+                "AUDIT_FILE_TIMING file={path} outcome=no_local_definitions parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms=0 typing_ms=0 postprocess_ms=0 match_ms=0 total_ms={}",
                 parse_time.as_millis(),
                 inventory_time.as_millis(),
                 namer_time.as_millis(),
@@ -12362,7 +12384,10 @@ fn audit_source_inner_filtered(
         &mut audit.source_function_outcomes,
     );
     drop(typer);
+    let postprocess_time = postprocess_started.elapsed();
+    let mut match_time = Duration::ZERO;
     if let Some(classpath) = probe_classpath {
+        let match_started = Instant::now();
         let session = resolver_session_out
             .borrow_mut()
             .take()
@@ -12380,18 +12405,19 @@ fn audit_source_inner_filtered(
             classpath,
             &mut audit.match_profile,
         );
+        match_time = match_started.elapsed();
         audit.match_profile.typed_case_successes = successes;
     }
     if profile_timing {
-        let postprocess_time = postprocess_started.elapsed();
         eprintln!(
-            "AUDIT_FILE_TIMING file={path} outcome=complete parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} total_ms={}",
+            "AUDIT_FILE_TIMING file={path} outcome=complete parse_ms={} inventory_ms={} namer_ms={} typer_setup_ms={} typing_ms={} postprocess_ms={} match_ms={} total_ms={}",
             parse_time.as_millis(),
             inventory_time.as_millis(),
             namer_time.as_millis(),
             typer_setup_time.as_millis(),
             typing_time.as_millis(),
             postprocess_time.as_millis(),
+            match_time.as_millis(),
             file_started.elapsed().as_millis()
         );
     }
@@ -13603,6 +13629,66 @@ fn print_classpath_resource_metrics(classpath: &SharedClassPath) {
         metrics.resource_bytes_returned,
         metrics.resource_inner_wall_ns / 1_000
     );
+}
+
+fn print_match_resolver_metrics(
+    path: &str,
+    metrics: &ResolverMetrics,
+    before: ClassPathCacheMetrics,
+    after: ClassPathCacheMetrics,
+) {
+    println!(
+        "AUDIT_MATCH_RESOLVER file={path} status=captured package_calls={} member_calls={} module_identity_calls={} module_completion_calls={} class_completion_calls={} classfile_completion_calls={} tasty_completion_calls={} package_inner_us={} member_inner_us={} module_identity_inner_us={} module_completion_inner_us={} class_completion_inner_us={} classfile_completion_inner_us={} tasty_completion_inner_us={} rollback_count={} rollback_operation_observations={} rollback_member_observations={} classpath_requests={} classpath_inner_calls={} classpath_positive={} classpath_negative={} classpath_errors={} classpath_negative_cache_hits={} classpath_returned_bytes={} classpath_inner_wall_us={}",
+        metrics.resolver_package_requests,
+        metrics.resolver_member_requests,
+        metrics.module_identity_resolver_calls,
+        metrics.module_completion_resolver_calls,
+        metrics.class_completion_calls,
+        metrics.classfile_completion_calls,
+        metrics.tasty_completion_calls,
+        metrics.package_lookup_inner_time.as_micros(),
+        metrics.member_lookup_inner_time.as_micros(),
+        metrics.module_identity_inner_time.as_micros(),
+        metrics.module_completion_inner_time.as_micros(),
+        metrics.class_completion_inner_time.as_micros(),
+        metrics.classfile_completion_inner_time.as_micros(),
+        metrics.tasty_completion_inner_time.as_micros(),
+        metrics.rollback_count,
+        metrics.rollback_operation_observations,
+        metrics.rollback_member_observations,
+        after
+            .find_class_calls
+            .saturating_sub(before.find_class_calls),
+        after
+            .resource_inner_calls
+            .saturating_sub(before.resource_inner_calls),
+        after
+            .resource_positive
+            .saturating_sub(before.resource_positive),
+        after
+            .resource_negative
+            .saturating_sub(before.resource_negative),
+        after.resource_errors.saturating_sub(before.resource_errors),
+        after
+            .missing_class_cache_hits
+            .saturating_sub(before.missing_class_cache_hits),
+        after
+            .resource_bytes_returned
+            .saturating_sub(before.resource_bytes_returned),
+        after
+            .resource_inner_wall_ns
+            .saturating_sub(before.resource_inner_wall_ns)
+            / 1_000,
+    );
+    for (operation, timing) in &metrics.audit_wrapper_timings {
+        let wall_us = timing.wall_time.as_micros();
+        let delegated_us = timing.delegated_time.as_micros();
+        println!(
+            "AUDIT_MATCH_RESOLVER_WRAPPER file={path} operation={operation} calls={} wall_us={wall_us} delegated_us={delegated_us} exclusive_us={}",
+            timing.calls,
+            wall_us.saturating_sub(delegated_us)
+        );
+    }
 }
 
 fn print_package_term_module_evidence(metrics: &ResolverMetrics, classpath: SharedClassPath) {
