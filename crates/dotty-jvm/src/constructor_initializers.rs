@@ -44,6 +44,8 @@ pub enum JvmConstructorInitializerInstruction {
     LoadThis,
     /// Push an int-like constant using the class-file builder's compact encoding.
     Constant(i32),
+    /// Push a signed category-two Long constant without narrowing it.
+    LongConstant(i64),
     /// Allocate one planned class for a reference-valued field initializer.
     NewObject {
         /// Checked JVM internal name of the allocated class.
@@ -116,6 +118,9 @@ impl JvmConstructorFieldInitializerPlan {
                 let result = match instruction {
                     JvmConstructorInitializerInstruction::LoadThis => code.aload(0),
                     JvmConstructorInitializerInstruction::Constant(value) => code.iconst(*value),
+                    JvmConstructorInitializerInstruction::LongConstant(value) => {
+                        code.lconst(*value)
+                    }
                     JvmConstructorInitializerInstruction::NewObject { owner } => {
                         code.new_object(owner.clone())
                     }
@@ -127,12 +132,7 @@ impl JvmConstructorFieldInitializerPlan {
                     } => match value_type {
                         JvmType::Int | JvmType::Boolean => code.iload(usize::from(*slot)),
                         JvmType::Reference(_) => code.aload(usize::from(*slot)),
-                        JvmType::Long => {
-                            return Err(JvmCodegenError::UnsupportedTypedExpression {
-                                tree: field.initializer,
-                                node: "Long constructor parameter initializer",
-                            });
-                        }
+                        JvmType::Long => code.lload(usize::from(*slot)),
                     },
                     JvmConstructorInitializerInstruction::IntAdd => code.iadd(),
                     JvmConstructorInitializerInstruction::BooleanNot => {
@@ -466,10 +466,26 @@ impl ConstructorInitializerContext<'_> {
 
         match &tree.kind {
             TreeKind::Literal(literal) => {
+                if let Constant::Long(value) = literal.value {
+                    let found = self.tree_value_type(tree_id, tree.ty)?;
+                    let constant_matches = match self.store.types.try_get(tree.ty) {
+                        Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                        _ => found == JvmType::Long,
+                    };
+                    if found != JvmType::Long || !constant_matches {
+                        return Err(JvmCodegenError::LiteralTypeMismatch {
+                            tree: tree_id,
+                            value: JvmType::Long,
+                            typed: Some(found),
+                        });
+                    }
+                    instructions.push(JvmConstructorInitializerInstruction::LongConstant(value));
+                    return Ok(JvmType::Long);
+                }
                 let (value, value_type) = match literal.value {
                     Constant::Int(value) => (value, JvmType::Int),
                     Constant::Boolean(value) => (i32::from(value), JvmType::Boolean),
-                    _ => return self.unsupported(tree_id, "non-Int/Boolean literal"),
+                    _ => return self.unsupported(tree_id, "unsupported literal type"),
                 };
                 let found = self.tree_value_type(tree_id, tree.ty)?;
                 let constant_matches = match self.store.types.try_get(tree.ty) {

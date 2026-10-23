@@ -18,10 +18,10 @@ classpath-aware JVM backend.
 The current `Long` and JVM category-two support boundary is recorded in
 [`jvm-long-category2.md`](jvm-long-category2.md), including the Scala 3.9.0
 source fixture, method and constructor descriptor metadata (`J`) with
-category-two parameter offsets, CFG/frame verification, and the bounded
-straight-line literal, parameter, local, assignment, and return lowering.
-Long fields, constructors, calls, operators, and control-flow expressions
-remain outside the supported subset.
+category-two parameter offsets, CFG/frame verification, straight-line value
+lowering, and private instance `Long` fields initialized by a primary
+constructor. Long calls, operators, and control-flow expressions remain
+outside the supported subset.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -323,7 +323,7 @@ unsupported states remain typed build errors.
 | --- | --- | --- |
 | Immutable `val` of planned class `C` | `new`/`dup`/constructor/`astore`; later `aload` | Initialized exact `C` may cross joins and loop edges; local must be initialized on every read path |
 | Mutable `var` of planned class `C`, initialized before reads | One canonical `astore` for each initialization or assignment; `aload` for an initialized read | RHS must be exact `C`, assignable through validated ancestry, or a checked sibling `If` whose nearest non-`Object` ancestor is declared `C`; `If` joins intersect source initialization and CFG frames join compatible initialized local classes; `While` headers include preheader and back-edge values while exits preserve only pre-loop definite initialization |
-| Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield` | Exact owner and declared value descriptor; a field write may use up to two validated same-unit ancestry edges |
+| Private primitive or planned-reference field on current `this` | `aload(0)` with checked `getfield`/`putfield`; `Long` uses descriptor `J` and category-two stack flow | Exact owner and declared value descriptor; a field write may use up to two validated same-unit ancestry edges |
 | Planned virtual call on `this`, a reference parameter, `new C`, an immutable local, or a completed reference-valued call | Canonical `invokevirtual` target | Receiver owner is exact or a validated ancestor; arguments and results use exact types or the bounded two-edge assignment |
 | Reference parameter identifier or unqualified `this` value | Exact `aload(slot)` or `aload_0` | Parameter owner/type and `ThisType` must match the current validated plans |
 | Constructor argument from a reference parameter, initialized immutable local, or current `this` | Exact `aload(slot)`/`aload_0` in source order before `invokespecial` | Argument class must match or have the verified ancestry relation of up to two edges; full allocation sequence remains in one basic block |
@@ -493,7 +493,8 @@ completed field type.
 
 Only plain-private, non-static, non-lazy, non-synthetic instance fields of
 ordinary classes whose sole parent is canonical `java.lang.Object` project to
-metadata. Exact `Int` and `Boolean` types produce `I` and `Z`. Immutable
+metadata. Exact `Int`, `Boolean`, and canonical `Long` types produce `I`, `Z`,
+and `J`. Immutable
 fields produce `ACC_PRIVATE | ACC_FINAL`; mutable fields produce
 `ACC_PRIVATE` without `ACC_FINAL`. Metadata preserves the caller's field plan
 order and rejects repeated field symbols and duplicate JVM field names. Whole
@@ -505,8 +506,9 @@ Method-body lowering accepts assignments to planned mutable primitive and
 exact-reference fields
 that resolve canonically to the current class's unqualified field identifier or
 `this.field`. It validates field ownership, plan membership, mutability and
-exact field value type, then emits `aload_0`, the RHS once, and `putfield`; a
-successful assignment completes with Unit and no value on the operand stack.
+exact field value type, then emits the receiver and RHS once before `putfield`.
+Long RHS values use a two-slot temporary with `lstore`/`lload`; a successful
+assignment completes with Unit and no value on the operand stack.
 Local assignments continue to use their canonical local slot and `istore`,
 including when a local shadows a field. Immutable fields and arbitrary
 receivers return typed errors; CFG validation checks temporary states across
@@ -528,10 +530,12 @@ types. Instance local slot zero is reserved for `this`; `Int` and `Boolean`
 parameters occupy one slot and `Long` occupies two, beginning at slot one for
 instance methods. Long literals, parameters, locals, assignments, and returns
 use category-correct `lconst`/`ldc2_w`, `lload`, `lstore`, and `lreturn`
-instructions in straight-line method bodies. Descriptor validation enforces the 255-unit JVM parameter
-limit including the instance receiver. Each output parameter records its
-type, first slot, and width. Long fields, method calls, arithmetic, and
-control-flow lowering remain unsupported.
+instructions in straight-line method bodies. Private instance Long fields use
+descriptor `J`; constructor initializers, field reads, and mutable field writes
+preserve their two-slot stack and local behavior. Descriptor validation
+enforces the 255-unit JVM parameter limit including the instance receiver.
+Each output parameter records its type, first slot, and width. Long method
+calls, arithmetic, and control-flow lowering remain unsupported.
 
 `JvmCompilationUnit::resolve_same_class_call` accepts a complete typed
 `Apply` tree plus the planned caller class and method. It resolves only a
@@ -1004,10 +1008,11 @@ not substitute one identity for another.
 
 The result is a checked instruction plan, not a complete constructor. Each
 field fragment starts with `aload_0`, lowers one value, and ends with `putfield`
-for that canonical field. Supported RHS forms are Int/Boolean literals,
-constructor-owned primitive parameters, an exact planned-reference constructor
-parameter, canonical `Int.+`, canonical Boolean negation, empty-statement
-blocks, and reads of earlier initialized primitive fields. The reference
+for that canonical field. Supported RHS forms are Int/Boolean/Long literals,
+constructor-owned primitive parameters (including two-slot Long parameters),
+an exact planned-reference constructor parameter, canonical `Int.+`,
+canonical Boolean negation, empty-statement blocks, and reads of earlier
+initialized primitive fields. The reference
 parameter is matched by its canonical `SymbolId`, constructor owner, exact
 class identity, and validated local slot; its load uses `aload`. Self and
 forward field reads, reference field reads, user method calls, `this` escape,

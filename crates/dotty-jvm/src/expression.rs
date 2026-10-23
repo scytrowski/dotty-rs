@@ -441,7 +441,7 @@ fn lower_leaf(
                 _ => {
                     return Err(JvmCodegenError::UnsupportedTypedExpression {
                         tree: tree_id,
-                        node: "non-Int/Boolean literal",
+                        node: "unsupported literal type",
                     });
                 }
             };
@@ -1497,7 +1497,10 @@ fn emit_field_assignment(
     let receiver_slot = usize::from(local_layout.max_locals());
     let value_slot = receiver_slot
         .checked_add(1)
-        .filter(|slot| *slot < usize::from(u16::MAX))
+        .filter(|slot| {
+            slot.checked_add(usize::from(field_type.slot_width()))
+                .is_some_and(|end| end <= usize::from(u16::MAX))
+        })
         .ok_or(JvmCodegenError::TooManyLocalSlots {
             method: context.method.symbol(),
         })?;
@@ -1510,25 +1513,22 @@ fn emit_field_assignment(
     match emit_expression(context, rhs, code, depth + 1)? {
         Flow::Diverges => Ok(Flow::Diverges),
         Flow::Value(found) if flow_assignable(context, found, field_type)? => {
-            if found == JvmType::Long {
-                return Err(JvmCodegenError::UnsupportedTypedExpression {
-                    tree: tree_id,
-                    node: "Long field assignment",
-                });
-            }
-            match found {
+            let store_value = match found {
                 JvmType::Reference(_) => code.astore(value_slot),
-                JvmType::Int | JvmType::Boolean | JvmType::Long => code.istore(value_slot),
-            }
-            .and_then(|code| code.aload(receiver_slot))
-            .and_then(|code| match found {
-                JvmType::Reference(_) => code.aload(value_slot),
-                JvmType::Int | JvmType::Boolean | JvmType::Long => code.iload(value_slot),
-            })
-            .map_err(|error| JvmCodegenError::CodeBuilder {
-                tree: tree_id,
-                error,
-            })?;
+                JvmType::Int | JvmType::Boolean => code.istore(value_slot),
+                JvmType::Long => code.lstore(value_slot),
+            };
+            store_value
+                .and_then(|code| code.aload(receiver_slot))
+                .and_then(|code| match found {
+                    JvmType::Reference(_) => code.aload(value_slot),
+                    JvmType::Int | JvmType::Boolean => code.iload(value_slot),
+                    JvmType::Long => code.lload(value_slot),
+                })
+                .map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
+                })?;
             code.putfield(
                 class.identity().internal_name(),
                 field_metadata.name(),

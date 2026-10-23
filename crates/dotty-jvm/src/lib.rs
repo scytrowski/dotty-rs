@@ -72,8 +72,9 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 /// both use the JVM's int-like category-one operand representation. `Long`
 /// uses descriptor `J` and occupies two JVM slots. The current expression
 /// subset supports Long literals, parameters, ordinary locals, assignments,
-/// and method returns; Long fields, calls, operators, and control-flow joins
-/// remain unsupported. References retain their exact planned class identity.
+/// returns, and private instance fields with primary-constructor
+/// initialization. Long calls, operators, and control-flow joins remain
+/// unsupported. References retain their exact planned class identity.
 /// Unit-aware method and field metadata can encode those identities;
 /// store-only projectors remain narrower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1908,10 +1909,12 @@ impl JvmMethodDispatchMetadata {
 
 /// Lowers the supported value-producing leaves from the supplied typed AST.
 ///
-/// Integer and Boolean literals become an integer constant instruction.
+/// Int, Boolean, and Long literals become category-correct constant
+/// instructions.
 /// Parameter identifiers are resolved only through their canonical
-/// `TermRefTarget::Symbol` and this method's parameter metadata. Both produce
-/// [`JvmValueCategory::IntLike`]. The method does not add a return instruction
+/// `TermRefTarget::Symbol` and this method's parameter metadata. Int and
+/// Boolean leaves produce [`JvmValueCategory::IntLike`]; Long leaves produce
+/// [`JvmValueCategory::Long`]. The method does not add a return instruction
 /// or any other method epilogue. Unsupported expressions return a typed error.
 /// The builder is only updated after successful validation and instruction
 /// construction.
@@ -1928,12 +1931,14 @@ pub fn lower_value_expression(
 
 /// Lowers one supported typed expression without appending a method epilogue.
 ///
-/// Integer/Boolean values, canonical Int/Boolean intrinsics, the `Unit`
+/// Int/Boolean/Long values, canonical Int/Boolean intrinsics, the `Unit`
 /// literal, ordered blocks, and nested `If`/local `Return` nodes are supported.
 /// Intrinsics resolve only by their canonical semantic symbols. `Value` leaves
 /// one correctly typed value on the JVM stack; `Unit` completes normally with
 /// no stack value; `Diverges` has no reachable fallthrough. Blocks discard unused primitive
-/// values with `pop` and stop lowering after a definitely diverging statement.
+/// values with category-correct stack operations where supported and stop
+/// lowering after a definitely diverging statement. Long-valued branch joins
+/// and discarded Long statements remain unsupported.
 /// The expression is built into a fresh method-local instruction builder, so
 /// an error never exposes partial code. This standalone API has no local
 /// binding layout; local `Ident` nodes return [`JvmCodegenError::MissingLocalBinding`].
@@ -1951,8 +1956,9 @@ pub fn lower_expression(
 /// terminal return required by its reachable fallthrough.
 ///
 /// The returned builder is method-local and is discarded on any lowering
-/// error. Int and Boolean values use `ireturn`; a normally completing Unit body
-/// gets `return`; a body whose paths all terminate gets no additional epilogue.
+/// error. Int and Boolean values use `ireturn`, Long values use `lreturn`, a
+/// normally completing Unit body gets `return`, and a body whose paths all
+/// terminate gets no additional epilogue.
 pub fn lower_method_body(
     store: &SemanticStore,
     typed_ast: &TypedAst,

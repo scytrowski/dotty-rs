@@ -908,11 +908,7 @@ fn field_descriptor(
     match value_type {
         crate::JvmType::Int => Ok("I".to_owned()),
         crate::JvmType::Boolean => Ok("Z".to_owned()),
-        crate::JvmType::Long => Err(JvmCodegenError::UnsupportedJvmType {
-            symbol,
-            ty,
-            kind: crate::UnsupportedJvmTypeKind::Other,
-        }),
+        crate::JvmType::Long => Ok("J".to_owned()),
         crate::JvmType::Reference(class) => {
             let Some(identity) = class_identities.and_then(|identities| {
                 identities
