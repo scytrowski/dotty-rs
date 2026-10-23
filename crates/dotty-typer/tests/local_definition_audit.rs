@@ -35,6 +35,14 @@ struct ResolverMetrics {
     rollback_count: usize,
     rollback_operation_observations: usize,
     rollback_member_observations: usize,
+    rollback_operation_rows_scanned: usize,
+    rollback_member_rows_scanned: usize,
+    rollback_operation_status_changes: usize,
+    rollback_member_status_changes: usize,
+    resolver_checkpoint_count: usize,
+    resolver_checkpoint_max_depth: usize,
+    module_operation_observations_appended: usize,
+    module_member_observations_appended: usize,
     profiled_root_method_attempts: usize,
     current_file: String,
     current_method: String,
@@ -1494,6 +1502,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                 transaction_state: "observed",
                 error_category,
             });
+        metrics.module_operation_observations_appended += 1;
         drop(metrics);
         record_audit_stage(&self.metrics, "observation_collection", collection_started);
         record_audit_wrapper_timing(
@@ -1583,6 +1592,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     transaction_state: "observed",
                     error_category,
                 });
+            metrics.module_operation_observations_appended += 1;
         }
         drop(metrics);
         record_audit_stage(&self.metrics, "observation_collection", collection_started);
@@ -1683,6 +1693,10 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         metrics
             .module_operation_checkpoints
             .insert(token, (inner_checkpoint, offsets.0, offsets.1));
+        metrics.resolver_checkpoint_count += 1;
+        metrics.resolver_checkpoint_max_depth = metrics
+            .resolver_checkpoint_max_depth
+            .max(metrics.module_operation_checkpoints.len());
         drop(metrics);
         record_audit_stage(&self.metrics, "checkpoint_bookkeeping", bookkeeping_started);
         record_audit_wrapper_timing(
@@ -1721,20 +1735,32 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         metrics.rollback_count += 1;
         metrics.rollback_operation_observations += rolled_back_operations;
         metrics.rollback_member_observations += rolled_back_members;
+        let mut operation_status_changes = 0;
         for observation in metrics
             .module_operation_observations
             .iter_mut()
             .skip(operation_offset)
         {
+            if observation.transaction_state != "rolled_back" {
+                operation_status_changes += 1;
+            }
             observation.transaction_state = "rolled_back";
         }
+        metrics.rollback_operation_rows_scanned += rolled_back_operations;
+        metrics.rollback_operation_status_changes += operation_status_changes;
+        let mut member_status_changes = 0;
         for observation in metrics
             .module_member_observations
             .iter_mut()
             .skip(member_offset)
         {
+            if observation.transaction_state != "rolled_back" {
+                member_status_changes += 1;
+            }
             observation.transaction_state = "rolled_back";
         }
+        metrics.rollback_member_rows_scanned += rolled_back_members;
+        metrics.rollback_member_status_changes += member_status_changes;
         // Checkpoint tokens increase monotonically, so rollback only needs to
         // discard the ordered suffix. `retain` scans every active checkpoint
         // on every rollback, which made this audit bookkeeping quadratic for
@@ -1999,6 +2025,7 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
                     }),
                     transaction_state: "observed",
                 });
+            metrics.module_member_observations_appended += 1;
         }
         merge_module_resolution_profile(&mut metrics.module_resolution, module_profile);
         if prefix.target_kind == "Package"
@@ -14040,10 +14067,18 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         metrics.tasty_completion_inner_time.as_micros()
     );
     println!(
-        "AUDIT_ROLLBACK count={} operation_observations={} member_observations={}",
+        "AUDIT_ROLLBACK count={} checkpoint_count={} checkpoint_max_depth={} operation_appended={} member_appended={} operation_rollback_coverage={} member_rollback_coverage={} operation_rows_scanned={} member_rows_scanned={} operation_status_changes={} member_status_changes={}",
         metrics.rollback_count,
+        metrics.resolver_checkpoint_count,
+        metrics.resolver_checkpoint_max_depth,
+        metrics.module_operation_observations_appended,
+        metrics.module_member_observations_appended,
         metrics.rollback_operation_observations,
-        metrics.rollback_member_observations
+        metrics.rollback_member_observations,
+        metrics.rollback_operation_rows_scanned,
+        metrics.rollback_member_rows_scanned,
+        metrics.rollback_operation_status_changes,
+        metrics.rollback_member_status_changes
     );
     for (operation, timing) in &metrics.audit_wrapper_timings {
         let wall_us = timing.wall_time.as_micros();
