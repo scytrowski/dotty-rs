@@ -1356,19 +1356,23 @@ fn exact_reference_descriptor_shapes_and_local_errors_are_typed() {
             )),
         })
     );
+    let category_two = CfgCodeAnalyzer::analyze_with_current_class(
+        &empty_graph,
+        "categoryTwoParameter",
+        "(JLexample/Counter;)V",
+        false,
+        &pool,
+        owner,
+    )
+    .expect("Long parameters may be mixed with an exact reference signature");
+    assert_eq!(category_two.max_locals, 4);
     assert_eq!(
-        CfgCodeAnalyzer::analyze_with_current_class(
-            &empty_graph,
-            "categoryTwoParameter",
-            "(JLexample/Counter;)V",
-            false,
-            &pool,
-            owner,
-        ),
-        Err(AnalysisError::UnsupportedMethodDescriptorType {
-            parameter: Some(0),
-            actual: dotty_classfile::descriptor::FieldType::Long,
-        })
+        category_two.block_entries()[0].as_ref().unwrap().locals[1],
+        FlowLocalState::Long
+    );
+    assert_eq!(
+        category_two.block_entries()[0].as_ref().unwrap().locals[2],
+        FlowLocalState::LongTail
     );
 
     let mut wrong_slot = CodeSequence::new();

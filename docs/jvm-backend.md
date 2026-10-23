@@ -20,7 +20,12 @@ The current `Long` and JVM category-two support boundary is recorded in
 source fixture, method and constructor descriptor metadata (`J`) with
 category-two parameter offsets, CFG/frame verification, straight-line value
 lowering, and private instance `Long` fields initialized by a primary
-constructor. Long calls, operators, and control-flow expressions remain
+constructor. The backend also supports checked planned Long method calls,
+Long arguments to object creation and approved direct-parent constructor calls
+(including Long constants and forwarded constructor parameters), Long-valued
+`If` joins, and Long locals updated across Boolean/Int-controlled `While`
+loops. Long arithmetic,
+comparisons, static Long calls, and category-two stack manipulation remain
 outside the supported subset.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
@@ -428,8 +433,8 @@ constant folding or prechecks.
 lexer, parser, namer, typer, JVM backend, and JDK 21+ runtime. Its Java harness
 checks arithmetic overflow, signed comparison boundaries, divide-by-zero
 exceptions, and repeated `sumTo` loop execution with `java -Xverify:all`.
-General Scala library lowering, Long operations outside the straight-line
-subset, Float/Double, Java classpath loading,
+General Scala library lowering, Long arithmetic/comparison outside the bounded
+call and control-flow subset, Float/Double, Java classpath loading,
 TASTy emission, the full Scala ABI, universal equality, and arbitrary
 reference-bearing calls remain outside this subset.
 
@@ -535,7 +540,11 @@ descriptor `J`; constructor initializers, field reads, and mutable field writes
 preserve their two-slot stack and local behavior. Descriptor validation
 enforces the 255-unit JVM parameter limit including the instance receiver.
 Each output parameter records its type, first slot, and width. Long method
-calls, arithmetic, and control-flow lowering remain unsupported.
+calls preserve source argument order and exact planned method owner/descriptor;
+Long results keep their two-slot stack width through returns and `If` joins.
+Long local updates may cross a loop backedge only when the initialized
+head/tail pair agrees at the header. Long arithmetic/comparisons, implicit
+conversions, and discarded Long expressions remain unsupported.
 
 `JvmCompilationUnit::resolve_same_class_call` accepts a complete typed
 `Apply` tree plus the planned caller class and method. It resolves only a
@@ -699,10 +708,10 @@ returns only after encoding succeeds, so a failure does not expose a partial
 artifact.
 
 The lower-level `dotty-classfile::CodeBuilder::pop` operation discards one
-category-one JVM stack value. Linear analysis accepts represented
-category-one values and rejects category-two values; the current CFG analyzer
-supports it within its integer-only stack model. This bytecode primitive does
-not infer Scala expression effects or add source block lowering to `dotty-jvm`.
+category-one JVM stack value. Linear and CFG analysis reject using it on a
+category-two Long. Source blocks and loop bodies that discard a Long return a
+typed unsupported error; `pop2` and `dup2` are not emitted. This bytecode
+primitive does not infer Scala expression effects.
 
 The CI JVM gate writes this generated class to disk, inspects it with `javap`,
 compiles a small Java caller with `javac`, and executes it with
@@ -932,8 +941,8 @@ returns follow the same receiver and result restrictions.
 
 `Return.from = Some(...)` is rejected. Non-intrinsic `Select`, `TypeApply`,
 `Match`, `Try`, `New`, closures, nested `DefDef`s, String and other unsupported
-literals, object/reference joins, Long operations outside the documented
-straight-line subset, and all other typed nodes
+literals, object/reference joins outside their validated subset, Long
+arithmetic/comparison, and all other typed nodes
 remain unsupported. No source name lookup, implicit boxing, general-purpose
 coercion, constant folding, or frontend dependency is introduced.
 
