@@ -194,13 +194,12 @@ metadata also retains the exact value type, so later stages do not need to
 recover it from descriptor text. Immutable vals use `ACC_PRIVATE | ACC_FINAL`;
 mutable vars use `ACC_PRIVATE`.
 
-A reference initializer must be a typed identifier for a parameter of a
-constructor owned by the field's class, and the parameter's exact class must
-match the declared field type. Classes absent from the compilation unit,
-`this`, arbitrary reference expressions, arrays, applied types, and
-`private[this]` remain unsupported. Reference metadata requires the complete
-unit; the standalone `JvmClassPlan::metadata_with_typed_ast` entry point stays
-primitive-only because it cannot prove that a referenced class is planned.
+An initialized reference field accepts an exact constructor-owned reference
+parameter copy or one direct allocation of a planned class. Other arbitrary
+reference expressions, arrays, applied types, and `private[this]` remain
+unsupported. Reference metadata requires the complete unit; the standalone
+`JvmClassPlan::metadata_with_typed_ast` entry point stays primitive-only
+because it cannot prove that a referenced class is planned.
 
 The constructor initializer subset supports copying an exact planned
 reference from an unqualified constructor-owned parameter into a private
@@ -245,7 +244,12 @@ parameter can also be read with `aload` from its descriptor-assigned slot, and
 unqualified `this` can be read with `aload_0` after its `ThisType` matches the
 current planned class. Exact planned references may be returned with `areturn`,
 passed to virtual calls, used as call results or receivers, and discarded with
-`pop`. The local's checked class identity must match the initializer's
+`pop`. A completed method result can feed the next selected receiver directly;
+for example, `create(seed).value().get()` lowers each canonical call once in
+source order, while `new OwnedHolder(seed).get()` invokes the instance method
+only after construction completes. Receiver resolution preserves the selected
+method owner and checks each result against the next receiver's planned class
+identity. The local's checked class identity must match the initializer's
 `Flow::Value`, except for an assignment proved through up to two validated
 same-unit ancestry edges; the local and descriptor keep the declared class
 identity. Mutable locals of validated planned reference classes receive

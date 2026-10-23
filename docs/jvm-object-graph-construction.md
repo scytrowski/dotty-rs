@@ -3,7 +3,7 @@
 Issue #1492 records the current source, backend, and verifier boundaries for
 constructing and passing more than one object. It is an audit increment: it
 does not enable any new bytecode form. The source-backed regression is
-`object_graph_construction_audit_keeps_frontend_identity_before_emission_boundary`
+`object_graph_construction_audit_emits_after_frontend_identity_validation`
 in [`tests/jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs),
 using [`ObjectGraphConstruction.scala`](../tests/fixtures/jvm/ObjectGraphConstruction.scala).
 
@@ -38,6 +38,12 @@ class, constructor, method, parameter, and local symbols. In particular:
 - `new OwnedHolder(seed).get()` and `create(seed).value().get()` retain their
   exact selected constructor and method symbols through the complete call
   chains.
+- The chained-receiver regression decodes `Runner.read`,
+  `Runner.chainedFactory`, and `Runner.readOwned` and checks the exact
+  `invokevirtual`/`invokespecial` owners and descriptors. Two fresh source
+  sessions produce byte-identical class batches. A JDK 21 `-Xverify:all`
+  harness checks positive, zero, and negative seeds; a counter in each factory
+  method proves the outer receiver call runs exactly once.
 - The `OwnedHolder.inner` initializer stays a typed `new Counter(seed)` tree
   and uses the exact `OwnedHolder.<init>` parameter symbol.
 
@@ -86,6 +92,11 @@ preserves:
 - `create(counter).value().get()` chains calls on initialized results.
 - `makeHolder(seed).value().get()` chains calls on a reference returned by a
   method whose body itself contains nested constructor applications.
+- `create(seed).value().get()` and `makeHolder(seed).value().get()` each emit
+  one call per selected method in source order, preserving the canonical
+  `Runner`, `Holder`, and `Counter` method owners.
+- `new OwnedHolder(seed).get()` completes `OwnedHolder.<init>(I)V` before
+  invoking `OwnedHolder.get()I` on the initialized instance.
 - An exact reference parameter can be passed to `new Holder(counter)`.
 
 The positive source regression decodes the emitted owners and descriptors and,
@@ -233,7 +244,7 @@ argument integration that consume the verified contract.
 | #1495 | Exact reference constructor arguments, including initialized mutable locals, current-instance private planned fields, planned reference-returning calls, and null for reference formals; preserve the already-working parameter, immutable-local, and same-class `this` forms |
 | #1496 | Two-level nested `new` lowering with separate allocation identities; deeper nesting and branches with a live allocation remain unsupported |
 | #1497 | Reference fields initialized from `new` in constructors |
-| #1498 | Chained call receivers and preserving the already-working receiver forms |
+| #1498 | End-to-end tests for chained call receivers and preserving the already-working receiver forms |
 | #1499 | End-to-end integration after the lower-level contracts are ready |
 
 The #1492 audit itself changed tests and documentation only. This #1493
