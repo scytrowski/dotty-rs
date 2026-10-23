@@ -3,7 +3,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from compare_deferred_audit import cohort_records, gate, main, matching_methods, requests, scalar
+from compare_deferred_audit import (
+    cohort_records,
+    gate,
+    main,
+    matching_methods,
+    requests,
+    scalar,
+    sprint_start_gate_baseline,
+)
 
 
 def report(depth=3, fanout=8, name='B'):
@@ -57,6 +65,20 @@ class DeferredAuditComparisonTests(unittest.TestCase):
                 self.assertEqual(main(), 1)
             self.assertTrue(rows_path.is_file())
             self.assertIn('cohort\tfrozen_row', rows_path.read_text(encoding='utf-8'))
+
+    def test_sprint_start_gate_baseline_reads_targets_and_success_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            baseline_path = Path(temp_dir) / 'baseline.tsv'
+            baseline_path.write_text(
+                'kind\tkey\tvalue\n'
+                'metric\texternal_class_symbol_successes\t12\n'
+                'successful_target_key\tprefix=scala\t1\n',
+                encoding='utf-8',
+            )
+            self.assertEqual(
+                sprint_start_gate_baseline(baseline_path),
+                ({'prefix=scala'}, 12),
+            )
 
     def test_requests_keep_method_identity_and_count(self):
         rows = requests(report())

@@ -89,21 +89,40 @@ def successful_targets(text):
             for target, outcome in outcomes if outcome == 'external class success'}
 
 
-def gate(baseline, current):
-    lost = successful_targets(baseline) - successful_targets(current)
+def gate(baseline, current, baseline_target_keys=None, baseline_class_successes=None):
+    baseline_successes = (successful_targets(baseline) if baseline_target_keys is None
+                          else baseline_target_keys)
+    lost = baseline_successes - successful_targets(current)
     if lost:
         raise ValueError(f'lost previously successful targets: {sorted(lost)}')
     depth = scalar(current, 'dependency_load_profile', 'p95_dependency_depth')
     fanout = scalar(current, 'dependency_load_profile', 'max_distinct_fully_completed_classes_per_request')
     if depth > 6 or fanout > 16:
         raise ValueError(f'dependency reduction gate failed: p95={depth}, fanout={fanout}')
-    before = scalar(baseline, 'resolver_metrics', 'external_class_symbol_successes')
+    before = (scalar(baseline, 'resolver_metrics', 'external_class_symbol_successes')
+              if baseline_class_successes is None else baseline_class_successes)
     after = scalar(current, 'resolver_metrics', 'external_class_symbol_successes')
     if after < before:
         raise ValueError(f'class-success count regressed: {after} < {before}; request movement needs explicit review')
     if scalar(current, 'audit_v1_comparison', 'local_methods') != 3297:
         raise ValueError('typed-method denominator changed')
     return depth, fanout
+
+
+def sprint_start_gate_baseline(path):
+    target_keys = set()
+    class_successes = None
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if not line or line.startswith('kind\t'):
+            continue
+        kind, key, value = line.split('\t')
+        if kind == 'metric' and key == 'external_class_symbol_successes':
+            class_successes = int(value)
+        elif kind == 'successful_target_key':
+            target_keys.add(key)
+    if class_successes is None or not target_keys:
+        raise ValueError(f'incomplete sprint-start gate baseline: {path}')
+    return target_keys, class_successes
 
 
 def cohort_records(text):
@@ -244,13 +263,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('current', type=Path)
     parser.add_argument('--baseline', type=Path, default=Path(__file__).resolve().parents[2] / 'docs/typer-classpath-corpus-audit-976-3.9.0.md')
+    parser.add_argument('--sprint-start-gate-baseline', type=Path)
     parser.add_argument('--rows', type=Path)
     args = parser.parse_args()
     baseline = args.baseline.read_text(encoding='utf-8')
     current = args.current.read_text(encoding='utf-8')
+    target_keys = class_successes = None
+    if args.sprint_start_gate_baseline:
+        target_keys, class_successes = sprint_start_gate_baseline(
+            args.sprint_start_gate_baseline)
     gate_error = None
     try:
-        depth, fanout = gate(baseline, current)
+        depth, fanout = gate(baseline, current, target_keys, class_successes)
     except ValueError as error:
         gate_error = str(error)
         depth = scalar(current, 'dependency_load_profile', 'p95_dependency_depth')
@@ -272,7 +296,8 @@ def main():
         print(f'Gate failed: {gate_error}')
     else:
         print(f'Gate passed: p95 completion depth {depth}/6; maximum completed fanout {fanout}/16.')
-    baseline_successes = successful_targets(baseline)
+    baseline_successes = (successful_targets(baseline) if target_keys is None
+                          else target_keys)
     current_successes = successful_targets(current)
     retained = baseline_successes & current_successes
     print(

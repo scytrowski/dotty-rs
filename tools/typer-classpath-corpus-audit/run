@@ -653,9 +653,11 @@ mkdir -p "$(dirname -- "$output_path")"
 parent_provenance_path="${output_path%.md}-tasty-parent-source-provenance.tsv"
 cp "$tmp_dir/first.tasty-parent-provenance.tsv" "$parent_provenance_path"
 cohort_path="${output_path%.md}-deferred-cohorts.tsv"
+sprint_start_gate_baseline="$repo_root/docs/typer-performance-sprint-start-gate-3.9.0.tsv"
 gate_status=0
 if PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
-    "$tmp_dir/first.report" --rows "$tmp_dir/cohorts.tsv" \
+    "$tmp_dir/first.report" --sprint-start-gate-baseline "$sprint_start_gate_baseline" \
+    --rows "$tmp_dir/cohorts.tsv" \
     >"$tmp_dir/gate.txt" 2>"$tmp_dir/gate-error.txt"; then
     :
 else
@@ -663,7 +665,8 @@ else
 fi
 if [[ "$verify_determinism" == 1 ]]; then
     if PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
-        "$tmp_dir/second.report" --rows "$tmp_dir/second-cohorts.tsv" \
+        "$tmp_dir/second.report" --sprint-start-gate-baseline "$sprint_start_gate_baseline" \
+        --rows "$tmp_dir/second-cohorts.tsv" \
         >"$tmp_dir/second-gate.txt" 2>"$tmp_dir/second-gate-error.txt"; then
         :
     else

@@ -117,6 +117,10 @@ The compact metrics and cohort reconciliation are checked in as
 and [`typer-performance-sprint-cohorts-3.9.0.tsv`](typer-performance-sprint-cohorts-3.9.0.tsv).
 The full target-by-target outcome movement is in
 [`typer-performance-target-movement-3.9.0.tsv`](typer-performance-target-movement-3.9.0.tsv).
+The full-audit runner now uses the compact frozen target-key and class-success
+baseline at
+[`typer-performance-sprint-start-gate-3.9.0.tsv`](typer-performance-sprint-start-gate-3.9.0.tsv);
+#976 remains the source of historical cohort row identities only.
 
 The opt-in frozen TASTy profile also ran locally. Its stale assertions were
 updated to the observed result: 7 unresolved roots / 17 weighted observations,
