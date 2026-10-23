@@ -1491,8 +1491,14 @@ fn emit_block(
     let flow = emit_expression_with_expected(context, expr, block_expected_type, code, depth + 1)?;
     match flow {
         Flow::Value(value) => {
-            let block_matches =
-                block_types_match(context, tree_id, expr, declared_type, expression_type)?;
+            let block_matches = block_types_match(
+                context,
+                tree_id,
+                expr,
+                declared_type,
+                expression_type,
+                block_expected_type,
+            )?;
             let expected = contextual_block_value_type(
                 context,
                 tree_id,
@@ -1514,8 +1520,14 @@ fn emit_block(
             }
         }
         Flow::Null => {
-            let block_matches =
-                block_types_match(context, tree_id, expr, declared_type, expression_type)?;
+            let block_matches = block_types_match(
+                context,
+                tree_id,
+                expr,
+                declared_type,
+                expression_type,
+                block_expected_type,
+            )?;
             let expected = contextual_block_value_type(
                 context,
                 tree_id,
@@ -1535,12 +1547,26 @@ fn emit_block(
         }
         Flow::Unit
             if is_unit_type(context.store, declared_type, context.definitions)
-                && block_types_match(context, tree_id, expr, declared_type, expression_type)? =>
+                && block_types_match(
+                    context,
+                    tree_id,
+                    expr,
+                    declared_type,
+                    expression_type,
+                    block_expected_type,
+                )? =>
         {
             Ok(flow)
         }
         Flow::Diverges
-            if block_types_match(context, tree_id, expr, declared_type, expression_type)? =>
+            if block_types_match(
+                context,
+                tree_id,
+                expr,
+                declared_type,
+                expression_type,
+                block_expected_type,
+            )? =>
         {
             Ok(flow)
         }
@@ -1631,6 +1657,7 @@ fn block_types_match(
     expression_tree: TreeId<Typed>,
     declared: TypeId,
     expression: TypeId,
+    expected_type: Option<TypeId>,
 ) -> Result<bool, JvmCodegenError> {
     if declared == expression || is_nothing_type(context.store, expression, context.definitions) {
         return Ok(true);
@@ -1641,12 +1668,18 @@ fn block_types_match(
         return Ok(true);
     }
 
-    let declared_value_type = block_value_type(context, tree, declared, Some(expression_tree))?;
+    let declared_value_type = contextual_block_value_type(
+        context,
+        tree,
+        declared,
+        expected_type,
+        Some(expression_tree),
+    )?;
     let expression = contextual_block_value_type(
         context,
         tree,
         expression,
-        Some(declared),
+        expected_type.or(Some(declared)),
         Some(expression_tree),
     )?;
     match (declared_value_type, expression) {
@@ -1747,6 +1780,21 @@ fn contextual_block_value_type(
     expected_type: Option<TypeId>,
     intrinsic_expression: Option<TreeId<Typed>>,
 ) -> Result<Option<JvmType>, JvmCodegenError> {
+    if source_type == context.definitions.null_type
+        && let Some(expected_type) = expected_type
+    {
+        let expected = planned_reference_type(
+            context.call_context.map(|(unit, _, _)| unit).ok_or(
+                JvmCodegenError::UnsupportedTypedExpression {
+                    tree,
+                    node: "null-valued composite outside a planned reference context",
+                },
+            )?,
+            expected_type,
+            context.definitions,
+        )?;
+        return Ok(matches!(expected, JvmType::Reference(_)).then_some(expected));
+    }
     if matches!(
         context.store.types.try_get(source_type),
         Some(Type::Or { .. })

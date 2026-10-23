@@ -7430,7 +7430,11 @@ fn typed_null_reference_flows_emit_verifiable_null_values() {
 
     for method_name in [
         "empty",
+        "emptyBlock",
+        "bothNull",
         "passNullToFormal",
+        "passBlockNullToFormal",
+        "blockNullLocal",
         "choose",
         "chooseReverse",
         "replace",
@@ -7445,7 +7449,12 @@ fn typed_null_reference_flows_emit_verifiable_null_values() {
         assert_eq!(
             runner.constant_pool.utf8(method.descriptor_index),
             Ok(match method_name {
-                "empty" | "passNullToFormal" => "()LBox;",
+                "empty"
+                | "emptyBlock"
+                | "passNullToFormal"
+                | "passBlockNullToFormal"
+                | "blockNullLocal" => "()LBox;",
+                "bothNull" => "(Z)LBox;",
                 "choose" | "chooseReverse" | "replace" | "clear" => "(ZLBox;)LBox;",
                 "keepNull" => "(Z)LBox;",
                 _ => unreachable!(),
@@ -7457,7 +7466,7 @@ fn typed_null_reference_flows_emit_verifiable_null_values() {
                 .iter()
                 .filter(|(_, opcode)| *opcode == 0x01)
                 .count(),
-            1,
+            if method_name == "bothNull" { 2 } else { 1 },
             "{method_name} emits one aconst_null for its one null literal"
         );
     }
@@ -7487,8 +7496,12 @@ fn typed_null_reference_flows_emit_verifiable_null_values() {
   public static void main(String[] args) {
     Runner runner = new Runner();
     Box box = new Box(7);
-    if (runner.empty() != null || runner.passNullToFormal() != null)
+    if (runner.empty() != null || runner.emptyBlock() != null
+        || runner.passNullToFormal() != null || runner.passBlockNullToFormal() != null
+        || runner.blockNullLocal() != null)
       throw new AssertionError("null return or reference formal");
+    if (runner.bothNull(true) != null || runner.bothNull(false) != null)
+      throw new AssertionError("both-null If result");
     if (runner.choose(true, box) != null || runner.choose(false, box) != box)
       throw new AssertionError("null-first If result");
     if (runner.chooseReverse(true, box) != box || runner.chooseReverse(false, box) != null)

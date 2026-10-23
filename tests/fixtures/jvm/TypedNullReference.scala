@@ -9,7 +9,14 @@ class Runner:
   def chooseReverse(flag: Boolean, value: Box): Box =
     if flag then value else null
   def empty(): Box = null
+  def emptyBlock(): Box = { 1; null }
+  def bothNull(flag: Boolean): Box =
+    if flag then null else null
   def passNullToFormal(): Box = accept(null)
+  def passBlockNullToFormal(): Box = accept({ 1; null })
+  def blockNullLocal(): Box =
+    val result: Box = { 1; null }
+    result
   def replace(flag: Boolean, value: Box): Box =
     var result: Box = null
     if flag then result = value
