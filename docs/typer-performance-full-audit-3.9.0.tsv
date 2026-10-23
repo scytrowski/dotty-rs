@@ -1,6 +1,6 @@
 metric	value	notes
-sprint_start_sha	4025adf3092cfe4a0e51597acdfc91fcf5359746	Fresh local baseline run at exact sprint-start source SHA
-local_audit_sha	2f67951133	Current full audit source revision
+sprint_start_sha	4025adf3092cfe4a0e51597acdfc91fcf5359746	Fresh local baseline run at exact sprint-start source SHA; compact gate snapshot regenerated from this report
+local_audit_sha	2f67951133	Current full audit source revision; target movement regenerated from its retained report
 scala_source_sha	777528f19a58e794c9954a42f433373472ec57f8	Pinned Scala source checkout
 source_files	1236	Each baseline and current local pass
 local_method_denominator	3297	Sprint start and current
@@ -25,3 +25,5 @@ overall_gate	local_target_retention_pass_hosted_pending	Fresh local comparison p
 baseline_two_pass_elapsed_seconds	3742	Two complete local passes at exact sprint-start SHA; 62:22 total, audit tests completed before report extraction hit disk-full
 baseline_repeat_pass_elapsed_seconds	1884.58	Independent repeated second pass with compressed log
 baseline_normalized_report_sha256	08e0c99ae89c97c67ecca4ccef52a310012bf2b17d8993cc228b3be5539ee603	Baseline/current semantic report normalization: remove interleaved diagnostics and schema-specific AUDIT_ROLLBACK row, canonicalize JAR origins; 2312215 lines match
+successful_target_keys_start_sha256	b11bb1a525efa8dd2ab5dd725143fcd7a67acf7088d538aed4124d651306b1eb	SHA-256 over sorted exact sprint-start target keys; asserted against gate and movement sidecars
+successful_target_keys_current_sha256	b11bb1a525efa8dd2ab5dd725143fcd7a67acf7088d538aed4124d651306b1eb	SHA-256 over sorted current target keys; current equals sprint-start

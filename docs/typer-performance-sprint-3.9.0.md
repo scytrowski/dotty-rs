@@ -138,8 +138,11 @@ is 678 MB, so it remains a local audit artifact rather than a checked-in file.
 The compact metrics and cohort reconciliation are checked in as
 [`typer-performance-full-audit-3.9.0.tsv`](typer-performance-full-audit-3.9.0.tsv)
 and [`typer-performance-sprint-cohorts-3.9.0.tsv`](typer-performance-sprint-cohorts-3.9.0.tsv).
-The full target-by-target outcome movement is in
-[`typer-performance-target-movement-3.9.0.tsv`](typer-performance-target-movement-3.9.0.tsv).
+The full target-by-target outcome movement was regenerated from the retained
+exact-source baseline and current reports. It contains 5,553 normalized request
+targets with no outcome changes between those two snapshots. The baseline key
+set SHA-256 is `b11bb1a525efa8dd2ab5dd725143fcd7a67acf7088d538aed4124d651306b1eb`;
+a consistency test checks it against the compact metrics and movement sidecars.
 The full-audit runner now uses the compact frozen target-key and class-success
 baseline at
 [`typer-performance-sprint-start-gate-3.9.0.tsv`](typer-performance-sprint-start-gate-3.9.0.tsv);
