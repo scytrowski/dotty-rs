@@ -1930,7 +1930,7 @@ impl Frame {
                     self.pop_field_receiver(instruction_index, &owner)?;
                     match field_class {
                         Some(class) => self.push_object(instruction_index, class)?,
-                        None => self.push(instruction_index, ValueKind::Int)?,
+                        None => self.push(instruction_index, value_kind(&ty))?,
                     }
                 } else {
                     let ty = self.field_type(instruction_index, reference, pool)?;
@@ -1963,7 +1963,7 @@ impl Frame {
                             }
                         }
                     } else {
-                        self.pop_expected(instruction_index, ValueKind::Int)?;
+                        self.pop_expected(instruction_index, value_kind(&ty))?;
                     }
                     self.pop_field_receiver(instruction_index, &owner)?;
                 } else {
@@ -3407,7 +3407,8 @@ impl CfgCodeAnalyzer {
     ///
     /// The existing [`Self::analyze`] entry point retains its receiver
     /// placeholder behavior. This context enables exact initialized-reference
-    /// moves, `dup`/`pop`, `getfield`/`putfield` for `int` and `boolean` fields,
+    /// moves, `dup`/`pop`, `getfield`/`putfield` for `int`, `boolean`, and
+    /// `long` fields,
     /// and `invokevirtual` methods with exact object or int-like parameters and
     /// exact object, int-like, or void results. Non-null reference arguments
     /// and receivers must match their declared class names exactly; null is
@@ -3907,7 +3908,7 @@ fn validate_flow_field_type(
     ty: &FieldType,
 ) -> Result<Option<ClassIdentity>, AnalysisError> {
     match ty {
-        FieldType::Int | FieldType::Boolean => Ok(None),
+        FieldType::Int | FieldType::Boolean | FieldType::Long => Ok(None),
         FieldType::Object(name) if is_valid_internal_name(name) => {
             Ok(Some(ClassIdentity(Arc::from(name.as_str()))))
         }
@@ -5871,29 +5872,71 @@ mod tests {
             .is_ok()
         );
 
-        let mut unsupported_type_code = CodeSequence::new();
-        unsupported_type_code
+        let mut long_read = CodeSequence::new();
+        long_read
             .instruction(Instruction::ALoad(LocalIndex::new(0)))
             .instruction(Instruction::GetField(FieldReference::new(operand(
                 long_field,
             ))))
-            .instruction(Instruction::Pop)
+            .instruction(Instruction::LReturn);
+        let long_read_graph = ControlFlowGraph::build(&long_read).unwrap();
+        let long_read_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &long_read_graph,
+            "readLong",
+            "()J",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(long_read_flow.max_stack, 2);
+        assert_eq!(long_read_flow.max_locals, 1);
+
+        let mut long_write = CodeSequence::new();
+        long_write
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::LLoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                long_field,
+            ))))
             .instruction(Instruction::Return);
-        let unsupported_type_graph = ControlFlowGraph::build(&unsupported_type_code).unwrap();
-        assert_eq!(
+        let long_write_graph = ControlFlowGraph::build(&long_write).unwrap();
+        let long_write_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &long_write_graph,
+            "writeLong",
+            "(J)V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(long_write_flow.max_stack, 3);
+        assert_eq!(long_write_flow.max_locals, 3);
+
+        let mut wrong_long_value = CodeSequence::new();
+        wrong_long_value
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                long_field,
+            ))))
+            .instruction(Instruction::Return);
+        let wrong_long_value_graph = ControlFlowGraph::build(&wrong_long_value).unwrap();
+        assert!(matches!(
             CfgCodeAnalyzer::analyze_with_current_class(
-                &unsupported_type_graph,
-                "read",
-                "()V",
+                &wrong_long_value_graph,
+                "writeLong",
+                "(J)V",
                 false,
                 &pool,
                 class_index,
             ),
-            Err(AnalysisError::UnsupportedFlowFieldType {
-                instruction: 1,
-                index: long_field,
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Long,
+                actual: ValueKind::Reference,
             })
-        );
+        ));
 
         let mut wrong_value_code = CodeSequence::new();
         wrong_value_code
