@@ -155,6 +155,7 @@ struct JvmLoweringContext<'a> {
     local_layout: Option<&'a JvmLocalLayout>,
     initialized_locals: HashSet<SymbolId>,
     reference_assignment_restricted_region_depth: usize,
+    long_control_flow_depth: usize,
     call_context: Option<(
         &'a JvmCompilationUnit<'a>,
         &'a JvmClassMetadata,
@@ -179,6 +180,7 @@ impl<'a> JvmLoweringContext<'a> {
             local_layout: None,
             initialized_locals: HashSet::new(),
             reference_assignment_restricted_region_depth: 0,
+            long_control_flow_depth: 0,
             call_context: None,
             expected_expression_type: None,
             node_visits: 0,
@@ -355,8 +357,12 @@ fn append_method_return(
     }
     match (method.descriptor().result(), flow) {
         (JvmReturnType::Value(expected), Flow::Value(found)) if expected == found => {
-            code.ireturn()
-                .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
+            match expected {
+                JvmType::Long => code.lreturn(),
+                JvmType::Int | JvmType::Boolean => code.ireturn(),
+                JvmType::Reference(_) => unreachable!("reference returns handled above"),
+            }
+            .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
         }
         (JvmReturnType::Void, Flow::Unit) => {
             code.return_void()
@@ -399,6 +405,27 @@ fn lower_leaf(
     let tree = context.tree(tree_id)?;
     match &tree.kind {
         TreeKind::Literal(literal) => {
+            if let Constant::Long(value) = literal.value {
+                reject_long_control_flow_value(context, tree_id)?;
+                let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
+                let matches_constant_type = match context.store.types.try_get(tree.ty) {
+                    Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                    _ => typed_primitive == Some(JvmType::Long),
+                };
+                if typed_primitive != Some(JvmType::Long) || !matches_constant_type {
+                    return Err(JvmCodegenError::LiteralTypeMismatch {
+                        tree: tree_id,
+                        value: JvmType::Long,
+                        typed: typed_primitive,
+                    });
+                }
+                code.lconst(value)
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                return Ok(Flow::Value(JvmType::Long));
+            }
             let (value, primitive) = match literal.value {
                 Constant::Int(value) => (value, JvmType::Int),
                 Constant::Boolean(value) => (i32::from(value), JvmType::Boolean),
@@ -465,11 +492,17 @@ fn lower_leaf(
                     })?;
                     return Ok(Flow::Value(local.ty()));
                 }
-                code.iload(usize::from(local.slot())).map_err(|error| {
-                    JvmCodegenError::CodeBuilder {
-                        tree: tree_id,
-                        error,
+                let load = match local.ty() {
+                    JvmType::Long => {
+                        reject_long_control_flow_value(context, tree_id)?;
+                        code.lload(usize::from(local.slot()))
                     }
+                    JvmType::Int | JvmType::Boolean => code.iload(usize::from(local.slot())),
+                    JvmType::Reference(_) => unreachable!("references use aload above"),
+                };
+                load.map_err(|error| JvmCodegenError::CodeBuilder {
+                    tree: tree_id,
+                    error,
                 })?;
                 return Ok(Flow::Value(local.ty()));
             }
@@ -504,10 +537,8 @@ fn lower_leaf(
                 JvmType::Reference(_) => code.aload(usize::from(parameter.slot())),
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(parameter.slot())),
                 JvmType::Long => {
-                    return Err(JvmCodegenError::UnsupportedTypedExpression {
-                        tree: tree_id,
-                        node: "Long parameter expression",
-                    });
+                    reject_long_control_flow_value(context, tree_id)?;
+                    code.lload(usize::from(parameter.slot()))
                 }
             }
             .map_err(|error| JvmCodegenError::CodeBuilder {
@@ -608,7 +639,7 @@ fn parameter_value_type(
                 Some(unit),
             )?
         }
-        JvmType::Int | JvmType::Boolean => {
+        JvmType::Int | JvmType::Boolean | JvmType::Long => {
             primitive_type(context.store, semantic_type, context.definitions).ok_or(
                 JvmCodegenError::ParameterReferenceTypeMismatch {
                     tree,
@@ -617,12 +648,6 @@ fn parameter_value_type(
                     found: None,
                 },
             )?
-        }
-        JvmType::Long => {
-            return Err(JvmCodegenError::UnsupportedTypedExpression {
-                tree,
-                node: "Long parameter expression",
-            });
         }
     };
     if found != parameter.ty() {
@@ -1297,11 +1322,14 @@ fn emit_assignment(
             Ok(Flow::Unit)
         }
         Flow::Value(found) if found == local.ty() => {
-            code.istore(usize::from(local.slot())).map_err(|error| {
-                JvmCodegenError::CodeBuilder {
-                    tree: tree_id,
-                    error,
-                }
+            let store = match local.ty() {
+                JvmType::Long => code.lstore(usize::from(local.slot())),
+                JvmType::Int | JvmType::Boolean => code.istore(usize::from(local.slot())),
+                JvmType::Reference(_) => unreachable!("references use astore above"),
+            };
+            store.map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
             })?;
             Ok(Flow::Unit)
         }
@@ -1546,6 +1574,12 @@ fn emit_block(
             continue;
         }
         match emit_expression(context, stat, code, depth + 1)? {
+            Flow::Value(JvmType::Long) => {
+                return Err(JvmCodegenError::UnsupportedTypedExpression {
+                    tree: stat,
+                    node: "discarded Long value requires category-two stack operation",
+                });
+            }
             Flow::Value(_) => {
                 code.pop()
                     .map_err(|error| JvmCodegenError::CodeBuilder { tree: stat, error })?;
@@ -1742,11 +1776,15 @@ fn emit_local_declaration(
                 error,
             })?;
     } else {
-        code.istore(usize::from(local.slot()))
-            .map_err(|error| JvmCodegenError::CodeBuilder {
-                tree: declaration,
-                error,
-            })?;
+        let store = match local.ty() {
+            JvmType::Long => code.lstore(usize::from(local.slot())),
+            JvmType::Int | JvmType::Boolean => code.istore(usize::from(local.slot())),
+            JvmType::Reference(_) => unreachable!("references use astore above"),
+        };
+        store.map_err(|error| JvmCodegenError::CodeBuilder {
+            tree: declaration,
+            error,
+        })?;
     }
     context.initialized_locals.insert(local.symbol());
     Ok(())
@@ -2848,7 +2886,9 @@ fn emit_short_circuit_boolean_intrinsic(
 
     let initialized_on_skip = context.initialized_locals.clone();
     context.reference_assignment_restricted_region_depth += 1;
+    context.long_control_flow_depth += 1;
     let argument_flow = emit_expression(context, *argument, code, depth + 1)?;
+    context.long_control_flow_depth -= 1;
     context.reference_assignment_restricted_region_depth -= 1;
     if argument_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::BooleanIntrinsicOperandFlowMismatch {
@@ -3240,14 +3280,17 @@ fn emit_if(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    emit_if_body(
+    context.long_control_flow_depth += 1;
+    let result = emit_if_body(
         context,
         tree_id,
         expected_type,
         identity_reference_context,
         code,
         depth,
-    )
+    );
+    context.long_control_flow_depth -= 1;
+    result
 }
 
 fn emit_if_body(
@@ -3273,6 +3316,12 @@ fn emit_if_body(
             if_tree.else_branch,
         )
     };
+    if primitive_type(context.store, result_ty, context.definitions) == Some(JvmType::Long) {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree: tree_id,
+            node: "Long-valued control-flow expression",
+        });
+    }
     let condition_flow = emit_expression(context, condition, code, depth + 1)?;
     if condition_flow != Flow::Value(JvmType::Boolean) {
         return Err(JvmCodegenError::InvalidIfCondition {
@@ -3374,7 +3423,10 @@ fn emit_while(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    emit_while_body(context, tree_id, code, depth)
+    context.long_control_flow_depth += 1;
+    let result = emit_while_body(context, tree_id, code, depth);
+    context.long_control_flow_depth -= 1;
+    result
 }
 
 fn emit_while_body(
@@ -3753,12 +3805,7 @@ fn emit_return(
                 match found {
                     JvmType::Reference(_) => code.areturn(),
                     JvmType::Int | JvmType::Boolean => code.ireturn(),
-                    JvmType::Long => {
-                        return Err(JvmCodegenError::UnsupportedTypedExpression {
-                            tree: tree_id,
-                            node: "Long return expression",
-                        });
-                    }
+                    JvmType::Long => code.lreturn(),
                 }
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -3889,6 +3936,7 @@ fn primitive_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) 
     match store.types.try_get(ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmType::Int),
         Type::Constant(Constant::Boolean(_)) => Some(JvmType::Boolean),
+        Type::Constant(Constant::Long(_)) => Some(JvmType::Long),
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
             ..
@@ -3897,7 +3945,30 @@ fn primitive_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) 
             target: TypeRefTarget::Symbol(symbol),
             ..
         } if *symbol == type_symbol(store, definitions.boolean)? => Some(JvmType::Boolean),
+        Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        } if *symbol == type_symbol(store, definitions.long)?
+            && *prefix == definitions.no_prefix
+            && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) =>
+        {
+            Some(JvmType::Long)
+        }
         _ => None,
+    }
+}
+
+fn reject_long_control_flow_value(
+    context: &JvmLoweringContext<'_>,
+    tree: TreeId<Typed>,
+) -> Result<(), JvmCodegenError> {
+    if context.long_control_flow_depth > 0 {
+        Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree,
+            node: "Long value inside control flow",
+        })
+    } else {
+        Ok(())
     }
 }
 
@@ -4526,12 +4597,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mismatched_and_unsupported_leaves_without_mutating_code() {
+    fn rejects_mismatched_leaves_without_mutating_code() {
         let mut fixture = Fixture::new(&[]);
         let mismatch = fixture.literal(Constant::Int(7), fixture.definitions.boolean);
         let singleton_type = fixture.store.types.alloc(Type::Constant(Constant::Int(5)));
         let mismatched_singleton = fixture.literal(Constant::Int(7), singleton_type);
-        let unsupported = fixture.literal(Constant::Long(7), fixture.definitions.long);
+        let long_singleton_type = fixture.store.types.alloc(Type::Constant(Constant::Long(5)));
+        let mismatched_long = fixture.literal(Constant::Long(7), long_singleton_type);
+        let long_as_int = fixture.literal(Constant::Long(7), fixture.definitions.int);
         for (tree, expected) in [
             (
                 mismatch,
@@ -4550,10 +4623,19 @@ mod tests {
                 },
             ),
             (
-                unsupported,
-                JvmCodegenError::UnsupportedTypedExpression {
-                    tree: unsupported,
-                    node: "non-Int/Boolean literal",
+                mismatched_long,
+                JvmCodegenError::LiteralTypeMismatch {
+                    tree: mismatched_long,
+                    value: JvmType::Long,
+                    typed: Some(JvmType::Long),
+                },
+            ),
+            (
+                long_as_int,
+                JvmCodegenError::LiteralTypeMismatch {
+                    tree: long_as_int,
+                    value: JvmType::Long,
+                    typed: Some(JvmType::Int),
                 },
             ),
         ] {
@@ -4573,6 +4655,30 @@ mod tests {
             );
             assert_eq!(code_bytes(&fixture, &code), before);
         }
+    }
+
+    #[test]
+    fn lowers_canonical_long_literal_as_a_category_two_value() {
+        let mut fixture = Fixture::new(&[]);
+        fixture.set_result(JvmReturnType::Value(JvmType::Long));
+        let literal = fixture.literal(Constant::Long(9_000_000_000), fixture.definitions.long);
+        let mut code = CodeBuilder::new();
+
+        assert_eq!(
+            lower_value_expression(
+                &fixture.store,
+                &fixture.ast,
+                &fixture.definitions,
+                &fixture.method,
+                literal,
+                &mut code,
+            ),
+            Ok(JvmValueCategory::Long)
+        );
+        code.lreturn().unwrap();
+        let bytes = encoded_method_code(&fixture, code);
+        assert_eq!(bytes[0], 0x14, "non-small Long uses ldc2_w");
+        assert_eq!(bytes[3], 0xad, "Long result uses lreturn");
     }
 
     #[test]

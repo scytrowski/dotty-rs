@@ -1540,20 +1540,241 @@ fn canonical_long_descriptors_and_category_two_parameter_slots_are_projected() {
         observed,
         "source reaches JVM metadata projection: {result:?}"
     );
-    assert!(matches!(
-        result,
-        Err(PipelineFailure::Codegen(
-            JvmCodegenError::UnsupportedTypedExpression { .. }
-        ))
-    ));
-    assert!(
-        output.class_files().is_empty(),
-        "unsupported Long body does not publish a partial class"
-    );
+    let artifacts = result.expect("straight-line Long methods emit after #1516");
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(output.class_files(), vec![artifacts[0].path.clone()]);
 }
 
 #[test]
-fn scala_long_source_reaches_typed_plans_before_backend_rejects_it() {
+fn long_literals_parameters_locals_and_returns_verify_and_execute() {
+    let first_output = TestOutputDirectory::new("long-values-first");
+    let second_output = TestOutputDirectory::new("long-values-second");
+    let first = compile_fixture("LongValues.scala", first_output.path()).unwrap();
+    let second = compile_fixture("LongValues.scala", second_output.path()).unwrap();
+
+    assert_eq!(first.class.internal_name(), "Runner");
+    assert_eq!(first.class.bytes(), second.class.bytes());
+    let mut reader = Reader::new(first.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("Runner should decode completely");
+    assert!(reader.is_at_end());
+    class
+        .validate_references()
+        .expect("Long constant pool and method references are valid");
+
+    let signatures = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                class.constant_pool.utf8(method.name_index).unwrap(),
+                class.constant_pool.utf8(method.descriptor_index).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        signatures,
+        [
+            ("<init>", "()V"),
+            ("zero", "()J"),
+            ("one", "()J"),
+            ("constant", "()J"),
+            ("identity", "(J)J"),
+            ("mixed", "(ZIJI)J"),
+            ("roundTrip", "(J)J"),
+            ("reassigned", "(JJ)J"),
+            ("explicit", "(J)J"),
+        ]
+    );
+    let long_index = (1..=u16::MAX)
+        .find(|index| {
+            matches!(
+                class.constant_pool.get(ConstantPoolIndex(*index)),
+                Some(ConstantPoolEntry::Long(9_000_000_000))
+            )
+        })
+        .expect("Long literal constant pool entry");
+    assert!(
+        matches!(
+            class.constant_pool.get(ConstantPoolIndex(long_index)),
+            Some(ConstantPoolEntry::Long(9_000_000_000))
+        ),
+        "nontrivial Long literal is preserved as a CONSTANT_Long"
+    );
+
+    assert_eq!(emitted_method_code(&class, "zero"), [0x09, 0xad]);
+    assert_eq!(emitted_method_code(&class, "one"), [0x0a, 0xad]);
+    let constant = emitted_method_code(&class, "constant");
+    assert_eq!(constant[0], 0x14, "non-small literal uses ldc2_w");
+    assert_eq!(*constant.last().unwrap(), 0xad);
+    assert_eq!(emitted_method_code(&class, "identity"), [0x1f, 0xad]);
+    assert_eq!(emitted_method_code(&class, "mixed"), [0x21, 0xad]);
+    assert_eq!(
+        emitted_method_code(&class, "roundTrip"),
+        [0x1f, 0x42, 0x21, 0xad]
+    );
+    assert_eq!(
+        emitted_method_code(&class, "reassigned"),
+        [0x1f, 0x37, 0x05, 0x21, 0x37, 0x05, 0x16, 0x05, 0xad]
+    );
+    assert_eq!(emitted_method_code(&class, "explicit"), [0x1f, 0xad]);
+    for name in [
+        "zero",
+        "one",
+        "constant",
+        "identity",
+        "mixed",
+        "roundTrip",
+        "reassigned",
+        "explicit",
+    ] {
+        assert_eq!(
+            code_max_stack(&class, name),
+            2,
+            "{name} counts Long as two stack slots"
+        );
+    }
+    assert_eq!(code_max_locals(&class, "identity"), 3);
+    assert_eq!(code_max_locals(&class, "mixed"), 6);
+    assert_eq!(code_max_locals(&class, "roundTrip"), 5);
+    assert_eq!(code_max_locals(&class, "reassigned"), 7);
+
+    if require_jdk_or_skip() {
+        let output_path = first_output.path().to_str().expect("UTF-8 output path");
+        let javap = Command::new("javap")
+            .args(["-v", "-c", "-classpath", output_path, "Runner"])
+            .output()
+            .expect("start javap");
+        assert!(
+            javap.status.success(),
+            "javap rejected Long Runner\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap_output = String::from_utf8_lossy(&javap.stdout);
+        for expected in [
+            "descriptor: ()J",
+            "descriptor: (J)J",
+            "descriptor: (ZIJI)J",
+            "lload_1",
+            "lload_3",
+            "lstore_3",
+            "lstore",
+            "ldc2_w",
+            "lreturn",
+        ] {
+            assert!(
+                javap_output.contains(expected),
+                "javap output omitted {expected:?}:\n{javap_output}"
+            );
+        }
+
+        let harness_path = first_output.path().join("LongValuesHarness.java");
+        fs::write(
+            &harness_path,
+            r#"public final class LongValuesHarness {
+  public static void main(String[] args) {
+    Runner value = new Runner();
+    if (value.zero() != 0L || value.one() != 1L || value.constant() != 9000000000L) throw new AssertionError("Long constants");
+    if (value.identity(Long.MAX_VALUE) != Long.MAX_VALUE || value.identity(Long.MIN_VALUE) != Long.MIN_VALUE || value.identity(-7L) != -7L) throw new AssertionError("parameter and return");
+    if (value.mixed(true, 4, Long.MIN_VALUE, 8) != Long.MIN_VALUE) throw new AssertionError("mixed parameter slots");
+    if (value.roundTrip(-9000000001L) != -9000000001L) throw new AssertionError("immutable local");
+    if (value.reassigned(11L, Long.MAX_VALUE) != Long.MAX_VALUE) throw new AssertionError("mutable local assignment");
+    if (value.explicit(Long.MIN_VALUE) != Long.MIN_VALUE) throw new AssertionError("explicit return");
+    System.out.println("long values ok");
+  }
+}
+"#,
+        )
+        .expect("write LongValuesHarness.java");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(
+            javac.status.success(),
+            "javac rejected LongValuesHarness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "LongValuesHarness",
+            ])
+            .output()
+            .expect("start Java verifier");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected or failed Long Runner\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "long values ok"
+        );
+    }
+}
+
+#[test]
+fn unsupported_long_discard_and_control_flow_fail_without_artifacts() {
+    for (name, source) in [
+        (
+            "LongDiscard.scala",
+            "class LongDiscard:\n  def valueTwice(value: Long): Long =\n    value\n    value\n",
+        ),
+        (
+            "LongBranch.scala",
+            "class LongBranch:\n  def choose(flag: Boolean, left: Long, right: Long): Long = if flag then left else right\n",
+        ),
+        (
+            "LongAndAssignment.scala",
+            "class LongAndAssignment:\n  def update(flag: Boolean, value: Long): Long =\n    var saved: Long = 0L\n    flag && { saved = value; true }\n    saved\n",
+        ),
+        (
+            "LongOrAssignment.scala",
+            "class LongOrAssignment:\n  def update(flag: Boolean, value: Long): Long =\n    var saved: Long = 0L\n    flag || { saved = value; true }\n    saved\n",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(name);
+        let error = compile_source(source, name, output.path())
+            .expect_err("unsupported Long operation must fail closed");
+        assert!(
+            matches!(error, PipelineFailure::Codegen(_)),
+            "{name}: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{name} must not publish a partial class"
+        );
+    }
+
+    let output = TestOutputDirectory::new("LongArithmetic.scala");
+    let error = compile_source(
+        "class LongArithmetic:\n  def increment(value: Long): Long = value + 1L\n",
+        "LongArithmetic.scala",
+        output.path(),
+    )
+    .expect_err("Typer currently cannot complete primitive Long arithmetic lookup");
+    assert!(
+        matches!(
+            &error,
+            PipelineFailure::Typer(TyperError::MemberLookup(error))
+                if matches!(
+                    **error,
+                    dotty_typer::MemberLookupError::ClassInfoUnavailable { .. }
+                )
+        ),
+        "Long arithmetic currently stops at missing scala.Long class info: {error:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn long_category_two_audit_rejects_out_of_scope_fields_and_control_flow() {
     let source = fs::read_to_string(fixture_path("LongCategoryTwo.scala"))
         .expect("read Scala Long category-two audit fixture");
     let output = TestOutputDirectory::new("scala-long-category-two-audit");
@@ -1571,7 +1792,7 @@ fn scala_long_source_reaches_typed_plans_before_backend_rejects_it() {
             canonical_long = Some(definitions.long);
             metadata_failure = Some(
                 unit.metadata(definitions)
-                    .expect_err("Long projection is not yet supported"),
+                    .expect_err("Long field metadata remains outside this issue"),
             );
             let long_box = audit_class_named(unit, "LongBox");
             let runner = audit_class_named(unit, "Runner");
@@ -1653,31 +1874,20 @@ fn scala_long_source_reaches_typed_plans_before_backend_rejects_it() {
         "parser, namer and typer completed before code generation: {result:?}"
     );
     let canonical_long = canonical_long.expect("observer records this session's Long type");
-    assert!(
-        matches!(
-            metadata_failure,
-            Some(JvmCodegenError::UnsupportedJvmReferenceType { ty, kind })
-                if ty == canonical_long
-                    && kind == dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass
-        ),
-        "metadata projection misclassifies canonical Long as an external reference"
-    );
-    let emission_failure = result.expect_err("backend emission rejects Long projection");
-    let PipelineFailure::Codegen(emission_failure) = emission_failure else {
-        panic!("expected a backend projection failure, got {emission_failure:?}")
-    };
-    assert!(
-        matches!(
-            emission_failure,
-            JvmCodegenError::UnsupportedJvmReferenceType { ty, kind }
-                if ty == canonical_long
-                    && kind == dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass
-        ),
-        "the first emission failure is the same unsupported canonical Long projection"
-    );
+    assert!(matches!(
+        metadata_failure,
+        Some(JvmCodegenError::UnsupportedJvmType { ty, kind, .. })
+            if ty == canonical_long && kind == dotty_jvm::UnsupportedJvmTypeKind::Other
+    ));
+    let emission_failure = result.expect_err("Long fields remain out of scope");
+    assert!(matches!(
+        emission_failure,
+        PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType { ty, kind, .. })
+            if ty == canonical_long && kind == dotty_jvm::UnsupportedJvmTypeKind::Other
+    ));
     assert!(
         output.class_files().is_empty(),
-        "failed emission publishes no classes"
+        "unsupported Long field/control-flow methods publish no classes"
     );
 }
 

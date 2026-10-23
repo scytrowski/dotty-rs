@@ -70,16 +70,17 @@ pub const JVM_MAX_PARAMETER_SLOTS: usize = 255;
 ///
 /// `Int` and `Boolean` have distinct descriptor letters (`I` and `Z`) but
 /// both use the JVM's int-like category-one operand representation. `Long`
-/// uses descriptor `J` and occupies two JVM slots; this metadata support does
-/// not enable Long expression lowering. References retain their exact planned
-/// class identity. Unit-aware method and field metadata can encode those
-/// identities; store-only projectors remain narrower.
+/// uses descriptor `J` and occupies two JVM slots. The current expression
+/// subset supports Long literals, parameters, ordinary locals, assignments,
+/// and method returns; Long fields, calls, operators, and control-flow joins
+/// remain unsupported. References retain their exact planned class identity.
+/// Unit-aware method and field metadata can encode those identities;
+/// store-only projectors remain narrower.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmType {
     Int,
     Boolean,
-    /// A category-two JVM `long` value. Metadata support only; code generation
-    /// for Long expressions, fields, and locals remains unsupported.
+    /// A category-two JVM `long` value.
     Long,
     /// A category-one reference to one exact class in a validated compilation unit.
     Reference(SymbolId),

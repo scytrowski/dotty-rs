@@ -551,9 +551,11 @@ pub(super) fn primitive_semantic_value_type(
     validate_semantic_type(store, symbol, ty)?;
     let int = builtin_symbol(store, definitions.int, PrimitiveBuiltin::Int)?;
     let boolean = builtin_symbol(store, definitions.boolean, PrimitiveBuiltin::Boolean)?;
+    let long = builtin_symbol(store, definitions.long, PrimitiveBuiltin::Long)?;
     match store.types.try_get(ty) {
         Some(Type::Constant(Constant::Int(_))) => Ok(JvmType::Int),
         Some(Type::Constant(Constant::Boolean(_))) => Ok(JvmType::Boolean),
+        Some(Type::Constant(Constant::Long(_))) => Ok(JvmType::Long),
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..
@@ -562,6 +564,15 @@ pub(super) fn primitive_semantic_value_type(
             target: TypeRefTarget::Symbol(target),
             ..
         }) if *target == boolean => Ok(JvmType::Boolean),
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(target),
+        }) if *target == long
+            && *prefix == definitions.no_prefix
+            && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) =>
+        {
+            Ok(JvmType::Long)
+        }
         _ => Err(unsupported_type_error(store, symbol, ty)),
     }
 }

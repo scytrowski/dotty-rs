@@ -18,8 +18,10 @@ classpath-aware JVM backend.
 The current `Long` and JVM category-two support boundary is recorded in
 [`jvm-long-category2.md`](jvm-long-category2.md), including the Scala 3.9.0
 source fixture, method and constructor descriptor metadata (`J`) with
-category-two parameter offsets, existing linear/stack-map support, and the
-still unsupported CFG and expression lowering paths.
+category-two parameter offsets, CFG/frame verification, and the bounded
+straight-line literal, parameter, local, assignment, and return lowering.
+Long fields, constructors, calls, operators, and control-flow expressions
+remain outside the supported subset.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
@@ -67,17 +69,18 @@ initialization. Planned method lowering accepts ordinary local `ValDef`
 statements with an initializer: it lowers the RHS once, checks the resulting
 supported primitive or exact planned-reference type, then emits one `istore`
 or `astore` and marks that symbol initialized.
-Assignments to already initialized mutable `Int` and `Boolean` locals inspect
+Assignments to already initialized mutable `Int`, `Boolean`, and `Long` locals inspect
 the exact local symbol without loading it, lower the RHS once, and emit one
-`istore`; the expression leaves Unit on the operand stack. Immutable locals,
+type-correct store (`istore` or `lstore`); the expression leaves Unit on the operand stack. Immutable locals,
 parameters, field selections outside the supported current-instance form,
 unsupported types, and locals not initialized on every reachable path are
 rejected.
 Missing bindings, missing initializers, unsupported types and modifiers,
 initializer type mismatches, and detectable reads before the store fail with
-typed errors. `PatDef` remains unsupported. Initialized primitive
-local reads lower through the same canonical `SymbolId` lookup to one `iload`
-from the allocated slot. Local loads require the current method's validated
+typed errors. `PatDef` remains unsupported. Initialized primitive local reads
+lower through the same canonical `SymbolId` lookup to `iload` or `lload` from
+the allocated head slot. Long locals reserve two consecutive slots; the tail
+is not an independently addressable value. Local loads require the current method's validated
 layout, a completed supported semantic type, and a preceding store on every
 reachable path. Name-only references, foreign or unplanned locals, and reads before
 initialization return typed errors. Reference slots support initialized
@@ -425,7 +428,8 @@ constant folding or prechecks.
 lexer, parser, namer, typer, JVM backend, and JDK 21+ runtime. Its Java harness
 checks arithmetic overflow, signed comparison boundaries, divide-by-zero
 exceptions, and repeated `sumTo` loop execution with `java -Xverify:all`.
-General Scala library lowering, Long/Float/Double, Java classpath loading,
+General Scala library lowering, Long operations outside the straight-line
+subset, Float/Double, Java classpath loading,
 TASTy emission, the full Scala ABI, universal equality, and arbitrary
 reference-bearing calls remain outside this subset.
 
@@ -522,10 +526,12 @@ Formal parameter identities stay in the plan's explicit order and are checked
 against the canonical method owner, completed parameter info, and descriptor
 types. Instance local slot zero is reserved for `this`; `Int` and `Boolean`
 parameters occupy one slot and `Long` occupies two, beginning at slot one for
-instance methods. Descriptor validation enforces the 255-unit JVM parameter
+instance methods. Long literals, parameters, locals, assignments, and returns
+use category-correct `lconst`/`ldc2_w`, `lload`, `lstore`, and `lreturn`
+instructions in straight-line method bodies. Descriptor validation enforces the 255-unit JVM parameter
 limit including the instance receiver. Each output parameter records its
-type, first slot, and width. This metadata support does not enable Long
-expression, field, or local emission.
+type, first slot, and width. Long fields, method calls, arithmetic, and
+control-flow lowering remain unsupported.
 
 `JvmCompilationUnit::resolve_same_class_call` accepts a complete typed
 `Apply` tree plus the planned caller class and method. It resolves only a
@@ -921,8 +927,9 @@ expression roots, as arguments to other calls, and under supported local
 returns follow the same receiver and result restrictions.
 
 `Return.from = Some(...)` is rejected. Non-intrinsic `Select`, `TypeApply`,
-`Match`, `Try`, `New`, closures, nested `DefDef`s, String/Long and other
-non-Int/Boolean literals, object/reference joins, and all other typed nodes
+`Match`, `Try`, `New`, closures, nested `DefDef`s, String and other unsupported
+literals, object/reference joins, Long operations outside the documented
+straight-line subset, and all other typed nodes
 remain unsupported. No source name lookup, implicit boxing, general-purpose
 coercion, constant folding, or frontend dependency is introduced.
 
