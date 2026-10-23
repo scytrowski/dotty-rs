@@ -186,9 +186,13 @@ not be stored, returned, passed as an ordinary method argument, used as an
 ordinary receiver, exposed through a field, or carried across a branch. The
 class-aware CFG verifier supports up to two nested `new` sites in one straight-
 line block and can call an approved method on an initialized receiver while a
-separate outer allocation remains pending. Source lowering of nested
-constructor arguments, conditional or short-circuit arguments, and reference
-operations in `If`/`While` remains outside the current JVM emission contract.
+separate outer allocation remains pending. Source lowering supports one
+planned nested constructor application per outer constructor argument:
+`new Holder(new Counter(seed))`. Multiple sibling inner allocations are
+completed one at a time. It rejects deeper nested constructor applications and
+conditional or short-circuit expressions while an allocation remains pending.
+Reference operations in `If`/`While` remain outside this constructor-argument
+contract.
 
 `dotty-classfile::bytecode::LinearCodeAnalyzer` is not that verifier. It
 represents `New` as the broad `ValueKind::Reference`, lets `Dup` copy any
@@ -212,14 +216,16 @@ code must run under JDK 21+ `java -Xverify:all`.
 | `val c = new C(args)` and later `c.method()` | Supported for an exact planned class and bounded primitive/Unit method signature |
 | Direct `new C(args).method()` | Supported after constructor initialization for the bounded method subset |
 | `new C(parameter)` or an exact immutable local constructor argument | Supported when the reference class and constructor are planned in the same unit |
+| `new Holder(new Counter(seed))` | Supported for one nested planned constructor application; each allocation site is initialized by its own exact constructor in LIFO order |
+| `new Pair(new Counter(first), new Counter(second))` | Supported; sibling child allocations are initialized sequentially while Pair remains the one separate pending allocation |
 | `new C(this)` from a method of `C` | Supported for the exact current-class reference and planned constructor |
 | Method receiver when planned classes declare same-spelled methods | Selected method and receiver `SymbolId`/`TypeId` preserve the exact owner |
 | Private constructor call, wrong constructor arity/type, or missing external class metadata | Rejected at the originating Typer or backend stage; no artifact is published |
-| Mutable reference local, factory result, nested allocation, or null used as a constructor argument | Typer accepts the observed source forms; codegen currently reports `JvmConstructorCallArgumentTypeMismatch` |
+| Initialized mutable reference local, planned factory result, approved private current-instance field, or canonical null for a reference formal used as a constructor argument | Supported by the bounded initialized-reference whitelist |
 | Reference field initialized by `new` in the primary constructor | `UnsupportedJvmReferenceFieldInitializer` |
 | `var` reference local as a receiver, unsupported reference method descriptor, arbitrary classpath receiver | Unsupported; no descriptor fallback |
 | Generic, abstract, trait, external, secondary, or unplanned constructor | Unsupported for JVM emission |
-| Nested allocation or an uninitialized allocation crossing a branch/short-circuit CFG edge | Unsupported; initialized references can flow through the verifier-aware CFG |
+| Third simultaneously live allocation, deeper source nesting, branch-valued constructor argument with a pending allocation, or an uninitialized allocation crossing a CFG edge | Unsupported; the source emitter accepts only one direct nested constructor level and the class-aware verifier rejects pending-site control-flow edges |
 | Duplicate emitted internal class name | `JvmCompilationUnit` validation error |
 
 `tests/fixtures/jvm/CounterObjects.scala` is the end-to-end source gate for this

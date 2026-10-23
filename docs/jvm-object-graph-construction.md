@@ -59,8 +59,9 @@ batch publishes no class files.
 | `new Holder(current)` for an exact immutable reference local | Succeeds; argument keeps the canonical local symbol | Supported and emitted | Existing support |
 | `new Holder(current)` for an initialized exact mutable reference local | Succeeds; argument keeps the canonical local symbol | Supported and emitted | #1495 |
 | `new Holder(saved)` for an exact current-instance private planned reference field | Succeeds; argument keeps the canonical field symbol | Supported and emitted | #1495 |
+| `new Holder(new Counter(seed))` | Succeeds; both constructor applications keep canonical owners and result types | Supported; inner allocation initializes before the outer constructor call | #1496 |
+| `new Pair(new Counter(first), new Counter(second))` | Succeeds; each inner allocation is a distinct source application | Supported; sibling inner allocations initialize sequentially while the outer allocation stays pending | #1496 |
 | `new Link(this)` in a method of `Link` | Succeeds with exact `Link` type | Supported and emitted; `Link.<init>(LLink;)V` verifies under JDK 21 | Existing support |
-| `new Holder(new Counter(seed))` | Succeeds; both constructor selections remain canonical | `Codegen(JvmConstructorCallArgumentTypeMismatch { .. })` | #1496 |
 | `new Holder(makeCounter(seed))` for a planned same-instance reference-returning method | Succeeds; selected factory method remains canonical | Supported and emitted | #1495 |
 | `new Holder(null)` with a reference formal | Succeeds; null stays `Definitions.null_type` | Supported and emitted; null is accepted only with a reference formal | #1495 |
 | `private val inner: Counter = new Counter(seed)` | Succeeds; initializer is a typed constructor application | `Codegen(UnsupportedJvmReferenceFieldInitializer { .. })` | #1497 |
@@ -92,9 +93,12 @@ when JDK validation is enabled, compiles and runs a Java harness with
 `java -Xverify:all`. The bounded reference-valued constructor argument subset
 includes initialized mutable locals, same-class private planned field reads,
 same-instance planned reference-returning calls, and canonical null for a
-reference formal. A new allocation nested inside constructor arguments remains
-outside the current emission contract. A successful selection or a typed result
-alone does not prove that the emitter can represent it.
+reference formal. It also supports one nested planned constructor application
+in each outer constructor argument, including multiple sibling allocations
+which complete sequentially. It rejects a third simultaneously nested
+allocation, branch-valued arguments while an allocation is pending, and nested
+`new` inside another nested constructor's arguments. A successful selection or
+a typed result alone does not prove that the emitter can represent it.
 
 ## Scala 3.9.0 and JDK 21 oracle
 
@@ -227,7 +231,7 @@ argument integration that consume the verified contract.
 | #1493 | Classfile verifier state for multiple live allocation sites, exact alias initialization, and invalid-use checks; implemented by this bounded transfer contract |
 | #1494 | Typer call-selection contracts, only where source typing needs a correction |
 | #1495 | Exact reference constructor arguments, including initialized mutable locals, current-instance private planned fields, planned reference-returning calls, and null for reference formals; preserve the already-working parameter, immutable-local, and same-class `this` forms |
-| #1496 | Nested `new` lowering with separate allocation identities |
+| #1496 | Two-level nested `new` lowering with separate allocation identities; deeper nesting and branches with a live allocation remain unsupported |
 | #1497 | Reference fields initialized from `new` in constructors |
 | #1498 | Chained call receivers and preserving the already-working receiver forms |
 | #1499 | End-to-end integration after the lower-level contracts are ready |

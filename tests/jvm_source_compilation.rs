@@ -7777,8 +7777,12 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(start: Int)\nclass Other(start: Int)\nclass CounterClient:\n  def choose(flag: Boolean): Int =\n    val selected = if flag then new Counter(1) else new Other(2)\n    1\n",
         ),
         (
-            "nested-reference-constructor-argument",
-            "class Counter(start: Int)\nclass Box(counter: Counter)\nclass Client:\n  def nested(): Box = new Box(new Counter(1))\n",
+            "branching-nested-constructor-argument",
+            "class Counter(seed: Int)\nclass Box(counter: Counter)\nclass Client:\n  def nested(flag: Boolean): Box = new Box(new Counter(if flag then 1 else 2))\n",
+        ),
+        (
+            "third-simultaneous-nested-allocation",
+            "class Leaf(seed: Int)\nclass Middle(leaf: Leaf)\nclass Outer(middle: Middle)\nclass Client:\n  def tooDeep(): Outer = new Outer(new Middle(new Leaf(1)))\n",
         ),
         (
             "reference-var-reassignment",
@@ -7883,12 +7887,14 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                     ..
                 })
             ),
-            "nested-reference-constructor-argument" => matches!(
-                &error,
-                PipelineFailure::Codegen(
-                    JvmCodegenError::JvmConstructorCallArgumentTypeMismatch { .. }
+            "branching-nested-constructor-argument" | "third-simultaneous-nested-allocation" => {
+                matches!(
+                    &error,
+                    PipelineFailure::Codegen(
+                        JvmCodegenError::UnsupportedJvmConstructorArgument { .. }
+                    )
                 )
-            ),
+            }
             "reference-field-initialized-by-new" => matches!(
                 &error,
                 PipelineFailure::Codegen(
@@ -8740,6 +8746,140 @@ fn reference_constructor_arguments_lower_in_order_and_verify_initialized_values(
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );
+    }
+}
+
+#[test]
+fn nested_new_constructor_arguments_lower_lifo_and_verify_initialized_values() {
+    let output = TestOutputDirectory::new("nested-new-constructor-arguments");
+    let source = "class Counter(seed: Int):\n  private val value: Int = seed\n  def get(): Int = value\nclass Holder(counter: Counter):\n  private val saved: Counter = counter\n  def get(): Int = saved.get()\nclass Pair(first: Counter, second: Counter):\n  private val savedFirst: Counter = first\n  private val savedSecond: Counter = second\n  def firstValue(): Int = savedFirst.get()\n  def secondValue(): Int = savedSecond.get()\n  def firstCounter(): Counter = savedFirst\n  def secondCounter(): Counter = savedSecond\nclass Node(next: Node):\n  private val saved: Node = next\n  def nextNode(): Node = saved\nclass Client:\n  def create(seed: Int): Holder = new Holder(new Counter(seed))\n  def pair(first: Int, second: Int): Pair = new Pair(new Counter(first), new Counter(second))\n  def sameClass(): Node = new Node(new Node(null))\n";
+    let artifacts = compile_planned_constructor_source(source, output.path()).unwrap();
+    let second_output = TestOutputDirectory::new("nested-new-constructor-arguments-repeat");
+    let second_artifacts =
+        compile_planned_constructor_source(source, second_output.path()).unwrap();
+    assert_eq!(artifacts.len(), second_artifacts.len());
+    for (first, second) in artifacts.iter().zip(&second_artifacts) {
+        assert_eq!(first.class.internal_name(), second.class.internal_name());
+        assert_eq!(first.class.bytes(), second.class.bytes());
+    }
+    let client_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Client")
+        .expect("Client class is emitted");
+    let client = decode_emitted_class(client_artifact);
+    let create = emitted_method_code(&client, "create");
+    assert_opcode_sequence(create, &[0xbb, 0x59, 0xbb, 0x59, 0x1b, 0xb7, 0xb7, 0xb0]);
+    let pair = emitted_method_code(&client, "pair");
+    assert_opcode_sequence(
+        pair,
+        &[
+            0xbb, 0x59, 0xbb, 0x59, 0x1b, 0xb7, 0xbb, 0x59, 0x1c, 0xb7, 0xb7, 0xb0,
+        ],
+    );
+    let constructor_references = |code: &[u8]| {
+        decode_subset_instructions(code)
+            .into_iter()
+            .filter_map(|(offset, opcode)| {
+                if opcode != 0xb7 {
+                    return None;
+                }
+                let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+                let ConstantPoolEntry::Methodref {
+                    class_index,
+                    name_and_type_index,
+                } = client.constant_pool.get(ConstantPoolIndex(index))?
+                else {
+                    panic!("constructor invocation references a Methodref")
+                };
+                Some((
+                    client.constant_pool.class_name(*class_index).unwrap(),
+                    client
+                        .constant_pool
+                        .name_and_type(*name_and_type_index)
+                        .unwrap(),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        constructor_references(create),
+        vec![
+            ("Counter", ("<init>", "(I)V")),
+            ("Holder", ("<init>", "(LCounter;)V"))
+        ]
+    );
+    assert_eq!(
+        constructor_references(pair),
+        vec![
+            ("Counter", ("<init>", "(I)V")),
+            ("Counter", ("<init>", "(I)V")),
+            ("Pair", ("<init>", "(LCounter;LCounter;)V")),
+        ]
+    );
+    let same_class = emitted_method_code(&client, "sameClass");
+    assert_opcode_sequence(
+        same_class,
+        &[0xbb, 0x59, 0xbb, 0x59, 0x01, 0xb7, 0xb7, 0xb0],
+    );
+    assert_eq!(
+        constructor_references(same_class),
+        vec![
+            ("Node", ("<init>", "(LNode;)V")),
+            ("Node", ("<init>", "(LNode;)V")),
+        ]
+    );
+
+    if require_jdk_or_skip() {
+        let output_path = output.path().to_str().expect("UTF-8 output path");
+        let harness = output
+            .path()
+            .join("NestedNewConstructorArgumentsHarness.java");
+        fs::write(
+            &harness,
+            "public final class NestedNewConstructorArgumentsHarness { public static void main(String[] args) { Client client = new Client(); if (client.create(10).get() != 10) throw new AssertionError(\"nested constructor argument\"); Pair pair = client.pair(7, 8); if (pair.firstValue() != 7 || pair.secondValue() != 8 || pair.firstCounter() == pair.secondCounter()) throw new AssertionError(\"sequential nested constructor arguments\"); Node node = client.sameClass(); if (node.nextNode() == null || node.nextNode().nextNode() != null) throw new AssertionError(\"same-class nested constructor arguments\"); } }\n",
+        )
+        .unwrap();
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness)
+            .output()
+            .unwrap();
+        assert!(
+            javac.status.success(),
+            "javac rejected nested-new constructor harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "NestedNewConstructorArgumentsHarness",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected nested-new constructor harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        let javap = Command::new("javap")
+            .args(["-c", "-v", "-classpath", output_path, "Client"])
+            .output()
+            .unwrap();
+        assert!(
+            javap.status.success(),
+            "javap -c -v rejected the emitted Client class\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javap.stdout),
+            String::from_utf8_lossy(&javap.stderr)
+        );
+        let javap_output = String::from_utf8_lossy(&javap.stdout);
+        assert!(javap_output.contains("Counter.\"<init>\":(I)V"));
+        assert!(javap_output.contains("Holder.\"<init>\":(LCounter;)V"));
+        assert!(javap_output.contains("Pair.\"<init>\":(LCounter;LCounter;)V"));
+        assert!(javap_output.contains("Node.\"<init>\":(LNode;)V"));
     }
 }
 
