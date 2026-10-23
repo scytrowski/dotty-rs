@@ -11,7 +11,7 @@ This profile evaluates the post-typing audit changes for issue #1486. It is a bo
 | Resolver trace join | Repeatedly scan all method keys and clone matching observations at each local method | Parse/index trace keys once per file and clone each matching observation once: O(trace keys + observations + local methods × lookup) |
 | Baseline function outcomes | Repeated source-prefix line scans and full failure scans | Reuse the source line and enclosing-failure indexes |
 
-The index remains file-local. Resolver observation order and duplicates are retained. The root-failure selection still uses the smallest covering source range and stable original failure order for ties. When malformed AST methods have no indexed source span, their failures stay in a once-built fallback list.
+The index remains file-local. Resolver observation order and duplicates are retained. The root-failure selection still uses the smallest covering source range and stable original failure order for ties. If method ranges are equal/crossing or a failure's body range disagrees with its owner's recovered span, attribution falls back to the original full range scan for that file; this preserves malformed-AST behavior while keeping the common laminar, consistent case indexed. A failure whose owner has no indexed source span also activates that fallback.
 
 ## Measurements
 
