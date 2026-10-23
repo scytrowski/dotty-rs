@@ -30,8 +30,21 @@ const FIXTURE_DIRECTORY: &str = "tests/fixtures/jvm";
 
 type SourceBatchObserver<'observer> =
     dyn for<'a> FnMut(&mut JvmCompilationUnit<'a>, &Definitions) + 'observer;
+type SourceSemanticObserver<'observer> = dyn for<'a> FnMut(
+        &AstArena<Untyped>,
+        &SourceSemanticIndex,
+        &mut JvmCompilationUnit<'a>,
+        &Definitions,
+    ) + 'observer;
 type TyperFailureObserver<'observer> =
     dyn for<'a> FnMut(&AstArena<Untyped>, &SourceTyper<'a>, &TyperError) + 'observer;
+
+#[derive(Default)]
+struct SourceBatchObservers<'observer> {
+    batch: Option<&'observer mut SourceBatchObserver<'observer>>,
+    typer_failure: Option<&'observer mut TyperFailureObserver<'observer>>,
+    source: Option<&'observer mut SourceSemanticObserver<'observer>>,
+}
 
 #[derive(Debug)]
 #[allow(dead_code)] // Retain typed stage failures so test panics report the exact pipeline error.
@@ -223,13 +236,13 @@ fn compile_source_batch(
     )
 }
 
-fn compile_source_batch_observed(
+fn compile_source_batch_observed<'observer>(
     source_text: &str,
     source_file_name: &str,
     output_directory: &Path,
     source_id: SourceId,
     cardinality: SourceUnitCardinality,
-    observe: Option<&mut SourceBatchObserver<'_>>,
+    observe: Option<&'observer mut SourceBatchObserver<'observer>>,
 ) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
     compile_source_batch_with_typer_failure_observer(
         source_text,
@@ -237,8 +250,31 @@ fn compile_source_batch_observed(
         output_directory,
         source_id,
         cardinality,
-        observe,
-        None,
+        SourceBatchObservers {
+            batch: observe,
+            ..SourceBatchObservers::default()
+        },
+    )
+}
+
+fn compile_source_batch_with_source_observer<'observer>(
+    source_text: &str,
+    source_file_name: &str,
+    output_directory: &Path,
+    source_id: SourceId,
+    cardinality: SourceUnitCardinality,
+    observe: &'observer mut SourceSemanticObserver<'observer>,
+) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    compile_source_batch_with_typer_failure_observer(
+        source_text,
+        source_file_name,
+        output_directory,
+        source_id,
+        cardinality,
+        SourceBatchObservers {
+            source: Some(observe),
+            ..SourceBatchObservers::default()
+        },
     )
 }
 
@@ -248,9 +284,13 @@ fn compile_source_batch_with_typer_failure_observer(
     output_directory: &Path,
     source_id: SourceId,
     cardinality: SourceUnitCardinality,
-    mut observe: Option<&mut SourceBatchObserver<'_>>,
-    mut observe_typer_failure: Option<&mut TyperFailureObserver<'_>>,
+    observers: SourceBatchObservers<'_>,
 ) -> Result<Vec<EmittedArtifact>, PipelineFailure> {
+    let SourceBatchObservers {
+        batch: mut observe,
+        typer_failure: mut observe_typer_failure,
+        source: mut observe_source,
+    } = observers;
     let source = SourceText::new(source_text)
         .map_err(|error| PipelineFailure::SourceText(error.to_string()))?;
     let scanner = ContextualScanner::new(source_text)
@@ -576,6 +616,9 @@ fn compile_source_batch_with_typer_failure_observer(
         typed_ast: typer.typed_ast(),
         classes: plans,
     };
+    if let Some(observe) = observe_source.as_mut() {
+        observe(&parsed.ast, &index, &mut unit, &definitions);
+    }
     if let Some(observe) = observe.as_mut() {
         observe(&mut unit, &definitions);
     }
@@ -2172,6 +2215,447 @@ fn sibling_batch_rejects_a_base_without_its_required_parent_constructor_proof() 
             issue: dotty_jvm::JvmSuperclassIssue::ParentConstructorUnavailable,
         }) if class == left && parent == base
     ));
+}
+
+#[test]
+fn object_graph_construction_audit_keeps_frontend_identity_before_emission_boundary() {
+    let source = fs::read_to_string(fixture_path("ObjectGraphConstruction.scala"))
+        .expect("read the bounded object-graph source fixture");
+    let output = TestOutputDirectory::new("object-graph-construction-audit");
+    let mut observed = false;
+    let source_id = SourceId::from_index(1492);
+    let mut inspect = |ast: &AstArena<Untyped>,
+                       index: &SourceSemanticIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        let counter = audit_class_named(unit, "Counter");
+        let holder = audit_class_named(unit, "Holder");
+        let owned_holder = audit_class_named(unit, "OwnedHolder");
+        let runner = audit_class_named(unit, "Runner");
+        let primary_constructor = |class| {
+            let plan = unit
+                .classes
+                .iter()
+                .find(|plan| plan.class == class)
+                .expect("source class has a JVM plan");
+            let JvmClassInitializationPlan::PrimaryConstructor(constructor) = &plan.initialization
+            else {
+                panic!("source primary constructor proof is retained")
+            };
+            constructor
+        };
+        let counter_constructor = primary_constructor(counter).symbol();
+        let holder_constructor = primary_constructor(holder).symbol();
+        let owned_holder_constructor = primary_constructor(owned_holder).symbol();
+
+        let owner_name = |symbol: SymbolId| {
+            let owner = unit
+                .store
+                .symbols
+                .get(symbol)
+                .owner
+                .expect("selected call has a canonical declaring owner");
+            unit.store
+                .names
+                .resolve(unit.store.symbols.get(owner).name.text())
+                .to_owned()
+        };
+        for (symbol, owner) in [
+            (counter_constructor, "Counter"),
+            (holder_constructor, "Holder"),
+            (owned_holder_constructor, "OwnedHolder"),
+            (audit_method_named(unit, counter, "get").method, "Counter"),
+            (audit_method_named(unit, holder, "get").method, "Holder"),
+            (audit_method_named(unit, holder, "value").method, "Holder"),
+            (
+                audit_method_named(unit, runner, "makeCounter").method,
+                "Runner",
+            ),
+            (audit_method_named(unit, runner, "create").method, "Runner"),
+        ] {
+            assert_eq!(owner_name(symbol), owner, "selected symbol {symbol:?}");
+        }
+
+        let targets = |method: &str| {
+            let body = audit_method_named(unit, runner, method)
+                .body
+                .unwrap_or_else(|| panic!("Runner.{method} has a typed body"));
+            typed_tree_targets(unit, body)
+        };
+        let create_targets = targets("create");
+        assert!(create_targets.contains(&holder_constructor));
+        assert!(create_targets.contains(&counter_constructor));
+        let factory_targets = targets("fromFactory");
+        assert!(factory_targets.contains(&holder_constructor));
+        assert!(factory_targets.contains(&audit_method_named(unit, runner, "makeCounter").method));
+        let chain_targets = targets("read");
+        assert!(chain_targets.contains(&audit_method_named(unit, runner, "create").method));
+        assert!(chain_targets.contains(&audit_method_named(unit, holder, "value").method));
+        assert!(chain_targets.contains(&audit_method_named(unit, counter, "get").method));
+        let direct_new_receiver_targets = targets("readOwned");
+        assert!(direct_new_receiver_targets.contains(&owned_holder_constructor));
+        assert!(
+            direct_new_receiver_targets
+                .contains(&audit_method_named(unit, owned_holder, "get").method)
+        );
+        for method in ["existing", "fromImmutable", "fromMutable", "fromNull"] {
+            assert!(
+                targets(method).contains(&holder_constructor),
+                "Runner.{method} retains the canonical Holder constructor application"
+            );
+        }
+
+        let existing = audit_method_named(unit, runner, "existing");
+        let TreeKind::Apply(existing_call) = &unit.typed_ast.get(existing.body.unwrap()).kind
+        else {
+            panic!("existing remains the typed Holder constructor application")
+        };
+        assert_eq!(existing.parameters.len(), 1);
+        assert_eq!(existing_call.args.len(), 1);
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(existing_call.args[0]).ty),
+            Some(existing.parameters[0]),
+            "constructor argument keeps the exact source method parameter"
+        );
+
+        let from_mutable = audit_method_named(unit, runner, "fromMutable");
+        let mutable_locals = from_mutable
+            .locals
+            .iter()
+            .filter(|local| local.mutable)
+            .collect::<Vec<_>>();
+        let [mutable_local] = mutable_locals.as_slice() else {
+            panic!("fromMutable has one planned mutable reference local")
+        };
+        let TreeKind::Block(block) = &unit.typed_ast.get(from_mutable.body.unwrap()).kind else {
+            panic!("fromMutable preserves its source block")
+        };
+        let TreeKind::Apply(mutable_call) = &unit.typed_ast.get(block.expr).kind else {
+            panic!("fromMutable ends with the Holder constructor application")
+        };
+        assert_eq!(mutable_call.args.len(), 1);
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(mutable_call.args[0]).ty),
+            Some(mutable_local.symbol),
+            "mutable constructor argument retains its local SymbolId"
+        );
+
+        let from_immutable = audit_method_named(unit, runner, "fromImmutable");
+        let immutable_local = from_immutable
+            .locals
+            .iter()
+            .find(|local| !local.mutable)
+            .expect("fromImmutable has a planned immutable reference local");
+        let TreeKind::Block(immutable_block) =
+            &unit.typed_ast.get(from_immutable.body.unwrap()).kind
+        else {
+            panic!("fromImmutable preserves its local binding block")
+        };
+        let TreeKind::Apply(immutable_call) = &unit.typed_ast.get(immutable_block.expr).kind else {
+            panic!("fromImmutable ends with the Holder constructor application")
+        };
+        assert_eq!(immutable_call.args.len(), 1);
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(immutable_call.args[0]).ty),
+            Some(immutable_local.symbol),
+            "immutable constructor argument retains its local SymbolId"
+        );
+
+        let from_null = audit_method_named(unit, runner, "fromNull");
+        let TreeKind::Apply(null_call) = &unit.typed_ast.get(from_null.body.unwrap()).kind else {
+            panic!("fromNull remains the typed Holder constructor application")
+        };
+        let TreeKind::Literal(null_literal) = &unit.typed_ast.get(null_call.args[0]).kind else {
+            panic!("null constructor argument remains a literal")
+        };
+        assert_eq!(null_literal.value, Constant::Null);
+        assert_eq!(
+            unit.typed_ast.get(null_call.args[0]).ty,
+            definitions.null_type
+        );
+
+        let create = audit_method_named(unit, runner, "create");
+        let TreeKind::Apply(outer) = &unit.typed_ast.get(create.body.unwrap()).kind else {
+            panic!("create remains the typed Holder constructor application")
+        };
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(outer.function).ty),
+            Some(holder_constructor)
+        );
+        assert_eq!(outer.args.len(), 1);
+        let inner = outer.args[0];
+        assert!(matches!(unit.typed_ast.get(inner).kind, TreeKind::Apply(_)));
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(inner).ty),
+            Some(counter)
+        );
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(create.body.unwrap()).ty),
+            Some(holder)
+        );
+
+        let from_factory = audit_method_named(unit, runner, "fromFactory");
+        let TreeKind::Apply(outer) = &unit.typed_ast.get(from_factory.body.unwrap()).kind else {
+            panic!("fromFactory remains the typed Holder constructor application")
+        };
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(outer.function).ty),
+            Some(holder_constructor)
+        );
+        assert!(matches!(
+            unit.typed_ast.get(outer.args[0]).kind,
+            TreeKind::Apply(_)
+        ));
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(outer.args[0]).ty),
+            Some(counter)
+        );
+
+        let dotty_core::SourceDefinition::Canonical {
+            source,
+            tree: holder_tree,
+        } = index
+            .definition_of(holder)
+            .expect("Holder retains source provenance")
+        else {
+            panic!("Holder has a canonical source definition")
+        };
+        assert_eq!(source, source_id);
+        let TreeKind::TypeDef(holder_definition) = &ast.get(holder_tree).kind else {
+            panic!("Holder source definition is a TypeDef")
+        };
+        let TreeKind::Template(holder_template) = &ast.get(holder_definition.rhs).kind else {
+            panic!("Holder source definition retains its Template")
+        };
+        let TreeKind::DefDef(holder_constructor_tree) = &ast.get(holder_template.constructor).kind
+        else {
+            panic!("Holder source primary constructor is a DefDef")
+        };
+        let [holder_source_parameter] = holder_constructor_tree.value_param_clauses[0].as_slice()
+        else {
+            panic!("Holder source constructor has one parameter")
+        };
+        let class_owned_counter = index
+            .symbol_at(source_id, *holder_source_parameter)
+            .expect("source parameter has a class-owned identity");
+        let constructor_owned_counter = index
+            .derived_symbol_at(holder_constructor, source_id, *holder_source_parameter)
+            .expect("source parameter has a constructor-owned identity");
+        assert_ne!(class_owned_counter, constructor_owned_counter);
+        assert_eq!(
+            unit.store.symbols.get(class_owned_counter).owner,
+            Some(holder)
+        );
+        assert_eq!(
+            unit.store.symbols.get(constructor_owned_counter).owner,
+            Some(holder_constructor)
+        );
+
+        let owned_plan = unit
+            .classes
+            .iter()
+            .find(|plan| plan.class == owned_holder)
+            .expect("OwnedHolder plan exists");
+        let inner_field = owned_plan
+            .fields
+            .iter()
+            .find(|field| {
+                unit.store
+                    .names
+                    .resolve(unit.store.symbols.get(field.field).name.text())
+                    == "inner"
+            })
+            .expect("OwnedHolder.inner has a field plan");
+        let initializer = inner_field
+            .initializer
+            .expect("field initializer has a typed root");
+        assert_eq!(
+            audit_type_symbol(unit, unit.typed_ast.get(initializer).ty),
+            Some(counter)
+        );
+        assert!(typed_tree_targets(unit, initializer).contains(&counter_constructor));
+        let TreeKind::Apply(field_allocation) = &unit.typed_ast.get(initializer).kind else {
+            panic!("OwnedHolder.inner keeps the Counter constructor application")
+        };
+        assert_eq!(field_allocation.args.len(), 1);
+        let dotty_core::SourceDefinition::Canonical {
+            tree: owned_tree, ..
+        } = index
+            .definition_of(owned_holder)
+            .expect("OwnedHolder retains source provenance")
+        else {
+            panic!("OwnedHolder has a canonical source definition")
+        };
+        let TreeKind::TypeDef(owned_definition) = &ast.get(owned_tree).kind else {
+            panic!("OwnedHolder source definition is a TypeDef")
+        };
+        let TreeKind::Template(owned_template) = &ast.get(owned_definition.rhs).kind else {
+            panic!("OwnedHolder retains its source Template")
+        };
+        let TreeKind::DefDef(owned_constructor_tree) = &ast.get(owned_template.constructor).kind
+        else {
+            panic!("OwnedHolder primary constructor is a DefDef")
+        };
+        let [owned_seed_tree] = owned_constructor_tree.value_param_clauses[0].as_slice() else {
+            panic!("OwnedHolder source constructor has one seed parameter")
+        };
+        let owned_seed = index
+            .derived_symbol_at(owned_holder_constructor, source_id, *owned_seed_tree)
+            .expect("OwnedHolder seed has its constructor-owned identity");
+        assert_eq!(
+            term_type_target(unit, unit.typed_ast.get(field_allocation.args[0]).ty),
+            Some(owned_seed),
+            "field allocation argument retains the constructor-owned seed"
+        );
+        let Type::Method(signature) =
+            unit.store
+                .types
+                .get(match unit.store.symbols.info(owned_holder_constructor) {
+                    dotty_core::SymbolInfo::Complete(ty) => *ty,
+                    other => {
+                        panic!("OwnedHolder constructor has complete signature: {other:?}")
+                    }
+                })
+        else {
+            panic!("OwnedHolder constructor signature is a method")
+        };
+        assert_eq!(signature.params.len(), 1);
+        assert_eq!(owner_name(owned_holder_constructor), "OwnedHolder");
+    };
+    let result = compile_source_batch_with_source_observer(
+        &source,
+        "ObjectGraphConstruction.scala",
+        output.path(),
+        source_id,
+        SourceUnitCardinality::AtLeastTwo,
+        &mut inspect,
+    );
+    assert!(
+        observed,
+        "the real frontend completed before backend emission"
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::UnsupportedJvmReferenceFieldInitializer { .. }
+        ))
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "audit failure publishes no classfiles"
+    );
+}
+
+#[test]
+fn object_graph_direct_new_and_completed_call_receivers_remain_supported() {
+    let output = TestOutputDirectory::new("object-graph-supported-receivers");
+    let artifacts = compile_planned_constructor_source(
+        "class Counter(initial: Int):\n  private var current: Int = initial\n  def get(): Int = current\nclass Holder(counter: Counter):\n  private val inner: Counter = counter\n  def value(): Counter = inner\nclass Link(next: Link):\n  def wrapSelf(): Link = new Link(this)\nclass Runner:\n  def makeCounter(seed: Int): Counter = new Counter(seed)\n  def create(counter: Counter): Holder = new Holder(counter)\n  def fromImmutable(counter: Counter): Holder =\n    val current: Counter = counter\n    new Holder(current)\n  def directNew(seed: Int): Int = new Counter(seed).get()\n  def factoryReceiver(seed: Int): Int = makeCounter(seed).get()\n  def chained(counter: Counter): Int = create(counter).value().get()\n",
+        output.path(),
+    )
+    .expect("already supported direct-new and completed call receivers stay accepted");
+    let class = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner is emitted")
+        .class
+        .bytes();
+    let mut reader = Reader::new(class);
+    let runner = ClassFile::decode(&mut reader).expect("decode source-backed Runner");
+    runner
+        .validate_references()
+        .expect("Runner constant-pool references validate");
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "directNew"),
+        &[
+            (0xb7, "Counter", "<init>", "(I)V"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "factoryReceiver"),
+        &[
+            (0xb6, "Runner", "makeCounter", "(I)LCounter;"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "chained"),
+        &[
+            (0xb6, "Runner", "create", "(LCounter;)LHolder;"),
+            (0xb6, "Holder", "value", "()LCounter;"),
+            (0xb6, "Counter", "get", "()I"),
+        ],
+    );
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "fromImmutable"),
+        &[(0xb7, "Holder", "<init>", "(LCounter;)V")],
+    );
+    let link_bytes = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Link")
+        .expect("Link is emitted")
+        .class
+        .bytes();
+    let mut reader = Reader::new(link_bytes);
+    let link = ClassFile::decode(&mut reader).expect("decode source-backed Link");
+    assert_invocation_sequence(
+        &link,
+        emitted_method_code(&link, "wrapSelf"),
+        &[(0xb7, "Link", "<init>", "(LLink;)V")],
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 class output path");
+        let harness = output.path().join("ObjectGraphReceiverHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class ObjectGraphReceiverHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    Counter counter = new Counter(11);
+    if (runner.directNew(12) != 12) throw new AssertionError("direct new receiver");
+    if (runner.factoryReceiver(13) != 13) throw new AssertionError("factory receiver");
+    if (runner.chained(counter) != 11) throw new AssertionError("chained call-result receivers");
+    if (runner.fromImmutable(counter).value().get() != 11) throw new AssertionError("immutable local constructor argument");
+    if (new Link(null).wrapSelf() == null) throw new AssertionError("this constructor argument");
+  }
+}
+"#,
+        )
+        .expect("write direct-new and chained receiver harness");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for receiver characterization");
+        assert!(
+            javac.status.success(),
+            "javac rejected receiver harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "ObjectGraphReceiverHarness",
+            ])
+            .output()
+            .expect("start JVM verifier for receiver characterization");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected receiver harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
 }
 
 fn audit_symbol_name(unit: &JvmCompilationUnit<'_>, symbol: SymbolId) -> String {
@@ -7220,6 +7704,10 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class Counter(start: Int)\nclass Box(counter: Counter)\nclass Client:\n  def nested(): Box = new Box(new Counter(1))\n",
         ),
         (
+            "null-reference-constructor-argument",
+            "class Counter\nclass Box(counter: Counter)\nclass Client:\n  def nested(): Box = new Box(null)\n",
+        ),
+        (
             "reference-returning-call-constructor-argument",
             "class Counter\nclass Box(counter: Counter)\nclass Client:\n  def make(): Counter = new Counter()\n  def nested(): Box = new Box(make())\n",
         ),
@@ -7254,6 +7742,10 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
         (
             "reference-field",
             "class Counter\nclass Holder:\n  private val counter: Counter = new Counter()\n",
+        ),
+        (
+            "reference-field-initialized-by-new",
+            "class Counter(seed: Int)\nclass Holder(seed: Int):\n  private val counter: Counter = new Counter(seed)\n",
         ),
         (
             "generic-class",
@@ -7297,11 +7789,9 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             ),
             "reference-branch-constructor-argument" => matches!(
                 &error,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmConstructorArgument { .. })
-                    | PipelineFailure::Codegen(
-                        JvmCodegenError::JvmConstructorCallArgumentTypeMismatch { .. }
-                    )
-                    | PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch { .. })
+                PipelineFailure::Codegen(
+                    JvmCodegenError::JvmConstructorCallArgumentTypeMismatch { .. }
+                )
             ),
             "unplanned-object-class" => matches!(
                 &error,
@@ -7333,13 +7823,20 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
                 })
             ),
             "nested-reference-constructor-argument"
+            | "null-reference-constructor-argument"
             | "reference-returning-call-constructor-argument"
             | "mutable-reference-local-constructor-argument"
             | "reference-field-constructor-argument" => matches!(
                 &error,
                 PipelineFailure::Codegen(
                     JvmCodegenError::JvmConstructorCallArgumentTypeMismatch { .. }
-                ) | PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch { .. })
+                )
+            ),
+            "reference-field-initialized-by-new" => matches!(
+                &error,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::UnsupportedJvmReferenceFieldInitializer { .. }
+                )
             ),
             "reference-var-reassignment" => matches!(
                 &error,
