@@ -19,10 +19,10 @@ Host: AMD Ryzen 9 7940HS; JDK 21.0.8; Cargo/test concurrency 1; Scala checkout p
 
 | Measurement | Before, run 2 | After, run 2 | Interpretation |
 | --- | ---: | ---: | --- |
-| Cargo wall | 12,178 ms | 12,183 ms | No end-to-end speedup detected (0.04% slower, within noise) |
-| Audit wall | 12,098 ms | 12,120 ms | No end-to-end speedup detected (0.18% slower, within noise) |
-| Reported postprocess, three expensive files | 13 ms | 4 ms | 9 ms lower in this sample; millisecond granularity and changed timing coverage make this directional only |
-| Maximum sampled process-tree RSS | 113.8 MiB | 115.0 MiB | No meaningful conclusion from this single sample |
+| Cargo wall | 12,178 ms | 12,387 ms | No end-to-end speedup detected (1.7% slower, within run-to-run noise) |
+| Audit wall | 12,098 ms | 12,255 ms | No end-to-end speedup detected (1.3% slower, within run-to-run noise) |
+| Reported postprocess, three expensive files | 13 ms | 6 ms | 7 ms lower in this sample; millisecond granularity and changed timing coverage make this directional only |
+| Maximum sampled process-tree RSS | 113.8 MiB | 115.2 MiB | No meaningful conclusion from this single sample |
 
 The new `AUDIT_POSTPROCESS` profile line reports per-file bytes, newline count and line queries; method and failure counts; actual enclosing-failure lookups and candidates examined; resolver trace methods and observation count; and index construction/helper times in microseconds. In the after run, the two repeated samples showed:
 
@@ -30,9 +30,9 @@ The new `AUDIT_POSTPROCESS` profile line reports per-file bytes, newline count a
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `GenericSignatures.scala` | 27,255 | 40 | 44 | 2 / 22 / 19 | 2 / 1,768 | 0.33 ms |
 | `tpd.scala` | 73,174 | 257 | 34 | 2 / 17 / 4 | 2 / 980 | 0.32 ms |
-| `Types.scala` | 307,493 | 1,100 | 150 | 2 / 76 / 3 | 1 / 1,845 | 1.14 ms |
+| `Types.scala` | 307,493 | 1,100 | 150 | 2 / 76 / 3 | 1 / 1,845 | 1.69 ms |
 
-The values above are representative of run 2; helper totals combine line index, ownership/failure index, resolver trace index, and source-function outcome timing. They are not the entire postprocess phase: other audit projections and report-row construction remain in that phase. The previous full scans are eliminated from the indexed hot paths, but their original invocation counts were not recorded by the old profiler, so they cannot be reconstructed as observed counts. The current counters expose the new path's actual query and candidate volume.
+The values above are representative of the latest run 2 after review fixes; helper totals combine line index, ownership/failure index, resolver trace index, and source-function outcome timing. The pinned `Types.scala` probe reproduces the review comparison: 76 failure lookups check 3 indexed candidates, rather than scanning both failures for all 76 lookups. A separate temporary implementation of the global fallback showed 152 candidates for the same query count; that fallback has since been narrowed to ambiguous failed owners only. These are candidate counts, not a CPU-time claim. The helpers are not the entire postprocess phase: other audit projections and report-row construction remain in that phase. The previous full scans' invocation counts were not recorded by the old profiler, so they cannot be reconstructed as observed counts.
 
 ## Semantic parity
 

@@ -17125,12 +17125,16 @@ fn root_failures_by_method<'a>(
             unindexed.push((order, failure));
         }
     }
-    let requires_linear_fallback = !method_ranges_are_laminar(method_ranges)
-        || failures.iter().any(|failure| {
-            method_ranges
+    let ambiguous_methods = ambiguous_method_ranges(method_ranges);
+    let requires_linear_fallback = failures.iter().any(|failure| {
+        ambiguous_methods.contains(&failure.enclosing_method_tree)
+            || method_ranges
                 .get(&failure.enclosing_method_tree)
-                .is_none_or(|method_range| *method_range != failure.range)
-        });
+                .is_none_or(|method_range| {
+                    failure.range.start() < method_range.start()
+                        || failure.range.end() > method_range.end()
+                })
+    });
     RootFailureIndex {
         by_method,
         unindexed,
@@ -17141,27 +17145,33 @@ fn root_failures_by_method<'a>(
     }
 }
 
-fn method_ranges_are_laminar(method_ranges: &BTreeMap<u32, TextRange>) -> bool {
-    let mut ranges = method_ranges.values().copied().collect::<Vec<_>>();
-    ranges.sort_by_key(|range| (range.start(), std::cmp::Reverse(range.end())));
-    let mut stack = Vec::<TextRange>::new();
-    for range in ranges {
+fn ambiguous_method_ranges(method_ranges: &BTreeMap<u32, TextRange>) -> BTreeSet<u32> {
+    let mut ranges = method_ranges
+        .iter()
+        .map(|(tree, range)| (*tree, *range))
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|(tree, range)| (range.start(), std::cmp::Reverse(range.end()), *tree));
+    let mut stack = Vec::<(u32, TextRange)>::new();
+    let mut ambiguous = BTreeSet::new();
+    for (tree, range) in ranges {
         while stack
             .last()
-            .is_some_and(|parent| parent.end() <= range.start())
+            .is_some_and(|(_, parent)| parent.end() <= range.start())
         {
             stack.pop();
         }
-        if let Some(parent) = stack.last()
-            && (parent.start() == range.start()
+        for (ancestor, parent) in &stack {
+            if parent.start() == range.start()
                 || parent.end() == range.end()
-                || range.end() > parent.end())
-        {
-            return false;
+                || range.end() > parent.end()
+            {
+                ambiguous.insert(*ancestor);
+                ambiguous.insert(tree);
+            }
         }
-        stack.push(range);
+        stack.push((tree, range));
     }
-    true
+    ambiguous
 }
 
 fn nearest_enclosing_root_failure<'a>(
@@ -17416,6 +17426,39 @@ fn enclosing_failure_index_falls_back_for_inconsistent_owner_span() {
             .map(|failure| failure.failure.bucket.as_str()),
         Some("covering")
     );
+}
+
+#[test]
+fn enclosing_failure_index_keeps_valid_body_ranges_on_indexed_path() {
+    let range = |start, end| TextRange::new(start, end).expect("valid fixture range");
+    let failure = RootFailure {
+        range: range(10, 90),
+        enclosing_method_tree: 10,
+        failure: FailureClassification {
+            bucket: "body-failure".to_owned(),
+            family: FailureFamily::Other,
+        },
+        import_qualifier_path: None,
+        import_tree_index: None,
+        unsupported_type_tree: None,
+        missing_type_tree: None,
+        singleton_reference_tree: None,
+        local_method_signature: None,
+        local_value_declaration: None,
+    };
+    let failures = [failure];
+    let methods = [(10, range(0, 100)), (12, range(20, 30))];
+    let ancestors = method_ancestor_index(&methods);
+    let method_ranges = methods.into_iter().collect();
+    let indexed = root_failures_by_method(&failures, &ancestors, &method_ranges);
+
+    assert_eq!(
+        nearest_enclosing_root_failure(12, range(20, 30), &ancestors, &indexed)
+            .0
+            .map(|failure| failure.failure.bucket.as_str()),
+        Some("body-failure")
+    );
+    assert_eq!(indexed.candidates_checked.get(), 1);
 }
 
 fn function_with_mods_observation(
