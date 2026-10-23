@@ -556,17 +556,17 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         # Keep the established TSV observation column names for downstream consumers,
         # while accepting both the old producer fields and the newer coverage fields.
         operation_observations = rollback.get(
-            "operation_rollback_coverage", rollback.get("operation_observations", 0)
+            "operation_rollback_coverage", rollback.get("operation_observations", "not_captured")
         )
         member_observations = rollback.get(
-            "member_rollback_coverage", rollback.get("member_observations", 0)
+            "member_rollback_coverage", rollback.get("member_observations", "not_captured")
         )
         rollback_rows.append("\t".join(str(value) for value in (
-            run_index, rollback.get("count", 0), rollback.get("checkpoint_count", 0),
-            rollback.get("checkpoint_max_depth", 0), rollback.get("operation_appended", 0),
-            rollback.get("member_appended", 0), operation_observations, member_observations,
-            rollback.get("operation_rows_scanned", 0), rollback.get("member_rows_scanned", 0),
-            rollback.get("operation_status_changes", 0), rollback.get("member_status_changes", 0),
+            run_index, rollback.get("count", "not_captured"), rollback.get("checkpoint_count", "not_captured"),
+            rollback.get("checkpoint_max_depth", "not_captured"), rollback.get("operation_appended", "not_captured"),
+            rollback.get("member_appended", "not_captured"), operation_observations, member_observations,
+            rollback.get("operation_rows_scanned", "not_captured"), rollback.get("member_rows_scanned", "not_captured"),
+            rollback.get("operation_status_changes", "not_captured"), rollback.get("member_status_changes", "not_captured"),
         )))
     (out_dir / "rollback.tsv").write_text("\n".join(rollback_rows) + "\n", encoding="utf-8")
     classpath_rows = ["run\trequests\tinner_calls\tpositive\tnegative\terrors\tnegative_cache_hits\treturned_bytes\tinner_wall_us"] + [
