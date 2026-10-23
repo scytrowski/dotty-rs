@@ -137,6 +137,9 @@ top-type rule permits it where `Any` is expected. Primitive targets such as
 `Int` and `Boolean` are rejected. Direct `Type::Constant(Constant::Null)`
 relations remain unsupported, as do generic or external class targets,
 general union erasure, flow narrowing, and `-Yexplicit-nulls`.
+`NullIdentityAcceptance.scala` keeps the selected `AnyRef.eq/ne` symbols and
+source `Null` types observable in the JVM acceptance test; emitted descriptors
+and backend frame joins do not replace the Typer's original source types.
 
 Class literals and general constant folding remain unsupported until their own
 source and relation contracts are specified.

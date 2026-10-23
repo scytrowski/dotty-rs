@@ -303,6 +303,7 @@ straight-line builder methods.
 | Branched constructor before `this`/super initialization | Keep rejected as unsupported constructor flow | `ClassFileBuilder` rejects branched `<init>` analysis |
 | Exact planned reference method parameter/result | Accept; seed parameter frames and require matching initialized `areturn` values | Source integration and mandatory JDK 21 verifier gate |
 | Transitive `Leaf -> Base` argument or return | Accept only with the validated two-edge ancestry; preserve the concrete value class and emit no cast | `MultilevelInheritance.scala`, decoded descriptors/references, and JDK 21 `-Xverify:all` harness |
+| Canonical source `Null` in planned results, locals, and supported `If` joins | Preserve verifier `Null`; join with `Object(Box)` only as the checked `Object(Box)` frame | `NullReferenceIdentity.scala`, decoded CP-resolved frames, independent-session byte comparison, strict JDK 21 acceptance harness |
 
 The backend converts exact planned reference-CFG cases and explicitly proven
 direct-parent assignments from negative to positive coverage. Remaining
@@ -318,7 +319,8 @@ constructor-safety, hierarchy-join, and descriptor boundaries.
   the bounded source forms described above.
 - Branched `<init>` and `UninitializedThis` remain a separate constructor-flow
   problem. General least-upper-bound inference beyond the explicitly checked
-  single-parent graph, arrays, `null`, interface inheritance, exception-flow
+  single-parent graph, arrays and null contexts outside the bounded default-null
+  paths, interface inheritance, exception-flow
   joins, and arbitrary uninitialized values remain out of scope. For source compilation, the adapter proves the
   bounded same-unit `Base -> Object`, `Middle -> Base`, and `Leaf -> Middle`
   chain; a source-typed `If` joins distinct initialized references only when
