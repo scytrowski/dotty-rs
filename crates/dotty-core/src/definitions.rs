@@ -421,7 +421,9 @@ impl Definitions {
             return None;
         }
         let scope_data = store.scopes.get(scope);
-        if scope_data.owner != Some(self.object_class) {
+        if scope_data.owner != Some(self.object_class)
+            || scope_data.entered_symbols().count() != 2
+        {
             return None;
         }
         for (symbol, spelling) in [(ids.eq, "eq"), (ids.ne, "ne")] {
@@ -433,9 +435,10 @@ impl Definitions {
             if member.name != name
                 || member.owner != Some(self.object_class)
                 || member.kind != SymbolKind::Method
+                || member.origin != SymbolOrigin::Builtin
                 || member.visibility != Visibility::Public
-                || !member.flags.contains(SymbolFlags::FINAL)
-                || store.scopes.get(scope).lookup(&name) != Some(symbol)
+                || member.flags != SymbolFlags::FINAL
+                || store.scopes.get(scope).lookup_all(&name) != [symbol]
             {
                 return None;
             }
