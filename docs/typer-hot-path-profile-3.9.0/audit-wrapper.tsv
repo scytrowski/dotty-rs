@@ -1,0 +1,11 @@
+run	operation	calls	wall_us	delegated_us	exclusive_us
+1	checkpoint	974	158	18	140
+1	member_lookup	3813	5960697	5933059	27638
+1	module_identity	6664	13137	4871	8266
+1	package_lookup	780	4821	902	3919
+1	rollback_to	386	333	108	225
+2	checkpoint	974	158	18	140
+2	member_lookup	3813	5950310	5922250	28060
+2	module_identity	6664	13249	4905	8344
+2	package_lookup	780	4691	913	3778
+2	rollback_to	386	315	101	214
