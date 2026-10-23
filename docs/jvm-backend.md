@@ -278,6 +278,16 @@ the CFG verifier. Inferred unions, `Object`-only joins, or mismatched arms
 remain unsupported. A local that is not initialized on every path becomes
 unusable, and a later read fails.
 
+The canonical source `Null` literal lowers to one `aconst_null` only when its
+authentic source context supplies a checked planned-class reference target:
+method result or formal, explicitly typed local initializer or assignment, or
+reference-valued `If` result. Its `TypeId` remains `Definitions.null_type` and
+its internal JVM flow remains verifier `Null`; it never becomes an invented
+`Object(C)`. A null-only path retains `Null` in `StackMapTable`, while a join
+with a checked `C` value uses `Object(C)`. The declared method/local descriptor
+continues to name `C`. Missing or inferred null targets and primitive,
+unplanned, generic, external, or otherwise unsupported targets fail closed.
+
 Allocation may occur in a branch or loop body only as one complete
 `new`/`dup`/supported-argument/`invokespecial` sequence inside a basic block.
 Arguments may be primitive values or the checked reference values described

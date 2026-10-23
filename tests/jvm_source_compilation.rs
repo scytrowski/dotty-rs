@@ -4877,7 +4877,8 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
     while offset < code.len() {
         let opcode = code[offset];
         let length = match opcode {
-            0x03..=0x0f
+            0x01
+            | 0x03..=0x0f
             | 0x1a..=0x1d
             | 0x2a..=0x2d
             | 0x3b..=0x3e
@@ -7203,6 +7204,10 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "class CounterClient:\n  def use(): Int = null\n",
         ),
         (
+            "inferred-null-signature",
+            "class Runner:\n  def unsupported() = null\n",
+        ),
+        (
             "array-method-parameter",
             "class CounterClient:\n  def use(values: Array[Int]): Int = 1\n",
         ),
@@ -7305,7 +7310,14 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
             "null-literal" => matches!(
                 &error,
                 PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
-                    node: "non-Int/Boolean literal",
+                    node: "null literal with a non-reference expected type",
+                    ..
+                })
+            ),
+            "inferred-null-signature" => matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmReferenceType {
+                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass,
                     ..
                 })
             ),
@@ -7375,6 +7387,148 @@ fn unsupported_counter_object_source_cases_fail_at_their_pipeline_stage() {
         assert!(
             output.class_files().is_empty(),
             "{label} failure must not publish any classfile"
+        );
+    }
+}
+
+#[test]
+fn typed_null_reference_flows_emit_verifiable_null_values() {
+    let output = TestOutputDirectory::new("typed-null-reference-flows");
+    let second_output = TestOutputDirectory::new("typed-null-reference-flows-second");
+    let artifacts = compile_fixture_classes("TypedNullReference.scala", output.path())
+        .expect("real source-typed null contexts compile");
+    let second_artifacts =
+        compile_fixture_classes("TypedNullReference.scala", second_output.path())
+            .expect("a fresh source session compiles the typed-null fixture");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Box", "Runner"]
+    );
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        second_artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        "the typed-null fixture emits deterministic class bytes across fresh sessions"
+    );
+    let runner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner class is emitted");
+    let mut reader = Reader::new(runner_artifact.class.bytes());
+    let runner = ClassFile::decode(&mut reader).expect("decode Runner class");
+    runner
+        .validate_references()
+        .expect("null bytecode has valid constant-pool references");
+
+    for method_name in [
+        "empty",
+        "passNullToFormal",
+        "choose",
+        "chooseReverse",
+        "replace",
+        "clear",
+        "keepNull",
+    ] {
+        let method = runner
+            .methods
+            .iter()
+            .find(|method| runner.constant_pool.utf8(method.name_index) == Ok(method_name))
+            .unwrap_or_else(|| panic!("missing {method_name} method"));
+        assert_eq!(
+            runner.constant_pool.utf8(method.descriptor_index),
+            Ok(match method_name {
+                "empty" | "passNullToFormal" => "()LBox;",
+                "choose" | "chooseReverse" | "replace" | "clear" => "(ZLBox;)LBox;",
+                "keepNull" => "(Z)LBox;",
+                _ => unreachable!(),
+            }),
+            "{method_name} keeps its declared Box descriptor"
+        );
+        assert_eq!(
+            decode_subset_instructions(emitted_method_code(&runner, method_name))
+                .iter()
+                .filter(|(_, opcode)| *opcode == 0x01)
+                .count(),
+            1,
+            "{method_name} emits one aconst_null for its one null literal"
+        );
+    }
+    for method_name in ["choose", "chooseReverse", "replace", "clear"] {
+        let frames = stack_map_frames(&runner, method_name);
+        assert!(
+            frames.iter().any(|frame| frame
+                .locals
+                .contains(&StackMapVerificationType::Object("Box".to_owned()))),
+            "{method_name} frame retains the resolved Box local/class identity: {frames:?}"
+        );
+    }
+    let keep_null_frames = stack_map_frames(&runner, "keepNull");
+    assert!(
+        keep_null_frames
+            .iter()
+            .any(|frame| frame.locals.contains(&StackMapVerificationType::Null)),
+        "a local that remains null across the branch keeps verifier Null: {keep_null_frames:?}"
+    );
+
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 test path");
+        let harness = output.path().join("TypedNullReferenceHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class TypedNullReferenceHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    Box box = new Box(7);
+    if (runner.empty() != null || runner.passNullToFormal() != null)
+      throw new AssertionError("null return or reference formal");
+    if (runner.choose(true, box) != null || runner.choose(false, box) != box)
+      throw new AssertionError("null-first If result");
+    if (runner.chooseReverse(true, box) != box || runner.chooseReverse(false, box) != null)
+      throw new AssertionError("null-second If result");
+    if (runner.replace(false, box) != null || runner.replace(true, box) != box)
+      throw new AssertionError("null-initialized mutable local");
+    if (runner.clear(true, box) != null || runner.clear(false, box) != box)
+      throw new AssertionError("mutable local assigned null");
+    if (runner.keepNull(true) != null || runner.keepNull(false) != null)
+      throw new AssertionError("null local preserved across a branch");
+  }
+}
+"#,
+        )
+        .expect("write typed-null verifier harness");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for typed-null verifier harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected typed-null harness\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "TypedNullReferenceHarness",
+            ])
+            .output()
+            .expect("start Java verifier for typed-null classes");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected typed-null classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
         );
     }
 }
