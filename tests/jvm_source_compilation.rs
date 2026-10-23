@@ -7652,6 +7652,14 @@ fn anyref_identity_uses_reference_branches_and_verifies_runtime_behavior() {
       throw new AssertionError("ne must use object identity");
     if (runner.missing(first) || !runner.missing(null))
       throw new AssertionError("eq with null");
+    if (!runner.blockMissing(null) || runner.blockMissing(first))
+      throw new AssertionError("eq with a block-null operand");
+    if (!runner.bothMissing(null, true) || runner.bothMissing(first, false))
+      throw new AssertionError("eq with a both-null If operand");
+    if (!runner.maybeMissing(null, second, true) || runner.maybeMissing(first, second, false))
+      throw new AssertionError("eq with a mixed-null If argument");
+    if (!runner.maybeReceiver(false, first) || runner.maybeReceiver(true, first))
+      throw new AssertionError("eq with a mixed-null If receiver");
     if (!runner.present(first) || runner.present(null))
       throw new AssertionError("ne with null");
     if (!runner.choose(true, first, first) || runner.choose(false, first, first))

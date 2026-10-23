@@ -152,13 +152,16 @@ The JVM backend recognizes only the exact method `SymbolId` selected by the
 Typer and registered in `Definitions`. It evaluates the receiver before the
 argument, accepts planned reference flows and canonical `Null`, emits
 `if_acmpeq` for `eq` or `if_acmpne` for `ne`, then materializes a Boolean with
-`iconst_0`/`iconst_1`. Null literals in these operands retain verifier `Null`;
-they do not acquire an `Object` class identity. The executable fixture covers
-parameter and mutable-local operands, null arguments, Boolean returns, `If`
-conditions, and a `While` condition. JDK 21 `java -Xverify:all` passes its
-same-object, distinct-object, null, and loop checks. Comparison operands are
-lowered once each in source order, and no `Object.eq`, `Object.ne`, or
-`equals` invocation is emitted.
+`iconst_0`/`iconst_1`. The identity context reaches a block's result and the
+value branches of an `If`; null-only results stay verifier `Null`, while a
+mixed null/reference `If` uses the checked class of its reference branch.
+Neither case invents an `Object` class identity. The executable fixture covers
+parameter and mutable-local operands, direct and block nulls, both-null and
+mixed-null `If` operands on either side, Boolean returns, `If` conditions, and
+a `While` condition. JDK 21 `java -Xverify:all` passes its same-object,
+distinct-object, null, and loop checks. Comparison operands are lowered once
+each in source order, and no `Object.eq`, `Object.ne`, or `equals` invocation
+is emitted.
 
 This does not add source `null` as a receiver selection: the current Typer
 does not select `AnyRef.eq` for a literal `null` receiver. The supported null
