@@ -11,7 +11,8 @@ use dotty_core::{
 };
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit,
-    JvmConstructorInitializerInstruction, JvmFieldPlan, JvmMethodPlan, emit_class,
+    JvmConstructorInitializerInstruction, JvmFieldPlan, JvmMethodPlan, JvmPrimaryConstructorPlan,
+    emit_class,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -195,7 +196,7 @@ fn complete_class_info(typer: &SourceTyper<'_>, class: SymbolId) -> dotty_core::
 #[test]
 fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots() {
     with_source(
-        "class Plain { private val seed: Int = 42; private val enabled: Boolean = true }",
+        "class Plain { private val seed: Int = 42; private val enabled: Boolean = true; private val large: Long = 9000000000L }",
         |ast, source, index, definitions, typer| {
             let class = symbol_named(ast, index, source, typer, "Plain");
             assert_eq!(typer.store().symbols.get(class).kind, SymbolKind::Class);
@@ -208,8 +209,8 @@ fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots()
                 typer.store().symbols.get(class).info,
                 SymbolInfo::Complete(_)
             ));
-            let fields =
-                ["seed", "enabled"].map(|name| field_tree_and_rhs(ast, index, source, typer, name));
+            let fields = ["seed", "enabled", "large"]
+                .map(|name| field_tree_and_rhs(ast, index, source, typer, name));
             let template = ast
                 .iter()
                 .find_map(|(_, node)| match &node.kind {
@@ -234,6 +235,7 @@ fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots()
                 fields.into_iter().zip([
                     (definitions.int, dotty_core::Constant::Int(42)),
                     (definitions.boolean, dotty_core::Constant::Boolean(true)),
+                    (definitions.long, dotty_core::Constant::Long(9_000_000_000)),
                 ])
             {
                 let symbol = typer.store().symbols.get(field);
@@ -1713,7 +1715,7 @@ fn constructor_field_initializer_lowering_rejects_user_method_calls() {
 #[test]
 fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
     with_source(
-        "class Counter(start: Int) { private var current: Int = start; def get(): Int = current }",
+        "class Counter(start: Long) { private var current: Long = start; def get(): Long = current }",
         |ast, source, index, definitions, typer| {
             let class = symbol_named(ast, index, source, typer, "Counter");
             let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "current");
@@ -1830,7 +1832,7 @@ fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
             };
             assert_eq!(signature.params.len(), 1);
             assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
-            assert_eq!(signature.params[0].ty, definitions.int);
+            assert_eq!(signature.params[0].ty, definitions.long);
             let constructor_parameter_type = signature.params[0].ty;
             assert_eq!(
                 typer.store().types.get(signature.result).reference_symbol(),
@@ -1858,7 +1860,7 @@ fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
             ));
             assert_eq!(
                 typer.store().types.get(constructor_parameter_type),
-                typer.store().types.get(definitions.int)
+                typer.store().types.get(definitions.long)
             );
 
             typer.complete_symbol(method).unwrap();
@@ -1871,6 +1873,64 @@ fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
                     .get(typer.typed_ast().get(typed_method_rhs).ty),
                 Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
                     if *symbol == field
+            ));
+
+            let constructor_plan = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                vec![constructor_parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: vec![JvmMethodPlan {
+                        method,
+                        parameters: Vec::new(),
+                        locals: Vec::new(),
+                        body: Some(typed_method_rhs),
+                    }],
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                        initializer: Some(typed_rhs),
+                    }],
+                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                        constructor_plan,
+                    ),
+                }],
+            };
+            let metadata = unit.metadata(definitions).unwrap();
+            assert_eq!(metadata[0].fields()[0].descriptor(), "J");
+            assert_eq!(metadata[0].constructor().unwrap().parameters()[0].slot(), 1);
+            assert_eq!(
+                metadata[0].constructor().unwrap().parameters()[0].width(),
+                2
+            );
+            let initializer = unit
+                .lower_constructor_field_initializers(class, definitions)
+                .unwrap();
+            assert!(matches!(
+                initializer.fields()[0].instructions(),
+                [
+                    JvmConstructorInitializerInstruction::LoadThis,
+                    JvmConstructorInitializerInstruction::LoadParameter {
+                        symbol,
+                        slot: 1,
+                        value_type: dotty_jvm::JvmType::Long,
+                    },
+                    JvmConstructorInitializerInstruction::PutField {
+                        field: actual_field,
+                        descriptor,
+                        ..
+                    },
+                ] if *symbol == constructor_parameter
+                    && *actual_field == field
+                    && descriptor == "J"
             ));
         },
     );
@@ -2162,13 +2222,13 @@ fn non_private_visibility_forms_are_canonicalized_and_self_forward_reads_type() 
 fn real_source_private_primitive_fields_project_in_frontend_order() {
     let snapshot = || {
         with_source(
-            "class Fields { private val seed: Int = 42; private var enabled: Boolean = true }",
+            "class Fields { private val seed: Int = 42; private var enabled: Boolean = true; private val large: Long = 9000000000L }",
             |ast, source, index, definitions, typer| {
                 let class = symbol_named(ast, index, source, typer, "Fields");
                 typer.complete_symbol(class).unwrap();
 
                 let mut fields = Vec::new();
-                for name in ["seed", "enabled"] {
+                for name in ["seed", "enabled", "large"] {
                     let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
                     typer.complete_symbol(field).unwrap();
                     let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info
@@ -2198,7 +2258,7 @@ fn real_source_private_primitive_fields_project_in_frontend_order() {
                 };
                 let metadata = unit.metadata(definitions).unwrap();
                 let projected = metadata[0].fields();
-                assert_eq!(projected.len(), 2);
+                assert_eq!(projected.len(), 3);
                 assert_eq!(projected[0].name(), "seed");
                 assert_eq!(projected[0].descriptor(), "I");
                 assert!(projected[0].access_flags().is_private());
@@ -2207,6 +2267,10 @@ fn real_source_private_primitive_fields_project_in_frontend_order() {
                 assert_eq!(projected[1].descriptor(), "Z");
                 assert!(projected[1].access_flags().is_private());
                 assert!(!projected[1].access_flags().is_final());
+                assert_eq!(projected[2].name(), "large");
+                assert_eq!(projected[2].descriptor(), "J");
+                assert!(projected[2].access_flags().is_private());
+                assert!(projected[2].access_flags().is_final());
 
                 assert_eq!(unit.metadata(definitions).unwrap(), metadata);
                 let snapshot = projected
@@ -2241,7 +2305,7 @@ fn real_source_private_primitive_fields_project_in_frontend_order() {
     assert_eq!(snapshot(), snapshot());
 
     with_source(
-        "class Counter(start: Int) { private var current: Int = start }",
+        "class Counter(start: Long) { private var current: Long = start }",
         |ast, source, index, definitions, typer| {
             let class = symbol_named(ast, index, source, typer, "Counter");
             typer.complete_symbol(class).unwrap();
@@ -2292,7 +2356,7 @@ fn real_source_private_primitive_fields_project_in_frontend_order() {
             let metadata = unit.metadata(definitions).unwrap();
             let field_metadata = &metadata[0].fields()[0];
             assert_eq!(field_metadata.symbol(), field);
-            assert_eq!(field_metadata.descriptor(), "I");
+            assert_eq!(field_metadata.descriptor(), "J");
             assert!(field_metadata.access_flags().is_private());
             assert!(!field_metadata.access_flags().is_final());
         },

@@ -5823,6 +5823,7 @@ mod tests {
             .field_ref("example/Counter", "enabled", "Z")
             .unwrap();
         let wrong_owner = builder.field_ref("example/Other", "count", "I").unwrap();
+        let wrong_long_owner = builder.field_ref("example/Other", "wide", "J").unwrap();
         let long_field = builder.field_ref("example/Counter", "wide", "J").unwrap();
         let pool = builder.finish().unwrap();
 
@@ -5840,6 +5841,30 @@ mod tests {
                 &wrong_owner_graph,
                 "read",
                 "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::FieldOwnerMismatch {
+                instruction: 1,
+                expected: class_identity("example/Other"),
+                actual: class_identity("example/Counter"),
+            })
+        );
+
+        let mut wrong_long_owner_code = CodeSequence::new();
+        wrong_long_owner_code
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::GetField(FieldReference::new(operand(
+                wrong_long_owner,
+            ))))
+            .instruction(Instruction::LReturn);
+        let wrong_long_owner_graph = ControlFlowGraph::build(&wrong_long_owner_code).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_long_owner_graph,
+                "readLong",
+                "()J",
                 false,
                 &pool,
                 class_index,
@@ -5935,6 +5960,32 @@ mod tests {
                 instruction: 2,
                 expected: ValueKind::Long,
                 actual: ValueKind::Reference,
+            })
+        ));
+
+        let mut wrong_long_integer_value = CodeSequence::new();
+        wrong_long_integer_value
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::IConst(SmallIntConstant::One))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                long_field,
+            ))))
+            .instruction(Instruction::Return);
+        let wrong_long_integer_value_graph =
+            ControlFlowGraph::build(&wrong_long_integer_value).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_long_integer_value_graph,
+                "writeLong",
+                "(J)V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Long,
+                actual: ValueKind::Int,
             })
         ));
 

@@ -1774,13 +1774,211 @@ fn unsupported_long_discard_and_control_flow_fail_without_artifacts() {
 }
 
 #[test]
-fn long_category_two_audit_rejects_out_of_scope_fields_and_control_flow() {
+fn long_fields_and_primary_constructor_initialization_verify_and_execute() {
+    let first_output = TestOutputDirectory::new("long-fields-first");
+    let second_output = TestOutputDirectory::new("long-fields-second");
+    let first = compile_fixture_classes("LongFields.scala", first_output.path()).unwrap();
+    let second = compile_fixture_classes("LongFields.scala", second_output.path()).unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name(),
+                artifact.class.bytes().to_vec()
+            ))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name(),
+                artifact.class.bytes().to_vec()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    let decode = |name: &str| {
+        let artifact = first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("missing emitted class {name}"));
+        let mut reader = Reader::new(artifact.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("Long field class should decode");
+        assert!(reader.is_at_end());
+        class.validate_references().unwrap();
+        class
+    };
+    let long_box = decode("LongBox");
+    let long_constant = decode("LongConstant");
+
+    let current = &long_box.fields[0];
+    assert_eq!(
+        long_box.constant_pool.utf8(current.name_index),
+        Ok("current")
+    );
+    assert_eq!(
+        long_box.constant_pool.utf8(current.descriptor_index),
+        Ok("J")
+    );
+    assert_eq!(
+        current.access_flags.0,
+        dotty_classfile::access_flags::ACC_PRIVATE
+    );
+    assert_eq!(
+        long_box
+            .methods
+            .iter()
+            .map(|method| (
+                long_box.constant_pool.utf8(method.name_index).unwrap(),
+                long_box
+                    .constant_pool
+                    .utf8(method.descriptor_index)
+                    .unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [("<init>", "(J)V"), ("get", "()J"), ("set", "(J)V")]
+    );
+    let constructor = emitted_method_code(&long_box, "<init>");
+    assert_opcode_sequence(constructor, &[0x2a, 0xb7, 0x2a, 0x1f, 0xb5, 0xb1]);
+    assert_method_reference(
+        &long_box,
+        constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_field_reference(&long_box, constructor, 0xb5, "LongBox", "current", "J");
+    assert_eq!(code_max_stack(&long_box, "<init>"), 3);
+    assert_eq!(code_max_locals(&long_box, "<init>"), 3);
+    assert_opcode_sequence(emitted_method_code(&long_box, "get"), &[0x2a, 0xb4, 0xad]);
+    assert_field_reference(
+        &long_box,
+        emitted_method_code(&long_box, "get"),
+        0xb4,
+        "LongBox",
+        "current",
+        "J",
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&long_box, "set"),
+        &[0x2a, 0x4e, 0x1f, 0x37, 0x2d, 0x16, 0xb5, 0xb1],
+    );
+    assert_eq!(code_max_stack(&long_box, "set"), 3);
+    assert_eq!(code_max_locals(&long_box, "set"), 6);
+
+    let number = &long_constant.fields[0];
+    assert_eq!(
+        long_constant.constant_pool.utf8(number.name_index),
+        Ok("number")
+    );
+    assert_eq!(
+        long_constant.constant_pool.utf8(number.descriptor_index),
+        Ok("J")
+    );
+    assert_eq!(
+        number.access_flags.0,
+        dotty_classfile::access_flags::ACC_PRIVATE | dotty_classfile::access_flags::ACC_FINAL
+    );
+    let constant_constructor = emitted_method_code(&long_constant, "<init>");
+    assert_opcode_sequence(constant_constructor, &[0x2a, 0xb7, 0x2a, 0x14, 0xb5, 0xb1]);
+    assert_method_reference(
+        &long_constant,
+        constant_constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_field_reference(
+        &long_constant,
+        constant_constructor,
+        0xb5,
+        "LongConstant",
+        "number",
+        "J",
+    );
+    assert_eq!(code_max_stack(&long_constant, "<init>"), 3);
+    assert_eq!(code_max_locals(&long_constant, "<init>"), 1);
+    assert_opcode_sequence(
+        emitted_method_code(&long_constant, "get"),
+        &[0x2a, 0xb4, 0xad],
+    );
+
+    if require_jdk_or_skip() {
+        for class_name in ["LongBox", "LongConstant"] {
+            let javap = Command::new("javap")
+                .args([
+                    "-v",
+                    "-c",
+                    "-classpath",
+                    first_output.path().to_str().unwrap(),
+                    class_name,
+                ])
+                .output()
+                .expect("start javap");
+            assert!(javap.status.success(), "javap failed: {javap:?}");
+            let text = String::from_utf8_lossy(&javap.stdout);
+            assert!(text.contains("descriptor: (J)V") || class_name == "LongConstant");
+            assert!(text.contains("descriptor: ()J"));
+            assert!(text.contains("putfield"));
+            assert!(text.contains("getfield"));
+            if class_name == "LongBox" {
+                assert!(text.contains("lload_1"));
+                assert!(text.contains("lstore"));
+            } else {
+                assert!(text.contains("ldc2_w"));
+                assert!(text.contains("9000000000"));
+            }
+        }
+
+        let harness_path = first_output.path().join("LongFieldsHarness.java");
+        fs::write(
+            &harness_path,
+            r#"public final class LongFieldsHarness {
+  public static void main(String[] args) {
+    LongBox first = new LongBox(9000000000L);
+    LongBox second = new LongBox(-9000000000L);
+    if (first.get() != 9000000000L || second.get() != -9000000000L) throw new AssertionError("constructor parameter");
+    first.set(-7L);
+    second.set(0L);
+    if (first.get() != -7L || second.get() != 0L) throw new AssertionError("instance field state");
+    if (new LongConstant().get() != 9000000000L) throw new AssertionError("Long literal field");
+    System.out.println("long fields ok");
+  }
+}
+"#,
+        )
+        .expect("write LongFieldsHarness.java");
+        let javac = Command::new("javac")
+            .args(["-classpath", first_output.path().to_str().unwrap(), "-d"])
+            .arg(first_output.path())
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(javac.status.success(), "javac failed: {javac:?}");
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                first_output.path().to_str().unwrap(),
+                "LongFieldsHarness",
+            ])
+            .output()
+            .expect("start Java verifier");
+        assert!(java.status.success(), "java failed: {java:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "long fields ok"
+        );
+    }
+}
+
+#[test]
+fn long_category_two_audit_emits_fields_but_rejects_long_control_flow() {
     let source = fs::read_to_string(fixture_path("LongCategoryTwo.scala"))
         .expect("read Scala Long category-two audit fixture");
     let output = TestOutputDirectory::new("scala-long-category-two-audit");
     let mut observed = false;
-    let mut canonical_long = None;
-    let mut metadata_failure = None;
     let result = compile_source_batch_with_source_observer(
         &source,
         "LongCategoryTwo.scala",
@@ -1789,13 +1987,21 @@ fn long_category_two_audit_rejects_out_of_scope_fields_and_control_flow() {
         SourceUnitCardinality::AtLeastTwo,
         &mut |_, _, unit, definitions| {
             observed = true;
-            canonical_long = Some(definitions.long);
-            metadata_failure = Some(
-                unit.metadata(definitions)
-                    .expect_err("Long field metadata remains outside this issue"),
-            );
+            let metadata = unit
+                .metadata(definitions)
+                .expect("canonical Long fields and descriptors are projected");
             let long_box = audit_class_named(unit, "LongBox");
             let runner = audit_class_named(unit, "Runner");
+            let long_box_metadata = metadata
+                .iter()
+                .find(|class| class.identity().symbol() == long_box)
+                .unwrap();
+            assert_eq!(long_box_metadata.fields()[0].name(), "current");
+            assert_eq!(long_box_metadata.fields()[0].descriptor(), "J");
+            let constructor = long_box_metadata.constructor().unwrap();
+            assert_eq!(constructor.parameters()[0].ty(), dotty_jvm::JvmType::Long);
+            assert_eq!(constructor.parameters()[0].slot(), 1);
+            assert_eq!(constructor.parameters()[0].width(), 2);
 
             for (class, method_name, parameter_count, returns_long) in [
                 (long_box, "get", 0, true),
@@ -1873,17 +2079,10 @@ fn long_category_two_audit_rejects_out_of_scope_fields_and_control_flow() {
         observed,
         "parser, namer and typer completed before code generation: {result:?}"
     );
-    let canonical_long = canonical_long.expect("observer records this session's Long type");
-    assert!(matches!(
-        metadata_failure,
-        Some(JvmCodegenError::UnsupportedJvmType { ty, kind, .. })
-            if ty == canonical_long && kind == dotty_jvm::UnsupportedJvmTypeKind::Other
-    ));
-    let emission_failure = result.expect_err("Long fields remain out of scope");
+    let emission_failure = result.expect_err("Long control-flow expressions remain out of scope");
     assert!(matches!(
         emission_failure,
-        PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmType { ty, kind, .. })
-            if ty == canonical_long && kind == dotty_jvm::UnsupportedJvmTypeKind::Other
+        PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression { .. })
     ));
     assert!(
         output.class_files().is_empty(),
@@ -6390,8 +6589,10 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             0x01
             | 0x02..=0x0f
             | 0x1a..=0x1d
+            | 0x1e..=0x21
             | 0x2a..=0x2d
             | 0x3b..=0x3e
+            | 0x3f..=0x42
             | 0x4b..=0x4e
             | 0x57
             | 0x59
@@ -6404,9 +6605,10 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0x80
             | 0x82
             | 0xac
+            | 0xad
             | 0xb0
             | 0xb1 => 1,
-            0x10 | 0x12 | 0x15 | 0x19 | 0x36 | 0x3a => 2,
+            0x10 | 0x12 | 0x15 | 0x16 | 0x19 | 0x36 | 0x37 | 0x3a => 2,
             0x13 | 0x14 | 0x99..=0x9a | 0x9f..=0xa6 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };

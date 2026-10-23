@@ -10,12 +10,12 @@ revision `777528f19a58e794c9954a42f433373472ec57f8`.
 | Layer | Existing behavior |
 | --- | --- |
 | `dotty-core` / Typer | Canonical `Definitions.long` and `Constant::Long` exist. The source fixture below parses, names, and types, retaining `Long` parameter/result/local types and the exact `9000000000L` literal. |
-| `dotty-jvm` projection | Method and constructor metadata project canonical `Definitions.long` as `JvmType::Long`, descriptor `J`, and width two. Instance parameter layouts account for receiver and parameter widths. #1516 lowers canonical Long literals, parameter reads, immutable/mutable local allocation and access, assignment, and method returns in straight-line bodies. |
+| `dotty-jvm` projection | Method and constructor metadata project canonical `Definitions.long` as `JvmType::Long`, descriptor `J`, and width two. Instance parameter layouts account for receiver and parameter widths. #1516 lowers Long literals, parameters, locals, assignments, and returns in straight-line bodies. #1517 adds private instance Long fields, constructor initialization from canonical Long literals/parameters, field access and mutation. |
 | Class-file descriptors | The descriptor parser accepts `J`; the linear bytecode analyzer already counts `Long` parameters/values as two slots and tracks the unusable second local slot. |
 | Stack-map wire model | `VerificationTypeInfo::Long` uses verification tag 4 and has a two-slot local width. A stack-map frame stores one verification entry for a `Long`, not two entries. |
-| CFG analyzer | Supports `Long` parameters, constants, local loads/stores, `lreturn`, branch joins, loop backedges, physical slot accounting, and StackMapTable projection. Long arithmetic, category-two stack manipulation, fields, and calls remain outside this increment. |
+| CFG analyzer | Supports `Long` parameters, constants, local loads/stores, `lreturn`, branch joins, loop backedges, physical slot accounting, StackMapTable projection, and class-aware instance field transfer for descriptor `J`. Long arithmetic, category-two stack manipulation, and calls remain outside this increment. |
 
-`LongValues.scala` exercises the emitted subset through the real source pipeline; its `Runner` methods include zero/one/nontrivial literals, mixed-width parameters, immutable and mutable locals, assignment, and explicit/implicit Long returns. The JDK gate checks decoded instructions and `max_locals`/`max_stack`, inspects the class with `javap`, and runs signed 64-bit values with `java -Xverify:all`. `LongCategoryTwo.scala` remains an audit fixture for fields and branching cases that are deliberately outside this issue.
+`LongValues.scala` exercises #1516 through the real source pipeline. `LongFields.scala` exercises #1517's `LongBox` constructor parameter, mutable `current:J` field, getter/setter, and immutable `number:J` literal field. Tests check decoded descriptors, flags, instruction order, `max_locals`/`max_stack`, `javap`, deterministic fresh-session bytes, and signed 64-bit execution under `java -Xverify:all`. `LongCategoryTwo.scala` remains an audit fixture for Long control-flow cases that are deliberately outside these issues.
 
 The current source frontend cannot reach backend validation for Long arithmetic:
 `value + 1L` stops in `SourceTyper` with `MemberLookupError::ClassInfoUnavailable`
@@ -115,7 +115,7 @@ category-two values, both orders of an incompatible `Long`/`Integer` stack
 join, wrong return descriptors, one-arm initialization, tail overwrite, and
 stable Long locals through a loop backedge. `Ldc2` uses the existing validated
 constant-pool path; arithmetic, `lcmp`, `pop2`/`dup2`, conversions, and
-Long-aware field/method transfer remain separate follow-up work.
+Long-aware method transfer remains separate follow-up work.
 
 ## JVMS 21 constraints
 
@@ -133,7 +133,7 @@ verification tag.
 The JVM Backend issues split implementation into descriptors and slot
 allocation (#1514), CFG category-two state (#1515), literal/local/return
 lowering (#1516), fields and constructors (#1517), calls and `If`/`While`
-control flow (#1518), and end-to-end execution (#1519). Issues #1514–#1516
-provide the descriptor, CFG, and straight-line value foundation. Long fields,
-method calls, arithmetic, category-two stack manipulation, and Long-aware
+control flow (#1518), and end-to-end execution (#1519). Issues #1514–#1517
+provide the descriptor, CFG, straight-line value, and private field foundation.
+Long method calls, arithmetic, category-two stack manipulation, and Long-aware
 control-flow expressions remain follow-up work; Typer is unchanged.
