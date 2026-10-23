@@ -3821,6 +3821,43 @@ fn local_slot_u16_boundary_does_not_publish_an_overflow_assignment() {
 }
 
 #[test]
+fn category_two_local_reserves_two_slots_and_checks_the_full_boundary() {
+    let mut fixture = Fixture::new();
+    let long_binding = add_local_binding(&mut fixture, "longLocal", false);
+    let int_binding = add_local_binding(&mut fixture, "intLocal", false);
+    let mut allocator = JvmLocalAllocator::empty(fixture.method);
+    allocator.reserve(long_binding, JvmType::Long).unwrap();
+    allocator.reserve(int_binding, JvmType::Int).unwrap();
+    assert_eq!(
+        allocator
+            .locals
+            .iter()
+            .map(|local| (local.ty(), local.slot()))
+            .collect::<Vec<_>>(),
+        [(JvmType::Long, 1), (JvmType::Int, 3)]
+    );
+    assert_eq!(allocator.next_slot, 4);
+
+    let mut boundary = JvmLocalAllocator::empty(fixture.method);
+    boundary.next_slot = u16::MAX as usize - 2;
+    boundary.reserve(long_binding, JvmType::Long).unwrap();
+    assert_eq!(boundary.next_slot, u16::MAX as usize);
+    assert_eq!(boundary.locals[0].slot(), u16::MAX - 2);
+
+    let mut rejected = JvmLocalAllocator::empty(fixture.method);
+    rejected.next_slot = u16::MAX as usize - 1;
+    assert_eq!(
+        rejected.reserve(long_binding, JvmType::Long),
+        Err(JvmCodegenError::TooManyLocalSlots {
+            method: fixture.method,
+        })
+    );
+    assert!(rejected.locals.is_empty());
+    assert!(rejected.by_symbol.is_empty());
+    assert_eq!(rejected.next_slot, u16::MAX as usize - 1);
+}
+
+#[test]
 fn rejects_non_simple_method_names_and_unsupported_instance_method_flags() {
     let mut invalid_name = SignatureFixture::new(0);
     prepare_signature_class(&mut invalid_name, "Answer");

@@ -53,12 +53,15 @@ impl JvmLocalAllocator {
         binding: JvmLocalBinding,
         ty: crate::JvmType,
     ) -> Result<(), JvmCodegenError> {
-        // Check the count before publishing either the map entry or slot.
-        if self.next_slot >= MAX_LOCAL_COUNT {
-            return Err(JvmCodegenError::TooManyLocalSlots {
+        // Check the complete physical width before publishing either the map
+        // entry or slot. Category-two locals reserve both slots atomically.
+        let end = self
+            .next_slot
+            .checked_add(usize::from(ty.slot_width()))
+            .filter(|end| *end <= MAX_LOCAL_COUNT)
+            .ok_or(JvmCodegenError::TooManyLocalSlots {
                 method: self.method,
-            });
-        }
+            })?;
         let slot =
             u16::try_from(self.next_slot).map_err(|_| JvmCodegenError::TooManyLocalSlots {
                 method: self.method,
@@ -72,7 +75,7 @@ impl JvmLocalAllocator {
             mutable: binding.mutable,
         });
         self.by_symbol.insert(binding.symbol, index);
-        self.next_slot += 1; // Supported primitive and reference locals are category one.
+        self.next_slot = end;
         Ok(())
     }
 
