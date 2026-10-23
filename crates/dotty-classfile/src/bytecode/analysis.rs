@@ -1690,7 +1690,9 @@ fn validate_bounded_reference_descriptor(
     }
 
     for (parameter, ty) in descriptor.parameters.iter().enumerate() {
-        if !matches!(ty, FieldType::Object(_)) && value_kind(ty) != ValueKind::Int {
+        if !matches!(ty, FieldType::Object(_))
+            && !matches!(value_kind(ty), ValueKind::Int | ValueKind::Long)
+        {
             return Err(AnalysisError::UnsupportedMethodDescriptorType {
                 parameter: Some(parameter),
                 actual: ty.clone(),
@@ -1699,7 +1701,7 @@ fn validate_bounded_reference_descriptor(
     }
     if let Some(result) = &descriptor.return_type
         && !matches!(result, FieldType::Object(_))
-        && value_kind(result) != ValueKind::Int
+        && !matches!(value_kind(result), ValueKind::Int | ValueKind::Long)
     {
         return Err(AnalysisError::UnsupportedMethodDescriptorType {
             parameter: None,
@@ -5382,6 +5384,33 @@ mod tests {
             ),
             Err(AnalysisError::StackTypeMismatch {
                 instruction: 2,
+                expected: ValueKind::Long,
+                actual: ValueKind::Int,
+            })
+        ));
+
+        let mut wrong_constructor_category = CodeSequence::new();
+        wrong_constructor_category
+            .instruction(Instruction::New(ClassReference::new(operand(wide_owner))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let wrong_constructor_graph = ControlFlowGraph::build(&wrong_constructor_category).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_constructor_graph,
+                "wrongLongConstructorArgumentCategory",
+                "()V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 3,
                 expected: ValueKind::Long,
                 actual: ValueKind::Int,
             })
