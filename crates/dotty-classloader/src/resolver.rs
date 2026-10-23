@@ -1601,6 +1601,7 @@ mod tests {
     struct ModuleTastyPath {
         entries: Arc<Mutex<std::collections::HashMap<BinaryName, Vec<u8>>>>,
         object_missing: Arc<AtomicBool>,
+        object_corrupted: Arc<AtomicBool>,
     }
 
     impl ModuleTastyPath {
@@ -1615,6 +1616,7 @@ mod tests {
                     bytes,
                 )]))),
                 object_missing: Arc::new(AtomicBool::new(false)),
+                object_corrupted: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -1622,6 +1624,13 @@ mod tests {
     impl ClassPathEntry for ModuleTastyPath {
         fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
             if name.as_internal() == "java/lang/Object" {
+                if self.object_corrupted.load(Ordering::SeqCst) {
+                    return Ok(Some(ClassResource::new(
+                        vec![0xCA, 0xFE, 0xBA, 0xBE],
+                        ClassFormat::Class,
+                        ClassOrigin::Directory(PathBuf::from("<module-dependency>")),
+                    )));
+                }
                 return Ok((!self.object_missing.load(Ordering::SeqCst)).then(|| {
                     ClassResource::new(
                         test_class_stub("java/lang/Object", 0x0021),
@@ -2157,6 +2166,7 @@ mod tests {
                 bytes,
             )]))),
             object_missing: Arc::new(AtomicBool::new(false)),
+            object_corrupted: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -2216,6 +2226,7 @@ mod tests {
                 Box::new(ModuleTastyPath {
                     entries: Arc::new(Mutex::new(std::collections::HashMap::new())),
                     object_missing: Arc::new(AtomicBool::new(false)),
+                    object_corrupted: Arc::new(AtomicBool::new(false)),
                 }),
             ]);
             let resource = class_path
@@ -2646,6 +2657,7 @@ mod tests {
             Box::new(ModuleTastyPath {
                 entries: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 object_missing: Arc::new(AtomicBool::new(false)),
+                object_corrupted: Arc::new(AtomicBool::new(false)),
             }),
         ]);
         let mut resolver = ClasspathSymbolResolver::new(
@@ -2707,6 +2719,7 @@ mod tests {
                 bytes,
             )]))),
             object_missing: Arc::new(AtomicBool::new(false)),
+            object_corrupted: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -2997,6 +3010,7 @@ mod tests {
         let path = ModuleTastyPath {
             entries: Arc::new(Mutex::new(std::collections::HashMap::from([(name, bytes)]))),
             object_missing: Arc::new(AtomicBool::new(false)),
+            object_corrupted: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);
@@ -3567,10 +3581,8 @@ mod tests {
             space: MemberSpace::Prefix,
         };
         assert_eq!(resolver.resolve_member(&mut store, &absent), Ok(None));
-        assert!(
-            resolver.validated_module_resources[&binary]
-                .contains_key(&BinaryName::from_internal("java/lang/Object"))
-        );
+        assert!(!resolver.validated_module_declarations.contains(&binary));
+        assert!(!resolver.validated_module_resources.contains_key(&binary));
 
         // Simulate an outer caller rolling back the earlier completed parent
         // after module resolution itself succeeded and cached a declaration miss.
@@ -3590,6 +3602,74 @@ mod tests {
         assert!(
             matches!(&result, Err(ResolutionError::Malformed { reason }) if reason.contains("java/lang/Object")),
             "a rolled-back precompleted parent must not leave a valid miss proof: {result:?}"
+        );
+    }
+
+    #[test]
+    fn changed_precompleted_parent_bytes_cannot_validate_a_module_miss() {
+        let binary = BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both");
+        let path = ModuleTastyPath::both_fixture();
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let object_prefix = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let outer_store_checkpoint = store.checkpoint();
+        let outer_session_checkpoint = resolver.session.checkpoint();
+
+        resolver
+            .load_class(&mut store, &BinaryName::from_internal("java/lang/Object"))
+            .unwrap();
+        path.object_corrupted.store(true, Ordering::SeqCst);
+        let absent = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentFirst"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        assert_eq!(resolver.resolve_member(&mut store, &absent), Ok(None));
+        assert!(!resolver.validated_module_declarations.contains(&binary));
+
+        resolver
+            .session
+            .rollback_to(&mut store, outer_session_checkpoint);
+        store.rollback_to(outer_store_checkpoint);
+        let absent_after_rollback = MemberRequest {
+            prefix: object_prefix,
+            name: Name::new(store.names.intern("absentSecond"), Namespace::Term),
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let result = resolver.resolve_member(&mut store, &absent_after_rollback);
+        assert!(
+            matches!(&result, Err(ResolutionError::Malformed { reason }) if reason.contains("java/lang/Object")),
+            "current corrupted bytes must not be hidden by an older cached ClassInfo: {result:?}"
         );
     }
 
@@ -3800,6 +3880,7 @@ mod tests {
                 vec![0, 1, 2, 3],
             )]))),
             object_missing: Arc::new(AtomicBool::new(false)),
+            object_corrupted: Arc::new(AtomicBool::new(false)),
         };
         let mut store = SemanticStore::new();
         let definitions = Definitions::bootstrap(&mut store);

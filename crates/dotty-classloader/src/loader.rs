@@ -1418,12 +1418,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         // consulted next.
         if let Some(&symbol) = self.session.resolved.get(name) {
             if self.collect_resource_observations {
-                match self.class_path.find_class(name) {
-                    Ok(Some(resource)) => {
-                        self.resource_observations.insert(name.clone(), resource);
-                    }
-                    Ok(None) | Err(_) => self.resource_observations_complete = false,
-                }
+                // A resource read now cannot prove which bytes produced the
+                // already completed semantic class, nor its transitive
+                // hierarchy. Do not publish a reusable module-miss proof
+                // when completion reused such a session entry.
+                self.resource_observations_complete = false;
             }
             if let Some(profile) = &mut self.active_load_profile {
                 profile.completed_cache_hits += 1;
