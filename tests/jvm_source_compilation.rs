@@ -1467,6 +1467,117 @@ class Branch:
 }
 
 #[test]
+fn scala_long_source_reaches_typed_plans_before_backend_rejects_it() {
+    let source = fs::read_to_string(fixture_path("LongCategoryTwo.scala"))
+        .expect("read Scala Long category-two audit fixture");
+    let output = TestOutputDirectory::new("scala-long-category-two-audit");
+    let mut observed = false;
+    let result = compile_source_batch_with_source_observer(
+        &source,
+        "LongCategoryTwo.scala",
+        output.path(),
+        SourceId::from_index(1513),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut |_, _, unit, definitions| {
+            observed = true;
+            let long_box = audit_class_named(unit, "LongBox");
+            let runner = audit_class_named(unit, "Runner");
+
+            for (class, method_name, parameter_count, returns_long) in [
+                (long_box, "get", 0, true),
+                (long_box, "set", 1, false),
+                (runner, "constant", 0, true),
+                (runner, "roundTrip", 1, true),
+                (runner, "choose", 3, true),
+                (runner, "repeat", 3, true),
+            ] {
+                let method = audit_method_named(unit, class, method_name);
+                let Some(body) = method.body else {
+                    panic!("{method_name} has a typed body")
+                };
+                let signature_id = match unit.store.symbols.info(method.method) {
+                    dotty_core::SymbolInfo::Complete(signature) => signature,
+                    other => panic!("{method_name} has a completed signature: {other:?}"),
+                };
+                let Type::Method(signature) = unit.store.types.get(*signature_id) else {
+                    panic!("{method_name} has a method type")
+                };
+                assert_eq!(signature.params.len(), parameter_count, "{method_name}");
+                if method_name != "constant" {
+                    assert_eq!(
+                        signature
+                            .params
+                            .iter()
+                            .filter(|param| param.ty == definitions.long)
+                            .count(),
+                        match method_name {
+                            "set" | "roundTrip" => 1,
+                            "choose" | "repeat" => 2,
+                            _ => 0,
+                        },
+                        "{method_name} retains canonical Long parameter types"
+                    );
+                }
+                assert_eq!(
+                    signature.result == definitions.long,
+                    returns_long,
+                    "{method_name}"
+                );
+                let typed_body = unit.typed_ast.get(body);
+                assert!(
+                    typed_body.position.is_some(),
+                    "{method_name} body keeps source position"
+                );
+                if method_name == "constant" {
+                    assert!(matches!(
+                        &typed_body.kind,
+                        TreeKind::Literal(literal) if literal.value == Constant::Long(9_000_000_000)
+                    ));
+                }
+                if method_name == "roundTrip" || method_name == "repeat" {
+                    let saved = method
+                        .locals
+                        .iter()
+                        .find(|local| {
+                            unit.store
+                                .names
+                                .resolve(unit.store.symbols.get(local.symbol).name.text())
+                                == "saved"
+                        })
+                        .expect("saved local is bound by its canonical local symbol");
+                    assert!(unit.typed_ast.get(saved.declaration).position.is_some());
+                    assert_eq!(
+                        *unit.store.symbols.info(saved.symbol),
+                        dotty_core::SymbolInfo::Complete(definitions.long)
+                    );
+                }
+            }
+        },
+    );
+
+    assert!(
+        observed,
+        "parser, namer and typer completed before code generation: {result:?}"
+    );
+    assert!(
+        matches!(
+            result,
+            Err(PipelineFailure::Codegen(
+                JvmCodegenError::UnsupportedJvmReferenceType {
+                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass,
+                    ..
+                }
+            ))
+        ),
+        "the first backend failure is the external superclass boundary: {result:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "failed emission publishes no classes"
+    );
+}
+
+#[test]
 fn sibling_source_hierarchy_proves_the_canonical_common_base_deterministically() {
     let source = fs::read_to_string(fixture_path("SiblingConstructors.scala"))
         .expect("read source fixture for sibling constructors and dispatch");
