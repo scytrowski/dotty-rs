@@ -12946,6 +12946,7 @@ fn audit_source_inner_filtered(
         );
     }
     let postprocess_started = Instant::now();
+    let source_lines = SourceLineIndex::new(text);
     for (tree, node) in parsed.ast.iter() {
         let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind else {
             continue;
@@ -13033,7 +13034,7 @@ fn audit_source_inner_filtered(
             .span()
             .range()
             .start() as usize;
-        let line = text[..start].bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let line = source_lines.line_at(start);
         let site = format!("{path}:{line}:{name}");
         if typer.source_typed_index().get(source, tree).is_some() {
             if import_prefix_only {
@@ -16981,6 +16982,41 @@ fn local_method_trees(
                 .then_some((tree, node.position?.span().range()))
         })
         .collect()
+}
+
+/// Maps source byte offsets to 1-based line numbers without rescanning each prefix.
+struct SourceLineIndex {
+    newline_offsets: Vec<usize>,
+}
+
+impl SourceLineIndex {
+    fn new(source: &str) -> Self {
+        Self {
+            newline_offsets: source
+                .bytes()
+                .enumerate()
+                .filter_map(|(offset, byte)| (byte == b'\n').then_some(offset))
+                .collect(),
+        }
+    }
+
+    fn line_at(&self, byte_offset: usize) -> usize {
+        self.newline_offsets
+            .partition_point(|newline_offset| *newline_offset < byte_offset)
+            + 1
+    }
+}
+
+#[test]
+fn source_line_index_handles_utf8_crlf_and_line_boundaries() {
+    let source = "α\r\nbeta\n終";
+    let index = SourceLineIndex::new(source);
+
+    assert_eq!(index.line_at(0), 1);
+    assert_eq!(index.line_at("α\r\n".len()), 2);
+    assert_eq!(index.line_at("α\r\nbeta\n".len()), 3);
+    assert_eq!(index.line_at(source.len()), 3);
+    assert_eq!(index.line_at(source.len() + 10), 3);
 }
 
 fn function_with_mods_observation(
