@@ -141,25 +141,22 @@ chained calls, and same-class `this`.
 ## Two-live-allocation verifier contract
 
 JVMS 21 assigns each `new` instruction its own `uninitialized(offset)` type.
-`dup` creates another alias of that same allocation identity. The accepted
-follow-up contract is bounded to **at most two simultaneously uninitialized
+`dup` creates another alias of that same allocation identity. The implemented
+verifier contract is bounded to **at most two simultaneously uninitialized
 allocation sites in one straight-line basic block**. A third `new` while two
 sites are still pending must fail at that instruction; another allocation is
 allowed only after an earlier site's constructor has completed and its aliases
 have become initialized. This is a concurrent-live-site limit, not a total
 allocation-count limit.
 
-The current class-aware CFG analyzer stores only one
-`pending_allocation: Option<UninitializedAllocation { site, class }>` in a
-frame. Its existing regression rejects a second `new` while the first
-allocation is pending, reporting the second instruction and first allocation
-site. That single slot cannot validate the nested sequence above. The
-two-site bound is a follow-up target, not a claim about current dotty-rs
-acceptance.
+The class-aware CFG analyzer retains at most two pending allocation records,
+each keyed by its `new` instruction position and exact class identity. Operand
+stack aliases carry that site identity through `dup`; allocation identity is
+not keyed by class name. A third live site fails with the typed
+`TooManyLiveAllocations` error. Once a constructor completes, that site's
+aliases become initialized and its active slot is reusable.
 
-A verifier that supports the sequence needs allocation-site identities in
-each local and operand-stack value, rather than one frame-wide pending slot.
-For the nested example its state progression is:
+For the nested example the verifier state progresses as follows:
 
 1. `new Holder` creates `uninitialized(holder_site, Holder)`; `dup` copies that
    identity.
@@ -172,15 +169,15 @@ For the nested example its state progression is:
    `holder_site` receiver and an initialized exact `Object(Counter)` argument;
    on normal completion it rewrites only remaining aliases of `holder_site`.
 
-For the factory form, a verifier must permit a call on an already initialized
-receiver and accept its initialized exact result while the distinct
-`Holder` allocation remains pending below it on the operand stack. Control
-transfer has an explicit exclusion: while any allocation site is pending, no
-conditional branch, unconditional jump, or basic-block exit may carry that
-site to another block. This rejects a jump even when its condition is an
-unrelated initialized Boolean and rejects fallthrough across a CFG edge. The
-method must complete initialization of every pending site before any outgoing
-normal edge.
+For the factory form, a virtual call on an already initialized receiver may
+return an initialized exact result while the distinct `Holder` allocation
+remains pending below it on the operand stack. Uninitialized aliases cannot
+be passed as receiver or arguments. Control transfer remains excluded: while
+any allocation site is pending, no conditional branch, unconditional jump,
+or basic-block exit may carry that site to another block. This rejects a
+jump even when its condition is an unrelated initialized Boolean and rejects
+fallthrough across a CFG edge. The method must complete initialization of
+every pending site before any outgoing normal edge.
 
 Exception handlers have a similarly explicit boundary. A handler entry must
 not contain an uninitialized allocation alias in its locals or operand stack;
@@ -189,8 +186,7 @@ protected instruction's operand stack do not flow into that entry. A handler
 edge with a pending alias retained in a local is rejected. General
 uninitialized joins and exception-flow merging are outside this subset, rather
 than open design questions. The current `ControlFlowGraph` does not model
-exception-table edges, so #1493 must add focused handler-edge rejection
-coverage before admitting that flow.
+exception-table edges, so handler-edge behavior remains unsupported.
 
 The verifier still rejects using, storing, returning, comparing, branching on,
 or passing an uninitialized allocation as an ordinary value. Constructor
@@ -203,24 +199,24 @@ These boundaries map to focused checks as follows:
 
 | Boundary | Characterization or required regression |
 | --- | --- |
-| Second live site | Existing `cfg_validates_constructor_descriptor_and_rejects_nested_allocations` currently asserts rejection at the second `new`; #1493 must replace that expectation with a passing two-site sequence. |
-| Third concurrently live site | #1493 must add a three-deep sequence that accepts the first two sites and rejects the third `new` at its instruction, then retain a separate case proving a later allocation is allowed after initialization. |
+| Two live sites and exact alias rewrite | `cfg_initializes_nested_allocations_by_distinct_sites`, `cfg_distinguishes_same_class_allocation_sites_and_allows_reuse_after_init`, and the JDK 21 nested object construction harness cover different-class and same-class sites, LIFO initialization, reuse, and executable output. |
+| Third concurrently live site | `cfg_validates_constructor_descriptors_and_rejects_third_nested_allocation` accepts two pending sites and rejects the third `new` at its instruction with `TooManyLiveAllocations`. |
 | Uninitialized ordinary use and owner mismatch | Existing `cfg_rejects_uninitialized_reference_escapes_and_invalid_constructor_calls` covers storing, field use, missing initialization, duplicate initialization, and wrong constructor owner. |
 | Pending site across `goto` | Existing `cfg_rejects_uninitialized_reference_escapes_and_invalid_constructor_calls` asserts a `goto` is rejected while an allocation is pending. |
-| Pending site across a branch on an initialized value | The same focused test now covers `ifeq` on an integer constant while the allocation remains pending; #1493 must preserve the prohibition for every conditional opcode. |
-| Pending alias at an exception-handler entry | #1493 must add a handler-edge negative fixture with an uninitialized alias in a local; current CFG analysis has no exception-table transfer to exercise this case. |
+| Pending site across a branch on an initialized value | `cfg_rejects_uninitialized_reference_escapes_and_invalid_constructor_calls` covers `ifeq` on an integer constant while the allocation remains pending; every conditional opcode remains prohibited. |
+| Pending alias at an exception-handler entry | Exception-table transfer is not represented by `ControlFlowGraph`; handler edges remain unsupported and outside this bounded implementation. |
 | Branching constructor before super | Existing `rejects_branched_constructors_without_uninitialized_this_flow` remains the constructor-specific negative case. |
 
 In particular, the branch guard applies to outgoing frame state, not just to
-whether the uninitialized value is itself a branch operand. #1493 owns this
-classfile verifier extension. #1496 and #1495 own the emitter and argument
-integration that consume the verified contract.
+whether the uninitialized value is itself a branch operand. #1493 implements
+this classfile verifier extension. #1496 and #1495 own the emitter and
+argument integration that consume the verified contract.
 
 ## Follow-up ownership
 
 | Issue | Scope |
 | --- | --- |
-| #1493 | Classfile verifier state for multiple live allocation sites, exact alias initialization, and invalid-use checks |
+| #1493 | Classfile verifier state for multiple live allocation sites, exact alias initialization, and invalid-use checks; implemented by this bounded transfer contract |
 | #1494 | Typer call-selection contracts, only where source typing needs a correction |
 | #1495 | Exact reference constructor arguments, including mutable locals, call results, and the explicit null boundary; preserve the already-working parameter, immutable-local, and same-class `this` forms |
 | #1496 | Nested `new` lowering with separate allocation identities |
@@ -228,9 +224,11 @@ integration that consume the verified contract.
 | #1498 | Chained call receivers and preserving the already-working receiver forms |
 | #1499 | End-to-end integration after the lower-level contracts are ready |
 
-This audit changes tests and documentation only. Emission remains gated by the
-existing typed errors until those follow-ups implement their own bounded
-contracts and regressions.
+The #1492 audit itself changed tests and documentation only. This #1493
+increment adds the bounded classfile verifier capability and JDK-verified
+symbolic output; source emission remains gated by existing typed errors until
+the constructor-argument, nested-emission, and field-initializer follow-ups
+implement their separate contracts.
 
 Related contracts: [object creation](jvm-object-creation-contract.md),
 [reference fields and constructor arguments](jvm-reference-fields-constructors.md),

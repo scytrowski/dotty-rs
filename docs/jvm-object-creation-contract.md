@@ -182,23 +182,24 @@ immutable local of `C` can each serve as the receiver of one planned
 `invokevirtual` call with primitive arguments and primitive/Unit results.
 
 Before the matching constructor returns normally, the fresh reference must
-not be stored, returned, passed to another method, used as an ordinary
-receiver, exposed through a field, or carried across a branch. Constructor
-argument lowering must itself be primitive-only and branch-free. Nested
-`new`, conditional or short-circuit arguments, and reference operations in
-`If`/`While` remain rejected until the whole-method verifier state can track
-initialized and uninitialized references.
+not be stored, returned, passed as an ordinary method argument, used as an
+ordinary receiver, exposed through a field, or carried across a branch. The
+class-aware CFG verifier supports up to two nested `new` sites in one straight-
+line block and can call an approved method on an initialized receiver while a
+separate outer allocation remains pending. Source lowering of nested
+constructor arguments, conditional or short-circuit arguments, and reference
+operations in `If`/`While` remains outside the current JVM emission contract.
 
 `dotty-classfile::bytecode::LinearCodeAnalyzer` is not that verifier. It
 represents `New` as the broad `ValueKind::Reference`, lets `Dup` copy any
 category-one value, and checks `InvokeSpecial` as a descriptor-shaped call;
-it does not remember the allocation offset, distinguish initialized from
-uninitialized references, or match a constructor to its allocation. The CFG
-analyzer currently rejects reference-flow instructions such as `ALoad`,
-`AStore`, `InvokeSpecial`, `InvokeVirtual`, and `AReturn` as unsupported
-reference operations. Passing the linear analyzer alone is not evidence that
-a generated constructor sequence verifies. Any future emitted object code
-must run under JDK 21+ `java -Xverify:all`.
+it does not remember allocation offsets, distinguish initialized from
+uninitialized references, or match constructors to allocation sites. The
+class-aware CFG analyzer tracks up to two pending allocation-site identities,
+requires last-in, first-out constructor initialization, and rejects aliases
+that escape or cross CFG edges. Passing the linear analyzer alone is not
+evidence that a generated constructor sequence verifies. Any emitted object
+code must run under JDK 21+ `java -Xverify:all`.
 
 ## Bounded support matrix
 
