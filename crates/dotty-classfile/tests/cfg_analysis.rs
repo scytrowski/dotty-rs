@@ -2028,6 +2028,26 @@ fn long_parameter_branch_join_uses_physical_slots_and_one_frame_entry() {
                 ]
             && frame.stack == [VerificationTypeInfo::Long]
     }));
+
+    let mut instance_parameter = CodeSequence::new();
+    instance_parameter
+        .instruction(Instruction::LLoad(local(1)))
+        .instruction(Instruction::LStore(local(3)))
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&instance_parameter).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "(J)V", false, &ConstantPool::default()).unwrap();
+    assert_eq!(flow.max_stack, 2);
+    assert_eq!(flow.max_locals, 5);
+    assert_eq!(
+        flow.entry_state(graph.entry_block()).unwrap().locals,
+        [
+            FlowLocalState::Receiver,
+            FlowLocalState::Long,
+            FlowLocalState::LongTail,
+            FlowLocalState::Top,
+            FlowLocalState::Top,
+        ]
+    );
 }
 
 #[test]
