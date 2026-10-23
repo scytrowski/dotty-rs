@@ -1,0 +1,158 @@
+name: Typer focused audit
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/typer-focused-audit.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/dotty-core/**'
+      - 'crates/dotty-classfile/**'
+      - 'crates/dotty-classloader/**'
+      - 'crates/dotty-tasty/**'
+      - 'crates/dotty-tasty-unpickler/**'
+      - 'crates/dotty-typer/**'
+      - 'tools/typer-classpath-corpus-audit/**'
+      - 'docs/typer-*.md'
+      - 'docs/typer-*.tsv'
+      - 'docs/typer-focused-smoke-baseline-3.9.0.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typer-focused-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  focused-audit:
+    name: Focused semantic regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUST_TEST_THREADS: 1
+      SCALA39_JDK_RELEASE: 21
+      SCALA39_ROOT: ${{ github.workspace }}/scala39-source
+      COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
+      DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}/typer-focused-intermediates
+      DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
+
+    steps:
+      - name: Check out dotty-rs
+        uses: actions/checkout@v4
+
+      - name: Run audit tooling unit tests
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools/typer-classpath-corpus-audit -p 'test_*.py'
+
+      - name: Check out pinned Scala 3.9.0 sources
+        uses: actions/checkout@v4
+        with:
+          repository: scala/scala3
+          ref: 777528f19a58e794c9954a42f433373472ec57f8
+          path: scala39-source
+          persist-credentials: false
+
+      - name: Install pinned JDK 21.0.8
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21.0.8+9'
+          check-latest: false
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.98.1 --profile minimal
+
+      - name: Cache Cargo dependencies and test artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+            target/.rustc_info.json
+          key: ${{ runner.os }}-typer-focused-1.98.1-${{ hashFiles('**/Cargo.lock') }}-test-no-debug-no-incremental
+          restore-keys: |
+            ${{ runner.os }}-typer-focused-1.98.1-
+
+      - name: Verify pinned inputs and record environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "777528f19a58e794c9954a42f433373472ec57f8"
+          grep -q '^JAVA_VERSION="21.0.8"$' "$JAVA_HOME/release"
+          test -d "$JAVA_HOME/jmods"
+          mkdir -p "$COURSIER_MAVEN_ROOT" "$DOTTY_AUDIT_REPORT_DIR"
+          {
+            printf 'dotty-rs_commit\t%s\n' "$(git rev-parse HEAD)"
+            printf 'scala3_commit\t%s\n' "$(git -C "$SCALA39_ROOT" rev-parse HEAD)"
+            printf 'rust\t%s\n' "$(rustc +1.98.1 --version)"
+            printf 'cargo\t%s\n' "$(cargo +1.98.1 --version)"
+            printf 'java\t%s\n' "$(java --version | head -1)"
+            printf 'cargo_build_jobs\t%s\n' "$CARGO_BUILD_JOBS"
+            printf 'rust_test_threads\t%s\n' "$RUST_TEST_THREADS"
+          } > "$DOTTY_AUDIT_REPORT_DIR/environment.tsv"
+
+      - name: Download and verify pinned Scala runtime artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS=' ' read -r relative_path sha256; do
+            [[ -z "$relative_path" ]] && continue
+            destination="$COURSIER_MAVEN_ROOT/$relative_path"
+            mkdir -p "$(dirname "$destination")"
+            curl --fail --location --retry 3 \
+              "https://repo1.maven.org/maven2/$relative_path" \
+              --output "$destination"
+            printf '%s  %s\n' "$sha256" "$destination" | sha256sum --check --status
+            printf '%s\t%s\n' "$sha256" "$relative_path" \
+              >> "$DOTTY_AUDIT_REPORT_DIR/scala-artifacts.sha256.tsv"
+          done <<'ARTIFACTS'
+          org/scala-lang/scala3-library_3/3.9.0/scala3-library_3-3.9.0.jar 9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba
+          org/scala-lang/scala-library/3.9.0/scala-library-3.9.0.jar b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd
+          org/scala-lang/scala3-compiler_3/3.9.0/scala3-compiler_3-3.9.0.jar 3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a
+          org/scala-lang/tasty-core_3/3.9.0/tasty-core_3-3.9.0.jar 66e12dda98bb23e864f3a31f8527c8338bf47bce9b85cc380b368c69c1ba8d0f
+          org/scala-lang/scala3-interfaces/3.9.0/scala3-interfaces-3.9.0.jar 64dfde1d2c6309d65a01c5f3ea836137eb84338dcadeb16f85764561ef4e10db
+          org/scala-lang/modules/scala-asm/9.9.0-scala-1/scala-asm-9.9.0-scala-1.jar 75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375
+          org/scala-sbt/compiler-interface/1.12.0/compiler-interface-1.12.0.jar 92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3
+          org/scala-sbt/util-interface/1.11.5/util-interface-1.11.5.jar 1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af
+          ARTIFACTS
+
+      - name: Run deterministic focused audit and compare baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v \
+            tools/typer-classpath-corpus-audit/run \
+              --focused-manifest docs/typer-focused-smoke-manifest-3.9.0.tsv \
+              --verify-determinism \
+              "$DOTTY_AUDIT_REPORT_DIR/focused-report.md" \
+            2> "$DOTTY_AUDIT_REPORT_DIR/runtime-resource-usage.txt"
+          AUDIT_RUN_DIR="$(python3 tools/typer-classpath-corpus-audit/audit_run_directory.py resolve "$DOTTY_AUDIT_TMP_ROOT")"
+          python3 tools/typer-classpath-corpus-audit/verify_focused_gate.py \
+            --report "$DOTTY_AUDIT_REPORT_DIR/focused-report.md" \
+            --baseline docs/typer-focused-smoke-baseline-3.9.0.txt \
+            --timing-output "$DOTTY_AUDIT_REPORT_DIR/focused-timings.tsv" \
+            --timing-log "$AUDIT_RUN_DIR/first.log" \
+            --timing-rss "$AUDIT_RUN_DIR/first.rss" \
+            --timing-log "$AUDIT_RUN_DIR/second.log" \
+            --timing-rss "$AUDIT_RUN_DIR/second.rss"
+          printf 'Focused-only coverage: 3 files / 31 methods; not a full-corpus result.\n' \
+            > "$DOTTY_AUDIT_REPORT_DIR/status.txt"
+
+      - name: Upload focused report, timings, and intermediates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: typer-focused-audit-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/typer-focused-report/
+            ${{ runner.temp }}/typer-focused-intermediates/
+          if-no-files-found: warn
+          retention-days: 30

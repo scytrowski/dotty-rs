@@ -174,6 +174,8 @@ if [[ -n "${DOTTY_AUDIT_TMP_ROOT:-}" ]]; then
     mkdir -p "$DOTTY_AUDIT_TMP_ROOT"
     tmp_dir="$(mktemp -d "$DOTTY_AUDIT_TMP_ROOT/run.XXXXXXXX")"
     trap 'printf "audit intermediates retained at %s\n" "$tmp_dir" >&2' EXIT
+    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/audit_run_directory.py" \
+        record "$DOTTY_AUDIT_TMP_ROOT" "$tmp_dir"
 else
     tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' EXIT
@@ -653,11 +655,25 @@ mkdir -p "$(dirname -- "$output_path")"
 parent_provenance_path="${output_path%.md}-tasty-parent-source-provenance.tsv"
 cp "$tmp_dir/first.tasty-parent-provenance.tsv" "$parent_provenance_path"
 cohort_path="${output_path%.md}-deferred-cohorts.tsv"
-PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
-    "$tmp_dir/first.report" --rows "$tmp_dir/cohorts.tsv" >"$tmp_dir/gate.txt"
+sprint_start_gate_baseline="$repo_root/docs/typer-performance-sprint-start-gate-3.9.0.tsv"
+gate_status=0
+if PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
+    "$tmp_dir/first.report" --sprint-start-gate-baseline "$sprint_start_gate_baseline" \
+    --rows "$tmp_dir/cohorts.tsv" \
+    >"$tmp_dir/gate.txt" 2>"$tmp_dir/gate-error.txt"; then
+    :
+else
+    gate_status=$?
+fi
 if [[ "$verify_determinism" == 1 ]]; then
-    PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
-        "$tmp_dir/second.report" --rows "$tmp_dir/second-cohorts.tsv" >"$tmp_dir/second-gate.txt"
+    if PYTHONDONTWRITEBYTECODE=1 python3 "$script_dir/compare_deferred_audit.py" \
+        "$tmp_dir/second.report" --sprint-start-gate-baseline "$sprint_start_gate_baseline" \
+        --rows "$tmp_dir/second-cohorts.tsv" \
+        >"$tmp_dir/second-gate.txt" 2>"$tmp_dir/second-gate-error.txt"; then
+        :
+    else
+        gate_status=1
+    fi
     if ! cmp -s "$tmp_dir/cohorts.tsv" "$tmp_dir/second-cohorts.tsv"; then
         diff -u "$tmp_dir/cohorts.tsv" "$tmp_dir/second-cohorts.tsv" >&2 || true
         printf 'deferred-cohort TSV sidecar was not deterministic\n' >&2
@@ -1309,6 +1325,9 @@ printf 'The #950 snapshot recommended the import/classpath resolution sprint. It
     printf '| Max new identity shells per request | n/a | %s |\n\n' "$(report_field max_identity_shells_created_per_request)"
     printf 'The automatic gate requires completed dependency p95 <= 6, completed-class fanout <= 16, unchanged local-method denominator, and no lost previously successful class target keys.\n\n```text\n'
     cat "$tmp_dir/gate.txt"
+    if [[ -s "$tmp_dir/gate-error.txt" ]]; then
+        cat "$tmp_dir/gate-error.txt"
+    fi
     printf '```\n\n'
     printf '## Previous type projection snapshot\n\n'
     printf 'The #738 type-projection measurements remain historical: 28 unsupported type-tree first blockers in 12 files. They are not current counts; current `type_tree_forms` and `unsupported_type_tree_failures` below are the refreshed values.\n\n'
@@ -1321,3 +1340,7 @@ printf 'The #950 snapshot recommended the import/classpath resolution sprint. It
 
 cp "$tmp_dir/cohorts.tsv" "$cohort_path"
 printf 'Wrote audit report to %s and frozen cohort rows to %s\n' "$output_path" "$cohort_path"
+if [[ "$gate_status" -ne 0 ]]; then
+    printf 'audit report and sidecars were written, but one or more semantic/dependency gates failed\n' >&2
+    exit "$gate_status"
+fi

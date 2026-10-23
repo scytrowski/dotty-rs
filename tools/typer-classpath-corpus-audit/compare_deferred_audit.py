@@ -3,6 +3,7 @@
 import argparse
 import collections
 import csv
+import io
 import re
 from pathlib import Path
 
@@ -19,18 +20,42 @@ COHORTS = {
 }
 
 
-def raw(text):
+def section_lines(text, name):
     marker = '## Full raw audit output'
-    return text[text.index(marker):] if marker in text else text
+    marker_offset = text.find(marker)
+    search_start = marker_offset + len(marker) if marker_offset >= 0 else 0
+    header = f'{name}:\n'
+    while True:
+        section_offset = text.find(header, search_start)
+        while section_offset >= 0 and section_offset > 0 and text[section_offset - 1] != '\n':
+            section_offset = text.find(header, section_offset + 1)
+        if section_offset < 0:
+            return
+        stream = io.StringIO(text)
+        stream.seek(section_offset + len(header))
+        for line in stream:
+            line = line.rstrip('\n')
+            if re.fullmatch(r'[a-zA-Z_0-9]+:', line):
+                search_start = stream.tell()
+                break
+            yield line
+        else:
+            return
 
 
-def sections(text):
+def sections(text, wanted=None):
     result = collections.defaultdict(list)
     section = None
-    for line in raw(text).splitlines():
+    marker = '## Full raw audit output'
+    stream = io.StringIO(text)
+    marker_offset = text.find(marker)
+    if marker_offset >= 0:
+        stream.seek(marker_offset + len(marker))
+    for line in stream:
+        line = line.rstrip('\n')
         if re.fullmatch(r'[a-zA-Z_0-9]+:', line):
             section = line[:-1]
-        elif section:
+        elif section and (wanted is None or section in wanted):
             result[section].append(line)
     return result
 
@@ -38,9 +63,10 @@ def sections(text):
 def requests(text):
     result = collections.defaultdict(collections.Counter)
     method = None
-    parts = sections(text)
-    lines = parts.get('resolver_observations_by_enclosing_method', parts['resolver_581_comparison'])
-    for line in lines:
+    section = ('resolver_observations_by_enclosing_method'
+               if '\nresolver_observations_by_enclosing_method:\n' in text
+               else 'resolver_581_comparison')
+    for line in section_lines(text, section):
         if match := re.match(r'^    (.*): requests=\d+, distinct_request_outcomes=', line):
             method = match[1]
         if match := re.match(r'^      (?:target=)?(.*?)::outcome=(.*?)=(\d+)$', line):
@@ -51,7 +77,7 @@ def requests(text):
 
 
 def scalar(text, section, name):
-    found = [int(m[1]) for line in sections(text)[section]
+    found = [int(m[1]) for line in section_lines(text, section)
              if (m := re.match(rf'^  {re.escape(name)}=(\d+)(?:\s|$)', line))]
     if len(found) != 1:
         raise ValueError(f'missing or duplicate metric {section}/{name}')
@@ -63,27 +89,53 @@ def successful_targets(text):
             for target, outcome in outcomes if outcome == 'external class success'}
 
 
-def gate(baseline, current):
-    lost = successful_targets(baseline) - successful_targets(current)
+def gate(baseline, current, baseline_target_keys=None, baseline_class_successes=None):
+    baseline_successes = (successful_targets(baseline) if baseline_target_keys is None
+                          else baseline_target_keys)
+    lost = baseline_successes - successful_targets(current)
+    errors = []
     if lost:
-        raise ValueError(f'lost previously successful targets: {sorted(lost)}')
+        errors.append(f'lost previously successful targets: {sorted(lost)}')
     depth = scalar(current, 'dependency_load_profile', 'p95_dependency_depth')
     fanout = scalar(current, 'dependency_load_profile', 'max_distinct_fully_completed_classes_per_request')
     if depth > 6 or fanout > 16:
-        raise ValueError(f'dependency reduction gate failed: p95={depth}, fanout={fanout}')
-    before = scalar(baseline, 'resolver_metrics', 'external_class_symbol_successes')
+        errors.append(
+            f'dependency reduction gate failed: p95={depth}/6, fanout={fanout}/16')
+    before = (scalar(baseline, 'resolver_metrics', 'external_class_symbol_successes')
+              if baseline_class_successes is None else baseline_class_successes)
     after = scalar(current, 'resolver_metrics', 'external_class_symbol_successes')
     if after < before:
-        raise ValueError(f'class-success count regressed: {after} < {before}; request movement needs explicit review')
+        errors.append(
+            f'class-success count regressed: {after} < {before}; '
+            'request movement needs explicit review')
     if scalar(current, 'audit_v1_comparison', 'local_methods') != 3297:
-        raise ValueError('typed-method denominator changed')
+        errors.append('typed-method denominator changed')
+    if errors:
+        raise ValueError('; '.join(errors))
     return depth, fanout
+
+
+def sprint_start_gate_baseline(path):
+    target_keys = set()
+    class_successes = None
+    for line in path.read_text(encoding='utf-8').splitlines():
+        if not line or line.startswith('kind\t'):
+            continue
+        kind, key, value = line.split('\t')
+        if kind == 'metric' and key == 'external_class_symbol_successes':
+            class_successes = int(value)
+        elif kind == 'successful_target_key':
+            target_keys.add(key)
+    if class_successes is None or not target_keys:
+        raise ValueError(f'incomplete sprint-start gate baseline: {path}')
+    return target_keys, class_successes
 
 
 def cohort_records(text):
     records = {}
+    parts = sections(text, set(COHORTS))
     for section, cohort in COHORTS.items():
-        for line in sections(text)[section]:
+        for line in parts[section]:
             row = line.strip()
             if row.startswith('field:'):
                 continue
@@ -133,7 +185,7 @@ def cohort_records(text):
 
 def attempts(text):
     by_id, by_site = {}, {}
-    for line in sections(text)['local_method_attempts']:
+    for line in section_lines(text, 'local_method_attempts'):
         if match := re.match(r'^  method=(.*?)::site=(.*?)::attempt=(.*?)::blocker=(.*?)::typed=(true|false)$', line):
             by_id[match[1]] = (match[3], line.strip())
             by_site.setdefault(match[2], []).append(match[3])
@@ -142,7 +194,7 @@ def attempts(text):
 
 def lifecycle(text):
     result = {}
-    for line in sections(text)['dependency_load_profile']:
+    for line in section_lines(text, 'dependency_load_profile'):
         if match := re.match(r'^    method=(.*?)::shells=\[(.*?)\]::completed=\[(.*?)\]$', line):
             result[match[1]] = (match[2], match[3])
     return result
@@ -176,7 +228,7 @@ def cohort_rows(baseline, current):
     traces, states = requests(current), lifecycle(current)
     attempt_ids, attempt_sites = attempts(current)
     field_traces = {}
-    for lines in sections(current).values():
+    for lines in sections(current, {'dependency_load_profile'}).values():
         for line in lines:
             if match := re.match(r'^    field:(.*?)::targets=\[(.*?)\]::shells=\[(.*?)\]::completed=\[(.*?)\]$', line):
                 field_traces[match[1]] = (match[2], match[3], match[4])
@@ -217,11 +269,26 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('current', type=Path)
     parser.add_argument('--baseline', type=Path, default=Path(__file__).resolve().parents[2] / 'docs/typer-classpath-corpus-audit-976-3.9.0.md')
+    parser.add_argument('--sprint-start-gate-baseline', type=Path)
     parser.add_argument('--rows', type=Path)
     args = parser.parse_args()
     baseline = args.baseline.read_text(encoding='utf-8')
     current = args.current.read_text(encoding='utf-8')
-    depth, fanout = gate(baseline, current)
+    target_keys = class_successes = None
+    if args.sprint_start_gate_baseline:
+        target_keys, class_successes = sprint_start_gate_baseline(
+            args.sprint_start_gate_baseline)
+    gate_error = None
+    try:
+        depth, fanout = gate(baseline, current, target_keys, class_successes)
+    except ValueError as error:
+        gate_error = str(error)
+        depth = scalar(current, 'dependency_load_profile', 'p95_dependency_depth')
+        fanout = scalar(
+            current,
+            'dependency_load_profile',
+            'max_distinct_fully_completed_classes_per_request',
+        )
     rows = cohort_rows(baseline, current)
     if args.rows:
         with args.rows.open('w', encoding='utf-8', newline='') as output:
@@ -231,10 +298,22 @@ def main():
                              'shells_observed', 'completions_observed', 'resolved_requests',
                              'current_first_blocker', 'full_method_typed'))
             writer.writerows(rows)
-    print(f'Gate passed: p95 completion depth {depth}/6; maximum completed fanout {fanout}/16.')
-    print(f'Previously successful target keys retained: {len(successful_targets(baseline))}/{len(successful_targets(current))}.')
+    if gate_error:
+        print(f'Gate failed: {gate_error}')
+    else:
+        print(f'Gate passed: p95 completion depth {depth}/6; maximum completed fanout {fanout}/16.')
+    baseline_successes = (successful_targets(baseline) if target_keys is None
+                          else target_keys)
+    current_successes = successful_targets(current)
+    retained = baseline_successes & current_successes
+    print(
+        'Previously successful target keys retained: '
+        f'{len(retained)}/{len(baseline_successes)}; '
+        f'current distinct successes: {len(current_successes)}.'
+    )
     print('Frozen cohort rows:', dict(sorted(collections.Counter(row[0] for row in rows).items())))
+    return 1 if gate_error else 0
 
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
