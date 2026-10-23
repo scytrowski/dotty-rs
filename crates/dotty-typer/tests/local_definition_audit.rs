@@ -6610,15 +6610,32 @@ fn pinned_scala39_local_definition_audit() {
         assert_eq!(row.modifiers, "Impure", "{row:?}");
         assert_eq!(row.erased_params, "ordinary", "{row:?}");
         assert_eq!(row.arity, 1, "{row:?}");
-        if row.projection_completed {
-            assert!(row.projection_error.is_none(), "{row:?}");
-            assert_eq!(row.semantic_family, "ImpureFunction1", "{row:?}");
-        } else {
-            assert_eq!(row.semantic_family, "unselected", "{row:?}");
-            assert!(row.projection_error.is_some(), "{row:?}");
-        }
         assert_eq!(row.expected_semantic_family, "ImpureFunction1", "{row:?}");
-        assert_eq!(row.first_blocker, "SymbolResolution", "{row:?}");
+        let expected_blocker = match row.path.as_str() {
+            // #1440 resolves the applied TASTy parents used by ImpureFunction1.
+            // These methods now reach function application, which remains
+            // unsupported; preserve the old SymbolResolution result only in
+            // the historical #946 documentation.
+            "library/src/scala/collection/StringParsers.scala" => {
+                assert!(row.projection_completed, "{row:?}");
+                assert!(row.projection_error.is_none(), "{row:?}");
+                assert_eq!(row.semantic_family, "ImpureFunction1", "{row:?}");
+                "ApplicationCalleeNotMethod"
+            }
+            "library/src/scala/collection/convert/JavaCollectionWrappers.scala" => {
+                assert!(!row.projection_completed, "{row:?}");
+                assert_eq!(row.semantic_family, "unselected", "{row:?}");
+                assert!(
+                    row.projection_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("ImportQualifierNotFound")),
+                    "{row:?}"
+                );
+                "ImportQualifierNotFound"
+            }
+            path => panic!("unexpected frozen impure-function path {path:?}"),
+        };
+        assert_eq!(row.first_blocker, expected_blocker, "{row:?}");
         assert!(!row.method_typed, "{row:?}");
     }
     assert_eq!(
