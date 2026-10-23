@@ -256,6 +256,11 @@ pub(crate) fn append_direct_super_constructor_call(
         current_field: class,
         node_visits: 0,
     };
+    enum EncodedArgument {
+        IntConstant(i32),
+        LongConstant(i64),
+        Parameter { slot: u16, value_type: JvmType },
+    }
     let mut encoded_arguments = Vec::with_capacity(proof.arguments().len());
     for (binding, formal) in proof
         .arguments()
@@ -287,7 +292,18 @@ pub(crate) fn append_direct_super_constructor_call(
         }
         match instructions.as_slice() {
             [JvmConstructorInitializerInstruction::Constant(value)] => {
-                encoded_arguments.push((*value, None, found, binding.typed));
+                encoded_arguments.push(EncodedArgument::IntConstant(*value));
+            }
+            [JvmConstructorInitializerInstruction::LongConstant(value)] => {
+                if found != JvmType::Long {
+                    return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                        tree: proof.typed_application(),
+                        argument: binding.typed,
+                        expected: formal.ty(),
+                        found: Some(found),
+                    });
+                }
+                encoded_arguments.push(EncodedArgument::LongConstant(*value));
             }
             [
                 JvmConstructorInitializerInstruction::LoadParameter {
@@ -302,7 +318,10 @@ pub(crate) fn append_direct_super_constructor_call(
                         found: Some(*value_type),
                     });
                 }
-                encoded_arguments.push((0, Some(*slot), found, binding.typed));
+                encoded_arguments.push(EncodedArgument::Parameter {
+                    slot: *slot,
+                    value_type: *value_type,
+                });
             }
             _ => {
                 return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
@@ -315,19 +334,15 @@ pub(crate) fn append_direct_super_constructor_call(
 
     code.aload(0)
         .map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
-    for (value, slot, value_type, argument) in encoded_arguments {
-        let result = match slot {
-            Some(slot) => match value_type {
+    for argument in encoded_arguments {
+        let result = match argument {
+            EncodedArgument::IntConstant(value) => code.iconst(value),
+            EncodedArgument::LongConstant(value) => code.lconst(value),
+            EncodedArgument::Parameter { slot, value_type } => match value_type {
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(slot)),
                 JvmType::Reference(_) => code.aload(usize::from(slot)),
-                JvmType::Long => {
-                    return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
-                        tree: proof.typed_application(),
-                        argument,
-                    });
-                }
+                JvmType::Long => code.lload(usize::from(slot)),
             },
-            None => code.iconst(value),
         };
         result.map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
     }

@@ -423,6 +423,7 @@ fn planned_argument_type(
     match store.types.try_get(argument_tree.ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmType::Int),
         Type::Constant(Constant::Boolean(_)) => Some(JvmType::Boolean),
+        Type::Constant(Constant::Long(_)) => Some(JvmType::Long),
         Type::TypeRef {
             prefix,
             target: TypeRefTarget::Symbol(symbol),
@@ -440,6 +441,15 @@ fn planned_argument_type(
             && Some(*symbol) == type_symbol(store, definitions.boolean) =>
         {
             Some(JvmType::Boolean)
+        }
+        Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        } if *prefix == definitions.no_prefix
+            && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix))
+            && Some(*symbol) == type_symbol(store, definitions.long) =>
+        {
+            Some(JvmType::Long)
         }
         Type::TypeRef { .. } if matches!(argument_tree.kind, TreeKind::Apply(_)) => {
             planned_constructor_application_type(

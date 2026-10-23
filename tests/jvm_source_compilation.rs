@@ -1976,7 +1976,7 @@ fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
         .expect("Long calls and CFG expressions compile");
     let second = compile_fixture_classes("LongComposition.scala", second_output.path())
         .expect("a fresh frontend compiles the same Long composition");
-    assert_eq!(first.len(), 2);
+    assert_eq!(first.len(), 4);
     assert_eq!(
         first
             .iter()
@@ -1996,6 +1996,8 @@ fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
             .unwrap_or_else(|| panic!("{name} class is emitted"))
     };
     let long_box = decode_emitted_class(artifact("LongBox"));
+    let long_derived = decode_emitted_class(artifact("LongDerived"));
+    let long_derived_literal = decode_emitted_class(artifact("LongDerivedLiteral"));
     let runner = decode_emitted_class(artifact("Runner"));
     assert_eq!(
         methods_with_descriptors(&long_box),
@@ -2009,6 +2011,24 @@ fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
     assert_eq!(code_max_stack(&long_box, "select"), 2);
     assert_eq!(code_max_locals(&long_box, "select"), 7);
     assert_eq!(
+        methods_with_descriptors(&long_derived),
+        [("<init>".to_owned(), "(J)V".to_owned())]
+    );
+    assert_invocation_sequence(
+        &long_derived,
+        emitted_method_code(&long_derived, "<init>"),
+        &[(0xb7, "LongBox", "<init>", "(J)V")],
+    );
+    assert_eq!(
+        methods_with_descriptors(&long_derived_literal),
+        [("<init>".to_owned(), "()V".to_owned())]
+    );
+    assert_invocation_sequence(
+        &long_derived_literal,
+        emitted_method_code(&long_derived_literal, "<init>"),
+        &[(0xb7, "LongBox", "<init>", "(J)V")],
+    );
+    assert_eq!(
         methods_with_descriptors(&runner),
         [
             ("<init>".to_owned(), "()V".to_owned()),
@@ -2017,6 +2037,7 @@ fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
             ("forward".to_owned(), "(LLongBox;)J".to_owned()),
             ("mixed".to_owned(), "(LLongBox;ZJJ)J".to_owned()),
             ("roundTrip".to_owned(), "(J)J".to_owned()),
+            ("literalRoundTrip".to_owned(), "()J".to_owned()),
         ]
     );
 
@@ -2087,12 +2108,20 @@ fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
         ],
     );
     assert_eq!(code_max_locals(&runner, "roundTrip"), 4);
+    assert_invocation_sequence(
+        &runner,
+        emitted_method_code(&runner, "literalRoundTrip"),
+        &[
+            (0xb7, "LongBox", "<init>", "(J)V"),
+            (0xb6, "LongBox", "get", "()J"),
+        ],
+    );
 
     if !require_jdk_or_skip() {
         return;
     }
 
-    for class_name in ["LongBox", "Runner"] {
+    for class_name in ["LongBox", "LongDerived", "LongDerivedLiteral", "Runner"] {
         let output_path = first_output.path().to_str().expect("UTF-8 output path");
         let javap = Command::new("javap")
             .args(["-v", "-c", "-classpath", output_path, class_name])
@@ -2105,7 +2134,9 @@ fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
             String::from_utf8_lossy(&javap.stderr)
         );
         let text = String::from_utf8_lossy(&javap.stdout);
-        assert!(text.contains("lreturn"));
+        if matches!(class_name, "LongBox" | "Runner") {
+            assert!(text.contains("lreturn"));
+        }
         if class_name == "Runner" {
             assert!(text.contains("StackMapTable"));
             assert!(text.contains("descriptor: (ZJJ)J"));
@@ -2126,11 +2157,13 @@ fn long_calls_if_and_while_compose_and_verify_on_the_jvm() {
   public static void main(String[] args) {
     Runner runner = new Runner();
     LongBox box = new LongBox(9000000000L);
+    LongBox derived = new LongDerived(-9000000000L);
+    LongBox derivedLiteral = new LongDerivedLiteral();
     if (runner.choose(true, 9000000000L, -9000000000L) != 9000000000L) throw new AssertionError("choose true");
     if (runner.choose(false, 9000000000L, -9000000000L) != -9000000000L) throw new AssertionError("choose false");
     if (runner.loop(0, 11L, 22L) != 11L || runner.loop(3, 11L, 22L) != 22L) throw new AssertionError("loop");
     if (runner.mixed(box, true, Long.MIN_VALUE, 5L) != Long.MIN_VALUE || runner.mixed(box, false, 7L, -9000000000L) != -9000000000L) throw new AssertionError("mixed call");
-    if (runner.forward(box) != 9000000000L || runner.roundTrip(-9000000000L) != -9000000000L) throw new AssertionError("calls");
+    if (runner.forward(box) != 9000000000L || runner.roundTrip(-9000000000L) != -9000000000L || runner.forward(derived) != -9000000000L || runner.forward(derivedLiteral) != 9000000000L || runner.literalRoundTrip() != 9000000000L) throw new AssertionError("calls");
     box.set(Long.MIN_VALUE);
     if (runner.forward(box) != Long.MIN_VALUE) throw new AssertionError("LongBox state");
     System.out.println("long composition ok");

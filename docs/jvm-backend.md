@@ -21,8 +21,10 @@ source fixture, method and constructor descriptor metadata (`J`) with
 category-two parameter offsets, CFG/frame verification, straight-line value
 lowering, and private instance `Long` fields initialized by a primary
 constructor. The backend also supports checked planned Long method calls,
-Long primary-constructor arguments, Long-valued `If` joins, and Long locals
-updated across Boolean/Int-controlled `While` loops. Long arithmetic,
+Long arguments to object creation and approved direct-parent constructor calls
+(including Long constants and forwarded constructor parameters), Long-valued
+`If` joins, and Long locals updated across Boolean/Int-controlled `While`
+loops. Long arithmetic,
 comparisons, static Long calls, and category-two stack manipulation remain
 outside the supported subset.
 

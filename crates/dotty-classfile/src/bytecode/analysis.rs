@@ -1339,7 +1339,7 @@ pub(crate) fn analyze_validated_with_current_class_and_hierarchy(
 }
 
 /// Analyzes a branchless constructor after validating its bounded direct-super
-/// prologue. Before the call, only integer constants and loads from initialized
+/// prologue. Before the call, only primitive constants and loads from initialized
 /// constructor parameter locals are accepted.
 pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
     method_descriptor: &str,
@@ -1371,13 +1371,12 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
             | FieldType::Char
             | FieldType::Short
             | FieldType::Int => ConstructorParameterLocal::Int,
+            FieldType::Long => ConstructorParameterLocal::Long,
             FieldType::Object(name) => {
                 ConstructorParameterLocal::Reference(ClassIdentity(Arc::from(name.as_str())))
             }
             FieldType::Array(_) => ConstructorParameterLocal::Unsupported,
-            FieldType::Float | FieldType::Long | FieldType::Double => {
-                ConstructorParameterLocal::Unsupported
-            }
+            FieldType::Float | FieldType::Double => ConstructorParameterLocal::Unsupported,
         };
         parameter_locals.push(local);
         if value_kind(parameter).slots() == 2 {
@@ -1410,8 +1409,21 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                 resolver.ldc_kind(instruction_index, constant, constant_pool)?;
                 ConstructorPrologueValue::Int
             }
+            Instruction::LConst(_) => ConstructorPrologueValue::Long,
+            Instruction::Ldc2(constant) => {
+                resolver.validate_ldc2(instruction_index, constant, constant_pool)?;
+                ConstructorPrologueValue::Long
+            }
             Instruction::ILoad(index) => match parameter_locals.get(usize::from(index.get())) {
                 Some(ConstructorParameterLocal::Int) => ConstructorPrologueValue::Int,
+                _ => {
+                    return Err(AnalysisError::InvalidConstructorSuperCall {
+                        instruction: instruction_index,
+                    });
+                }
+            },
+            Instruction::LLoad(index) => match parameter_locals.get(usize::from(index.get())) {
+                Some(ConstructorParameterLocal::Long) => ConstructorPrologueValue::Long,
                 _ => {
                     return Err(AnalysisError::InvalidConstructorSuperCall {
                         instruction: instruction_index,
@@ -1435,7 +1447,11 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
             }
         };
         prologue_stack.push(value);
-        prologue_max_stack = prologue_max_stack.max(prologue_stack.len());
+        let stack_slots = prologue_stack
+            .iter()
+            .map(ConstructorPrologueValue::slot_count)
+            .sum();
+        prologue_max_stack = prologue_max_stack.max(stack_slots);
     }
 
     let Some((instruction_index, reference)) = super_call else {
@@ -1479,6 +1495,7 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                 | FieldType::Int,
                 ConstructorPrologueValue::Int,
             ) => {}
+            (FieldType::Long, ConstructorPrologueValue::Long) => {}
             (
                 FieldType::Object(expected_name),
                 ConstructorPrologueValue::Reference(actual_class),
@@ -1493,7 +1510,7 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                     });
                 }
             }
-            (FieldType::Array(_) | FieldType::Float | FieldType::Long | FieldType::Double, _) => {
+            (FieldType::Array(_) | FieldType::Float | FieldType::Double, _) => {
                 return Err(AnalysisError::UnsupportedConstructorSuperArgumentType {
                     instruction: instruction_index,
                     parameter: parameter_index,
@@ -1505,10 +1522,12 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                     parameter: parameter_index,
                     expected: match expected {
                         FieldType::Object(_) | FieldType::Array(_) => ValueKind::Reference,
+                        FieldType::Long => ValueKind::Long,
                         _ => ValueKind::Int,
                     },
                     actual: match actual {
                         ConstructorPrologueValue::Int => ValueKind::Int,
+                        ConstructorPrologueValue::Long => ValueKind::Long,
                         ConstructorPrologueValue::Reference(_)
                         | ConstructorPrologueValue::UninitializedThis => ValueKind::Reference,
                     },
@@ -1545,6 +1564,7 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
 enum ConstructorParameterLocal {
     UninitializedThis,
     Int,
+    Long,
     Reference(ClassIdentity),
     Unsupported,
 }
@@ -1553,7 +1573,17 @@ enum ConstructorParameterLocal {
 enum ConstructorPrologueValue {
     UninitializedThis,
     Int,
+    Long,
     Reference(ClassIdentity),
+}
+
+impl ConstructorPrologueValue {
+    const fn slot_count(&self) -> usize {
+        match self {
+            Self::Long => 2,
+            Self::UninitializedThis | Self::Int | Self::Reference(_) => 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -7818,6 +7848,9 @@ mod tests {
         let int_arg = builder
             .method_ref("example/Base", "<init>", "(I)V")
             .unwrap();
+        let long_arg = builder
+            .method_ref("example/Base", "<init>", "(J)V")
+            .unwrap();
         let mixed_args = builder
             .method_ref("example/Base", "<init>", "(IZ)V")
             .unwrap();
@@ -7829,6 +7862,7 @@ mod tests {
             .unwrap();
         let integer_constants = [32_767, 32_768, -32_768, -32_769, i32::MIN, i32::MAX]
             .map(|value| (value, builder.integer(value).unwrap()));
+        let long_constant = builder.long(9_000_000_000).unwrap();
         let wrong_owner = builder.method_ref("example/Dep", "<init>", "(I)V").unwrap();
         let returning_constructor = builder
             .method_ref("example/Base", "<init>", "(I)I")
@@ -7863,6 +7897,50 @@ mod tests {
             Ok(CodeAnalysis {
                 max_stack: 2,
                 max_locals: 2,
+            })
+        );
+
+        let long_parameter_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::LLoad(LocalIndex::new(1)),
+            invoke(long_arg),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("(J)V", &long_parameter_prologue),
+            Ok(CodeAnalysis {
+                max_stack: 3,
+                max_locals: 3,
+            })
+        );
+
+        let long_constant_prologue = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::Ldc2(Ldc2Constant::Long(operand(long_constant))),
+            invoke(long_arg),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("()V", &long_constant_prologue),
+            Ok(CodeAnalysis {
+                max_stack: 3,
+                max_locals: 1,
+            })
+        );
+
+        let wrong_long_category = [
+            Instruction::ALoad(LocalIndex::new(0)),
+            Instruction::IConst(SmallIntConstant::One),
+            invoke(long_arg),
+            Instruction::Return,
+        ];
+        assert_eq!(
+            analyze_constructor("()V", &wrong_long_category),
+            Err(AnalysisError::ConstructorSuperArgumentTypeMismatch {
+                instruction: 2,
+                parameter: 0,
+                expected: ValueKind::Long,
+                actual: ValueKind::Int,
             })
         );
 

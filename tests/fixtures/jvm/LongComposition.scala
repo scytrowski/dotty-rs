@@ -6,6 +6,9 @@ class LongBox(initial: Long):
   def select(prefix: Int, left: Long, enabled: Boolean, right: Long): Long =
     if enabled then left else right
 
+class LongDerived(seed: Long) extends LongBox(seed)
+class LongDerivedLiteral extends LongBox(9000000000L)
+
 class Runner:
   def choose(flag: Boolean, left: Long, right: Long): Long =
     if flag then left else right
@@ -26,3 +29,6 @@ class Runner:
   def roundTrip(seed: Long): Long =
     val box: LongBox = new LongBox(seed)
     box.get()
+
+  def literalRoundTrip(): Long =
+    new LongBox(9000000000L).get()
