@@ -12947,6 +12947,11 @@ fn audit_source_inner_filtered(
     }
     let postprocess_started = Instant::now();
     let source_lines = SourceLineIndex::new(text);
+    let resolver_traces = request_metrics
+        .as_ref()
+        .map_or_else(BTreeMap::new, |metrics| {
+            index_resolver_traces_by_method(&metrics.borrow().resolver_requests_by_method, path)
+        });
     for (tree, node) in parsed.ast.iter() {
         let TreeKind::PhaseSpecific(UntypedNode::PatDef(definition)) = &node.kind else {
             continue;
@@ -13149,23 +13154,15 @@ fn audit_source_inner_filtered(
                 });
             if import_prefix_only {
                 if kind.bucket == "ImportQualifierNotFound"
-                    && let (Some(import_tree_index), Some(qualifier), Some(metrics)) = (
+                    && let (Some(import_tree_index), Some(qualifier), Some(_)) = (
                         import_tree_index,
                         import_qualifier_path.as_deref(),
                         request_metrics.as_ref(),
                     )
                 {
-                    let request_method = blocker_method_tree
-                        .map(|method_tree| format!("{path}#tree={method_tree}::"));
-                    let trace = request_method.map_or_else(Vec::new, |prefix| {
-                        metrics
-                            .borrow()
-                            .resolver_requests_by_method
-                            .iter()
-                            .filter(|(method, _)| method.starts_with(&prefix))
-                            .flat_map(|(_, requests)| requests.iter().cloned())
-                            .collect()
-                    });
+                    let trace = blocker_method_tree
+                        .and_then(|method_tree| resolver_traces.get(&method_tree))
+                        .map_or(&[][..], Vec::as_slice);
                     if let Some(observation) = import_prefix_observation(
                         &parsed.ast,
                         typer.store(),
@@ -13177,7 +13174,7 @@ fn audit_source_inner_filtered(
                         blocker_method_tree,
                         import_tree_index,
                         qualifier,
-                        &trace,
+                        trace,
                         source_package_paths,
                     ) {
                         audit.import_prefix_profile.observations.push(observation);
@@ -13251,23 +13248,14 @@ fn audit_source_inner_filtered(
                     });
                 audit.singleton_reference_profile.record(detail);
             }
-            if let Some(metrics) = &request_metrics {
-                let request_method =
-                    blocker_method_tree.map(|method_tree| format!("{path}#tree={method_tree}::"));
-                let trace = request_method.map_or_else(Vec::new, |prefix| {
-                    metrics
-                        .borrow()
-                        .resolver_requests_by_method
-                        .iter()
-                        .filter(|(method, _)| method.starts_with(&prefix))
-                        .flat_map(|(_, requests)| requests.iter().cloned())
-                        .collect()
-                });
+            if request_metrics.is_some() {
                 audit.resolution_blocker_profile.record_attempt(
                     &kind.bucket,
                     path,
                     tree.index(),
-                    &trace,
+                    blocker_method_tree
+                        .and_then(|method_tree| resolver_traces.get(&method_tree))
+                        .map_or(&[][..], Vec::as_slice),
                     import_qualifier_path.as_deref(),
                 );
             }
@@ -17007,6 +16995,30 @@ impl SourceLineIndex {
     }
 }
 
+fn index_resolver_traces_by_method(
+    traces: &BTreeMap<String, Vec<ResolverRequestObservation>>,
+    path: &str,
+) -> BTreeMap<u32, Vec<ResolverRequestObservation>> {
+    let method_prefix = format!("{path}#tree=");
+    let mut indexed = BTreeMap::<u32, Vec<ResolverRequestObservation>>::new();
+    for (method, requests) in traces {
+        let Some((tree_index, _)) = method
+            .strip_prefix(&method_prefix)
+            .and_then(|rest| rest.split_once("::"))
+        else {
+            continue;
+        };
+        let Ok(tree_index) = tree_index.parse::<u32>() else {
+            continue;
+        };
+        indexed
+            .entry(tree_index)
+            .or_default()
+            .extend(requests.iter().cloned());
+    }
+    indexed
+}
+
 #[test]
 fn source_line_index_handles_utf8_crlf_and_line_boundaries() {
     let source = "α\r\nbeta\n終";
@@ -17017,6 +17029,43 @@ fn source_line_index_handles_utf8_crlf_and_line_boundaries() {
     assert_eq!(index.line_at("α\r\nbeta\n".len()), 3);
     assert_eq!(index.line_at(source.len()), 3);
     assert_eq!(index.line_at(source.len() + 10), 3);
+}
+
+#[test]
+fn resolver_trace_index_groups_only_exact_source_methods_in_stable_order() {
+    let request = |target: &str| ResolverRequestObservation {
+        target: target.to_owned(),
+        outcome: "none".to_owned(),
+        cause: None,
+        materialized_prefix: None,
+        selected_identity: None,
+        enclosing_attempt: "attempt".to_owned(),
+    };
+    let traces = BTreeMap::from([
+        (
+            "compiler/A.scala#tree=8::A.outer".to_owned(),
+            vec![request("first"), request("second")],
+        ),
+        (
+            "compiler/A.scala#tree=80::A.sibling".to_owned(),
+            vec![request("other method")],
+        ),
+        (
+            "compiler/B.scala#tree=8::B.outer".to_owned(),
+            vec![request("other file")],
+        ),
+    ]);
+
+    let indexed = index_resolver_traces_by_method(&traces, "compiler/A.scala");
+
+    assert_eq!(
+        indexed[&8]
+            .iter()
+            .map(|request| request.target.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(indexed[&80][0].target, "other method");
 }
 
 fn function_with_mods_observation(
