@@ -2271,6 +2271,7 @@ fn emit_object_creation(
             tree_id,
             argument,
             Some(expected),
+            true,
             depth + 1,
             &mut budget,
         )?;
@@ -2342,6 +2343,7 @@ fn validate_constructor_argument(
     constructor_call: TreeId<Typed>,
     tree_id: TreeId<Typed>,
     expected: Option<JvmType>,
+    allow_direct_nested_new: bool,
     depth: usize,
     budget: &mut usize,
 ) -> Result<(), JvmCodegenError> {
@@ -2473,11 +2475,77 @@ fn validate_constructor_argument(
                 constructor_call,
                 select.qualifier,
                 None,
+                false,
                 depth + 1,
                 budget,
             )
         }
         TreeKind::Apply(application) => {
+            if is_constructor_application(context, application.function)? {
+                if !allow_direct_nested_new {
+                    return Err(unsupported());
+                }
+                let Some(expected @ JvmType::Reference(_)) = expected else {
+                    return Err(unsupported());
+                };
+                let Some((unit, caller_class, _)) = context.call_context else {
+                    return Err(unsupported());
+                };
+                let target = unit.resolve_constructor_call(
+                    caller_class.identity().symbol(),
+                    context.method.symbol(),
+                    tree_id,
+                    context.definitions,
+                )?;
+                if !call_argument_assignable(
+                    unit,
+                    Flow::Value(target.result_type()),
+                    expected,
+                    context.definitions,
+                )? {
+                    return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                        tree: constructor_call,
+                        argument: tree_id,
+                        expected,
+                        found: Some(target.result_type()),
+                    });
+                }
+                for (index, (argument, formal)) in application
+                    .args
+                    .iter()
+                    .copied()
+                    .zip(target.argument_types().iter().copied())
+                    .enumerate()
+                {
+                    let source_expected = source_method_parameter_type(
+                        context.store,
+                        target.constructor_symbol(),
+                        index,
+                    );
+                    if let Some(source_expected) = source_expected {
+                        let source_type =
+                            planned_reference_type(unit, source_expected, context.definitions)?;
+                        if source_type != formal {
+                            return Err(JvmCodegenError::JvmConstructorCallArgumentTypeMismatch {
+                                tree: tree_id,
+                                argument,
+                                expected: formal,
+                                found: Some(source_type),
+                            });
+                        }
+                    }
+                    validate_constructor_argument(
+                        context,
+                        constructor_call,
+                        argument,
+                        Some(formal),
+                        false,
+                        depth + 1,
+                        budget,
+                    )?;
+                }
+                return Ok(());
+            }
             let boolean_intrinsic = crate::resolve_boolean_intrinsic(
                 context.store,
                 context.typed_ast,
@@ -2522,6 +2590,7 @@ fn validate_constructor_argument(
                     constructor_call,
                     tree_id,
                     application,
+                    false,
                     depth,
                     budget,
                 );
@@ -2538,6 +2607,7 @@ fn validate_constructor_argument(
                 constructor_call,
                 select.qualifier,
                 None,
+                false,
                 depth + 1,
                 budget,
             )?;
@@ -2546,6 +2616,7 @@ fn validate_constructor_argument(
                 constructor_call,
                 *right,
                 None,
+                false,
                 depth + 1,
                 budget,
             )
@@ -2624,6 +2695,7 @@ fn validate_constructor_reference_factory_call(
     constructor_call: TreeId<Typed>,
     tree_id: TreeId<Typed>,
     application: &dotty_core::ast::Apply<Typed>,
+    allow_direct_nested_new: bool,
     depth: usize,
     budget: &mut usize,
 ) -> Result<(), JvmCodegenError> {
@@ -2677,6 +2749,7 @@ fn validate_constructor_reference_factory_call(
             constructor_call,
             argument,
             Some(expected),
+            allow_direct_nested_new,
             depth + 1,
             budget,
         )?;

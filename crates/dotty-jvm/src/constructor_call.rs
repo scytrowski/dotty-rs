@@ -432,15 +432,25 @@ fn planned_argument_type(
             Some(JvmType::Boolean)
         }
         Type::TypeRef { .. } if matches!(argument_tree.kind, TreeKind::Apply(_)) => {
-            planned_reference_call_type(
+            planned_constructor_application_type(
                 unit,
                 caller_class,
-                caller_method,
                 argument,
                 argument_tree,
                 definitions,
                 class_identities,
             )
+            .or_else(|| {
+                planned_reference_call_type(
+                    unit,
+                    caller_class,
+                    caller_method,
+                    argument,
+                    argument_tree,
+                    definitions,
+                    class_identities,
+                )
+            })
         }
         Type::TermRef {
             prefix,
@@ -462,6 +472,93 @@ fn planned_argument_type(
         }
         _ => None,
     }
+}
+
+fn planned_constructor_application_type(
+    unit: &JvmCompilationUnit<'_>,
+    caller_class: SymbolId,
+    application_id: TreeId<Typed>,
+    application_tree: &Tree<Typed>,
+    definitions: &Definitions,
+    class_identities: &[crate::JvmClassIdentity],
+) -> Option<JvmType> {
+    let TreeKind::Apply(application) = &application_tree.kind else {
+        return None;
+    };
+    if application.kind != ApplyKind::Regular {
+        return None;
+    }
+    let function = unit.typed_ast.try_get(application.function)?;
+    let TreeKind::Select(select) = &function.kind else {
+        return None;
+    };
+    if select.backquoted || unit.store.names.try_resolve(select.name.text()) != Some("<init>") {
+        return None;
+    }
+    let qualifier = unit.typed_ast.try_get(select.qualifier)?;
+    let TreeKind::New(new) = &qualifier.kind else {
+        return None;
+    };
+    let type_tree = unit.typed_ast.try_get(new.tpt)?;
+    if !matches!(type_tree.kind, TreeKind::TypeTree(_)) {
+        return None;
+    }
+    let JvmType::Reference(owner_class) =
+        crate::reference::project_constructor_type(unit, type_tree.ty, definitions).ok()?
+    else {
+        return None;
+    };
+    if crate::reference::project_constructor_type(unit, qualifier.ty, definitions).ok()?
+        != JvmType::Reference(owner_class)
+        || planned_result_class(unit, application_tree.ty, owner_class, definitions)
+            != Some(owner_class)
+        || !class_identities
+            .iter()
+            .any(|identity| identity.symbol() == owner_class)
+    {
+        return None;
+    }
+    let Type::TermRef {
+        prefix,
+        target: TermRefTarget::Symbol(constructor),
+    } = unit.store.types.try_get(function.ty)?
+    else {
+        return None;
+    };
+    if crate::reference::project_constructor_type(unit, *prefix, definitions).ok()?
+        != JvmType::Reference(owner_class)
+    {
+        return None;
+    }
+    let constructor_symbol = unit
+        .store
+        .symbols
+        .contains(*constructor)
+        .then(|| unit.store.symbols.get(*constructor))?;
+    if constructor_symbol.kind != SymbolKind::Constructor
+        || constructor_symbol.owner != Some(owner_class)
+        || constructor_symbol.name.namespace() != dotty_core::Namespace::Term
+        || unit.store.names.try_resolve(constructor_symbol.name.text()) != Some("<init>")
+        || (constructor_symbol.visibility == Visibility::Private && caller_class != owner_class)
+    {
+        return None;
+    }
+    let class_plan = unit.classes.iter().find(|plan| plan.class == owner_class)?;
+    let metadata = unit
+        .metadata(definitions)
+        .ok()?
+        .into_iter()
+        .find(|metadata| metadata.identity().symbol() == owner_class)?;
+    approved_constructor(
+        unit,
+        class_plan,
+        &metadata,
+        *constructor,
+        application_id,
+        definitions,
+    )
+    .ok()?;
+    Some(JvmType::Reference(owner_class))
 }
 
 fn planned_reference_call_type(
