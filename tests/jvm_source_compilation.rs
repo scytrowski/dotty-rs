@@ -7,7 +7,7 @@ use dotty_classfile::class_file::ClassFile;
 use dotty_classfile::constant_pool::{ConstantPoolEntry, ConstantPoolIndex};
 use dotty_classfile::reader::Reader;
 use dotty_core::ast::{AstArena, DefDef, Template, TreeKind, Typed, Untyped};
-use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
+use dotty_core::types::{Constant, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolKind,
     TreeId, Visibility,
@@ -4878,7 +4878,7 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
         let opcode = code[offset];
         let length = match opcode {
             0x01
-            | 0x03..=0x0f
+            | 0x02..=0x0f
             | 0x1a..=0x1d
             | 0x2a..=0x2d
             | 0x3b..=0x3e
@@ -7694,6 +7694,338 @@ fn anyref_identity_uses_reference_branches_and_verifies_runtime_behavior() {
         assert!(
             java.status.success(),
             "java -Xverify:all rejected AnyRef identity classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+    }
+}
+
+#[test]
+fn null_identity_jdk21_acceptance_fixture_is_canonical_verified_and_deterministic() {
+    let output = TestOutputDirectory::new("null-identity-acceptance");
+    let second_output = TestOutputDirectory::new("null-identity-acceptance-second");
+    let source = fs::read_to_string(fixture_path("NullIdentityAcceptance.scala"))
+        .expect("read pinned null identity source fixture");
+    let mut semantic_proof_ran = false;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, definitions: &Definitions| {
+        let box_class = audit_class_named(unit, "Box");
+        let runner_class = audit_class_named(unit, "Runner");
+        assert_eq!(
+            audit_class_parent(unit, box_class),
+            definitions.object_class
+        );
+        assert_eq!(
+            audit_class_parent(unit, runner_class),
+            definitions.object_class
+        );
+        let identity = definitions
+            .any_ref_identity_operator_symbols(unit.store)
+            .expect("canonical eq/ne semantic identities remain registered");
+
+        for (method, selected) in [
+            ("same", identity.eq),
+            ("different", identity.ne),
+            ("missing", identity.eq),
+            ("readOrDefault", identity.eq),
+        ] {
+            let body = audit_method_named(unit, runner_class, method)
+                .body
+                .unwrap_or_else(|| panic!("{method} has a typed source body"));
+            assert!(
+                typed_tree_targets(unit, body).contains(&selected),
+                "{method} selects the canonical {:?} method symbol",
+                selected
+            );
+        }
+
+        for method in ["choose", "chooseReverse", "empty", "update", "keepNull"] {
+            let plan = audit_method_named(unit, runner_class, method);
+            let signature = match unit.store.symbols.info(plan.method) {
+                dotty_core::SymbolInfo::Complete(ty) => match unit.store.types.get(*ty) {
+                    Type::Method(signature) => signature,
+                    other => panic!("{method} has method type, found {other:?}"),
+                },
+                other => panic!("{method} has completed method info, found {other:?}"),
+            };
+            assert_eq!(
+                audit_type_symbol(unit, signature.result),
+                Some(box_class),
+                "{method} retains its declared canonical Box result"
+            );
+        }
+
+        let null_literals = unit
+            .typed_ast
+            .iter()
+            .filter_map(|(_, tree)| match &tree.kind {
+                TreeKind::Literal(literal) if literal.value == Constant::Null => Some(tree.ty),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            null_literals.len() >= 6,
+            "fixture types all null source paths"
+        );
+        assert!(null_literals.iter().all(|ty| *ty == definitions.null_type));
+        semantic_proof_ran = true;
+    };
+    let artifacts = compile_source_batch_observed(
+        &source,
+        "NullIdentityAcceptance.scala",
+        output.path(),
+        SourceId::from_index(1475),
+        SourceUnitCardinality::AtLeastTwo,
+        Some(&mut observe),
+    )
+    .expect("real Scala null identity source compiles through the full pipeline");
+    assert!(
+        semantic_proof_ran,
+        "semantic proof ran before class emission"
+    );
+    let second_artifacts =
+        compile_fixture_classes("NullIdentityAcceptance.scala", second_output.path())
+            .expect("an independent frontend session compiles the same fixture");
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        ["Box", "Runner"]
+    );
+    assert_eq!(
+        artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        second_artifacts
+            .iter()
+            .map(|artifact| (artifact.class.internal_name(), artifact.class.bytes()))
+            .collect::<Vec<_>>(),
+        "fresh source sessions emit byte-identical classes in stable order"
+    );
+
+    fn decode(artifact: &EmittedArtifact) -> ClassFile<'_> {
+        let mut reader = Reader::new(artifact.class.bytes());
+        let class = ClassFile::decode(&mut reader).expect("decode emitted classfile");
+        class
+            .validate_references()
+            .expect("classfile constant-pool and attribute references validate");
+        assert_eq!(class.version.major, 65, "classfile targets Java 21");
+        assert_eq!(
+            class
+                .constant_pool
+                .class_name(class.this_class)
+                .expect("this_class resolves"),
+            artifact.class.internal_name()
+        );
+        assert_eq!(
+            class
+                .super_class
+                .and_then(|index| class.constant_pool.class_name(index).ok()),
+            Some("java/lang/Object")
+        );
+        class
+    }
+    let boxed = decode(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Box")
+            .expect("Box class emitted"),
+    );
+    let runner = decode(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == "Runner")
+            .expect("Runner class emitted"),
+    );
+
+    let field = boxed
+        .fields
+        .iter()
+        .find(|field| boxed.constant_pool.utf8(field.name_index) == Ok("current"))
+        .expect("Box.current field emitted");
+    assert!(field.access_flags.is_private());
+    assert_eq!(boxed.constant_pool.utf8(field.descriptor_index), Ok("I"));
+    let method_descriptors = [
+        ("same", "(LBox;LBox;)Z"),
+        ("different", "(LBox;LBox;)Z"),
+        ("missing", "(LBox;)Z"),
+        ("choose", "(ZLBox;)LBox;"),
+        ("chooseReverse", "(ZLBox;)LBox;"),
+        ("empty", "()LBox;"),
+        ("update", "(ZLBox;)LBox;"),
+        ("keepNull", "(Z)LBox;"),
+        ("readOrDefault", "(ZLBox;)I"),
+    ];
+    assert!(
+        boxed.methods.iter().any(|method| {
+            boxed.constant_pool.utf8(method.name_index) == Ok("<init>")
+                && boxed.constant_pool.utf8(method.descriptor_index) == Ok("(I)V")
+        }),
+        "Box exposes its source primary constructor"
+    );
+    assert!(
+        runner.methods.iter().any(|method| {
+            runner.constant_pool.utf8(method.name_index) == Ok("<init>")
+                && runner.constant_pool.utf8(method.descriptor_index) == Ok("()V")
+        }),
+        "Runner exposes its no-argument constructor"
+    );
+    for (name, descriptor) in method_descriptors {
+        let method = runner
+            .methods
+            .iter()
+            .find(|method| runner.constant_pool.utf8(method.name_index) == Ok(name))
+            .unwrap_or_else(|| panic!("Runner.{name} emitted"));
+        assert!(method.access_flags.is_public(), "Runner.{name} is public");
+        assert_eq!(
+            runner.constant_pool.utf8(method.descriptor_index),
+            Ok(descriptor)
+        );
+        assert!(code_max_stack(&runner, name) > 0);
+        assert!(code_max_locals(&runner, name) > 0);
+        let code = emitted_method_code(&runner, name);
+        let targets = decode_branch_targets(code);
+        if !targets.is_empty() {
+            let frames = stack_map_frames(&runner, name);
+            assert!(
+                targets
+                    .iter()
+                    .all(|(_, _, target)| frames.iter().any(|frame| frame.pc == *target)),
+                "all branch targets in {name} have mapped StackMapTable frames"
+            );
+        }
+    }
+    for (name, opcode, parameter_loads) in [
+        ("same", 0xa5, [0x2b, 0x2c]),
+        ("different", 0xa6, [0x2b, 0x2c]),
+    ] {
+        let instructions = decode_subset_instructions(emitted_method_code(&runner, name));
+        assert_eq!(
+            instructions
+                .iter()
+                .take(2)
+                .map(|(_, op)| *op)
+                .collect::<Vec<_>>(),
+            parameter_loads,
+            "{name} evaluates receiver then argument exactly once"
+        );
+        assert_eq!(
+            instructions.iter().filter(|(_, op)| *op == opcode).count(),
+            1
+        );
+        assert!(
+            !instructions
+                .iter()
+                .any(|(_, op)| matches!(*op, 0xb6 | 0xc0))
+        );
+    }
+    for name in ["choose", "chooseReverse"] {
+        let code = emitted_method_code(&runner, name);
+        let targets = decode_branch_targets(code);
+        let frames = stack_map_frames(&runner, name);
+        assert!(
+            targets.iter().any(|(_, _, target)| {
+                frames.iter().any(|frame| {
+                    frame.pc == *target
+                        && frame.stack == [StackMapVerificationType::Object("Box".into())]
+                })
+            }),
+            "{name} joins Null and Object(Box) on the operand stack"
+        );
+    }
+    assert!(
+        stack_map_frames(&runner, "update")
+            .iter()
+            .any(|frame| frame.locals.get(3)
+                == Some(&StackMapVerificationType::Object("Box".into()))),
+        "update carries the initialized Object(Box) local through its branch join"
+    );
+    assert!(
+        stack_map_frames(&runner, "keepNull")
+            .iter()
+            .any(
+                |frame| frame.locals.contains(&StackMapVerificationType::Null)
+                    || frame.stack.contains(&StackMapVerificationType::Null)
+            ),
+        "keepNull preserves verifier Null at a real branch join"
+    );
+    assert_eq!(
+        decode_subset_instructions(emitted_method_code(&runner, "empty"))
+            .iter()
+            .filter(|(_, opcode)| *opcode == 0x01)
+            .count(),
+        1,
+        "empty returns aconst_null without an invented object"
+    );
+    if require_jdk_or_skip() {
+        let classpath = output.path().to_str().expect("UTF-8 test path");
+        let javap = Command::new("javap")
+            .args(["-classpath", classpath, "-c", "-v", "Runner"])
+            .output()
+            .expect("start required javap JVM audit");
+        assert!(javap.status.success(), "javap -c -v Runner succeeds");
+        let javap = String::from_utf8_lossy(&javap.stdout);
+        assert!(javap.contains("if_acmpeq") && javap.contains("if_acmpne"));
+        assert!(javap.contains("aconst_null"));
+        assert!(!javap.contains("java/lang/Object.eq"));
+        assert!(!javap.contains("java/lang/Object.ne"));
+        assert!(!javap.contains("equals"));
+        assert!(!javap.contains("checkcast"));
+
+        let harness = output.path().join("NullReferenceIdentityHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class NullReferenceIdentityHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    Box a = new Box(10);
+    Box b = new Box(10);
+    Box c = new Box(20);
+    if (runner.same(a, a) != true || runner.same(a, b) != false
+        || runner.different(a, b) != true || runner.different(a, a) != false)
+      throw new AssertionError("identity differs from value equality");
+    if (runner.missing(a) || !runner.missing(null))
+      throw new AssertionError("eq null behavior");
+    if (runner.choose(true, a) != null || runner.choose(false, a) != a
+        || runner.chooseReverse(true, a) != a || runner.chooseReverse(false, a) != null)
+      throw new AssertionError("nullable If results preserve object identity");
+    if (runner.empty() != null || runner.update(false, a) != null
+        || runner.update(true, a) != a || runner.keepNull(true) != null
+        || runner.keepNull(false) != null)
+      throw new AssertionError("null returns and local branch flows");
+    if (runner.readOrDefault(true, a) != -1
+        || runner.readOrDefault(false, a) != 10
+        || runner.readOrDefault(false, c) != 20)
+      throw new AssertionError("null-aware dispatch uses the actual instance");
+  }
+}
+"#,
+        )
+        .expect("write acceptance harness");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for required JDK 21 harness");
+        assert!(
+            javac.status.success(),
+            "javac --release 21 failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "NullReferenceIdentityHarness",
+            ])
+            .output()
+            .expect("start java -Xverify:all for acceptance fixture");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&java.stdout),
             String::from_utf8_lossy(&java.stderr)
         );

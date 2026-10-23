@@ -360,7 +360,11 @@ The mandatory `Classfile JVM encoder gate` in `.github/workflows/ci.yml` sets
 Missing `java`, `javac`, or `javap` fails that gate. This tested boundary keeps
 arbitrary classpath classes, unplanned mutable reference reads/assignments,
 sibling/unrelated reference joins without the exact expected-type proof,
-arrays, null, and branching constructor bodies unsupported.
+arrays, unsupported inferred null contexts, and branching constructor bodies
+unsupported. The `NullIdentityAcceptance.scala` fixture verifies
+the bounded default-null source path through null results, null/reference
+`If` joins, mutable-local joins, identity comparisons, and a null-sensitive
+method call.
 Reference operations remain restricted to exact planned classes and verified
 calls; ancestor joins are limited to the source-typed `If` result and validated
 same-unit hierarchy.
@@ -825,9 +829,9 @@ Without the JDK it still runs structural and negative checks and explicitly
 skips Java verification. Reference method results outside the exact current
 source class subset, reference call arguments outside the exact supported
 class subset, sibling joins without an explicit checked expected parent,
-unrelated or `Object`-only class joins, arrays, null, assignments in
-short-circuit operands or repeatedly evaluated loop conditions, and branched
-constructors remain deferred. Ancestor-related
+unrelated or `Object`-only class joins, arrays, unsupported null contexts,
+assignments in short-circuit operands or repeatedly evaluated loop conditions,
+and branched constructors remain deferred. Ancestor-related
 and proven sibling source-typed `If` results are supported only within the validated same-unit
 hierarchy and still require JVM frame verification. The exact `Left`/`Right`
 join under a declared `Base` result is covered end to end: both branch orders
@@ -840,7 +844,9 @@ separate JVMS 21 null-verifier state, is recorded in the
 [null and reference identity audit](jvm-null-reference-identity.md). The JVM
 backend lowers only Typer-selected canonical `AnyRef.eq/ne` calls on supported
 planned references, using `if_acmpeq`/`if_acmpne` and Boolean materialization.
-The null and source identity fixture runs with `java -Xverify:all`. Universal
+The `NullIdentityAcceptance.scala` acceptance test inspects decoded classfiles,
+CP-resolved frames, `javap -c -v`, byte-identical output from fresh frontend
+sessions, and runs a Java harness with `java -Xverify:all` on JDK 21. Universal
 `==`/`!=`, explicit-nulls typing, flow-sensitive narrowing, and literal-null
 receivers remain outside this subset.
 

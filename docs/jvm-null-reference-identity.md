@@ -65,10 +65,15 @@ remains explicitly unverified.
 ## Source characterization
 
 [`tests/fixtures/jvm/NullReferenceIdentity.scala`](../tests/fixtures/jvm/NullReferenceIdentity.scala)
-preserves the candidate source shape: a `Box`, identity methods, a nullable
-`if` result, and a null-sensitive read. The focused Typer regression runs it
-through the real lexer, parser, namer, and source Typer in one semantic session.
-Lexing, parsing, naming, and the supported identity expressions succeed:
+preserves the candidate Typer source shape. The separate
+[`NullIdentityAcceptance.scala`](../tests/fixtures/jvm/NullIdentityAcceptance.scala)
+fixture adds end-to-end JDK 21 coverage for a `Box`, identity methods, nullable
+results in both branch orders, a null-initialized mutable local, and a
+null-sensitive read. The source acceptance test runs it through the real lexer,
+parser, namer, source Typer,
+compilation-unit validation, emitter, encoder, decoder, and JVM verifier in two
+independent semantic sessions. Lexing, parsing, naming, and the supported
+identity expressions succeed:
 
 | Method | Typer result |
 | --- | --- |
@@ -77,6 +82,14 @@ Lexing, parsing, naming, and the supported identity expressions succeed:
 | `isMissing(a)` | Selects `AnyRef.eq`; its RHS keeps canonical source `Null` |
 | `choose(flag, value)` | Returns `Box`; the `null` branch retains canonical source `Null` |
 | `readOrDefault(flag, value)` | Types the `eq null` check and `value()` call; this adds no flow-sensitive narrowing |
+
+The acceptance test also checks exact source descriptors and class version 65,
+canonical `eq/ne` selection and source `Null` types before emission, decoded
+branch targets and CP-resolved `Null`/`Object(Box)` stack-map entries,
+`javap -c -v`, and byte-identical complete classes from fresh frontend sessions.
+Its Java harness checks same versus equal-valued distinct objects, null
+returns, both nullable branch orders, mutable-local joins, and instance
+dispatch under `java -Xverify:all`.
 
 The Typer-only fixture also checks identity selection through a local receiver
 and the same parameter on both sides. The negative Typer regression rejects a foreign
@@ -155,13 +168,14 @@ argument, accepts planned reference flows and canonical `Null`, emits
 `iconst_0`/`iconst_1`. The identity context reaches a block's result and the
 value branches of an `If`; null-only results stay verifier `Null`, while a
 mixed null/reference `If` uses the checked class of its reference branch.
-Neither case invents an `Object` class identity. The executable fixture covers
+Neither case invents an `Object` class identity. `AnyRefIdentity.scala` covers
 parameter and mutable-local operands, direct and block nulls, both-null and
 mixed-null `If` operands on either side, Boolean returns, `If` conditions, and
-a `While` condition. JDK 21 `java -Xverify:all` passes its same-object,
-distinct-object, null, and loop checks. Comparison operands are lowered once
-each in source order, and no `Object.eq`, `Object.ne`, or `equals` invocation
-is emitted.
+a `While` condition. The `NullIdentityAcceptance.scala` fixture
+adds nullable Box results, mutable-local joins, and null-sensitive virtual
+dispatch. JDK 21 `java -Xverify:all` passes same-object, distinct-object,
+null, and loop checks. Comparison operands are lowered once each in source
+order, and no `Object.eq`, `Object.ne`, or `equals` invocation is emitted.
 
 This does not add source `null` as a receiver selection: the current Typer
 does not select `AnyRef.eq` for a literal `null` receiver. The supported null
