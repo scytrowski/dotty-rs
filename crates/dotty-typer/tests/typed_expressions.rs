@@ -139,22 +139,25 @@ fn source_null_literal_uses_the_canonical_null_type() {
         &mut packages,
     )
     .unwrap();
-    let (method, result_tpt, rhs) = parsed
+    let methods = parsed
         .ast
         .iter()
-        .find_map(|(tree, node)| {
+        .filter_map(|(tree, node)| {
             let TreeKind::DefDef(definition) = &node.kind else {
                 return None;
             };
-            (store.names.resolve(definition.name.as_name().text()) == "exact").then(|| {
-                (
-                    index.symbol_at(source, tree).unwrap(),
-                    definition.tpt,
-                    definition.rhs.unwrap(),
-                )
-            })
+            let rhs = definition.rhs?;
+            Some((
+                store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    .to_owned(),
+                index.symbol_at(source, tree).unwrap(),
+                definition.tpt,
+                rhs,
+            ))
         })
-        .expect("fixture should contain the explicitly typed Null result");
+        .collect::<Vec<_>>();
     let mut typer = SourceTyper::new(
         &parsed.ast,
         source,
@@ -164,19 +167,119 @@ fn source_null_literal_uses_the_canonical_null_type() {
         &packages,
     );
 
-    let context = typer.expression_context_for(method).unwrap();
+    let find_method = |name: &str| {
+        methods
+            .iter()
+            .find(|(method_name, ..)| method_name == name)
+            .map(|(_, method, tpt, rhs)| (*method, *tpt, *rhs))
+            .unwrap_or_else(|| panic!("fixture should contain method {name}"))
+    };
+    let (exact, exact_tpt, exact_rhs) = find_method("exact");
     assert_eq!(
         typer
-            .type_of_tpt(result_tpt, index.declaration_context_of(method).unwrap())
+            .type_of_tpt(exact_tpt, index.declaration_context_of(exact).unwrap())
             .unwrap(),
         definitions.null_type
     );
-    let typed_rhs = typer.type_expression(rhs, context).unwrap();
-    assert_eq!(typer.typed_ast().get(typed_rhs).ty, definitions.null_type);
+    let exact_context = typer.expression_context_for(exact).unwrap();
+    let typed_exact = typer
+        .type_expression_expected(exact_rhs, exact_context, definitions.null_type)
+        .unwrap();
+    assert_eq!(typer.typed_ast().get(typed_exact).ty, definitions.null_type);
     assert!(matches!(
-        typer.typed_ast().get(typed_rhs).kind,
+        typer.typed_ast().get(typed_exact).kind,
         TreeKind::Literal(_)
     ));
+
+    let (inferred, _, inferred_rhs) = find_method("inferredNull");
+    let inferred_context = typer.expression_context_for(inferred).unwrap();
+    let typed_inferred = typer
+        .type_expression(inferred_rhs, inferred_context)
+        .unwrap();
+    assert_eq!(
+        typer.typed_ast().get(typed_inferred).ty,
+        definitions.null_type
+    );
+
+    for name in ["choose", "chooseReverse"] {
+        let (method, result_tpt, rhs) = find_method(name);
+        let expected = typer
+            .type_of_tpt(result_tpt, index.declaration_context_of(method).unwrap())
+            .unwrap();
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression_expected(rhs, context, expected)
+            .unwrap();
+        assert_eq!(
+            typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed).ty)
+                .reference_symbol(),
+            typer.store().types.get(expected).reference_symbol(),
+            "{name} should preserve the expected source class identity"
+        );
+        let TreeKind::If(if_expression) = &typer.typed_ast().get(typed).kind else {
+            panic!("{name} should produce a typed If")
+        };
+        let null_branch = if name == "choose" {
+            if_expression.then_branch
+        } else {
+            if_expression.else_branch
+        };
+        assert_eq!(
+            typer.typed_ast().get(null_branch).ty,
+            definitions.null_type,
+            "the null literal keeps its source type in {name}"
+        );
+    }
+
+    let (local, local_tpt, local_rhs) = find_method("local");
+    let expected = typer
+        .type_of_tpt(local_tpt, index.declaration_context_of(local).unwrap())
+        .unwrap();
+    let local_context = typer.expression_context_for(local).unwrap();
+    let typed_local = typer
+        .type_expression_expected(local_rhs, local_context, expected)
+        .unwrap();
+    let local_result = typer
+        .widen_expression_type(typer.typed_ast().get(typed_local).ty)
+        .unwrap();
+    assert_eq!(
+        typer.store().types.get(local_result).reference_symbol(),
+        typer.store().types.get(expected).reference_symbol()
+    );
+
+    for (name, expected) in [
+        ("badInt", definitions.int),
+        ("badBoolean", definitions.boolean),
+    ] {
+        let (method, _, rhs) = find_method(name);
+        let context = typer.expression_context_for(method).unwrap();
+        assert!(matches!(
+            typer.type_expression_expected(rhs, context, expected),
+            Err(TyperError::ExpectedExpressionTypeMismatch { actual, expected: actual_expected, .. })
+                if actual == definitions.null_type && actual_expected == expected
+        ));
+        assert!(typer.source_typed_index().get(source, rhs).is_none());
+    }
+
+    let null_literals = typer
+        .typed_ast()
+        .iter()
+        .filter_map(|(_, node)| match &node.kind {
+            TreeKind::Literal(literal) if literal.value == dotty_core::Constant::Null => {
+                Some(node.ty)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(null_literals.len() >= 5);
+    assert!(
+        null_literals
+            .into_iter()
+            .all(|ty| ty == definitions.null_type)
+    );
 }
 
 #[test]
@@ -234,9 +337,29 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
         definitions,
         &packages,
     );
+    let box_class = class_definition(&parsed, typer.store(), &index, source, "Box").0;
     let mut failures = Vec::new();
     for (name, method, rhs) in methods {
         let context = typer.expression_context_for(method).unwrap();
+        if name == "choose" {
+            let typed = typer.type_expression(rhs, context).unwrap();
+            assert_eq!(
+                typer
+                    .store()
+                    .types
+                    .get(typer.typed_ast().get(typed).ty)
+                    .reference_symbol(),
+                Some(box_class)
+            );
+            let TreeKind::If(if_expression) = &typer.typed_ast().get(typed).kind else {
+                panic!("choose should remain a typed If expression")
+            };
+            assert_eq!(
+                typer.typed_ast().get(if_expression.then_branch).ty,
+                definitions.null_type
+            );
+            continue;
+        }
         let Err(error) = typer.type_expression(rhs, context) else {
             panic!("{name} unexpectedly typed")
         };
@@ -253,7 +376,6 @@ fn null_reference_identity_fixture_freezes_current_typer_boundaries() {
                 if typer.store().names.resolve(name.text()) == "eq" => {}
             ("different", TyperError::MemberNotFound { name, .. })
                 if typer.store().names.resolve(name.text()) == "ne" => {}
-            ("choose", TyperError::IfBranchJoinUnsupported { .. }) => {}
             ("readOrDefault", TyperError::MemberNotFound { name, .. })
                 if typer.store().names.resolve(name.text()) == "eq" => {}
             (method, error) => panic!("unexpected first typing failure for {method}: {error:?}"),
