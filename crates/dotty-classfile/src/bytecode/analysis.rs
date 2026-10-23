@@ -1,9 +1,9 @@
 //! Descriptor-aware analysis for straight-line code and typed CFGs.
 //!
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
-//! [`CfgCodeAnalyzer`] propagates integer and initialized-class references
-//! across symbolic branches, including proven common-superclass operand-stack
-//! and initialized-reference local joins when given an explicit hierarchy,
+//! [`CfgCodeAnalyzer`] propagates integer, null, and initialized-class
+//! references across symbolic branches, including proven common-superclass
+//! operand-stack and initialized-reference local joins when given an explicit hierarchy,
 //! bounded field transfers, constructor arguments, primitive virtual calls,
 //! and in-block object initialization.
 //! Neither analyzer is a full JVM
@@ -245,6 +245,8 @@ impl ClassHierarchy {
 pub enum FlowValue {
     /// An int-like JVM value.
     Integer,
+    /// The JVM null verification type.
+    Null,
     /// An initialized reference to this exact class.
     Object(ClassIdentity),
 }
@@ -1705,6 +1707,7 @@ fn class_identity_from_pool(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalSlot {
     Value(ValueKind),
+    Null,
     Receiver,
     Object(ClassIdentity),
     CategoryTwoTail,
@@ -1713,6 +1716,7 @@ enum LocalSlot {
 struct Frame {
     stack: Vec<ValueKind>,
     stack_classes: Vec<Option<ClassIdentity>>,
+    stack_nulls: Vec<bool>,
     stack_join_evidence: Vec<std::collections::BTreeSet<ClassIdentity>>,
     stack_allocation_sites: Vec<Option<usize>>,
     stack_slots: usize,
@@ -1779,6 +1783,7 @@ impl Frame {
         Ok(Self {
             stack: Vec::new(),
             stack_classes: Vec::new(),
+            stack_nulls: Vec::new(),
             stack_join_evidence: Vec::new(),
             stack_allocation_sites: Vec::new(),
             stack_slots: 0,
@@ -1800,7 +1805,7 @@ impl Frame {
         flow_is_static: bool,
     ) -> Result<(), AnalysisError> {
         match instruction {
-            Instruction::AConstNull => self.push(instruction_index, ValueKind::Reference)?,
+            Instruction::AConstNull => self.push_null(instruction_index)?,
             Instruction::IConst(_) | Instruction::Bipush(_) | Instruction::Sipush(_) => {
                 self.push(instruction_index, ValueKind::Int)?
             }
@@ -1856,9 +1861,11 @@ impl Frame {
                     });
                 }
                 let class = self.stack_classes.last().cloned().flatten();
+                let is_null = self.stack_nulls.last().copied().unwrap_or(false);
                 let allocation_site = self.stack_allocation_sites.last().copied().flatten();
                 let evidence = self.stack_join_evidence.last().cloned();
                 self.push_typed(instruction_index, top, class)?;
+                *self.stack_nulls.last_mut().expect("push adds a stack slot") = is_null;
                 if let Some(evidence) = evidence {
                     *self
                         .stack_join_evidence
@@ -1889,6 +1896,7 @@ impl Frame {
                 }
                 self.stack.pop();
                 self.stack_classes.pop();
+                self.stack_nulls.pop();
                 self.stack_join_evidence.pop();
                 self.stack_allocation_sites.pop();
                 self.stack_slots -= 1;
@@ -1917,20 +1925,22 @@ impl Frame {
                     let field_class =
                         validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;
                     if let Some(expected) = field_class {
-                        let (_, actual) =
-                            self.pop_typed(instruction_index, ValueKind::Reference)?;
-                        let actual = actual.ok_or(AnalysisError::MissingExactFieldValue {
-                            instruction: instruction_index,
-                        })?;
-                        if !self
-                            .hierarchy
-                            .is_assignable(actual.internal_name(), expected.internal_name())
-                        {
-                            return Err(AnalysisError::WrongExactFieldValue {
+                        let (_, actual, is_null) =
+                            self.pop_typed_with_null(instruction_index, ValueKind::Reference)?;
+                        if !is_null {
+                            let actual = actual.ok_or(AnalysisError::MissingExactFieldValue {
                                 instruction: instruction_index,
-                                expected,
-                                actual,
-                            });
+                            })?;
+                            if !self
+                                .hierarchy
+                                .is_assignable(actual.internal_name(), expected.internal_name())
+                            {
+                                return Err(AnalysisError::WrongExactFieldValue {
+                                    instruction: instruction_index,
+                                    expected,
+                                    actual,
+                                });
+                            }
                         }
                     } else {
                         self.pop_expected(instruction_index, ValueKind::Int)?;
@@ -2083,6 +2093,12 @@ impl Frame {
         self.push_typed(instruction, value, None)
     }
 
+    fn push_null(&mut self, instruction: usize) -> Result<(), AnalysisError> {
+        self.push_typed(instruction, ValueKind::Reference, None)?;
+        *self.stack_nulls.last_mut().expect("push adds a stack slot") = true;
+        Ok(())
+    }
+
     fn push_object(
         &mut self,
         instruction: usize,
@@ -2108,6 +2124,7 @@ impl Frame {
         }
         self.stack.push(value);
         self.stack_classes.push(class);
+        self.stack_nulls.push(false);
         self.stack_join_evidence.push(
             self.stack_classes
                 .last()
@@ -2127,14 +2144,15 @@ impl Frame {
         instruction: usize,
         expected: ValueKind,
     ) -> Result<ValueKind, AnalysisError> {
-        self.pop_typed(instruction, expected).map(|value| value.0)
+        self.pop_typed_with_null(instruction, expected)
+            .map(|(kind, _, _)| kind)
     }
 
-    fn pop_typed(
+    fn pop_typed_with_null(
         &mut self,
         instruction: usize,
         expected: ValueKind,
-    ) -> Result<(ValueKind, Option<ClassIdentity>), AnalysisError> {
+    ) -> Result<(ValueKind, Option<ClassIdentity>, bool), AnalysisError> {
         if let Some(site) = self.stack_allocation_sites.last().copied().flatten() {
             return Err(AnalysisError::UninitializedReferenceUse {
                 instruction,
@@ -2148,6 +2166,7 @@ impl Frame {
             available,
         })?;
         let class = self.stack_classes.pop().flatten();
+        let is_null = self.stack_nulls.pop().unwrap_or(false);
         self.stack_join_evidence.pop();
         self.stack_allocation_sites.pop();
         self.stack_slots -= actual.slots();
@@ -2158,7 +2177,7 @@ impl Frame {
                 actual,
             });
         }
-        Ok((actual, class))
+        Ok((actual, class, is_null))
     }
 
     fn ensure_empty_stack(&self, instruction: usize) -> Result<(), AnalysisError> {
@@ -2209,6 +2228,15 @@ impl Frame {
                     .expect("push_object adds a stack slot") = evidence;
                 Ok(())
             }
+            Some(LocalSlot::Null) if expected == ValueKind::Reference => {
+                self.push_null(instruction)
+            }
+            Some(LocalSlot::Null) => Err(AnalysisError::LocalTypeMismatch {
+                instruction,
+                index: index.get(),
+                expected,
+                actual: ValueKind::Reference,
+            }),
             Some(LocalSlot::Object(_)) => Err(AnalysisError::LocalTypeMismatch {
                 instruction,
                 index: index.get(),
@@ -2239,15 +2267,19 @@ impl Frame {
         } else {
             std::collections::BTreeSet::new()
         };
-        let actual_class = self.pop_typed(instruction, expected)?.1;
+        let (_, actual_class, is_null) = self.pop_typed_with_null(instruction, expected)?;
         let start = usize::from(index.get());
         let width = expected.slots();
         for slot in start..start + width {
             self.clear_local_slot(slot);
         }
-        self.locals[start] = Some(match actual_class {
-            Some(class) => LocalSlot::Object(class),
-            None => LocalSlot::Value(expected),
+        self.locals[start] = Some(if is_null {
+            LocalSlot::Null
+        } else {
+            match actual_class {
+                Some(class) => LocalSlot::Object(class),
+                None => LocalSlot::Value(expected),
+            }
         });
         self.local_join_evidence[start] = join_evidence;
         if width == 2 {
@@ -2407,7 +2439,10 @@ impl Frame {
         instruction: usize,
         expected_owner: &ClassIdentity,
     ) -> Result<(), AnalysisError> {
-        let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+        let (_, actual, is_null) = self.pop_typed_with_null(instruction, ValueKind::Reference)?;
+        if is_null {
+            return Ok(());
+        }
         let actual = actual.ok_or(AnalysisError::MissingExactReference { instruction })?;
         if !self
             .hierarchy
@@ -2722,7 +2757,11 @@ impl Frame {
                     self.pop_expected(instruction, ValueKind::Int)?;
                 }
                 FieldType::Object(name) if is_valid_internal_name(name) => {
-                    let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+                    let (_, actual, is_null) =
+                        self.pop_typed_with_null(instruction, ValueKind::Reference)?;
+                    if is_null {
+                        continue;
+                    }
                     let expected = ClassIdentity(Arc::from(name.as_str()));
                     let actual = actual.ok_or(AnalysisError::MissingExactMethodArgument {
                         instruction,
@@ -2795,6 +2834,7 @@ impl Frame {
 
         self.stack.pop();
         self.stack_classes.pop();
+        self.stack_nulls.pop();
         self.stack_join_evidence.pop();
         self.stack_allocation_sites.pop();
         self.stack_slots -= 1;
@@ -2836,7 +2876,11 @@ impl Frame {
                     self.pop_expected(instruction, ValueKind::Int)?;
                 }
                 FieldType::Object(name) => {
-                    let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+                    let (_, actual, is_null) =
+                        self.pop_typed_with_null(instruction, ValueKind::Reference)?;
+                    if is_null {
+                        continue;
+                    }
                     let expected = ClassIdentity(Arc::from(name.as_str()));
                     let actual = actual.ok_or(AnalysisError::MissingExactMethodArgument {
                         instruction,
@@ -2917,7 +2961,11 @@ impl Frame {
                     self.pop_expected(instruction, ValueKind::Int)?;
                 }
                 FieldType::Object(name) => {
-                    let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+                    let (_, actual, is_null) =
+                        self.pop_typed_with_null(instruction, ValueKind::Reference)?;
+                    if is_null {
+                        continue;
+                    }
                     let expected = ClassIdentity(Arc::from(name.as_str()));
                     let actual = actual.ok_or(AnalysisError::MissingExactMethodArgument {
                         instruction,
@@ -2944,15 +2992,18 @@ impl Frame {
                 }
             }
         }
-        let (_, actual_receiver) = self.pop_typed(instruction, ValueKind::Reference)?;
-        let actual_receiver =
-            actual_receiver.ok_or(AnalysisError::MissingExactReference { instruction })?;
-        if actual_receiver != *current_class {
-            return Err(AnalysisError::DirectSuperMethodReceiverMismatch {
-                instruction,
-                expected: current_class.clone(),
-                actual: actual_receiver,
-            });
+        let (_, actual_receiver, is_null) =
+            self.pop_typed_with_null(instruction, ValueKind::Reference)?;
+        if !is_null {
+            let actual_receiver =
+                actual_receiver.ok_or(AnalysisError::MissingExactReference { instruction })?;
+            if actual_receiver != *current_class {
+                return Err(AnalysisError::DirectSuperMethodReceiverMismatch {
+                    instruction,
+                    expected: current_class.clone(),
+                    actual: actual_receiver,
+                });
+            }
         }
         match descriptor.return_type.as_ref() {
             None => {}
@@ -2977,7 +3028,10 @@ impl Frame {
         instruction: usize,
         expected_owner: &ClassIdentity,
     ) -> Result<(), AnalysisError> {
-        let (_, actual) = self.pop_typed(instruction, ValueKind::Reference)?;
+        let (_, actual, is_null) = self.pop_typed_with_null(instruction, ValueKind::Reference)?;
+        if is_null {
+            return Ok(());
+        }
         let actual = actual.ok_or(AnalysisError::MissingExactReference { instruction })?;
         if !self
             .hierarchy
@@ -3074,6 +3128,9 @@ impl Frame {
             });
         }
         let Some(actual) = self.stack_classes.last().cloned().flatten() else {
+            if self.stack_nulls.last().copied().unwrap_or(false) {
+                return Ok(());
+            }
             return Err(AnalysisError::MissingExactReferenceReturn {
                 instruction,
                 expected,
@@ -3177,6 +3234,8 @@ pub enum FlowLocalState {
     Top,
     /// The slot contains an int-like JVM value.
     Integer,
+    /// The slot contains the JVM null verification type.
+    Null,
     /// The slot is the current instance receiver.
     Receiver,
     /// The slot contains an initialized reference to this exact class.
@@ -3188,7 +3247,7 @@ pub enum FlowLocalState {
 pub struct BlockEntryState {
     /// Local slots, including receiver/argument slots and slots grown by stores.
     pub locals: Vec<FlowLocalState>,
-    /// Exact int or initialized-class values in bottom-to-top order.
+    /// Exact int, null, or initialized-class values in bottom-to-top order.
     pub operand_stack: Vec<FlowValue>,
 }
 
@@ -3291,8 +3350,10 @@ impl CfgCodeAnalyzer {
     /// and switch flows are not supported. Use
     /// [`Self::analyze_with_current_class`] to enable exact initialized
     /// receiver moves, primitive field accesses, and exact `invokevirtual`
-    /// calls with supported object/int-like descriptors. No byte offsets or
-    /// stack-map frames are produced.
+    /// calls with supported object/int-like descriptors. Null is preserved as
+    /// its own verifier value and accepted for supported reference fields,
+    /// arguments, and returns. No byte offsets or stack-map frames are
+    /// produced.
     pub fn analyze(
         graph: &ControlFlowGraph,
         method_descriptor: &str,
@@ -3312,8 +3373,9 @@ impl CfgCodeAnalyzer {
     /// placeholder behavior. This context enables exact initialized-reference
     /// moves, `dup`/`pop`, `getfield`/`putfield` for `int` and `boolean` fields,
     /// and `invokevirtual` methods with exact object or int-like parameters and
-    /// exact object, int-like, or void results. Reference arguments and
-    /// receivers must match their declared class names exactly; no hierarchy
+    /// exact object, int-like, or void results. Non-null reference arguments
+    /// and receivers must match their declared class names exactly; null is
+    /// assignable to a supported reference type. No other hierarchy
     /// conversions are inferred by this entry point. Use
     /// [`Self::analyze_with_hierarchy`] to provide explicit superclass proofs.
     /// It also supports in-block `new; dup;
@@ -3962,6 +4024,7 @@ fn state_from_frame(frame: &Frame) -> Result<BlockEntryState, AnalysisError> {
         .iter()
         .map(|slot| match slot {
             Some(LocalSlot::Value(ValueKind::Int)) => FlowLocalState::Integer,
+            Some(LocalSlot::Null) => FlowLocalState::Null,
             Some(LocalSlot::Receiver) => FlowLocalState::Receiver,
             Some(LocalSlot::Object(class)) => FlowLocalState::Object(class.clone()),
             _ => FlowLocalState::Top,
@@ -3971,10 +4034,12 @@ fn state_from_frame(frame: &Frame) -> Result<BlockEntryState, AnalysisError> {
         .stack
         .iter()
         .zip(&frame.stack_classes)
-        .map(|(value, class)| match (value, class) {
-            (ValueKind::Int, _) => Ok(FlowValue::Integer),
-            (ValueKind::Reference, Some(class)) => Ok(FlowValue::Object(class.clone())),
-            (value, _) => Err(AnalysisError::UnsupportedFlowStackValue { actual: *value }),
+        .zip(&frame.stack_nulls)
+        .map(|((value, class), is_null)| match (value, class, is_null) {
+            (ValueKind::Int, _, _) => Ok(FlowValue::Integer),
+            (ValueKind::Reference, _, true) => Ok(FlowValue::Null),
+            (ValueKind::Reference, Some(class), false) => Ok(FlowValue::Object(class.clone())),
+            (value, _, _) => Err(AnalysisError::UnsupportedFlowStackValue { actual: *value }),
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(BlockEntryState {
@@ -3993,6 +4058,7 @@ fn frame_from_state(
         .map(|local| match local {
             FlowLocalState::Top => None,
             FlowLocalState::Integer => Some(LocalSlot::Value(ValueKind::Int)),
+            FlowLocalState::Null => Some(LocalSlot::Null),
             FlowLocalState::Receiver => Some(LocalSlot::Receiver),
             FlowLocalState::Object(class) => Some(LocalSlot::Object(class.clone())),
         })
@@ -4002,6 +4068,7 @@ fn frame_from_state(
         .iter()
         .map(|value| match value {
             FlowValue::Integer => ValueKind::Int,
+            FlowValue::Null => ValueKind::Reference,
             FlowValue::Object(_) => ValueKind::Reference,
         })
         .collect::<Vec<_>>();
@@ -4010,18 +4077,26 @@ fn frame_from_state(
         .iter()
         .map(|value| match value {
             FlowValue::Integer => None,
+            FlowValue::Null => None,
             FlowValue::Object(class) => Some(class.clone()),
         })
         .collect();
     let stack_slots = stack.len();
+    let stack_nulls = state
+        .operand_stack
+        .iter()
+        .map(|value| matches!(value, FlowValue::Null))
+        .collect();
     Frame {
         stack,
         stack_classes,
+        stack_nulls,
         stack_join_evidence: state
             .operand_stack
             .iter()
             .map(|value| match value {
                 FlowValue::Integer => std::collections::BTreeSet::new(),
+                FlowValue::Null => std::collections::BTreeSet::new(),
                 FlowValue::Object(class) => std::collections::BTreeSet::from([class.clone()]),
             })
             .collect(),
@@ -4142,6 +4217,15 @@ fn merge_flow_states_with_evidence(
                 local_evidence[index].clear();
                 changed = true;
             }
+            (FlowLocalState::Null, FlowLocalState::Object(class)) => {
+                *existing = FlowLocalState::Object(class.clone());
+                local_evidence[index] = incoming_local_evidence[index].clone();
+                if local_evidence[index].is_empty() {
+                    local_evidence[index].insert(class.clone());
+                }
+                changed = true;
+            }
+            (FlowLocalState::Object(_), FlowLocalState::Null) => {}
             (FlowLocalState::Object(_), FlowLocalState::Object(_)) => {
                 let previous_len = local_evidence[index].len();
                 let mut classes = local_evidence[index].clone();
@@ -4196,6 +4280,7 @@ fn stack_join_evidence(state: &BlockEntryState) -> Vec<std::collections::BTreeSe
         .iter()
         .map(|value| match value {
             FlowValue::Integer => std::collections::BTreeSet::new(),
+            FlowValue::Null => std::collections::BTreeSet::new(),
             FlowValue::Object(class) => std::collections::BTreeSet::from([class.clone()]),
         })
         .collect()
@@ -4319,6 +4404,9 @@ fn join_flow_values(
 ) -> Option<FlowValue> {
     match (left, right) {
         (FlowValue::Integer, FlowValue::Integer) => Some(FlowValue::Integer),
+        (FlowValue::Null, FlowValue::Null) => Some(FlowValue::Null),
+        (FlowValue::Null, FlowValue::Object(class))
+        | (FlowValue::Object(class), FlowValue::Null) => Some(FlowValue::Object(class.clone())),
         (FlowValue::Object(left), FlowValue::Object(right)) if left == right => {
             Some(FlowValue::Object(left.clone()))
         }
@@ -5187,7 +5275,7 @@ mod tests {
             Instruction::InvokeVirtual(VirtualMethodReference::new(operand(arg_method))),
             Instruction::Return,
         ];
-        assert_eq!(
+        assert!(
             analyze_validated_with_current_class(
                 "nullArgument",
                 "()V",
@@ -5195,11 +5283,8 @@ mod tests {
                 &null_sequence,
                 &pool,
                 Some(class_index),
-            ),
-            Err(AnalysisError::MissingExactMethodArgument {
-                instruction: 2,
-                parameter: 0,
-            })
+            )
+            .is_ok()
         );
     }
 
@@ -5848,7 +5933,7 @@ mod tests {
             ))))
             .instruction(Instruction::Return);
         let null_value_graph = ControlFlowGraph::build(&null_value).unwrap();
-        assert_eq!(
+        assert!(
             CfgCodeAnalyzer::analyze_with_current_class(
                 &null_value_graph,
                 "setNull",
@@ -5856,8 +5941,8 @@ mod tests {
                 false,
                 &pool,
                 holder_class,
-            ),
-            Err(AnalysisError::MissingExactFieldValue { instruction: 2 })
+            )
+            .is_ok()
         );
 
         let mut unsupported_array = CodeSequence::new();
@@ -6223,6 +6308,86 @@ mod tests {
             ),
             None,
             "Object-only commonality is not an approved fallback"
+        );
+    }
+
+    #[test]
+    fn null_stack_and_local_joins_keep_null_identity_and_object_evidence() {
+        let block = test_block_id();
+        let class_a = class_identity("example/A");
+        let class_b = class_identity("example/B");
+        let base = class_identity("example/Base");
+        let hierarchy = ClassHierarchy::from_edges([
+            ("example/A".to_owned(), "example/Base".to_owned()),
+            ("example/B".to_owned(), "example/Base".to_owned()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            join_flow_values(&FlowValue::Null, &FlowValue::Null, &hierarchy),
+            Some(FlowValue::Null)
+        );
+        assert_eq!(
+            join_flow_values(
+                &FlowValue::Null,
+                &FlowValue::Object(class_a.clone()),
+                &ClassHierarchy::default(),
+            ),
+            Some(FlowValue::Object(class_a.clone()))
+        );
+
+        let mut stack = BlockEntryState {
+            locals: vec![],
+            operand_stack: vec![FlowValue::Null],
+        };
+        let mut stack_evidence = stack_join_evidence(&stack);
+        merge_flow_states(
+            &mut stack,
+            &BlockEntryState {
+                locals: vec![],
+                operand_stack: vec![FlowValue::Object(class_a.clone())],
+            },
+            block,
+            &ClassHierarchy::default(),
+            &mut stack_evidence,
+        )
+        .unwrap();
+        assert_eq!(stack.operand_stack, [FlowValue::Object(class_a.clone())]);
+        merge_flow_states(
+            &mut stack,
+            &BlockEntryState {
+                locals: vec![],
+                operand_stack: vec![FlowValue::Object(class_b.clone())],
+            },
+            block,
+            &hierarchy,
+            &mut stack_evidence,
+        )
+        .unwrap();
+        assert_eq!(stack.operand_stack, [FlowValue::Object(base.clone())]);
+
+        let mut locals = BlockEntryState {
+            locals: vec![FlowLocalState::Null, FlowLocalState::Null],
+            operand_stack: vec![],
+        };
+        let mut local_evidence = vec![Default::default(), Default::default()];
+        let incoming = BlockEntryState {
+            locals: vec![FlowLocalState::Object(class_a.clone()), FlowLocalState::Top],
+            operand_stack: vec![],
+        };
+        merge_flow_states_with_evidence(
+            &mut locals,
+            &incoming,
+            (&[], &[Default::default(), Default::default()]),
+            block,
+            &hierarchy,
+            &mut [],
+            &mut local_evidence,
+        )
+        .unwrap();
+        assert_eq!(
+            locals.locals,
+            [FlowLocalState::Object(class_a), FlowLocalState::Top]
         );
     }
 

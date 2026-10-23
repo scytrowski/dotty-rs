@@ -514,6 +514,7 @@ fn frame_from_state(
         .map(|local| match local {
             FlowLocalState::Top => Ok(VerificationTypeInfo::Top),
             FlowLocalState::Integer => Ok(VerificationTypeInfo::Integer),
+            FlowLocalState::Null => Ok(VerificationTypeInfo::Null),
             FlowLocalState::Receiver => match receiver_class {
                 Some(class) if constant_pool.class_name(class).is_ok() => {
                     Ok(VerificationTypeInfo::Object(class))
@@ -545,6 +546,7 @@ fn frame_from_state(
         .iter()
         .map(|value| match value {
             FlowValue::Integer => Ok(VerificationTypeInfo::Integer),
+            FlowValue::Null => Ok(VerificationTypeInfo::Null),
             FlowValue::Object(class) => Ok(VerificationTypeInfo::Object(class_constant(
                 block,
                 class,
@@ -712,6 +714,128 @@ mod tests {
             ]
         );
         assert!(generated.frames.iter().all(|frame| frame.pc != 0));
+    }
+
+    #[test]
+    fn null_join_emits_null_verification_type_without_a_class_constant() {
+        let mut pool_builder = ConstantPoolBuilder::new();
+        let client = pool_builder.class("example/Client").unwrap();
+        let pool = pool_builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        let null_arm = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .branch(BranchInstruction::IfEq(null_arm.clone()))
+            .instruction(Instruction::AConstNull)
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(null_arm)
+            .unwrap()
+            .instruction(Instruction::AConstNull)
+            .bind(join.clone())
+            .unwrap()
+            .instruction(Instruction::AReturn);
+
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "nullJoin",
+            "()Ljava/lang/Object;",
+            false,
+            &pool,
+            client,
+        )
+        .unwrap();
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        let classes = frame_class_identities(&flow)
+            .into_iter()
+            .map(|identity| (identity, client))
+            .collect::<BTreeMap<_, _>>();
+        let generated = generate_stack_map_frames_inner(
+            &flow,
+            &graph,
+            &assembled,
+            &pool,
+            Some(client),
+            &classes,
+        )
+        .unwrap();
+        let join_offset = assembled.layout.label_offset(&join).unwrap();
+        let frame = generated
+            .frames
+            .iter()
+            .find(|frame| usize::try_from(frame.pc).ok() == Some(join_offset))
+            .unwrap();
+        assert_eq!(frame.stack, [VerificationTypeInfo::Null]);
+        assert!(
+            !classes
+                .keys()
+                .any(|class| class.internal_name() == "java/lang/Object")
+        );
+    }
+
+    #[test]
+    fn null_local_join_emits_null_verification_type() {
+        let mut pool_builder = ConstantPoolBuilder::new();
+        let client = pool_builder.class("example/Client").unwrap();
+        let pool = pool_builder.finish().unwrap();
+        let mut sequence = CodeSequence::new();
+        let null_arm = sequence.new_label().unwrap();
+        let join = sequence.new_label().unwrap();
+        sequence
+            .instruction(Instruction::IConst(SmallIntConstant::Zero))
+            .branch(BranchInstruction::IfEq(null_arm.clone()))
+            .instruction(Instruction::AConstNull)
+            .instruction(Instruction::AStore(crate::bytecode::LocalIndex::new(2)))
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(null_arm)
+            .unwrap()
+            .instruction(Instruction::AConstNull)
+            .instruction(Instruction::AStore(crate::bytecode::LocalIndex::new(2)))
+            .bind(join.clone())
+            .unwrap()
+            .instruction(Instruction::ALoad(crate::bytecode::LocalIndex::new(2)))
+            .instruction(Instruction::AReturn);
+
+        let graph = ControlFlowGraph::build(&sequence).unwrap();
+        let flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &graph,
+            "nullLocalJoin",
+            "(I)Ljava/lang/Object;",
+            false,
+            &pool,
+            client,
+        )
+        .unwrap();
+        let assembled = assemble_labeled(&sequence, &pool).unwrap();
+        let classes = frame_class_identities(&flow)
+            .into_iter()
+            .map(|identity| (identity, client))
+            .collect::<BTreeMap<_, _>>();
+        let generated = generate_stack_map_frames_inner(
+            &flow,
+            &graph,
+            &assembled,
+            &pool,
+            Some(client),
+            &classes,
+        )
+        .unwrap();
+        let join_offset = assembled.layout.label_offset(&join).unwrap();
+        let frame = generated
+            .frames
+            .iter()
+            .find(|frame| usize::try_from(frame.pc).ok() == Some(join_offset))
+            .unwrap();
+        assert_eq!(
+            frame.locals,
+            [
+                VerificationTypeInfo::Object(client),
+                VerificationTypeInfo::Integer,
+                VerificationTypeInfo::Null
+            ]
+        );
+        assert!(frame.stack.is_empty());
     }
 
     #[test]
