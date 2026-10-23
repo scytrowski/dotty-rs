@@ -2,8 +2,9 @@
 
 This is an audit checkpoint for Scala 3.9.0 default-null semantics and the
 Java SE 21 verifier contract. It records current source and classfile boundaries
-and successor ownership. The source typing increment in #1469 is implemented
-below; identity-call and bytecode support remain separate work.
+and successor ownership. The source typing increment in #1469 and low-level
+reference branch support in #1471 are implemented below; source identity-call
+support remains separate work.
 
 ## Reference evidence
 
@@ -116,8 +117,11 @@ At the classfile layer:
   object as that object's exact class. Reference arguments and `areturn` accept
   null under their declared reference types. Local `Top` remains absorbing,
   and null never gains a fabricated class identity.
-- The current typed branch model handles integer conditions and integer
-  comparisons. It has no reference equality or null-check branch variants.
+- The typed branch model handles integer conditions/comparisons and
+  `if_acmpeq`, `if_acmpne`, `ifnull`, and `ifnonnull`. The class-aware CFG
+  accepts initialized objects and `Null`, consumes the tested references, and
+  preserves the remaining state on both successors. The context-free analyzer
+  remains limited to its documented subset.
 - `Object_eq`/`Object_ne` are Scala semantic method identities, not methods to
   invoke on Java `Object`. Their bounded JVM implementation must use the
   reference comparison branch contract below, not `invokevirtual` or
@@ -125,8 +129,7 @@ At the classfile layer:
 
 The classfile CFG and stack-map frame generator now project `Null` directly to
 the existing `VerificationTypeInfo::Null` tag 5 without interning a class.
-This does not imply source lowering or the reference/null branch opcodes from
-the next classfile increment are supported.
+This does not imply source lowering or flow-sensitive null narrowing.
 
 ## Required verifier contract for successor work
 
@@ -172,7 +175,7 @@ claims.
 | --- | --- | --- |
 | #1469 | `dotty-core`/`dotty-typer`: canonical source `Null` identity and limited default Scala 3.9 typing | Implemented in this increment |
 | #1470 | `dotty-classfile`: Scala-independent `Null` verifier flow, joins, and stack-map generation | This audit; may run alongside #1469 |
-| #1471 | `dotty-classfile`: reference compare/null branch instructions, symbolic assembly, and CFG transfer | This audit; may run alongside #1469/#1470; final null-branch tests require #1470 |
+| #1471 | `dotty-classfile`: reference compare/null branch instructions, symbolic assembly, and CFG transfer | Implemented with #1470 Null flow available |
 | #1472 | `dotty-core`/`dotty-typer`: canonical `AnyRef.eq/ne` member IDs and normal Typer selection | This audit; may run alongside #1471 and non-null parts of #1469 |
 | #1473 | `dotty-jvm`: source-typed null lowering in explicit reference contexts | #1469 and #1470 |
 | #1474 | `dotty-jvm`: identity-only `eq/ne` lowering and Boolean materialization | #1471, #1472, and #1473 (therefore #1470) |

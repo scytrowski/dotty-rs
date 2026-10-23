@@ -85,7 +85,7 @@ fn encodes_wide_goto_and_every_conditional_opcode() {
     let assembled = assemble_labeled(&wide_backward, &pool).unwrap();
     assert_eq!(assembled.bytes, [0x01, 0xc8, 0xff, 0xff, 0xff, 0xff]);
 
-    let branches: [(BranchConstructor, u8); 8] = [
+    let branches: [(BranchConstructor, u8); 12] = [
         (BranchInstruction::IfEq, 0x99),
         (BranchInstruction::IfNe, 0x9a),
         (BranchInstruction::IfICmpEq, 0x9f),
@@ -94,6 +94,10 @@ fn encodes_wide_goto_and_every_conditional_opcode() {
         (BranchInstruction::IfICmpGe, 0xa2),
         (BranchInstruction::IfICmpGt, 0xa3),
         (BranchInstruction::IfICmpLe, 0xa4),
+        (BranchInstruction::IfACmpEq, 0xa5),
+        (BranchInstruction::IfACmpNe, 0xa6),
+        (BranchInstruction::IfNull, 0xc6),
+        (BranchInstruction::IfNonNull, 0xc7),
     ];
     for (make_branch, opcode) in branches {
         let mut sequence = CodeSequence::new();

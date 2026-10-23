@@ -37,7 +37,7 @@ name index and payload.
 `ClassFileBuilder` creates new classes with owned names, descriptors, fields,
 and methods. Its raw `MethodBuilder::code` path remains available for callers
 that need to provide bytes and explicit `max_stack`/`max_locals`. For
-straight-line methods and the supported integer-only branched subset,
+straight-line methods and the supported integer/reference branched subset,
 `add_static_method`, `add_instance_method`, and `add_code_method` accept a
 closure over `CodeBuilder`:
 
@@ -67,9 +67,12 @@ Straight-line methods use the linear analyzer and do not receive an automatic
 `StackMapTable`. Branched methods use symbolic labels, CFG analysis, final
 assembled byte offsets, and `full_frame` entries. Automatic branched emission
 requires class-file major version 65 or newer. It accepts only the analyzer's
-integer-like state subset; it is not a JVM verifier and rejects reference,
-category-two, incompatible-stack, uninitialized-local, and unreachable-block
-flows. Unreachable bytecode is rejected because automatic frame generation
+integer, null, initialized-object, and current-receiver states; it is not a
+general JVM verifier and rejects category-two, incompatible-stack,
+uninitialized-local, and unreachable-block flows. Reference branches accept
+initialized objects and `null`, but reject an uninitialized allocation. The
+identity branches compare object identity and do not infer a source-level
+equality operation. Unreachable bytecode is rejected because automatic frame generation
 does not infer verifier states for dead code.
 
 ```rust
@@ -96,7 +99,8 @@ let bytes = class.encode()?;
 ```
 
 `CodeBuilder` exposes `new_label`, `mark`, `goto`/`goto_w`, `ifeq`, `ifne`,
-and all `if_icmp*` branches. It validates label ownership and definitions
+all `if_icmp*` branches, `if_acmpeq`, `if_acmpne`, `ifnull`, and `ifnonnull`.
+It validates label ownership and definitions
 before committing the method. `ClassFileBuilder` stages symbolic references,
 the `Code` and `StackMapTable` names, and frame payloads before finalizing the
 constant pool. A branched method gets exactly one nested `StackMapTable`
@@ -122,6 +126,7 @@ subsets:
 | `Calculator` | `iload`, `iadd`, `ireturn` |
 | `IntegerArithmetic` | `isub`, `imul`, `idiv`, `irem`; signed operands, truncation toward zero, minimum-int division overflow, and division/remainder by zero |
 | `Calculator.max` | `if_icmpge`, both branches, and equality; executed for `(20,22)`, `(22,20)`, and `(22,22)` |
+| `ReferenceBranches` | `if_acmpeq`, `if_acmpne`, `ifnull`, and `ifnonnull`; identity and null predicates verified and executed with JDK 21+ |
 | `Calculator.sumTo` | loop back-edge, `goto`, integer locals, and merge frames; executed for `0`, `1`, and `10` |
 | `Calculator.nested` | nested integer conditionals, four branch targets, and a shared join of initialized integer locals |
 | `Box` | `aload`, `iload`, `invokespecial`, `putfield`, `getfield`, `return`, `ireturn` |
@@ -182,13 +187,14 @@ so the structural round-trip suite does not depend on an installed JDK.
 
 The existing `assemble(&[Instruction], ...)` and linear analyzer remain
 straight-line APIs. The separate symbolic `CodeSequence` API supports labels
-and `goto`, `goto_w`, `ifeq`, `ifne`, and `if_icmp{eq,ne,lt,ge,gt,le}` branches.
+and `goto`, `goto_w`, `ifeq`, `ifne`, `if_icmp{eq,ne,lt,ge,gt,le}`,
+`if_acmpeq`, `if_acmpne`, `ifnull`, and `ifnonnull` branches.
 `assemble_labeled` returns complete bytes plus deterministic instruction and
 label byte offsets. It uses checked branch displacement and code-length
 arithmetic, and never widens a short branch automatically. The public typed
-`CodeBuilder` now connects these pieces for the integer-only branched subset
-and emits `StackMapTable`; it rejects unreachable blocks and unsupported
-verifier states. Follow-up work can add switch instructions, exception edges,
-reference merges, and object initialization states. Frame compression and
-general JVM verification remain out of scope. This does not add Scala
+`CodeBuilder` connects these pieces for the supported integer and initialized
+reference subset and emits `StackMapTable`; it rejects unreachable blocks and
+unsupported verifier states. Follow-up work can add switch instructions,
+exception edges, and broader object initialization states. Frame compression
+and general JVM verification remain out of scope. This does not add Scala
 compilation or a JVM backend.

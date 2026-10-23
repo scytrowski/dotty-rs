@@ -212,7 +212,7 @@ must run under JDK 21+ `java -Xverify:all`.
 | Private constructor call, wrong constructor arity/type, or missing external class metadata | Rejected at the originating Typer or backend stage; no artifact is published |
 | `var` reference local, reference method parameter/result, arbitrary classpath receiver | Unsupported; no descriptor fallback |
 | Generic, abstract, trait, external, secondary, or unplanned constructor | Unsupported for JVM emission |
-| Nested allocation or allocation/reference inside branch or short-circuit CFG | Unsupported until verifier-aware reference CFG exists |
+| Nested allocation or an uninitialized allocation crossing a branch/short-circuit CFG edge | Unsupported; initialized references can flow through the verifier-aware CFG |
 | Duplicate emitted internal class name | `JvmCompilationUnit` validation error |
 
 `tests/fixtures/jvm/CounterObjects.scala` is the end-to-end source gate for this

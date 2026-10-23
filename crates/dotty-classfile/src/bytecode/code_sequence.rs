@@ -54,8 +54,7 @@ impl Hash for LabelId {
 ///
 /// `Goto` is the short `goto` form; [`Self::GotoWide`] is the explicit wide
 /// form. Neither form is automatically widened. Conditional variants
-/// correspond to the JVM's `ifeq`, `ifne`, and integer comparison branch
-/// family.
+/// correspond to the supported integer and reference comparison branch families.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchInstruction {
     /// Unconditional short branch (`goto`), with a signed 16-bit offset.
@@ -78,6 +77,14 @@ pub enum BranchInstruction {
     IfICmpGt(LabelId),
     /// Branch when the first integer value is less than or equal to the second (`if_icmple`).
     IfICmpLe(LabelId),
+    /// Branch when two references are identical (`if_acmpeq`).
+    IfACmpEq(LabelId),
+    /// Branch when two references are not identical (`if_acmpne`).
+    IfACmpNe(LabelId),
+    /// Branch when the top reference is null (`ifnull`).
+    IfNull(LabelId),
+    /// Branch when the top reference is not null (`ifnonnull`).
+    IfNonNull(LabelId),
 }
 
 impl BranchInstruction {
@@ -93,7 +100,11 @@ impl BranchInstruction {
             | Self::IfICmpLt(target)
             | Self::IfICmpGe(target)
             | Self::IfICmpGt(target)
-            | Self::IfICmpLe(target) => target,
+            | Self::IfICmpLe(target)
+            | Self::IfACmpEq(target)
+            | Self::IfACmpNe(target)
+            | Self::IfNull(target)
+            | Self::IfNonNull(target) => target,
         }
     }
 
@@ -109,6 +120,10 @@ impl BranchInstruction {
             Self::IfICmpGe(_) => BranchCondition::IntGreaterOrEqual,
             Self::IfICmpGt(_) => BranchCondition::IntGreaterThan,
             Self::IfICmpLe(_) => BranchCondition::IntLessOrEqual,
+            Self::IfACmpEq(_) => BranchCondition::ReferenceIdentityEqual,
+            Self::IfACmpNe(_) => BranchCondition::ReferenceIdentityNotEqual,
+            Self::IfNull(_) => BranchCondition::ReferenceIsNull,
+            Self::IfNonNull(_) => BranchCondition::ReferenceIsNotNull,
         }
     }
 
@@ -139,6 +154,14 @@ pub enum BranchCondition {
     IntGreaterThan,
     /// Take the branch when the first integer is less than or equal to the second.
     IntLessOrEqual,
+    /// Take the branch when two references have the same identity.
+    ReferenceIdentityEqual,
+    /// Take the branch when two references have different identities.
+    ReferenceIdentityNotEqual,
+    /// Take the branch when a reference is null.
+    ReferenceIsNull,
+    /// Take the branch when a reference is not null.
+    ReferenceIsNotNull,
 }
 
 /// One item in a symbolic method code sequence.

@@ -4015,6 +4015,14 @@ fn apply_branch(
             frame.pop_expected(instruction, ValueKind::Int)?;
             Ok(())
         }
+        BranchInstruction::IfACmpEq(_) | BranchInstruction::IfACmpNe(_) => {
+            frame.pop_expected(instruction, ValueKind::Reference)?;
+            frame.pop_expected(instruction, ValueKind::Reference)?;
+            Ok(())
+        }
+        BranchInstruction::IfNull(_) | BranchInstruction::IfNonNull(_) => frame
+            .pop_expected(instruction, ValueKind::Reference)
+            .map(|_| ()),
     }
 }
 

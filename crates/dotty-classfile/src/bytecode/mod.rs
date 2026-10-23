@@ -68,11 +68,11 @@
 //!
 //! The [`Instruction`] enum covers the straight-line instruction families
 //! listed above. [`code_sequence::BranchInstruction`] additionally models
-//! symbolic `goto`/`goto_w`, `ifeq`, `ifne`, and `if_icmp{eq,ne,lt,ge,gt,le}`
-//! branches. It does not choose branch widths or emit branch bytes. Float and
-//! double instructions, `invokeinterface`, `invokedynamic`, switches,
-//! `jsr`/`ret`, exception handlers, monitor operations, array operations,
-//! conversions, comparisons, and all other JVM instructions are intentionally
+//! symbolic `goto`/`goto_w`, integer conditional branches, and reference
+//! identity/null branches. It does not choose branch widths or emit branch
+//! bytes. Float and double instructions, `invokeinterface`, `invokedynamic`,
+//! switches, `jsr`/`ret`, exception handlers, monitor operations, array
+//! operations, conversions, numeric comparisons, and all other JVM instructions are intentionally
 //! unsupported. There are no catch-all opcode or raw-byte variants, so
 //! unsupported instructions cannot silently enter the model.
 //!

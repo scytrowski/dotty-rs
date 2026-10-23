@@ -1,4 +1,4 @@
-//! Symbolic builder for typed JVM instructions and integer-only branches.
+//! Symbolic builder for typed JVM instructions and supported integer/reference branches.
 
 use super::{
     ClassReference, ConstantPoolIndexOperand, FieldReference, Instruction, Ldc2Constant,
@@ -136,6 +136,10 @@ pub(crate) enum SymbolicBranch {
     IfICmpGe,
     IfICmpGt,
     IfICmpLe,
+    IfACmpEq,
+    IfACmpNe,
+    IfNull,
+    IfNonNull,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +284,26 @@ impl CodeBuilder {
     /// Branches when the first integer is less than or equal to the second.
     pub fn if_icmple(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
         self.branch(SymbolicBranch::IfICmpLe, target)
+    }
+
+    /// Branches when two references have the same object identity.
+    pub fn if_acmpeq(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfACmpEq, target)
+    }
+
+    /// Branches when two references have different object identities.
+    pub fn if_acmpne(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfACmpNe, target)
+    }
+
+    /// Branches when the top reference is null.
+    pub fn ifnull(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfNull, target)
+    }
+
+    /// Branches when the top reference is not null.
+    pub fn ifnonnull(&mut self, target: CodeLabel) -> Result<&mut Self, CodeBuilderError> {
+        self.branch(SymbolicBranch::IfNonNull, target)
     }
 
     /// Returns whether this method contains any branch instructions.

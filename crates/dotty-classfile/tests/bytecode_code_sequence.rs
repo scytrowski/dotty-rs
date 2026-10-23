@@ -140,6 +140,22 @@ fn exposes_semantics_for_every_supported_branch_condition() {
             BranchInstruction::IfICmpLe(target.clone()),
             BranchCondition::IntLessOrEqual,
         ),
+        (
+            BranchInstruction::IfACmpEq(target.clone()),
+            BranchCondition::ReferenceIdentityEqual,
+        ),
+        (
+            BranchInstruction::IfACmpNe(target.clone()),
+            BranchCondition::ReferenceIdentityNotEqual,
+        ),
+        (
+            BranchInstruction::IfNull(target.clone()),
+            BranchCondition::ReferenceIsNull,
+        ),
+        (
+            BranchInstruction::IfNonNull(target.clone()),
+            BranchCondition::ReferenceIsNotNull,
+        ),
     ];
     for (branch, _) in &branches {
         sequence.branch(branch.clone());
