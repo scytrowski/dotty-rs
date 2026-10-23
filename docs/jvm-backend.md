@@ -202,14 +202,17 @@ match the declared field type. Classes absent from the compilation unit,
 unit; the standalone `JvmClassPlan::metadata_with_typed_ast` entry point stays
 primitive-only because it cannot prove that a referenced class is planned.
 
-The constructor initializer subset also supports copying an exact planned
+The constructor initializer subset supports copying an exact planned
 reference from an unqualified constructor-owned parameter into a private
-reference field of the same class. It emits `aload` from the parameter's
-validated slot and `putfield` with the field's checked `L...;` descriptor,
-after the validated direct-parent constructor call. Primitive literals, parameters, approved primitive
+reference field, and initializing such a field with one direct `new` of a
+planned public class. The direct-new form accepts primitive literals and exact
+enclosing-constructor primitive parameters, emits the child's checked
+`invokespecial`, then stores the completed reference with the field's checked
+`L...;` descriptor. Both forms run after the validated direct-parent
+constructor call. Primitive literals, parameters, approved primitive
 operations, and earlier initialized primitive fields keep their existing
-behavior. Reference field reads, `this` escape, nested allocations, calls, and
-control flow in field initializers remain unsupported.
+behavior. Factory calls, nested `new` in the child arguments, `this` escape,
+and control flow in field initializers remain unsupported.
 
 The source-to-emission boundary for nested allocations, reference constructor
 arguments, and a reference field initialized by `new` is recorded in the

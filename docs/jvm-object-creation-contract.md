@@ -222,7 +222,8 @@ code must run under JDK 21+ `java -Xverify:all`.
 | Method receiver when planned classes declare same-spelled methods | Selected method and receiver `SymbolId`/`TypeId` preserve the exact owner |
 | Private constructor call, wrong constructor arity/type, or missing external class metadata | Rejected at the originating Typer or backend stage; no artifact is published |
 | Initialized mutable reference local, planned factory result, approved private current-instance field, or canonical null for a reference formal used as a constructor argument | Supported by the bounded initialized-reference whitelist |
-| Reference field initialized by `new` in the primary constructor | `UnsupportedJvmReferenceFieldInitializer` |
+| Private planned reference field initialized by one `new` with primitive literal/constructor-parameter arguments | Supported after the direct-super call; child is initialized before one `putfield` |
+| Reference field initialized by a factory, nested `new`, or branch-valued constructor argument | Rejected with a typed codegen error; no artifact is published |
 | `var` reference local as a receiver, unsupported reference method descriptor, arbitrary classpath receiver | Unsupported; no descriptor fallback |
 | Generic, abstract, trait, external, secondary, or unplanned constructor | Unsupported for JVM emission |
 | Third simultaneously live allocation, deeper source nesting, branch-valued constructor argument with a pending allocation, or an uninitialized allocation crossing a CFG edge | Unsupported; the source emitter accepts only one direct nested constructor level and the class-aware verifier rejects pending-site control-flow edges |

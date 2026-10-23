@@ -47,9 +47,11 @@ For the supported subset, constructor invocation must call
 `Template.body` source order, then return. The
 `JvmCompilationUnit::lower_constructor_field_initializers` method now
 produces checked fragments for primitive literals, constructor parameters,
-approved primitive intrinsics, and reads of earlier initialized fields. A
-plan pairs each field's canonical `SymbolId` with its exact typed initializer
-root.
+approved primitive intrinsics, reads of earlier initialized fields, and one
+completed direct allocation for a reference field. That allocation is limited
+to a planned public class and primitive literal or exact enclosing-constructor
+parameter arguments. A plan pairs each field's canonical `SymbolId` with its
+exact typed initializer root.
 The field type and typed expression's widened value type must conform before
 instructions are returned. There is no JVM slot for a field initializer
 itself. Constructor parameters retain source clause and parameter order; in the

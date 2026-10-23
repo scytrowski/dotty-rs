@@ -715,17 +715,31 @@ fn field_metadata(
                 field: plan.field,
                 initializer: initializer_id,
             })?;
-    let initializer_type = typed_expression_field_value_type(
-        store,
-        definitions,
-        plan.field,
-        initializer_id,
-        initializer.ty,
-        class_identities,
-        unit,
-    )?;
+    let is_planned_new =
+        is_canonical_planned_new_initializer(store, typed_ast, initializer_id, unit, definitions)?;
+    let initializer_type = if is_planned_new {
+        project_field_value_type(
+            store,
+            definitions,
+            plan.field,
+            initializer.ty,
+            class_identities,
+            unit,
+        )?
+    } else {
+        typed_expression_field_value_type(
+            store,
+            definitions,
+            plan.field,
+            initializer_id,
+            initializer.ty,
+            class_identities,
+            unit,
+        )?
+    };
     if matches!(initializer_type, crate::JvmType::Reference(_))
         && !matches!(&initializer.kind, dotty_core::ast::TreeKind::Ident(_))
+        && !is_planned_new
     {
         let symbol = match store.types.try_get(initializer.ty) {
             Some(Type::TermRef {
@@ -779,6 +793,87 @@ fn field_metadata(
         owner,
         initializer: initializer_id,
     })
+}
+
+fn is_canonical_planned_new_initializer(
+    store: &SemanticStore,
+    typed_ast: &dotty_core::ast::TypedAst,
+    initializer_id: dotty_core::TreeId<dotty_core::ast::Typed>,
+    unit: Option<&crate::JvmCompilationUnit<'_>>,
+    definitions: &Definitions,
+) -> Result<bool, JvmCodegenError> {
+    let Some(unit) = unit else {
+        return Ok(false);
+    };
+    let Some(initializer) = typed_ast.try_get(initializer_id) else {
+        return Ok(false);
+    };
+    let dotty_core::ast::TreeKind::Apply(application) = &initializer.kind else {
+        return Ok(false);
+    };
+    if application.kind != dotty_core::ast::ApplyKind::Regular {
+        return Ok(false);
+    }
+    let Some(function) = typed_ast.try_get(application.function) else {
+        return Ok(false);
+    };
+    let dotty_core::ast::TreeKind::Select(select) = &function.kind else {
+        return Ok(false);
+    };
+    if select.backquoted || store.names.try_resolve(select.name.text()) != Some("<init>") {
+        return Ok(false);
+    }
+    let Some(qualifier) = typed_ast.try_get(select.qualifier) else {
+        return Ok(false);
+    };
+    let dotty_core::ast::TreeKind::New(new) = &qualifier.kind else {
+        return Ok(false);
+    };
+    let Some(type_tree) = typed_ast.try_get(new.tpt) else {
+        return Ok(false);
+    };
+    if !matches!(type_tree.kind, dotty_core::ast::TreeKind::TypeTree(_)) {
+        return Ok(false);
+    }
+    let Some(Type::TermRef {
+        prefix,
+        target: dotty_core::types::TermRefTarget::Symbol(constructor),
+    }) = store.types.try_get(function.ty)
+    else {
+        return Ok(false);
+    };
+    if !store.symbols.contains(*constructor) {
+        return Ok(false);
+    }
+    let constructor_info = store.symbols.get(*constructor);
+    let Some(owner) = constructor_info.owner else {
+        return Ok(false);
+    };
+    if constructor_info.kind != SymbolKind::Constructor
+        || constructor_info.name.namespace() != Namespace::Term
+        || store.names.try_resolve(constructor_info.name.text()) != Some("<init>")
+        || !unit.classes.iter().any(|plan| plan.class == owner)
+    {
+        return Ok(false);
+    }
+    let canonical_class_target = |ty: dotty_core::TypeId| {
+        let Some(Type::TypeRef { prefix, target }) = store.types.try_get(ty) else {
+            return None;
+        };
+        let TypeRefTarget::Symbol(class) = target else {
+            return None;
+        };
+        (store.symbols.contains(*class)
+            && store.symbols.get(*class).kind == SymbolKind::Class
+            && unit.classes.iter().any(|plan| plan.class == *class)
+            && canonical_class_parent_prefix(store, *prefix, *class, definitions.no_prefix))
+        .then_some(*class)
+    };
+    let class = canonical_class_target(type_tree.ty);
+    Ok(class == Some(owner)
+        && canonical_class_target(qualifier.ty) == class
+        && canonical_class_target(*prefix) == class
+        && canonical_class_target(initializer.ty) == class)
 }
 
 pub(super) fn project_field_value_type(

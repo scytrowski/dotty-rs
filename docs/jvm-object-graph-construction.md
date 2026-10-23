@@ -64,7 +64,7 @@ batch publishes no class files.
 | `new Link(this)` in a method of `Link` | Succeeds with exact `Link` type | Supported and emitted; `Link.<init>(LLink;)V` verifies under JDK 21 | Existing support |
 | `new Holder(makeCounter(seed))` for a planned same-instance reference-returning method | Succeeds; selected factory method remains canonical | Supported and emitted | #1495 |
 | `new Holder(null)` with a reference formal | Succeeds; null stays `Definitions.null_type` | Supported and emitted; null is accepted only with a reference formal | #1495 |
-| `private val inner: Counter = new Counter(seed)` | Succeeds; initializer is a typed constructor application | `Codegen(UnsupportedJvmReferenceFieldInitializer { .. })` | #1497 |
+| `private val inner: Counter = new Counter(seed)` | Succeeds; initializer keeps the canonical constructor and enclosing constructor parameter identities | Supported; after `Object.<init>`, one planned `Counter` allocation is initialized and stored once | #1497 |
 | `new Counter(if flag then 1 else 2)` as a constructor argument | Succeeds with a typed `If` argument | `Codegen(UnsupportedJvmConstructorArgument { .. })` | #1495 |
 | Wrong constructor arity or primitive argument type | Rejected by the typer with its arity/type error | No JVM plan | Existing Typer behavior |
 
