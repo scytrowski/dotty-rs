@@ -131,93 +131,172 @@ struct ResolverMetrics {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RollbackObservationRanges {
-    ranges: BTreeMap<usize, usize>,
+    ranges: Vec<(usize, usize)>,
 }
 
 impl RollbackObservationRanges {
-    /// Add a half-open event range and return only the portions not covered
-    /// before this call. Rollbacks only append ranges to this index; they do
-    /// not revisit observation rows already transitioned to rolled back.
-    fn mark_new(&mut self, start: usize, end: usize) -> Vec<(usize, usize)> {
+    fn clear(&mut self) {
+        self.ranges.clear();
+    }
+
+    /// Add a half-open range and visit only the portions not covered before
+    /// this call. The callback avoids allocating a temporary range vector on
+    /// the common append-only path.
+    fn mark_new(
+        &mut self,
+        start: usize,
+        end: usize,
+        mut visit_new: impl FnMut(usize, usize),
+    ) -> usize {
         if start >= end {
-            return Vec::new();
+            return 0;
         }
 
-        let mut overlaps = Vec::new();
-        if let Some((&range_start, &range_end)) = self.ranges.range(..=start).next_back()
-            && range_end >= start
-        {
-            overlaps.push((range_start, range_end));
-        }
-        for (&range_start, &range_end) in self.ranges.range(start..=end) {
-            if overlaps
-                .last()
-                .is_none_or(|(seen_start, _)| *seen_start != range_start)
-            {
-                overlaps.push((range_start, range_end));
+        if let Some((last_start, last_end)) = self.ranges.last_mut() {
+            if start >= *last_end {
+                if start == *last_end {
+                    *last_end = end;
+                } else {
+                    self.ranges.push((start, end));
+                }
+                visit_new(start, end);
+                return end - start;
+            }
+            if start >= *last_start && end >= *last_end {
+                let newly_covered = (*last_end < end).then_some((*last_end, end));
+                *last_end = end;
+                if let Some((new_start, new_end)) = newly_covered {
+                    visit_new(new_start, new_end);
+                    return new_end - new_start;
+                }
+                return 0;
             }
         }
 
-        let mut newly_covered = Vec::new();
+        let first = self
+            .ranges
+            .partition_point(|(_, range_end)| *range_end < start);
+        let mut newly_covered_rows = 0;
         let mut cursor = start;
-        for &(range_start, range_end) in &overlaps {
-            if range_end <= start || range_start >= end {
-                continue;
-            }
-            if range_start > cursor {
-                newly_covered.push((cursor, range_start.min(end)));
-            }
-            cursor = cursor.max(range_end.min(end));
-        }
-        if cursor < end {
-            newly_covered.push((cursor, end));
-        }
-
         let mut merged_start = start;
         let mut merged_end = end;
-        for (range_start, range_end) in overlaps {
-            if range_end < merged_start || range_start > merged_end {
-                continue;
+        let mut last = first;
+        while let Some(&(range_start, range_end)) = self.ranges.get(last) {
+            if range_start > merged_end {
+                break;
             }
+            if range_start > cursor {
+                let new_end = range_start.min(end);
+                visit_new(cursor, new_end);
+                newly_covered_rows += new_end - cursor;
+            }
+            cursor = cursor.max(range_end.min(end));
             merged_start = merged_start.min(range_start);
             merged_end = merged_end.max(range_end);
-            self.ranges.remove(&range_start);
+            last += 1;
         }
-        self.ranges.insert(merged_start, merged_end);
-        newly_covered
+        if cursor < end {
+            visit_new(cursor, end);
+            newly_covered_rows += end - cursor;
+        }
+
+        self.ranges
+            .splice(first..last, [(merged_start, merged_end)]);
+        newly_covered_rows
     }
+}
+
+fn rollback_new_ranges(
+    ranges: &mut RollbackObservationRanges,
+    start: usize,
+    end: usize,
+) -> Vec<(usize, usize)> {
+    let mut newly_covered = Vec::new();
+    ranges.mark_new(start, end, |new_start, new_end| {
+        newly_covered.push((new_start, new_end));
+    });
+    newly_covered
 }
 
 #[test]
 fn rollback_observation_ranges_skip_rows_already_transitioned() {
     let mut ranges = RollbackObservationRanges::default();
 
-    assert_eq!(ranges.mark_new(0, 100), vec![(0, 100)]);
-    assert_eq!(ranges.mark_new(0, 120), vec![(100, 120)]);
-    assert_eq!(ranges.mark_new(0, 120), Vec::<(usize, usize)>::new());
-    assert_eq!(ranges.ranges, BTreeMap::from([(0, 120)]));
+    assert_eq!(rollback_new_ranges(&mut ranges, 0, 100), vec![(0, 100)]);
+    assert_eq!(rollback_new_ranges(&mut ranges, 0, 120), vec![(100, 120)]);
+    assert!(rollback_new_ranges(&mut ranges, 0, 120).is_empty());
+    assert_eq!(ranges.ranges, vec![(0, 120)]);
 }
 
 #[test]
 fn rollback_observation_ranges_preserve_gaps_and_merge_nested_coverage() {
     let mut ranges = RollbackObservationRanges::default();
 
-    assert_eq!(ranges.mark_new(5, 10), vec![(5, 10)]);
-    assert_eq!(ranges.mark_new(12, 15), vec![(12, 15)]);
-    assert_eq!(ranges.mark_new(8, 18), vec![(10, 12), (15, 18)]);
-    assert_eq!(ranges.mark_new(0, 20), vec![(0, 5), (18, 20)]);
-    assert_eq!(ranges.ranges, BTreeMap::from([(0, 20)]));
-    assert!(ranges.mark_new(7, 7).is_empty());
+    assert_eq!(rollback_new_ranges(&mut ranges, 5, 10), vec![(5, 10)]);
+    assert_eq!(rollback_new_ranges(&mut ranges, 12, 15), vec![(12, 15)]);
+    assert_eq!(
+        rollback_new_ranges(&mut ranges, 8, 18),
+        vec![(10, 12), (15, 18)]
+    );
+    assert_eq!(
+        rollback_new_ranges(&mut ranges, 0, 20),
+        vec![(0, 5), (18, 20)]
+    );
+    assert_eq!(ranges.ranges, vec![(0, 20)]);
+    assert!(rollback_new_ranges(&mut ranges, 7, 7).is_empty());
 }
 
 #[test]
 fn rollback_observation_ranges_keep_disjoint_attempt_suffixes() {
     let mut ranges = RollbackObservationRanges::default();
 
-    assert_eq!(ranges.mark_new(0, 3), vec![(0, 3)]);
+    assert_eq!(rollback_new_ranges(&mut ranges, 0, 3), vec![(0, 3)]);
     // No rollback covers rows 3..5 between these attempts.
-    assert_eq!(ranges.mark_new(5, 8), vec![(5, 8)]);
-    assert_eq!(ranges.ranges, BTreeMap::from([(0, 3), (5, 8)]));
+    assert_eq!(rollback_new_ranges(&mut ranges, 5, 8), vec![(5, 8)]);
+    assert_eq!(ranges.ranges, vec![(0, 3), (5, 8)]);
+}
+
+#[test]
+fn rollback_observation_ranges_reset_at_method_commit_boundary() {
+    let mut ranges = RollbackObservationRanges::default();
+    assert_eq!(rollback_new_ranges(&mut ranges, 0, 3), vec![(0, 3)]);
+
+    ranges.clear();
+    assert_eq!(rollback_new_ranges(&mut ranges, 3, 6), vec![(3, 6)]);
+    assert_eq!(ranges.ranges, vec![(3, 6)]);
+}
+
+#[test]
+fn rollback_observation_ranges_match_a_bitmap_for_mixed_ranges() {
+    let mut ranges = RollbackObservationRanges::default();
+    let mut expected = [false; 256];
+    let mut seed = 0x1485_u64;
+
+    for _ in 0..512 {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let start = (seed as usize) % expected.len();
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let end = start + ((seed as usize) % (expected.len() - start + 1));
+
+        let expected_new = (start..end)
+            .filter(|index| !expected[*index])
+            .collect::<Vec<_>>();
+        let mut actual_new = Vec::new();
+        ranges.mark_new(start, end, |range_start, range_end| {
+            actual_new.extend(range_start..range_end);
+        });
+        assert_eq!(actual_new, expected_new);
+        for status in &mut expected[start..end] {
+            *status = true;
+        }
+
+        let mut indexed = [false; 256];
+        for &(range_start, range_end) in &ranges.ranges {
+            indexed[range_start..range_end].fill(true);
+        }
+        assert_eq!(indexed, expected);
+        assert!(ranges.ranges.windows(2).all(|pair| pair[0].1 < pair[1].0));
+    }
 }
 
 #[test]
@@ -251,20 +330,23 @@ fn synthetic_rollback_observation_scaling_benchmark() {
     }
 
     println!(
-        "events\tpattern\trollbacks\tlegacy_scanned\tinterval_scanned\tlegacy_us\tinterval_us"
+        "events\tpattern\trollbacks\tlegacy_scanned\tinterval_scanned\tlegacy_ns_per_run\tinterval_ns_per_run"
     );
+    const SAMPLES: u128 = 1_000;
     for event_count in [100, 1_000, 10_000] {
         for (pattern, rollbacks) in patterns(event_count) {
             let mut legacy_elapsed = Duration::ZERO;
             let mut interval_elapsed = Duration::ZERO;
             let mut legacy_scanned = 0;
             let mut interval_scanned = 0;
-            for _ in 0..5 {
+            for _ in 0..SAMPLES {
                 let started = Instant::now();
                 let mut legacy_status = vec![false; event_count];
                 for &(start, end) in &rollbacks {
                     legacy_scanned += end - start;
-                    legacy_status[start..end].fill(true);
+                    for status in &mut legacy_status[start..end] {
+                        *status = true;
+                    }
                 }
                 legacy_elapsed += started.elapsed();
 
@@ -272,21 +354,23 @@ fn synthetic_rollback_observation_scaling_benchmark() {
                 let mut interval_status = vec![false; event_count];
                 let mut ranges = RollbackObservationRanges::default();
                 for &(start, end) in &rollbacks {
-                    for (new_start, new_end) in ranges.mark_new(start, end) {
+                    ranges.mark_new(start, end, |new_start, new_end| {
                         interval_scanned += new_end - new_start;
-                        interval_status[new_start..new_end].fill(true);
-                    }
+                        for status in &mut interval_status[new_start..new_end] {
+                            *status = true;
+                        }
+                    });
                 }
                 interval_elapsed += started.elapsed();
                 assert_eq!(interval_status, legacy_status);
             }
             println!(
                 "{event_count}\t{pattern}\t{}\t{}\t{}\t{}\t{}",
-                rollbacks.len() * 5,
-                legacy_scanned / 5,
-                interval_scanned / 5,
-                legacy_elapsed.as_micros() / 5,
-                interval_elapsed.as_micros() / 5
+                rollbacks.len() as u128 * SAMPLES,
+                legacy_scanned as u128 / SAMPLES,
+                interval_scanned as u128 / SAMPLES,
+                legacy_elapsed.as_nanos() / SAMPLES,
+                interval_elapsed.as_nanos() / SAMPLES
             );
         }
     }
@@ -1902,32 +1986,32 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         metrics.rollback_member_observations += rolled_back_members;
         let operation_end = metrics.module_operation_observations.len();
         let member_end = metrics.module_member_observations.len();
-        let operation_ranges = metrics
-            .rolled_back_operation_ranges
-            .mark_new(operation_offset, operation_end);
-        let member_ranges = metrics
-            .rolled_back_member_ranges
-            .mark_new(member_offset, member_end);
-        let operation_rows_scanned = operation_ranges
-            .iter()
-            .map(|(start, end)| end - start)
-            .sum::<usize>();
-        for (start, end) in operation_ranges {
-            for observation in &mut metrics.module_operation_observations[start..end] {
-                observation.transaction_state = "rolled_back";
-            }
-        }
+        let operation_rows_scanned = {
+            let ResolverMetrics {
+                rolled_back_operation_ranges,
+                module_operation_observations,
+                ..
+            } = &mut *metrics;
+            rolled_back_operation_ranges.mark_new(operation_offset, operation_end, |start, end| {
+                for observation in &mut module_operation_observations[start..end] {
+                    observation.transaction_state = "rolled_back";
+                }
+            })
+        };
         metrics.rollback_operation_rows_scanned += operation_rows_scanned;
         metrics.rollback_operation_status_changes += operation_rows_scanned;
-        let member_rows_scanned = member_ranges
-            .iter()
-            .map(|(start, end)| end - start)
-            .sum::<usize>();
-        for (start, end) in member_ranges {
-            for observation in &mut metrics.module_member_observations[start..end] {
-                observation.transaction_state = "rolled_back";
-            }
-        }
+        let member_rows_scanned = {
+            let ResolverMetrics {
+                rolled_back_member_ranges,
+                module_member_observations,
+                ..
+            } = &mut *metrics;
+            rolled_back_member_ranges.mark_new(member_offset, member_end, |start, end| {
+                for observation in &mut module_member_observations[start..end] {
+                    observation.transaction_state = "rolled_back";
+                }
+            })
+        };
         metrics.rollback_member_rows_scanned += member_rows_scanned;
         metrics.rollback_member_status_changes += member_rows_scanned;
         // Checkpoint tokens increase monotonically, so rollback only needs to
@@ -12733,6 +12817,8 @@ fn audit_source_inner_filtered(
             // Any checkpoint not rolled back during this method attempt has
             // reached the method's commit boundary.
             metrics.module_operation_checkpoints.clear();
+            metrics.rolled_back_operation_ranges.clear();
+            metrics.rolled_back_member_ranges.clear();
         }
         if let Err(error) = outcome {
             let failure = classify_typer_error(
