@@ -1216,6 +1216,200 @@ fn reference_fields_and_constructor_arguments_verify_with_jdk() {
 }
 
 #[test]
+fn nested_object_construction_verifies_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let directory = TempDir::new();
+    let version = ClassFileVersion {
+        major: 65,
+        minor: 0,
+    };
+    let package_dir = directory.path().join("example");
+    fs::create_dir_all(&package_dir).unwrap();
+
+    let mut counter = ClassFileBuilder::new("example/Counter", version).unwrap();
+    counter
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    counter
+        .add_field("value", "I", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    counter
+        .add_instance_method("<init>", "(I)V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.aload(0)?;
+            code.iload(1)?;
+            code.putfield("example/Counter", "value", "I")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    counter
+        .add_instance_method("get", "()I", |code| {
+            code.aload(0)?;
+            code.getfield("example/Counter", "value", "I")?;
+            code.ireturn()?;
+            Ok(())
+        })
+        .unwrap();
+    fs::write(package_dir.join("Counter.class"), counter.encode().unwrap()).unwrap();
+
+    let mut holder = ClassFileBuilder::new("example/Holder", version).unwrap();
+    holder
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    holder
+        .add_field("value", "Lexample/Counter;", FieldAccessFlags(ACC_PRIVATE))
+        .unwrap();
+    holder
+        .add_instance_method("<init>", "(Lexample/Counter;)V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.aload(0)?;
+            code.aload(1)?;
+            code.putfield("example/Holder", "value", "Lexample/Counter;")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    holder
+        .add_instance_method("get", "()Lexample/Counter;", |code| {
+            code.aload(0)?;
+            code.getfield("example/Holder", "value", "Lexample/Counter;")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    fs::write(package_dir.join("Holder.class"), holder.encode().unwrap()).unwrap();
+
+    let mut client = ClassFileBuilder::new("example/ObjectGraphClient", version).unwrap();
+    client
+        .set_access_flags(ClassAccessFlags(ACC_PUBLIC | ACC_SUPER))
+        .unwrap();
+    client
+        .add_instance_method("<init>", "()V", |code| {
+            code.aload(0)?;
+            code.invokespecial("java/lang/Object", "<init>", "()V")?;
+            code.return_void()?;
+            Ok(())
+        })
+        .unwrap();
+    client
+        .add_static_method("create", "(I)Lexample/Holder;", |code| {
+            code.new_object("example/Holder")?;
+            code.dup()?;
+            code.new_object("example/Counter")?;
+            code.dup()?;
+            code.iload(0)?;
+            code.invokespecial("example/Counter", "<init>", "(I)V")?;
+            code.invokespecial("example/Holder", "<init>", "(Lexample/Counter;)V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    client
+        .add_instance_method("makeCounter", "(I)Lexample/Counter;", |code| {
+            code.new_object("example/Counter")?;
+            code.dup()?;
+            code.iload(1)?;
+            code.invokespecial("example/Counter", "<init>", "(I)V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    client
+        .add_instance_method("fromFactory", "(I)Lexample/Holder;", |code| {
+            code.new_object("example/Holder")?;
+            code.dup()?;
+            code.aload(0)?;
+            code.iload(1)?;
+            code.invokevirtual(
+                "example/ObjectGraphClient",
+                "makeCounter",
+                "(I)Lexample/Counter;",
+            )?;
+            code.invokespecial("example/Holder", "<init>", "(Lexample/Counter;)V")?;
+            code.areturn()?;
+            Ok(())
+        })
+        .unwrap();
+    let client_bytes = client.encode().unwrap();
+    let client_file = decode_and_validate(&client_bytes);
+    let create_code = code(method_named(&client_file, "create"));
+    assert_eq!(create_code.max_stack, 5);
+    assert_eq!(create_code.max_locals, 1);
+    let javap_path = package_dir.join("ObjectGraphClient.class");
+    fs::write(&javap_path, client_bytes).unwrap();
+
+    let javap = run(
+        "javap",
+        &[
+            "-c",
+            "-v",
+            "-classpath",
+            directory.path().to_str().unwrap(),
+            "example.ObjectGraphClient",
+        ],
+    );
+    assert!(
+        javap.status.success(),
+        "javap failed for nested object graph\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    assert!(javap_output.contains("invokespecial #"));
+    assert!(javap_output.contains("Counter"), "{javap_output}");
+    assert!(javap_output.contains("Holder"), "{javap_output}");
+    assert!(javap_output.contains("makeCounter"), "{javap_output}");
+
+    let harness = directory.path().join("ObjectGraphHarness.java");
+    fs::write(
+        &harness,
+        "public class ObjectGraphHarness { public static void main(String[] args) { example.ObjectGraphClient client = new example.ObjectGraphClient(); for (int seed : new int[] {10, 0, -3}) { example.Holder nested = example.ObjectGraphClient.create(seed); if (nested.get().get() != seed) throw new AssertionError(\"nested \" + seed); example.Holder factory = client.fromFactory(seed); if (factory.get().get() != seed || factory.get() != factory.get()) throw new AssertionError(\"factory \" + seed); } System.out.println(\"nested-object-graph=ok\"); } }\n",
+    )
+    .unwrap();
+    let directory_arg = directory.path().to_str().unwrap();
+    let javac = run(
+        "javac",
+        &[
+            "-classpath",
+            directory_arg,
+            "-d",
+            directory_arg,
+            harness.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac failed for nested object graph harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            directory_arg,
+            "ObjectGraphHarness",
+        ],
+    );
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected nested object construction\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "nested-object-graph=ok"
+    );
+}
+
+#[test]
 fn direct_super_invokespecial_verifies_and_executes_with_jdk() {
     if !require_jdk_or_skip() {
         return;
