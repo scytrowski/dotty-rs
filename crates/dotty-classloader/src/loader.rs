@@ -1,6 +1,6 @@
 use crate::annotation::{AnnotationValue, SemanticAnnotation};
 use crate::binary_name::BinaryName;
-use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError};
+use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::error::{ClassLoadError, ClassLoadFailure};
 use crate::field_symbol::FieldSymbol;
 use crate::method_symbol::MethodSymbol;
@@ -35,6 +35,11 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 
 const MAX_INHERITANCE_DEPTH: usize = 256;
+
+pub(crate) struct CachedDecodedModule {
+    pub(crate) resource: ClassResource,
+    pub(crate) decoded: tasty_symbol::DecodedTastyClass,
+}
 
 #[derive(Debug)]
 pub(crate) enum TastyAliasResolutionError {
@@ -575,7 +580,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     pub(crate) fn complete_module_with_tasty_cache(
         &mut self,
         name: &BinaryName,
-        decoded_cache: &mut HashMap<BinaryName, tasty_symbol::DecodedTastyClass>,
+        decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
     ) -> (Result<ModuleIdentity, ClassLoadError>, bool) {
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
@@ -592,7 +597,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     fn complete_module_inner(
         &mut self,
         name: &BinaryName,
-        decoded_cache: &mut HashMap<BinaryName, tasty_symbol::DecodedTastyClass>,
+        decoded_cache: &mut HashMap<BinaryName, CachedDecodedModule>,
         decoded_cache_hit: &mut bool,
     ) -> Result<ModuleIdentity, ClassLoadError> {
         let identity = self.ensure_module_identity_inner(name)?;
@@ -670,10 +675,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let alias_error = RefCell::new(None);
         let class_path = &self.class_path;
-        let decoded = if let Some(decoded) = decoded_cache.get(name) {
+        let decoded = if let Some(cached) = decoded_cache.get(name)
+            && cached.resource == resource
+        {
             *decoded_cache_hit = true;
-            decoded.clone()
+            cached.decoded.clone()
         } else {
+            decoded_cache.remove(name);
             let decoded = tasty_symbol::decode_module_class_with_resolvers(
                 resource.bytes(),
                 &identity.module_class_name,
@@ -702,7 +710,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             let decoded = decoded.map_err(|error| {
                 ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
             })?;
-            decoded_cache.insert(name.clone(), decoded.clone());
+            decoded_cache.insert(
+                name.clone(),
+                CachedDecodedModule {
+                    resource: resource.clone(),
+                    decoded: decoded.clone(),
+                },
+            );
             decoded
         };
 
