@@ -1740,10 +1740,10 @@ fn discarded_long_values_remain_unsupported_and_arithmetic_fails_in_typer() {
     .expect_err("Long and Int branches do not gain an implicit numeric conversion");
     assert!(
         matches!(
-            error,
-            PipelineFailure::Typer(_) | PipelineFailure::Codegen(_)
+            &error,
+            PipelineFailure::Codegen(JvmCodegenError::ReferenceClassNotInJvmPlan { .. })
         ),
-        "mixed Long/Int join fails at a typed pipeline stage: {error:?}"
+        "mixed Long/Int join fails with its exact backend plan error: {error:?}"
     );
     assert!(output.class_files().is_empty());
 
@@ -1766,6 +1766,169 @@ fn discarded_long_values_remain_unsupported_and_arithmetic_fails_in_typer() {
         "Long arithmetic currently stops at missing scala.Long class info: {error:?}"
     );
     assert!(output.class_files().is_empty());
+}
+
+#[test]
+fn mismatched_long_fields_and_formals_fail_at_typer_without_class_artifacts() {
+    let cases = [
+        (
+            "LongToIntField",
+            "class LongToIntField:\n  private val value: Int = 1L\n",
+        ),
+        (
+            "LongToBooleanField",
+            "class LongToBooleanField:\n  private val value: Boolean = 1L\n",
+        ),
+        (
+            "LongToReferenceField",
+            "class LongBox(initial: Long)\nclass LongToReferenceField:\n  private val value: LongBox = 1L\n",
+        ),
+    ];
+    for (label, source) in cases {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("a Long initializer cannot be retyped as another field type");
+        let expected_error = if label == "LongToReferenceField" {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ExpectedExpressionConformanceUnsupported { .. })
+            )
+        } else {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ExpectedExpressionTypeMismatch { .. })
+            )
+        };
+        assert!(
+            expected_error,
+            "{label} must fail at the exact contextual Typer check: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure publishes no class files"
+        );
+    }
+
+    let cases = [
+        (
+            "LongToIntFormal",
+            "class LongToIntFormal:\n  def consume(value: Int): Int = value\n  def use(value: Long): Int = consume(value)\n",
+        ),
+        (
+            "LongToBooleanFormal",
+            "class LongToBooleanFormal:\n  def consume(value: Boolean): Boolean = value\n  def use(value: Long): Boolean = consume(value)\n",
+        ),
+        (
+            "LongToReferenceFormal",
+            "class LongBox(initial: Long)\nclass LongToReferenceFormal:\n  def consume(value: LongBox): LongBox = value\n  def use(value: Long): LongBox = consume(value)\n",
+        ),
+    ];
+    for (label, source) in cases {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err("a Long argument cannot satisfy another formal parameter type");
+        let expected_error = if label == "LongToReferenceFormal" {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentConformanceUnsupported {
+                    argument_index: 0,
+                    ..
+                })
+            )
+        } else {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::ApplicationArgumentTypeMismatch {
+                    argument_index: 0,
+                    ..
+                })
+            )
+        };
+        assert!(
+            expected_error,
+            "{label} must fail at the exact Typer application argument check: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure publishes no class files"
+        );
+    }
+}
+
+#[test]
+fn long_comparison_and_mixed_object_join_fail_closed_at_typer() {
+    let cases = [
+        (
+            "LongComparison",
+            "class LongComparison:\n  def less(left: Long, right: Long): Boolean = left < right\n",
+            "Long comparison remains unsupported by the source Typer",
+        ),
+        (
+            "LongObjectJoin",
+            "class LongBox(initial: Long)\nclass LongObjectJoin:\n  def choose(flag: Boolean, value: Long, box: LongBox): LongBox = if flag then value else box\n",
+            "a Long and a reference do not acquire a common source result type",
+        ),
+    ];
+    for (label, source, expectation) in cases {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source_classes(source, &format!("{label}.scala"), output.path())
+            .expect_err(expectation);
+        let expected_error = if label == "LongComparison" {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::MemberLookup(error))
+                    if matches!(
+                        **error,
+                        dotty_typer::MemberLookupError::ClassInfoUnavailable { .. }
+                    )
+            )
+        } else {
+            matches!(
+                &error,
+                PipelineFailure::Typer(TyperError::IfBranchJoinUnsupported { .. })
+            )
+        };
+        assert!(
+            expected_error,
+            "{label} must fail at its exact first Typer stage: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure publishes no class files"
+        );
+    }
+}
+
+#[test]
+fn float_and_double_source_signatures_fail_at_backend_without_artifacts() {
+    for (label, source) in [
+        (
+            "FloatSignature",
+            "class FloatSignature:\n  def identity(value: Float): Float = value\n",
+        ),
+        (
+            "DoubleSignature",
+            "class DoubleSignature:\n  def identity(value: Double): Double = value\n",
+        ),
+    ] {
+        let output = TestOutputDirectory::new(label);
+        let error = compile_source(source, &format!("{label}.scala"), output.path())
+            .expect_err("Float and Double remain outside the bounded JVM source subset");
+        assert!(
+            matches!(
+                &error,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmReferenceType {
+                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass,
+                    ..
+                })
+            ),
+            "{label} must be rejected as an unsupported external JVM reference: {error:?}"
+        );
+        assert!(
+            output.class_files().is_empty(),
+            "{label} failure publishes no class files"
+        );
+    }
 }
 
 #[test]
