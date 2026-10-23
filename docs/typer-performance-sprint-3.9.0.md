@@ -98,9 +98,14 @@ issue. Comparing instead with the report committed at sprint-start SHA
 keys: 65 of 142 sprint-start keys remain successful, while the current report
 has 157 distinct successes. The set movement needs semantic investigation;
 the larger aggregate count does not establish that old targets were preserved.
-The full audit also reports a maximum completed-class fanout of 29 (limit 16),
-above the required safety gate. Its p95 depth is 0 (limit 6), and maximum depth
-is 8. `dotty.tools.io.AbstractFile` has current type-request errors. Exact
+Of the 77 missing keys, 76 have no current member-request observation and one
+(`dotty.tools.io.AbstractFile`) has four current errors. External class-symbol
+successes also fell from 18,169 to 18,138. The full audit reports a maximum
+completed-class fanout of 29 (limit 16), above the required safety gate. Its
+p95 depth is 0 (limit 6), and maximum depth is 8. The 29 completions occur on
+four `scala.collection.immutable.List` requests from `ListMap.addOne`,
+`ListBuffer.removeAfter`, and `TrieMap.LNode` insert/remove methods; each touches
+63 distinct classes. Exact
 frozen cohort rows and these counters are retained in the machine-readable
 sidecars linked below. The regression gates therefore fail; the audit does not
 prove the required semantic invariants.

@@ -93,19 +93,25 @@ def gate(baseline, current, baseline_target_keys=None, baseline_class_successes=
     baseline_successes = (successful_targets(baseline) if baseline_target_keys is None
                           else baseline_target_keys)
     lost = baseline_successes - successful_targets(current)
+    errors = []
     if lost:
-        raise ValueError(f'lost previously successful targets: {sorted(lost)}')
+        errors.append(f'lost previously successful targets: {sorted(lost)}')
     depth = scalar(current, 'dependency_load_profile', 'p95_dependency_depth')
     fanout = scalar(current, 'dependency_load_profile', 'max_distinct_fully_completed_classes_per_request')
     if depth > 6 or fanout > 16:
-        raise ValueError(f'dependency reduction gate failed: p95={depth}, fanout={fanout}')
+        errors.append(
+            f'dependency reduction gate failed: p95={depth}/6, fanout={fanout}/16')
     before = (scalar(baseline, 'resolver_metrics', 'external_class_symbol_successes')
               if baseline_class_successes is None else baseline_class_successes)
     after = scalar(current, 'resolver_metrics', 'external_class_symbol_successes')
     if after < before:
-        raise ValueError(f'class-success count regressed: {after} < {before}; request movement needs explicit review')
+        errors.append(
+            f'class-success count regressed: {after} < {before}; '
+            'request movement needs explicit review')
     if scalar(current, 'audit_v1_comparison', 'local_methods') != 3297:
-        raise ValueError('typed-method denominator changed')
+        errors.append('typed-method denominator changed')
+    if errors:
+        raise ValueError('; '.join(errors))
     return depth, fanout
 
 
