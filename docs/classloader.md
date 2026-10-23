@@ -201,6 +201,13 @@ resolution.
   support `TypeRef`, `Applied`, and `ThisType` shapes. Resolver calls and caller
   transaction rollbacks undo package-scope links and session cache entries
   together with store allocations.
+  After a module has completed successfully once, its immutable decoded
+  declarations can also prove that other requested names are absent without
+  repeating semantic completion after rollback. Decoding alone does not
+  establish this proof: hierarchy loading must have succeeded. The proof
+  contains binary names only and is scoped to the resolver's fixed classpath;
+  completed modules still use their live declaration scope, including normal
+  namespace and ambiguity checks.
 
 ### Explicitly out of scope
 - JPMS module-path resolution, readability/accessibility checks, module-layer

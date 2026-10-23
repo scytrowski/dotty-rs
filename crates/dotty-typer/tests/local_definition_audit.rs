@@ -122,6 +122,7 @@ fn merge_module_resolution_profile(
     target.module_member_successes += source.module_member_successes;
     target.module_decode_cache_hits += source.module_decode_cache_hits;
     target.module_decode_cache_misses += source.module_decode_cache_misses;
+    target.module_declaration_miss_shortcuts += source.module_declaration_miss_shortcuts;
     target
         .resolved_object_targets
         .extend(source.resolved_object_targets);
@@ -144,6 +145,7 @@ fn merged_module_resolution_profiles_union_only_resolved_object_and_member_targe
         package_term_successes: 1,
         module_decode_cache_hits: 2,
         module_decode_cache_misses: 1,
+        module_declaration_miss_shortcuts: 2,
         resolved_object_targets: BTreeSet::from(["fixture::First".to_owned()]),
         resolved_member_targets: BTreeSet::from([
             "fixture/First::namespace=term::name=value::space=Prefix::selector=Unique".to_owned(),
@@ -155,6 +157,7 @@ fn merged_module_resolution_profiles_union_only_resolved_object_and_member_targe
         package_term_successes: 2,
         module_decode_cache_hits: 3,
         module_decode_cache_misses: 4,
+        module_declaration_miss_shortcuts: 3,
         resolved_object_targets: BTreeSet::from([
             "fixture::First".to_owned(),
             "fixture::Second".to_owned(),
@@ -171,6 +174,7 @@ fn merged_module_resolution_profiles_union_only_resolved_object_and_member_targe
     assert_eq!(aggregate.package_term_successes, 3);
     assert_eq!(aggregate.module_decode_cache_hits, 5);
     assert_eq!(aggregate.module_decode_cache_misses, 5);
+    assert_eq!(aggregate.module_declaration_miss_shortcuts, 5);
     assert_eq!(
         aggregate.resolved_object_targets,
         BTreeSet::from(["fixture::First".to_owned(), "fixture::Second".to_owned()])
@@ -12771,6 +12775,10 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
     println!(
         "  module_decode_cache_hits={} module_decode_cache_misses={}",
         module_profile.module_decode_cache_hits, module_profile.module_decode_cache_misses
+    );
+    println!(
+        "  module_declaration_miss_shortcuts={}",
+        module_profile.module_declaration_miss_shortcuts
     );
     println!(
         "  external_package_term_successes={} distinct_external_objects={}",
