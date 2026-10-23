@@ -1922,7 +1922,6 @@ impl Frame {
             }
             Instruction::GetField(reference) => {
                 if flow_current_class.is_some() {
-                    self.ensure_no_pending_allocation(instruction_index)?;
                     let (owner, ty) = self.flow_field_type(instruction_index, reference, pool)?;
                     let field_class =
                         validate_flow_field_type(instruction_index, reference.index().get(), &ty)?;

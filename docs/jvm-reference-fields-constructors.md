@@ -108,16 +108,16 @@ compiler's bounded subset:
 
 Current class-aware CFG analysis records exact identities for ordinary
 reference calls and tracks up to two allocation-site identities in a bounded
-straight-line basic block. It permits exact LIFO initialization and lets a
-checked call on a separate initialized receiver return an exact initialized
-reference while an outer allocation remains pending. The supported source
-form `new Holder(existingRef)` uses one exact reference parameter. Nested
-`new Holder(new Counter(...))` and `new Holder(factory())` still reach source
-codegen and fail with `JvmConstructorCallArgumentTypeMismatch`; the verifier
-capability does not itself lower source constructor arguments. Category-only
-linear analysis cannot establish allocation-site alias transitions. See the
-[object graph construction audit](jvm-object-graph-construction.md) for source
-observer evidence and the full state contract.
+straight-line basic block. It permits exact LIFO initialization, checked calls
+on initialized receivers, and reads from initialized field receivers while a
+separate outer allocation remains pending. Constructor argument lowering
+supports exact reference parameters, immutable and initialized mutable locals,
+canonical null for reference formals, approved current-instance private
+planned reference fields, and same-instance planned reference-returning calls.
+Nested `new Holder(new Counter(...))` remains unsupported and belongs to #1496.
+Category-only linear analysis cannot establish allocation-site alias
+transitions. See the [object graph construction audit](jvm-object-graph-construction.md)
+for source observer evidence and the full state contract.
 
 The class-aware linear analyzer can validate straight-line exact descriptors,
 but cannot prove allocation-site alias transitions, branch joins, or
@@ -137,10 +137,10 @@ constructor is verifier-safe.
 
 Keep regression coverage for wrong `Counter`/`Other` values, missing class or
 member plans, wrong field or constructor owners, uninitialized references,
-`null`, arrays, generic/unresolved types, nested allocations, and constructor
-CFG branches. Tests must assert the stage and typed failure; do not add ignored
-or expected-failure tests that imply unsupported emission works. Existing
-source-pipeline rejection coverage is in
+null passed to a primitive formal, arrays, generic/unresolved types, nested
+allocations, and constructor CFG branches. Tests must assert the stage and
+typed failure; do not add ignored or expected-failure tests that imply
+unsupported emission works. Existing source-pipeline rejection coverage is in
 `tests/jvm_source_compilation.rs`; lower-level exact-owner, uninitialized, and
 allocation checks are in `dotty-jvm` and `dotty-classfile` tests.
 
