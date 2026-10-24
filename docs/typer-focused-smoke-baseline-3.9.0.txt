@@ -32,9 +32,9 @@ method_outcomes:
   method=library/src/scala/collection/StringParsers.scala#tree=1007::site=library/src/scala/collection/StringParsers.scala:243:isExp::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1058::site=library/src/scala/collection/StringParsers.scala:245:expOK::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1175::site=library/src/scala/collection/StringParsers.scala:240:isDecFloatLiteral::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
-  method=library/src/scala/collection/StringParsers.scala#tree=123::site=library/src/scala/collection/StringParsers.scala:41:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=129::blocker=MemberNotFound::typed=false
-  method=library/src/scala/collection/StringParsers.scala#tree=482::site=library/src/scala/collection/StringParsers.scala:109:step::attempt=library/src/scala/collection/StringParsers.scala#tree=550::blocker=MemberNotFound::typed=false
-  method=library/src/scala/collection/StringParsers.scala#tree=641::site=library/src/scala/collection/StringParsers.scala:144:step::attempt=library/src/scala/collection/StringParsers.scala#tree=710::blocker=MemberNotFound::typed=false
+  method=library/src/scala/collection/StringParsers.scala#tree=123::site=library/src/scala/collection/StringParsers.scala:41:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=129::blocker=MemberLookup::typed=false
+  method=library/src/scala/collection/StringParsers.scala#tree=482::site=library/src/scala/collection/StringParsers.scala:109:step::attempt=library/src/scala/collection/StringParsers.scala#tree=550::blocker=ApplicationCalleeNotMethod::typed=false
+  method=library/src/scala/collection/StringParsers.scala#tree=641::site=library/src/scala/collection/StringParsers.scala:144:step::attempt=library/src/scala/collection/StringParsers.scala#tree=710::blocker=MemberLookup::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=750::site=library/src/scala/collection/StringParsers.scala:186:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=755::site=library/src/scala/collection/StringParsers.scala:184:forAllBetween::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=799::site=library/src/scala/collection/StringParsers.scala:195:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
@@ -225,24 +225,25 @@ resolver_observations:
   library/src/scala/collection/StringParsers.scala#tree=550	java/lang	package success	direct package evidence	package=java/lang::owner=java	kind=Package::origin=synthetic::path=java.lang
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=java.lang::namespace=type::name=String::space=Prefix	external class success	-	-	kind=Class::origin=classfile::path=java.lang.String
   library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
+  library/src/scala/collection/StringParsers.scala#tree=550	prefix=scala::namespace=term::name=Some::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=scala.Some
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala::namespace=type::name=String::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=710	java/lang	package success	direct package evidence	package=java/lang::owner=java	kind=Package::origin=synthetic::path=java.lang
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=java.lang::namespace=type::name=String::space=Prefix	external class success	-	-	kind=Class::origin=classfile::path=java.lang.String
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
 blocker_counts:
-  ApplicationCalleeNotMethod: count=11, files=1
-  MemberNotFound: count=3, files=1
+  ApplicationCalleeNotMethod: count=12, files=1
+  MemberLookup: count=2, files=1
   SymbolResolution: count=17, files=1
 resolver_metrics:
   package_requests=88
   package_successes=37
   package_unresolved=51
   package_errors=0
-  member_requests=96
-  member_successes=23
+  member_requests=97
+  member_successes=24
   member_unresolved=58
   member_errors=15
-  class_symbol_successes=23
+  class_symbol_successes=24
 materialized_packages:
   dotty.tools.dotc
   dotty.tools.dotc.ast
@@ -256,10 +257,12 @@ materialized_classes:
   scala.Function1
   scala.None
   scala.Option
+  scala.Some
   scala.annotation.retainsCap
 materialized_members:
 materialized_objects:
   dotty.tools.dotc.ast::tpd
   scala::None
+  scala::Some
 materialized_module_classes:
 materialized_module_members:

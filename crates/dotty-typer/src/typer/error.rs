@@ -952,6 +952,14 @@ pub enum TyperError {
         receiver: TypeId,
         name: dotty_core::Name,
     },
+    /// Universal equality is defined, but its two operand types are
+    /// statically disjoint under the supported Scala 3.9 equality rules.
+    IncompatibleEqualityOperands {
+        source: SourceId,
+        tree_index: u32,
+        left: TypeId,
+        right: TypeId,
+    },
     /// Several member candidates remain after lookup; overload resolution is deferred.
     OverloadedSelectionDeferred {
         source: SourceId,

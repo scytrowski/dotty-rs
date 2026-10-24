@@ -20488,6 +20488,7 @@ fn typer_error_name(error: &TyperError) -> &'static str {
         TyperError::ObjectModuleClassResolution { .. } => "ObjectModuleClassResolution",
         TyperError::UnsupportedTermReference { .. } => "UnsupportedTermReference",
         TyperError::MemberNotFound { .. } => "MemberNotFound",
+        TyperError::IncompatibleEqualityOperands { .. } => "IncompatibleEqualityOperands",
         TyperError::OverloadedSelectionDeferred { .. } => "OverloadedSelectionDeferred",
         TyperError::ApplicationCalleeNotMethod { .. } => "ApplicationCalleeNotMethod",
         TyperError::UnconstrainedTypeParameter { .. } => "UnconstrainedTypeParameter",

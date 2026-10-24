@@ -46,6 +46,11 @@ impl SourceTyper<'_> {
             });
         }
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
+        let receiver = if self.any_equality_operator_name(operator) {
+            self.dealias_source_aliases(receiver, info_journal)?
+        } else {
+            receiver
+        };
         if let Err(error) = self.require_stable_selection_prefix(receiver_type, tree_index) {
             // A left-associated infix chain selects on the result of the
             // preceding application. Its widened nominal type is enough to
@@ -95,11 +100,37 @@ impl SourceTyper<'_> {
                 member: None,
                 rejection: None,
             }]
+        } else if self.any_equality_operator_name(operator)
+            && self.is_canonical_any_receiver(receiver)
+        {
+            let Some(symbol) = self.any_equality_operator_symbol(operator) else {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            };
+            let SymbolInfo::Complete(callable) = self.store.symbols.get(symbol).info else {
+                return Err(TyperError::MemberNotFound {
+                    source: self.source,
+                    tree_index,
+                    receiver,
+                    name: operator,
+                });
+            };
+            self.validate_overload_callable(symbol, callable)?;
+            vec![ApplicationCandidate {
+                symbol,
+                callable,
+                member: None,
+                rejection: None,
+            }]
         } else {
             let members = self
                 .lookup_overload_members_journaled(receiver, operator, info_journal)
                 .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-            if members.is_empty() {
+            if members.is_empty() && !self.any_equality_operator_name(operator) {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,
@@ -117,7 +148,7 @@ impl SourceTyper<'_> {
                     candidates: members.iter().map(|member| member.symbol).collect(),
                 });
             }
-            members
+            let mut candidates = members
                 .into_iter()
                 .map(|member| {
                     let callable = self.member_type_on_journaled(&member, info_journal)?;
@@ -129,7 +160,33 @@ impl SourceTyper<'_> {
                         rejection: None,
                     })
                 })
-                .collect::<Result<Vec<_>, TyperError>>()?
+                .collect::<Result<Vec<_>, TyperError>>()?;
+            if self.any_equality_operator_name(operator) {
+                let Some(symbol) = self.any_equality_operator_symbol(operator) else {
+                    return Err(TyperError::MemberNotFound {
+                        source: self.source,
+                        tree_index,
+                        receiver,
+                        name: operator,
+                    });
+                };
+                let SymbolInfo::Complete(callable) = self.store.symbols.get(symbol).info else {
+                    return Err(TyperError::MemberNotFound {
+                        source: self.source,
+                        tree_index,
+                        receiver,
+                        name: operator,
+                    });
+                };
+                self.validate_overload_callable(symbol, callable)?;
+                candidates.push(ApplicationCandidate {
+                    symbol,
+                    callable,
+                    member: None,
+                    rejection: None,
+                });
+            }
+            candidates
         };
 
         let typed =
@@ -143,6 +200,11 @@ impl SourceTyper<'_> {
             } else {
                 widened_type
             };
+        let widened_type = if self.any_equality_operator_name(operator) {
+            self.dealias_source_aliases(widened_type, info_journal)?
+        } else {
+            widened_type
+        };
         let arguments = [TypedArgument {
             typed,
             own_type,
@@ -161,18 +223,78 @@ impl SourceTyper<'_> {
                         &mut completed_relation_types,
                         0,
                     )?;
+                    if self.any_equality_operator_name(operator) {
+                        self.dealias_source_aliases(parameter_type, info_journal)?;
+                    }
                 }
             }
         }
 
+        let universal_candidate = if self.any_equality_operator_name(operator) {
+            candidates
+                .iter()
+                .position(|candidate| self.is_any_equality_symbol(candidate.symbol))
+                .map(|index| candidates.remove(index))
+        } else {
+            None
+        };
         self.remove_overridden_overload_candidates(&mut candidates, tree_index)?;
-        let winner = self.choose_method_overload_candidate(
-            &mut candidates,
-            &arguments,
-            tree_index,
-            ApplyKind::Regular,
-            info_journal,
-        )?;
+        if let Some(universal_candidate) = universal_candidate {
+            candidates.push(universal_candidate);
+        }
+        let winner = if self.any_equality_operator_name(operator) {
+            let universal_candidate = candidates
+                .iter()
+                .position(|candidate| self.is_any_equality_symbol(candidate.symbol))
+                .map(|index| candidates.remove(index));
+            if let Some(universal_candidate) = universal_candidate {
+                if candidates.is_empty() {
+                    self.require_compatible_universal_equality(
+                        receiver,
+                        widened_type,
+                        tree_index,
+                        info_journal,
+                    )?;
+                    universal_candidate
+                } else {
+                    match self.choose_method_overload_candidate(
+                        &mut candidates,
+                        &arguments,
+                        tree_index,
+                        ApplyKind::Regular,
+                        info_journal,
+                    ) {
+                        Ok(winner) => winner,
+                        Err(TyperError::OverloadApplicationNoApplicable { .. }) => {
+                            self.require_compatible_universal_equality(
+                                receiver,
+                                widened_type,
+                                tree_index,
+                                info_journal,
+                            )?;
+                            universal_candidate
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            } else {
+                self.choose_method_overload_candidate(
+                    &mut candidates,
+                    &arguments,
+                    tree_index,
+                    ApplyKind::Regular,
+                    info_journal,
+                )?
+            }
+        } else {
+            self.choose_method_overload_candidate(
+                &mut candidates,
+                &arguments,
+                tree_index,
+                ApplyKind::Regular,
+                info_journal,
+            )?
+        };
         if winner
             .member
             .is_some_and(|member| member.symbol != winner.symbol)
@@ -199,6 +321,25 @@ impl SourceTyper<'_> {
             arguments: arguments.into(),
             argument_trees: None,
         })
+    }
+
+    fn require_compatible_universal_equality(
+        &mut self,
+        left: TypeId,
+        right: TypeId,
+        tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<(), TyperError> {
+        if self.universal_equality_operands_compatible(left, right, info_journal)? {
+            Ok(())
+        } else {
+            Err(TyperError::IncompatibleEqualityOperands {
+                source: self.source,
+                tree_index,
+                left,
+                right,
+            })
+        }
     }
 
     pub(in crate::typer) fn resolve_overloaded_application_function(
