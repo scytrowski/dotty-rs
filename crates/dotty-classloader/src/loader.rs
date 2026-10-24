@@ -33,6 +33,7 @@ use dotty_core::{
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
+use std::time::Instant;
 
 const MAX_INHERITANCE_DEPTH: usize = 256;
 
@@ -332,6 +333,40 @@ pub struct ClassLoadProfile {
     pub member_type_references: usize,
     /// Eager superclass/interface load requests, including cache hits and failures.
     pub hierarchy_loads: usize,
+    /// Inclusive time spent querying the classpath for resources.
+    pub resource_lookup_ns: u128,
+    /// Number of ClassPathEntry resource lookup attempts included above.
+    pub resource_lookup_calls: usize,
+    /// Resource lookup attempts returning a resource.
+    pub resources_found: usize,
+    /// Resource lookup attempts returning no resource.
+    pub resources_missing: usize,
+    /// Resource lookup attempts returning an error.
+    pub resource_lookup_errors: usize,
+    /// Logical bytes returned by successful resource lookups.
+    pub resource_bytes: usize,
+    /// Time spent decoding class-file payloads; nested class loads are counted separately.
+    pub classfile_decode_ns: u128,
+    pub classfile_decode_calls: usize,
+    /// Class-file decoder time after subtracting any explicitly timed child lookup.
+    pub classfile_decode_exclusive_ns: u128,
+    /// Time spent decoding TASTy payloads; nested class loads are counted separately.
+    pub tasty_decode_ns: u128,
+    pub tasty_decode_calls: usize,
+    /// TASTy decoder time after subtracting resource accesses measured in its callbacks.
+    pub tasty_decode_exclusive_ns: u128,
+    /// Inclusive time in uncached loads, including decode, semantic projection, and dependencies.
+    pub load_uncached_inclusive_ns: u128,
+    /// Direct module completion attempts represented by this profile.
+    pub module_completion_calls: usize,
+    /// Direct module completions that returned a canonical completed identity.
+    pub module_completion_successes: usize,
+    /// Direct module completions that failed and rolled back.
+    pub module_completion_errors: usize,
+    /// Inclusive direct module completion time.
+    pub module_completion_inclusive_ns: u128,
+    /// Direct module completion time outside its explicitly timed resource/decode intervals.
+    pub module_completion_residual_ns: u128,
 }
 
 #[derive(Default)]
@@ -349,6 +384,26 @@ struct ActiveLoadProfile {
     shells_reused: usize,
     member_type_references: usize,
     hierarchy_loads: usize,
+    resource_lookup_ns: u128,
+    resource_lookup_calls: usize,
+    resources_found: usize,
+    resources_missing: usize,
+    resource_lookup_errors: usize,
+    resource_bytes: usize,
+    nested_resource_lookup_ns: u128,
+    classfile_decode_ns: u128,
+    classfile_decode_calls: usize,
+    classfile_decode_exclusive_ns: u128,
+    tasty_decode_ns: u128,
+    tasty_decode_calls: usize,
+    tasty_decode_exclusive_ns: u128,
+    nested_tasty_decode_ns: u128,
+    load_uncached_inclusive_ns: u128,
+    module_completion_calls: usize,
+    module_completion_successes: usize,
+    module_completion_errors: usize,
+    module_completion_inclusive_ns: u128,
+    module_completion_residual_ns: u128,
 }
 
 /// Reconstructs a [`ClassTypeSignature`]'s binary name (JVMS §4.2.1): its
@@ -507,6 +562,126 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         self.collect_load_profiles = enabled;
     }
 
+    fn begin_direct_load_profile(&mut self, name: &BinaryName) -> bool {
+        if !self.collect_load_profiles || self.active_load_profile.is_some() {
+            return false;
+        }
+        let root = name.as_internal().to_owned();
+        let root_was_shell = self
+            .session
+            .identified
+            .get(name)
+            .is_some_and(|id| self.store.symbols.get(*id).info == SymbolInfo::Missing);
+        self.active_load_profile = Some(ActiveLoadProfile {
+            root: root.clone(),
+            root_was_shell,
+            identity_shells: if root_was_shell {
+                BTreeSet::from([root])
+            } else {
+                BTreeSet::new()
+            },
+            ..ActiveLoadProfile::default()
+        });
+        true
+    }
+
+    fn finish_direct_load_profile(&mut self, owns_profile: bool) {
+        if owns_profile {
+            self.finish_load_profile();
+        }
+    }
+
+    fn finish_load_profile(&mut self) {
+        let Some(profile) = self.active_load_profile.take() else {
+            return;
+        };
+        self.load_profiles.push(ClassLoadProfile {
+            root: profile.root,
+            root_was_shell: profile.root_was_shell,
+            max_dependency_depth: profile.max_dependency_depth,
+            classes: profile.classes,
+            full_completions: profile.full_completions,
+            completed_classes: profile.completed_classes,
+            identity_shells: profile.identity_shells,
+            completed_cache_hits: profile.completed_cache_hits,
+            shells_created: profile.shells_created,
+            shells_reused: profile.shells_reused,
+            member_type_references: profile.member_type_references,
+            hierarchy_loads: profile.hierarchy_loads,
+            resource_lookup_ns: profile.resource_lookup_ns,
+            resource_lookup_calls: profile.resource_lookup_calls,
+            resources_found: profile.resources_found,
+            resources_missing: profile.resources_missing,
+            resource_lookup_errors: profile.resource_lookup_errors,
+            resource_bytes: profile.resource_bytes,
+            classfile_decode_ns: profile.classfile_decode_ns,
+            classfile_decode_calls: profile.classfile_decode_calls,
+            classfile_decode_exclusive_ns: profile.classfile_decode_exclusive_ns,
+            tasty_decode_ns: profile.tasty_decode_ns,
+            tasty_decode_calls: profile.tasty_decode_calls,
+            tasty_decode_exclusive_ns: profile.tasty_decode_exclusive_ns,
+            load_uncached_inclusive_ns: profile.load_uncached_inclusive_ns,
+            module_completion_calls: profile.module_completion_calls,
+            module_completion_successes: profile.module_completion_successes,
+            module_completion_errors: profile.module_completion_errors,
+            module_completion_inclusive_ns: profile.module_completion_inclusive_ns,
+            module_completion_residual_ns: profile.module_completion_residual_ns,
+        });
+    }
+
+    fn record_resource_lookup<LookupError>(
+        &mut self,
+        started: Option<Instant>,
+        result: &Result<Option<ClassResource>, LookupError>,
+    ) {
+        let (Some(started), Some(profile)) = (started, self.active_load_profile.as_mut()) else {
+            return;
+        };
+        let elapsed_ns = started.elapsed().as_nanos();
+        profile.resource_lookup_ns += elapsed_ns;
+        profile.resource_lookup_calls += 1;
+        if profile.depth > 0 {
+            profile.nested_resource_lookup_ns += elapsed_ns;
+        }
+        match result {
+            Ok(Some(resource)) => {
+                profile.resources_found += 1;
+                profile.resource_bytes += resource.bytes().len();
+            }
+            Ok(None) => profile.resources_missing += 1,
+            Err(_) => profile.resource_lookup_errors += 1,
+        }
+    }
+
+    fn resource_lookup_total_ns(&self) -> u128 {
+        self.active_load_profile
+            .as_ref()
+            .map_or(0, |profile| profile.resource_lookup_ns)
+    }
+
+    fn record_classfile_decode(&mut self, started: Option<Instant>) {
+        if let (Some(started), Some(profile)) = (started, self.active_load_profile.as_mut()) {
+            let elapsed_ns = started.elapsed().as_nanos();
+            profile.classfile_decode_ns += elapsed_ns;
+            profile.classfile_decode_exclusive_ns += elapsed_ns;
+            profile.classfile_decode_calls += 1;
+        }
+    }
+
+    fn record_tasty_decode(&mut self, started: Option<Instant>, resource_before: u128) {
+        if let (Some(started), Some(profile)) = (started, self.active_load_profile.as_mut()) {
+            let elapsed_ns = started.elapsed().as_nanos();
+            let resource_delta = profile.resource_lookup_ns.saturating_sub(resource_before);
+            let exclusive_ns = elapsed_ns.saturating_sub(resource_delta);
+            profile.tasty_decode_ns += elapsed_ns;
+            profile.tasty_decode_exclusive_ns += exclusive_ns;
+            profile.tasty_decode_calls += 1;
+            if profile.depth > 0 {
+                profile.nested_tasty_decode_ns += exclusive_ns;
+            }
+        }
+    }
+
     /// JVM-specific metadata for a `.class`-backed symbol previously
     /// returned by [`Self::load_class`] — `None` for a `.tasty`-backed
     /// symbol (not yet reconstructed from `.tasty`, see
@@ -597,6 +772,21 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         BTreeMap<BinaryName, ClassResource>,
         bool,
     ) {
+        let profile_started = self.collect_load_profiles.then(Instant::now);
+        let owns_profile = self.begin_direct_load_profile(name);
+        let resource_before = self.resource_lookup_total_ns();
+        let resource_nested_before = self
+            .active_load_profile
+            .as_ref()
+            .map_or(0, |profile| profile.nested_resource_lookup_ns);
+        let tasty_before = self
+            .active_load_profile
+            .as_ref()
+            .map_or(0, |profile| profile.tasty_decode_exclusive_ns);
+        let tasty_nested_before = self
+            .active_load_profile
+            .as_ref()
+            .map_or(0, |profile| profile.nested_tasty_decode_ns);
         let store_checkpoint = self.store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         self.resource_observations.clear();
@@ -611,11 +801,39 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             self.store.rollback_to(store_checkpoint);
             self.repository.discard_rolled_back_symbols(self.store);
         }
+        if let (Some(started), Some(profile)) = (profile_started, self.active_load_profile.as_mut())
+        {
+            let elapsed_ns = started.elapsed().as_nanos();
+            let resource_delta = profile.resource_lookup_ns.saturating_sub(resource_before);
+            let nested_resource_delta = profile
+                .nested_resource_lookup_ns
+                .saturating_sub(resource_nested_before);
+            let tasty_delta = profile
+                .tasty_decode_exclusive_ns
+                .saturating_sub(tasty_before);
+            let nested_tasty_delta = profile
+                .nested_tasty_decode_ns
+                .saturating_sub(tasty_nested_before);
+            let direct_resource_ns = resource_delta.saturating_sub(nested_resource_delta);
+            let direct_tasty_ns = tasty_delta.saturating_sub(nested_tasty_delta);
+            profile.module_completion_calls += 1;
+            profile.module_completion_inclusive_ns += elapsed_ns;
+            profile.module_completion_residual_ns +=
+                elapsed_ns.saturating_sub(direct_resource_ns + direct_tasty_ns);
+            if result.is_ok() {
+                profile.module_completion_successes += 1;
+            } else {
+                profile.module_completion_errors += 1;
+            }
+        }
+        let observations = self.take_resource_observations();
+        let observations_complete = self.resource_observations_complete;
+        self.finish_direct_load_profile(owns_profile);
         (
             result,
             decoded_cache_hit,
-            self.take_resource_observations(),
-            self.resource_observations_complete,
+            observations,
+            observations_complete,
         )
     }
 
@@ -686,9 +904,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             SymbolInfo::Missing => {}
         }
 
-        let resource = self
-            .class_path
-            .find_class(name)
+        let lookup_started = self.collect_load_profiles.then(Instant::now);
+        let lookup_result = self.class_path.find_class(name);
+        self.record_resource_lookup(lookup_started, &lookup_result);
+        let resource = lookup_result
             .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
         if resource.format() != ClassFormat::Tasty {
@@ -704,6 +923,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
 
         let alias_error = RefCell::new(None);
         let class_path = &self.class_path;
+        let resource_before_decode = self.resource_lookup_total_ns();
         let decoded = if let Some(cached) = decoded_cache.get(name)
             && cached.resource == resource
         {
@@ -711,6 +931,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             cached.decoded.clone()
         } else {
             decoded_cache.remove(name);
+            let decode_started = self.collect_load_profiles.then(Instant::now);
             let decoded = tasty_symbol::decode_module_class_with_resolvers(
                 resource.bytes(),
                 &identity.module_class_name,
@@ -733,6 +954,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     }
                 },
             );
+            self.record_tasty_decode(decode_started, resource_before_decode);
             if let Some(error) = alias_error.into_inner() {
                 return Err(error.into_class_load_error().0);
             }
@@ -843,9 +1065,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     .to_owned(),
             });
         }
-        let resource = self
-            .class_path
-            .find_class(name)
+        let lookup_started = self.collect_load_profiles.then(Instant::now);
+        let lookup_result = self.class_path.find_class(name);
+        self.record_resource_lookup(lookup_started, &lookup_result);
+        let resource = lookup_result
             .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
         if resource.format() != ClassFormat::Tasty {
@@ -854,7 +1077,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 reason: "a classfile does not prove Scala module identity".to_owned(),
             });
         }
-        let decoded = tasty_symbol::decode_module_identity(resource.bytes(), name)
+        let resource_before = self.resource_lookup_total_ns();
+        let decode_started = self.collect_load_profiles.then(Instant::now);
+        let decoded_result = tasty_symbol::decode_module_identity(resource.bytes(), name);
+        self.record_tasty_decode(decode_started, resource_before);
+        let decoded = decoded_result
             .map_err(|error| ClassLoadError::InvalidTastyFile(name.clone(), error))?
             .ok_or_else(|| ClassLoadError::IdentityConflict {
                 name: name.clone(),
@@ -1161,9 +1388,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
-        let resource = self
-            .class_path
-            .find_class(name)
+        let lookup_started = self.collect_load_profiles.then(Instant::now);
+        let lookup_result = self.class_path.find_class(name);
+        self.record_resource_lookup(lookup_started, &lookup_result);
+        let resource = lookup_result
             .map_err(|error| ClassLoadError::Io(name.clone(), Rc::new(error)))?
             .ok_or_else(|| ClassLoadError::NotFound(name.clone()))?;
         let origin = resource.origin().clone();
@@ -1171,7 +1399,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             Ok(match resource.format() {
                 ClassFormat::Class => {
                     let mut reader = Reader::new(resource.bytes());
-                    let class_file = ClassFile::decode(&mut reader)
+                    let decode_started = self.collect_load_profiles.then(Instant::now);
+                    let decoded_class_file = ClassFile::decode(&mut reader);
+                    self.record_classfile_decode(decode_started);
+                    let class_file = decoded_class_file
                         .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
                     if !class_file.version.is_compatible() {
                         return Err(ClassLoadError::UnsupportedClassVersion(
@@ -1555,24 +1786,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             .expect("profile remains active until the top-level load returns");
         profile.depth -= 1;
         if is_root {
-            let profile = self
-                .active_load_profile
-                .take()
-                .expect("top-level profile was initialized above");
-            self.load_profiles.push(ClassLoadProfile {
-                root: profile.root,
-                root_was_shell: profile.root_was_shell,
-                max_dependency_depth: profile.max_dependency_depth,
-                classes: profile.classes,
-                full_completions: profile.full_completions,
-                completed_classes: profile.completed_classes,
-                identity_shells: profile.identity_shells,
-                completed_cache_hits: profile.completed_cache_hits,
-                shells_created: profile.shells_created,
-                shells_reused: profile.shells_reused,
-                member_type_references: profile.member_type_references,
-                hierarchy_loads: profile.hierarchy_loads,
-            });
+            self.finish_load_profile();
         }
         result
     }
@@ -1582,9 +1796,18 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         name: &BinaryName,
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadFailure> {
-        let resource = match self.class_path.find_class(name) {
+        let uncached_started = self.collect_load_profiles.then(Instant::now);
+        let resource_lookup_started = self.collect_load_profiles.then(Instant::now);
+        let resource_result = self.class_path.find_class(name);
+        self.record_resource_lookup(resource_lookup_started, &resource_result);
+        let resource = match resource_result {
             Ok(Some(resource)) => resource,
             Ok(None) => {
+                if let (Some(started), Some(profile)) =
+                    (uncached_started, self.active_load_profile.as_mut())
+                {
+                    profile.load_uncached_inclusive_ns += started.elapsed().as_nanos();
+                }
                 return Err(ClassLoadFailure {
                     error: ClassLoadError::NotFound(name.clone()),
                     origin: None,
@@ -1592,6 +1815,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 });
             }
             Err(error) => {
+                if let (Some(started), Some(profile)) =
+                    (uncached_started, self.active_load_profile.as_mut())
+                {
+                    profile.load_uncached_inclusive_ns += started.elapsed().as_nanos();
+                }
                 return Err(ClassLoadFailure {
                     error: ClassLoadError::Io(name.clone(), Rc::new(error)),
                     origin: None,
@@ -1624,7 +1852,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         };
         self.loading_context.remove(name);
         let observed_context = self.dependency_failure_context.take();
-        result.map_err(|error| {
+        let result = result.map_err(|error| {
             let cause_name = error_binary_name(error.root_cause());
             let failure_is_for_another_name =
                 cause_name.is_some_and(|cause_name| cause_name != name);
@@ -1644,7 +1872,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 origin,
                 format,
             }
-        })
+        });
+        if let (Some(started), Some(profile)) =
+            (uncached_started, self.active_load_profile.as_mut())
+        {
+            profile.load_uncached_inclusive_ns += started.elapsed().as_nanos();
+        }
+        result
     }
 
     /// Allocates a class's stable `SymbolId`, and its declarations scope,
@@ -2317,6 +2551,8 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
     ) -> Result<SymbolId, ClassLoadError> {
         let alias_error = RefCell::new(None);
         let class_path = &self.class_path;
+        let resource_before_decode = self.resource_lookup_total_ns();
+        let decode_started = self.collect_load_profiles.then(Instant::now);
         let decoded = tasty_symbol::decode_with_resolvers(
             bytes,
             name,
@@ -2339,6 +2575,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 }
             },
         );
+        self.record_tasty_decode(decode_started, resource_before_decode);
         if let Some(error) = alias_error.into_inner() {
             let (error, context) = error.into_class_load_error();
             self.dependency_failure_context = context;
@@ -2500,7 +2737,10 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
         let mut reader = Reader::new(bytes);
-        let class_file = ClassFile::decode(&mut reader)
+        let decode_started = self.collect_load_profiles.then(Instant::now);
+        let decoded_class_file = ClassFile::decode(&mut reader);
+        self.record_classfile_decode(decode_started);
+        let class_file = decoded_class_file
             .map_err(|error| ClassLoadError::InvalidClassFile(name.clone(), error))?;
 
         // Checked before any symbol allocation: a version this decoder
@@ -7295,6 +7535,10 @@ mod tests {
         assert_eq!(profile.hierarchy_loads, 2);
         assert_eq!(profile.shells_created, 0);
         assert_eq!(profile.max_dependency_depth, 1);
+        assert!(profile.resource_lookup_ns > 0);
+        assert!(profile.classfile_decode_ns > 0);
+        assert_eq!(profile.tasty_decode_ns, 0);
+        assert!(profile.load_uncached_inclusive_ns > 0);
     }
 
     #[test]
@@ -7397,6 +7641,25 @@ mod tests {
         assert_eq!(cached.shells_created, 0);
         assert_eq!(cached.shells_reused, 0);
         assert_eq!(calls.load(Ordering::Relaxed), 21);
+    }
+
+    #[test]
+    fn failed_resource_lookup_is_included_in_load_profile_timing() {
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(HashMap::new()), &mut store);
+        loader.set_load_profile_collection(true);
+
+        assert!(
+            loader
+                .load_class(&BinaryName::from_internal("missing/Type"))
+                .is_err()
+        );
+
+        let profile = loader.take_load_profiles().pop().unwrap();
+        assert!(profile.resource_lookup_ns > 0);
+        assert!(profile.load_uncached_inclusive_ns > 0);
+        assert_eq!(profile.classfile_decode_ns, 0);
+        assert_eq!(profile.tasty_decode_ns, 0);
     }
 
     #[test]

@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use dotty_classloader::classloader::{
     BinaryName, ClassFormat, ClassLoadProfile, ClassLoader, ClassOrigin, ClassPathEntry,
-    ClassPathError, ClassResource, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
-    JarClassPath, JdkClassPath, LoadingSession, ModuleResolutionProfile,
+    ClassPathError, ClassResource, ClasspathResolverProfile, ClasspathSymbolResolver,
+    CompositeClassPath, DirectoryClassPath, JarClassPath, JdkClassPath, LoadingSession,
+    ModuleResolutionProfile,
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::ids::TreeId;
@@ -86,6 +87,7 @@ struct ResolverMetrics {
     member_request_targets: BTreeMap<String, RequestTargetMetrics>,
     member_requests_by_method: BTreeMap<String, BTreeMap<String, usize>>,
     resolver_requests_by_method: BTreeMap<String, Vec<ResolverRequestObservation>>,
+    resolver_profile_by_method: BTreeMap<String, ClasspathResolverProfile>,
     member_request_outcome_targets: BTreeMap<MemberRequestOutcomeKey, BTreeSet<String>>,
     member_request_outcome_files: BTreeMap<MemberRequestOutcomeKey, BTreeSet<String>>,
     member_error_roots: BTreeMap<String, usize>,
@@ -127,6 +129,7 @@ struct ResolverMetrics {
     class_member_prefixes: BTreeSet<String>,
     class_member_keys: BTreeSet<String>,
     module_resolution: ModuleResolutionProfile,
+    resolver_profile: ClasspathResolverProfile,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2216,9 +2219,17 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let resolver_started = self.metrics.borrow().timing_enabled.then(Instant::now);
         let result = self.resolver_mut().resolve_member(store, request);
         let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
-        if resolver_started.is_some() {
+        let request_resolver_profile = if resolver_started.is_some() {
+            let resolver_profile = self.resolver_mut().take_resolver_profile();
+            self.metrics
+                .borrow_mut()
+                .resolver_profile
+                .merge(&resolver_profile);
             self.metrics.borrow_mut().member_lookup_inner_time += resolver_elapsed;
-        }
+            Some(resolver_profile)
+        } else {
+            None
+        };
         let load_profiles = self.resolver_mut().take_load_profiles();
         let module_profile = self.resolver_mut().take_module_resolution_profile();
         // Profiles describe work performed even when Ok(None) rolls it back.
@@ -2250,6 +2261,15 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         }
         let current_file = metrics.current_file.clone();
         let current_method = metrics.current_method.clone();
+        if !current_method.is_empty()
+            && let Some(resolver_profile) = &request_resolver_profile
+        {
+            metrics
+                .resolver_profile_by_method
+                .entry(current_method.clone())
+                .or_default()
+                .merge(resolver_profile);
+        }
         if module_class.is_some() && !current_method.is_empty() {
             let (result, result_symbol) = match &result {
                 Ok(Some(symbol)) if store.symbols.contains(*symbol) => {
@@ -11826,6 +11846,9 @@ fn probe_supported_match_cases_in_index(
     let mut resolver = ClasspathSymbolResolver::new(classpath.clone(), definitions, session);
     if mode == AuditProfileMode::Full {
         resolver = resolver.with_load_profile_collection();
+        if profile_timing {
+            resolver = resolver.with_resolver_profile_collection();
+        }
         if !profile_timing
             || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1")
         {
@@ -11932,6 +11955,18 @@ fn probe_supported_match_cases_in_index(
                 Err(_) => continue,
             },
         };
+        probe_metrics.borrow_mut().current_method = format!(
+            "{path}#symbol={}::match-probe#case_tree={}::selector#tree={}",
+            method.index(),
+            matched.cases.first().map_or(0, |case| case.index()),
+            matched.selector.index()
+        );
+        let selector_root = probe_metrics.borrow().current_method.clone();
+        probe_metrics
+            .borrow_mut()
+            .resolver_profile_by_method
+            .entry(selector_root)
+            .or_default();
         let selector_started = Instant::now();
         let resolver_calls_before = probe_metrics.borrow().module_identity_resolver_calls;
         if let Err(error) = typer.type_expression(matched.selector, context) {
@@ -11954,6 +11989,7 @@ fn probe_supported_match_cases_in_index(
             };
             selector_outcomes.insert(key, (error_name, boundary));
         }
+        probe_metrics.borrow_mut().current_method.clear();
         if profile_timing && mode == AuditProfileMode::Full {
             let metrics = probe_metrics.borrow();
             eprintln!(
@@ -11987,12 +12023,24 @@ fn probe_supported_match_cases_in_index(
         // A method context owns a typer-local scope frame. Reusing the context
         // avoids pushing the same method scope once for every match case (and
         // growing the lookup chain throughout the audit).
+        probe_metrics.borrow_mut().current_method = format!(
+            "{path}#symbol={}::match-case#tree={}",
+            method.index(),
+            matched.cases.first().map_or(0, |case| case.index())
+        );
+        let case_root = probe_metrics.borrow().current_method.clone();
+        probe_metrics
+            .borrow_mut()
+            .resolver_profile_by_method
+            .entry(case_root)
+            .or_default();
         let outcome = match method_contexts.get(&method).copied() {
             Some(context) => typer.type_expression(match_tree, context),
             None => typer
                 .expression_context_for(method)
                 .and_then(|context| typer.type_expression(match_tree, context)),
         };
+        probe_metrics.borrow_mut().current_method.clear();
         if profile_timing && mode == AuditProfileMode::Full {
             let metrics = probe_metrics.borrow();
             eprintln!(
@@ -12609,6 +12657,9 @@ fn audit_source_inner_filtered(
         );
         if mode == AuditProfileMode::Full {
             resolver = resolver.with_load_profile_collection();
+            if profile_timing {
+                resolver = resolver.with_resolver_profile_collection();
+            }
         }
         if mode == AuditProfileMode::Full
             && (!profile_timing
@@ -12714,6 +12765,12 @@ fn audit_source_inner_filtered(
                 method_tree.index(),
                 audit_symbol_path(typer.store(), method)
             );
+            let root = metrics.borrow().current_method.clone();
+            metrics
+                .borrow_mut()
+                .resolver_profile_by_method
+                .entry(root)
+                .or_default();
         }
         let outcome = typer
             .expression_context_for(method)
@@ -14344,6 +14401,166 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         metrics.tasty_completion_calls,
         metrics.tasty_completion_inner_time.as_micros()
     );
+    let resolver_profile = &metrics.resolver_profile;
+    if resolver_profile.member_lookups > 0 {
+        println!(
+            "AUDIT_CLASSLOADER_RESOLVER_COUNTS member_lookups={} successes={} misses={} errors={} rollbacks={}",
+            resolver_profile.member_lookups,
+            resolver_profile.member_successes,
+            resolver_profile.member_misses,
+            resolver_profile.member_errors,
+            resolver_profile.rollbacks,
+        );
+        for (stage, profile) in [
+            (
+                "delegate_member_lookup_inclusive",
+                resolver_profile.member_lookup_inclusive,
+            ),
+            (
+                "delegate_prefix_classification",
+                resolver_profile.prefix_classification,
+            ),
+            (
+                "delegate_module_cache_validation",
+                resolver_profile.module_cache_validation,
+            ),
+            (
+                "delegate_target_resolution",
+                resolver_profile.target_resolution,
+            ),
+            (
+                "delegate_declaration_selection",
+                resolver_profile.declaration_selection,
+            ),
+            (
+                "delegate_module_identity_resolution",
+                resolver_profile.module_identity_resolution,
+            ),
+            (
+                "delegate_class_loading_inclusive",
+                resolver_profile.class_loading_inclusive,
+            ),
+            (
+                "package_term_selection",
+                resolver_profile.package_term_selection,
+            ),
+            ("module_completion", resolver_profile.module_completion),
+            ("class_completion", resolver_profile.class_completion),
+            (
+                "module_snapshot_validation",
+                resolver_profile.module_snapshot_validation,
+            ),
+            (
+                "classpath_resource_lookup",
+                resolver_profile.classpath_resource_lookup,
+            ),
+            ("classfile_decode", resolver_profile.classfile_decode),
+            ("tasty_decode", resolver_profile.tasty_decode),
+            (
+                "transaction_bookkeeping",
+                resolver_profile.transaction_bookkeeping,
+            ),
+            ("rollback", resolver_profile.rollback),
+        ] {
+            println!(
+                "AUDIT_RESOLVER_STAGE stage={stage} calls={} elapsed_us={} elapsed_ns={} exclusive_ns={}",
+                profile.calls,
+                profile.elapsed_ns / 1_000,
+                profile.elapsed_ns,
+                profile.exclusive_ns
+            );
+        }
+        println!(
+            "AUDIT_RESOLVER_CACHE negative_member_hits={} positive_module_hits={} module_cache_misses={} completion_attempts={} completion_successes={} completion_errors={} class_completion_attempts={} class_completion_successes={} class_completion_errors={} class_completion_nested_classload_ns={}",
+            resolver_profile.negative_member_cache_hits,
+            resolver_profile.positive_module_cache_hits,
+            resolver_profile.module_cache_misses,
+            resolver_profile.module_completion_attempts,
+            resolver_profile.module_completion_successes,
+            resolver_profile.module_completion_errors,
+            resolver_profile.class_completion_attempts,
+            resolver_profile.class_completion_successes,
+            resolver_profile.class_completion_errors,
+            resolver_profile.class_completion_nested_classload_ns
+        );
+        for (root, profile) in &metrics.resolver_profile_by_method {
+            let requests = metrics
+                .resolver_requests_by_method
+                .get(root)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let mut keys = BTreeMap::<String, (usize, BTreeMap<String, usize>)>::new();
+            for request in requests {
+                let entry = keys.entry(request.target.clone()).or_default();
+                entry.0 += 1;
+                *entry.1.entry(request.outcome.clone()).or_default() += 1;
+            }
+            let repeated = keys.values().filter(|(attempts, _)| *attempts > 1).count();
+            let mut failed_keys = BTreeSet::new();
+            let mut retry_after_rollback = 0;
+            for request in requests {
+                if failed_keys.contains(&request.target) {
+                    retry_after_rollback += 1;
+                }
+                let outcome = request.outcome.to_ascii_lowercase();
+                if ["unresolved", "unsupported", "unavailable", "error", "miss"]
+                    .iter()
+                    .any(|needle| outcome.contains(needle))
+                {
+                    failed_keys.insert(request.target.clone());
+                }
+            }
+            let top_repeated = keys
+                .iter()
+                .filter(|(_, (attempts, _))| *attempts > 1)
+                .take(8)
+                .map(|(key, (attempts, outcomes))| {
+                    let outcome_text = outcomes
+                        .iter()
+                        .map(|(outcome, count)| format!("{}:{count}", outcome.replace(' ', "_")))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("{key}#{attempts}[{outcome_text}]")
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+            println!(
+                "AUDIT_RESOLVER_ROOT scope=source root={root} calls={} stable_key_observations={} successes={} misses={} errors={} rollbacks={} unique_keys={} repeated_keys={} retry_after_failed_lookup={} top_repeated={top_repeated}",
+                profile.member_lookups,
+                requests.len(),
+                profile.member_successes,
+                profile.member_misses,
+                profile.member_errors,
+                profile.rollbacks,
+                keys.len(),
+                repeated,
+                retry_after_rollback
+            );
+            for (stage, phase) in [
+                ("member", profile.member_lookup_inclusive),
+                ("prefix", profile.prefix_classification),
+                ("cache", profile.module_cache_validation),
+                ("target", profile.target_resolution),
+                ("declaration", profile.declaration_selection),
+                ("package_term", profile.package_term_selection),
+                ("module_completion", profile.module_completion),
+                ("class_completion", profile.class_completion),
+                ("snapshot", profile.module_snapshot_validation),
+                ("resource", profile.classpath_resource_lookup),
+                ("classfile_decode", profile.classfile_decode),
+                ("tasty_decode", profile.tasty_decode),
+                ("transaction", profile.transaction_bookkeeping),
+                ("rollback", profile.rollback),
+            ] {
+                if phase.calls > 0 {
+                    println!(
+                        "AUDIT_RESOLVER_ROOT_PHASE root={root} stage={stage} calls={} elapsed_ns={} exclusive_ns={}",
+                        phase.calls, phase.elapsed_ns, phase.exclusive_ns
+                    );
+                }
+            }
+        }
+    }
     println!(
         "AUDIT_ROLLBACK count={} checkpoint_count={} checkpoint_max_depth={} operation_appended={} member_appended={} operation_rollback_coverage={} member_rollback_coverage={} operation_rows_scanned={} member_rows_scanned={} operation_status_changes={} member_status_changes={}",
         metrics.rollback_count,
@@ -14720,12 +14937,116 @@ fn print_classpath_resource_metrics(classpath: &SharedClassPath) {
     );
 }
 
+fn print_classload_profile_timings(profiles: &[DependencyObservation], match_file: Option<&str>) {
+    let resource_lookup_ns = profiles
+        .iter()
+        .map(|observation| observation.profile.resource_lookup_ns)
+        .sum::<u128>();
+    let classfile_decode_ns = profiles
+        .iter()
+        .map(|observation| observation.profile.classfile_decode_ns)
+        .sum::<u128>();
+    let tasty_decode_ns = profiles
+        .iter()
+        .map(|observation| observation.profile.tasty_decode_ns)
+        .sum::<u128>();
+    let load_uncached_inclusive_ns = profiles
+        .iter()
+        .map(|observation| observation.profile.load_uncached_inclusive_ns)
+        .sum::<u128>();
+    if let Some(file) = match_file {
+        println!(
+            "AUDIT_MATCH_CLASSLOAD_TIMINGS file={file} resource_lookup_ns={resource_lookup_ns} classfile_decode_ns={classfile_decode_ns} tasty_decode_ns={tasty_decode_ns} load_uncached_inclusive_ns={load_uncached_inclusive_ns}"
+        );
+    } else {
+        println!(
+            "AUDIT_CLASSLOAD_TIMINGS resource_lookup_ns={resource_lookup_ns} classfile_decode_ns={classfile_decode_ns} tasty_decode_ns={tasty_decode_ns} load_uncached_inclusive_ns={load_uncached_inclusive_ns}"
+        );
+    }
+}
+
 fn print_match_resolver_metrics(
     path: &str,
     metrics: &ResolverMetrics,
     before: ClassPathCacheMetrics,
     after: ClassPathCacheMetrics,
 ) {
+    print_classload_profile_timings(&metrics.dependency_profiles, Some(path));
+    for (root, profile) in &metrics.resolver_profile_by_method {
+        let requests = metrics
+            .resolver_requests_by_method
+            .get(root)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut keys = BTreeMap::<String, (usize, BTreeMap<String, usize>)>::new();
+        let mut failed_keys = BTreeSet::new();
+        let mut retries = 0;
+        for request in requests {
+            let entry = keys.entry(request.target.clone()).or_default();
+            entry.0 += 1;
+            *entry.1.entry(request.outcome.clone()).or_default() += 1;
+            if failed_keys.contains(&request.target) {
+                retries += 1;
+            }
+            let outcome = request.outcome.to_ascii_lowercase();
+            if ["unresolved", "unsupported", "unavailable", "error", "miss"]
+                .iter()
+                .any(|needle| outcome.contains(needle))
+            {
+                failed_keys.insert(request.target.clone());
+            }
+        }
+        let repeated = keys.values().filter(|(attempts, _)| *attempts > 1).count();
+        let top_repeated = keys
+            .iter()
+            .filter(|(_, (attempts, _))| *attempts > 1)
+            .take(8)
+            .map(|(key, (attempts, outcomes))| {
+                let outcomes = outcomes
+                    .iter()
+                    .map(|(outcome, count)| format!("{}:{count}", outcome.replace(' ', "_")))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{key}#{attempts}[{outcomes}]")
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        println!(
+            "AUDIT_RESOLVER_ROOT scope=match root={root} calls={} stable_key_observations={} successes={} misses={} errors={} rollbacks={} unique_keys={} repeated_keys={} retry_after_failed_lookup={} top_repeated={top_repeated}",
+            profile.member_lookups,
+            requests.len(),
+            profile.member_successes,
+            profile.member_misses,
+            profile.member_errors,
+            profile.rollbacks,
+            keys.len(),
+            repeated,
+            retries
+        );
+        for (stage, phase) in [
+            ("member", profile.member_lookup_inclusive),
+            ("prefix", profile.prefix_classification),
+            ("module_cache", profile.module_cache_validation),
+            ("target", profile.target_resolution),
+            ("declaration", profile.declaration_selection),
+            ("package_term", profile.package_term_selection),
+            ("module_completion", profile.module_completion),
+            ("class_completion", profile.class_completion),
+            ("snapshot", profile.module_snapshot_validation),
+            ("resource", profile.classpath_resource_lookup),
+            ("classfile_decode", profile.classfile_decode),
+            ("tasty_decode", profile.tasty_decode),
+            ("transaction", profile.transaction_bookkeeping),
+            ("rollback", profile.rollback),
+        ] {
+            if phase.calls > 0 {
+                println!(
+                    "AUDIT_RESOLVER_ROOT_PHASE scope=match root={root} stage={stage} calls={} elapsed_ns={} exclusive_ns={}",
+                    phase.calls, phase.elapsed_ns, phase.exclusive_ns
+                );
+            }
+        }
+    }
     println!(
         "AUDIT_MATCH_RESOLVER file={path} status=captured package_calls={} member_calls={} module_identity_calls={} module_completion_calls={} class_completion_calls={} classfile_completion_calls={} tasty_completion_calls={} package_inner_us={} member_inner_us={} module_identity_inner_us={} module_completion_inner_us={} class_completion_inner_us={} classfile_completion_inner_us={} tasty_completion_inner_us={} rollback_count={} rollback_operation_observations={} rollback_member_observations={} classpath_requests={} classpath_inner_calls={} classpath_positive={} classpath_negative={} classpath_errors={} classpath_negative_cache_hits={} classpath_returned_bytes={} classpath_inner_wall_us={}",
         metrics.resolver_package_requests,
@@ -14783,6 +15104,80 @@ fn print_match_resolver_metrics(
             "AUDIT_MATCH_RESOLVER_STAGE file={path} stage={stage} calls={} elapsed_us={}",
             timing.calls,
             timing.elapsed.as_micros()
+        );
+    }
+    let profile = &metrics.resolver_profile;
+    if profile.member_lookups > 0 {
+        println!(
+            "AUDIT_MATCH_CLASSLOADER_RESOLVER_COUNTS file={path} member_lookups={} successes={} misses={} errors={} rollbacks={}",
+            profile.member_lookups,
+            profile.member_successes,
+            profile.member_misses,
+            profile.member_errors,
+            profile.rollbacks,
+        );
+        for (stage, timing) in [
+            (
+                "delegate_member_lookup_inclusive",
+                profile.member_lookup_inclusive,
+            ),
+            (
+                "delegate_prefix_classification",
+                profile.prefix_classification,
+            ),
+            (
+                "delegate_module_cache_validation",
+                profile.module_cache_validation,
+            ),
+            ("delegate_target_resolution", profile.target_resolution),
+            (
+                "delegate_declaration_selection",
+                profile.declaration_selection,
+            ),
+            (
+                "delegate_module_identity_resolution",
+                profile.module_identity_resolution,
+            ),
+            ("package_term_selection", profile.package_term_selection),
+            ("module_completion", profile.module_completion),
+            ("class_completion", profile.class_completion),
+            (
+                "module_snapshot_validation",
+                profile.module_snapshot_validation,
+            ),
+            (
+                "classpath_resource_lookup",
+                profile.classpath_resource_lookup,
+            ),
+            ("classfile_decode", profile.classfile_decode),
+            ("tasty_decode", profile.tasty_decode),
+            ("transaction_bookkeeping", profile.transaction_bookkeeping),
+            ("rollback", profile.rollback),
+            (
+                "delegate_class_loading_inclusive",
+                profile.class_loading_inclusive,
+            ),
+        ] {
+            println!(
+                "AUDIT_MATCH_RESOLVER_STAGE file={path} stage={stage} calls={} elapsed_us={} elapsed_ns={} exclusive_ns={}",
+                timing.calls,
+                timing.elapsed_ns / 1_000,
+                timing.elapsed_ns,
+                timing.exclusive_ns
+            );
+        }
+        println!(
+            "AUDIT_MATCH_RESOLVER_CACHE file={path} negative_member_hits={} positive_module_hits={} module_cache_misses={} completion_attempts={} completion_successes={} completion_errors={} class_completion_attempts={} class_completion_successes={} class_completion_errors={} class_completion_nested_classload_ns={}",
+            profile.negative_member_cache_hits,
+            profile.positive_module_cache_hits,
+            profile.module_cache_misses,
+            profile.module_completion_attempts,
+            profile.module_completion_successes,
+            profile.module_completion_errors,
+            profile.class_completion_attempts,
+            profile.class_completion_successes,
+            profile.class_completion_errors,
+            profile.class_completion_nested_classload_ns
         );
     }
 }
@@ -16149,6 +16544,7 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
     println!("  median_dependency_depth={median_depth:.1}");
     println!("  p95_dependency_depth={p95_depth}");
     println!("  max_distinct_classes_touched_by_one_request={max_classes}");
+    print_classload_profile_timings(&metrics.dependency_profiles, None);
 
     let mut observed_by_method: BTreeMap<&str, (BTreeSet<&str>, BTreeSet<&str>)> = BTreeMap::new();
     for observation in &metrics.dependency_profiles {

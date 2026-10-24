@@ -53,7 +53,10 @@ pub mod classloader {
     pub use crate::method_symbol::MethodSymbol;
     pub use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
     pub use crate::record_component::RecordComponentSymbol;
-    pub use crate::resolver::{ClasspathSymbolResolver, ModuleResolutionProfile};
+    pub use crate::resolver::{
+        ClasspathResolverProfile, ClasspathSymbolResolver, ModuleResolutionProfile,
+        ResolverPhaseProfile,
+    };
     pub use crate::session::LoadingSession;
     pub use crate::symbol::{ClassRef, ClassfileMetadata};
     pub use crate::tasty_symbol::{TastyDecodeError, UnresolvedParentReference};

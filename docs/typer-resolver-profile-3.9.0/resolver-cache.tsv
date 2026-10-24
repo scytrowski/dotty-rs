@@ -1,0 +1,4 @@
+run	class_completion_attempts	class_completion_errors	class_completion_nested_classload_ns	class_completion_successes	completion_attempts	completion_errors	completion_successes	module_cache_misses	negative_member_hits	positive_module_hits
+1	0	0	0	0	43	1	42	42	602	3211
+2	0	0	0	0	43	1	42	42	602	3211
+3	0	0	0	0	43	1	42	42	602	3211

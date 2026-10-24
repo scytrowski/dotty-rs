@@ -148,7 +148,10 @@ def parse_run(log: str) -> dict:
         "files": {}, "methods": {}, "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {}, "resolver": {}, "match_phases": [], "match_resolver": [], "match_resolver_wrappers": [], "summary": {},
         "loads": {}, "resolver_counts": {}, "load_roots": [], "wrappers": {}, "rollback": {},
         "cheap_resolver": {}, "cheap_resolver_outcomes": {}, "resolver_stages": [], "match_resolver_stages": [],
-        "classpath_resources": {},
+        "classpath_resources": {}, "resolver_profile": {}, "match_resolver_profiles": [],
+        "repeated_requests": [],
+        "classload_timings": {}, "match_classload_timings": [],
+        "resolver_roots": [], "resolver_root_phases": [], "resolver_cache": {}, "match_resolver_cache": [],
     }
     for line in log.splitlines():
         if line.startswith("AUDIT_PROFILE_SUMMARY "):
@@ -190,6 +193,32 @@ def parse_run(log: str) -> dict:
             result["match_resolver_wrappers"].append(values)
         elif line.startswith("AUDIT_MATCH_RESOLVER_STAGE "):
             result["match_resolver_stages"].append(kvs(line))
+        elif line.startswith("AUDIT_CLASSLOADER_RESOLVER_COUNTS "):
+            result["resolver_profile"] = {key: int(value) for key, value in kvs(line).items()}
+        elif line.startswith("AUDIT_MATCH_CLASSLOADER_RESOLVER_COUNTS "):
+            values = kvs(line)
+            result["match_resolver_profiles"].append(
+                {"file": values["file"], **{key: int(value) for key, value in values.items() if key != "file"}}
+            )
+        elif line.startswith("AUDIT_CLASSLOAD_TIMINGS "):
+            result["classload_timings"] = {key: int(value) for key, value in kvs(line).items()}
+        elif line.startswith("AUDIT_RESOLVER_ROOT_PHASE "):
+            values = kvs(line)
+            values.setdefault("scope", "source")
+            result["resolver_root_phases"].append(values)
+        elif line.startswith("AUDIT_RESOLVER_ROOT "):
+            values = kvs(line)
+            values.setdefault("stable_key_observations", values.pop("request_observations", "not_captured"))
+            result["resolver_roots"].append(values)
+        elif line.startswith("AUDIT_RESOLVER_CACHE "):
+            result["resolver_cache"] = kvs(line)
+        elif line.startswith("AUDIT_MATCH_RESOLVER_CACHE "):
+            result["match_resolver_cache"].append(kvs(line))
+        elif line.startswith("AUDIT_MATCH_CLASSLOAD_TIMINGS "):
+            values = kvs(line)
+            result["match_classload_timings"].append(
+                {"file": values["file"], **{key: int(value) for key, value in values.items() if key != "file"}}
+            )
         elif line.startswith("AUDIT_RESOLVER_STAGE "):
             result["resolver_stages"].append(kvs(line))
         elif line.startswith("AUDIT_CHEAP_RESOLVER_OUTCOMES "):
@@ -216,6 +245,20 @@ def parse_run(log: str) -> dict:
             values = kvs(line)
             key = (values["file"], values["tree"])
             result["resolver"][key] = {k: int(v) for k, v in values.items() if k not in {"file", "tree"}}
+        elif "repeated_hit_factor=" in line and ": requests=" in line:
+            shape, raw_values = line.strip().split(": ", 1)
+            values = kvs(raw_values)
+            result["repeated_requests"].append(
+                {
+                    "shape": shape,
+                    **{
+                        key: int(value.rstrip(","))
+                        for key, value in values.items()
+                        if key not in {"outcomes", "repeated_hit_factor", "known_repeated_hit_factor"}
+                    },
+                    "repeated_hit_factor": float(values["repeated_hit_factor"].rstrip(",")),
+                }
+            )
         elif line.startswith("  "):
             root_match = LOAD_ROOT_RE.match(line)
             if root_match:
@@ -407,10 +450,17 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 stage = row["stage"]
                 calls = int(row["calls"])
                 elapsed_us = int(row["elapsed_us"])
-                resolver_stage_rows.append(f"{run_index}\t{scope}\t{stage}\t{calls}\t{elapsed_us}")
-                total = resolver_stage_totals.setdefault((scope, stage), {"calls": 0, "elapsed_us": 0})
+                elapsed_ns = int(row.get("elapsed_ns", elapsed_us * 1_000))
+                exclusive_ns = int(row.get("exclusive_ns", elapsed_ns))
+                resolver_stage_rows.append(
+                    f"{run_index}\t{scope}\t{stage}\t{calls}\t{elapsed_us}\t{elapsed_ns}\t{exclusive_ns}"
+                )
+                total = resolver_stage_totals.setdefault(
+                    (scope, stage), {"calls": 0, "elapsed_us": 0, "exclusive_ns": 0}
+                )
                 total["calls"] += calls
                 total["elapsed_us"] += elapsed_us
+                total["exclusive_ns"] += exclusive_ns
         for (scope, operation), values in result.get("cheap_resolver", {}).items():
             outcomes = result.get("cheap_resolver_outcomes", {}).get((scope, operation), {})
             row = {**values, **outcomes}
@@ -516,10 +566,86 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         encoding="utf-8",
     )
     (out_dir / "resolver-stages.tsv").write_text(
-        "run\tscope\tstage\tcalls\telapsed_us\n"
+        "run\tscope\tstage\tcalls\telapsed_us\telapsed_ns\texclusive_ns\n"
         + "\n".join(resolver_stage_rows) + ("\n" if resolver_stage_rows else ""),
         encoding="utf-8",
     )
+    (out_dir / "resolver-profile.tsv").write_text(
+        "run\tmember_lookups\tsuccesses\tmisses\terrors\trollbacks\n" + "".join(
+            f"{run_index}\t" + "\t".join(
+                str(run.get("resolver_profile", {}).get(key, "not_captured"))
+                for key in ("member_lookups", "successes", "misses", "errors", "rollbacks")
+            ) + "\n"
+            for run_index, run in enumerate(runs, 1)
+        ), encoding="utf-8")
+    (out_dir / "match-resolver-profile.tsv").write_text(
+        "run\tfile\tmember_lookups\tsuccesses\tmisses\terrors\trollbacks\n" + "".join(
+            f"{run_index}\t{row.get('file', 'not_captured')}\t" + "\t".join(
+                str(row.get(key, "not_captured"))
+                for key in ("member_lookups", "successes", "misses", "errors", "rollbacks")
+            ) + "\n"
+            for run_index, run in enumerate(runs, 1)
+            for row in run.get("match_resolver_profiles", [])
+        ), encoding="utf-8")
+    root_rows = ["run\tscope\troot\tresolver_calls\tstable_key_observations\tsuccesses\tmisses\terrors\trollbacks\tunique_keys\trepeated_keys\tretry_after_failed_lookup\ttop_repeated"]
+    root_phase_rows = ["run\tscope\troot\tstage\tcalls\telapsed_ns\texclusive_ns"]
+    cache_rows = ["run\t" + "\t".join(sorted({key for run in runs for key in run.get("resolver_cache", {})}))]
+    cache_keys = cache_rows[0].split("\t")[1:]
+    for run_index, run in enumerate(runs, 1):
+        for row in run.get("resolver_roots", []):
+            root_rows.append(f"{run_index}\t" + "\t".join(str(row.get(key, "not_captured")) for key in (
+                "scope", "root", "calls", "stable_key_observations", "successes", "misses", "errors", "rollbacks",
+                "unique_keys", "repeated_keys", "retry_after_failed_lookup", "top_repeated",
+            )))
+        for row in run.get("resolver_root_phases", []):
+            root_phase_rows.append(f"{run_index}\t" + "\t".join(str(row.get(key, "not_captured")) for key in (
+                "scope", "root", "stage", "calls", "elapsed_ns", "exclusive_ns",
+            )))
+    for run_index, run in enumerate(runs, 1):
+        cache_rows.append(str(run_index) + "\t" + "\t".join(run.get("resolver_cache", {}).get(key, "not_captured") for key in cache_keys))
+    (out_dir / "resolver-roots.tsv").write_text("\n".join(root_rows) + "\n", encoding="utf-8")
+    (out_dir / "resolver-root-phases.tsv").write_text("\n".join(root_phase_rows) + "\n", encoding="utf-8")
+    (out_dir / "resolver-cache.tsv").write_text("\n".join(cache_rows) + "\n", encoding="utf-8")
+    match_cache_keys = sorted({key for run in runs for row in run.get("match_resolver_cache", []) for key in row if key != "file"})
+    match_cache_rows = ["run\tfile\t" + "\t".join(match_cache_keys)]
+    for run_index, run in enumerate(runs, 1):
+        for row in run.get("match_resolver_cache", []):
+            match_cache_rows.append(
+                f"{run_index}\t{row.get('file', 'not_captured')}\t"
+                + "\t".join(row.get(key, "not_captured") for key in match_cache_keys)
+            )
+    (out_dir / "match-resolver-cache.tsv").write_text(
+        "\n".join(match_cache_rows) + "\n", encoding="utf-8"
+    )
+    (out_dir / "repeated-requests.tsv").write_text(
+        "run\tshape\trequests\tknown_requests\tdistinct_keys\tunknown_identity_requests\towners\tnames\tfiles\trepeated_hit_factor\n"
+        + "".join(
+            f"{run_index}\t{row['shape']}\t" + "\t".join(
+                str(row.get(key, "not_captured"))
+                for key in ("requests", "known_requests", "distinct_keys", "unknown_identity_requests", "owners", "names", "files", "repeated_hit_factor")
+            ) + "\n"
+            for run_index, run in enumerate(runs, 1)
+            for row in run.get("repeated_requests", [])
+        ), encoding="utf-8")
+    (out_dir / "classload-timings.tsv").write_text(
+        "run\tresource_lookup_ns\tclassfile_decode_ns\ttasty_decode_ns\tload_uncached_inclusive_ns\n"
+        + "".join(
+            f"{run_index}\t" + "\t".join(
+                str(run.get("classload_timings", {}).get(key, "not_captured"))
+                for key in ("resource_lookup_ns", "classfile_decode_ns", "tasty_decode_ns", "load_uncached_inclusive_ns")
+            ) + "\n"
+            for run_index, run in enumerate(runs, 1)
+        ), encoding="utf-8")
+    (out_dir / "match-classload-timings.tsv").write_text(
+        "run\tfile\tresource_lookup_ns\tclassfile_decode_ns\ttasty_decode_ns\tload_uncached_inclusive_ns\n"
+        + "".join(
+            f"{run_index}\t{row['file']}\t" + "\t".join(
+                str(row.get(key, "not_captured"))
+                for key in ("resource_lookup_ns", "classfile_decode_ns", "tasty_decode_ns", "load_uncached_inclusive_ns")
+            ) + "\n"
+            for run_index, run in enumerate(runs, 1)
+            for row in run.get("match_classload_timings", [])
+        ), encoding="utf-8")
     (out_dir / "methods.tsv").write_text("\n".join(method_rows) + "\n", encoding="utf-8")
     outcome_rows = ["run\tfile\ttree\tresult"] + [
         f"{run_index}\t{path}\t{tree}\t{result}"
@@ -646,8 +772,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         f"- Input page-cache measurements: {input_cache_summary}. Warm mode reads the selected Scala sources, pinned Scala JARs, and JDK jmods before each sample, then records residency with `fincore`. Cold mode evicts only these selected inputs with POSIX_FADV_DONTNEED; it does not clear the system-wide cache.",
         "- `runner_overhead_ms` is cargo wall time minus the test's measured audit setup and source loop. It includes Cargo/test startup, sampler overhead, and test-side log emission. Captured bytes plus the Python log read/write times are recorded in `run-timings.tsv`; the cost of emitting each diagnostic line remains inside the process timing.",
         f"- Process measurements: child CPU user/system mean {statistics.mean(cpu_user_s):.2f}/{statistics.mean(cpu_system_s):.2f} s; maximum sampled aggregate Cargo-process-tree RSS {max(sampled_rss, default=0) / (1024 * 1024):.1f} MiB. RSS sums per-process resident sets and can double-count shared mappings; 100 ms sampling may miss short peaks. CPU comes from child process accounting.",
-        "- Classpath setup includes JDK module and Scala JAR adapter construction. No artifact decode timing is reported separately: class/module completion timers are inclusive at the resolver boundary.",
-        "- Cache evidence: classloader profiles report completed-cache hits, full completions, identity shell creation/reuse, and hierarchy requests. They do not expose all lookup cache misses; those are not inferred.",
+        ("- Classpath setup includes JDK module and Scala JAR adapter construction. Full mode records resource lookup and ClassFile/TASTy decode intervals in `classload-timings.tsv`; those counters only cover classloads represented by dependency observations. Resolver phase and classloader timers are inclusive and may overlap, so do not add them as disjoint CPU intervals." if not timing_only else "- Classpath setup includes JDK module and Scala JAR adapter construction. Classloader resource/decode timings are collected only in full mode."),
+        "- Cache evidence: classloader profiles report completed-cache hits, full completions, identity shell creation/reuse, and hierarchy requests. Resolver profiles additionally report request outcomes and repeated key counts by request shape. They do not expose all lookup cache misses; those are not inferred.",
         "- `audit-wrapper.tsv` separates full AuditResolver wrapper time from delegated resolver time; `exclusive_us` includes detailed observation work. Semantic-only mode bypasses audit collection; cheap-counters mode records only fixed operation/outcome counters and timings in `cheap-resolver.tsv`. Rollback detail is available only in full mode.",
         "- `classpath-resources.tsv` counts logical resource responses and returned bytes, not physical JAR reads/decompressions: the classloader interface does not expose those physical events. `inner_wall_us` measures the aggregate ClassPathEntry lookup interval only in detailed mode; cached negative requests are counted separately.",
         "- Semantic/report ratio compares `typer_setup + typing` against generation of all profile TSV/Markdown artifacts. It does not time the full-corpus normalized report writer, which this focused run does not invoke.",
@@ -671,7 +797,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     phase_sum = sum(phase_totals.values())
     for phase, total in sorted(phase_totals.items(), key=lambda item: (-item[1], item[0])):
         lines.append(f"| `{phase}` | {total} | {100 * total / max(1, phase_sum):.1f}% |")
-    lines += ["", "## Resolver operation families", "", ("Detailed resolver counters and timings are not captured outside full mode; cheap boundary counters, when selected, are listed separately." if timing_only else "Durations measure delegated resolver calls; nested class/TASTy loading remains inclusive inside those calls. AuditResolver wrapper time is reported separately."), "", "| Operation | Calls | Delegated ms |", "| --- | ---: | ---: |"]
+    lines += ["", "## Resolver operation families", "", ("Detailed resolver counters and timings are not captured outside full mode; cheap boundary counters, when selected, are listed separately." if timing_only else "Durations measure delegated resolver calls; nested class/TASTy loading remains inclusive inside those calls. AuditResolver wrapper time is reported separately. Full mode also records aggregate resolver phases, member outcomes, repeated request shapes, and classloader resource/decode timings in sidecar TSVs."), "", "| Operation | Calls | Delegated ms |", "| --- | ---: | ---: |"]
     resolver_sort_key = lambda item: (item[1][1] is None and item[1][2] is None, -(item[1][2] if item[1][2] is not None else (item[1][1] or 0) * 1000), item[0])
     for operation, (calls, millis, micros) in sorted(resolver_operations.items(), key=resolver_sort_key):
         calls_text = "not captured" if calls is None else str(calls)
@@ -738,9 +864,9 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 aggregate[key] += value
     for operation, values in sorted(wrapper_totals.items(), key=lambda item: (-item[1].get("wall_us", 0), item[0])):
         lines.append(f"| `{operation}` | {values.get('calls', 0)} | {values.get('wall_us', 0) / 1000:.3f} | {values.get('delegated_us', 0) / 1000:.3f} | {values.get('exclusive_us', 0) / 1000:.3f} |")
-    lines += ["", "## Full-mode AuditResolver subphases", "", "These separately timed wrapper windows attribute request preparation/identity, result classification, event collection, and transaction bookkeeping. They are inclusive across resolver operations that can nest; do not sum them with delegated resolver intervals or wrapper totals.", "", "| Scope | Stage | Calls | Elapsed ms |", "| --- | --- | ---: | ---: |"]
+    lines += ["", "## Full-mode AuditResolver subphases", "", "These separately timed wrapper windows attribute request preparation/identity, result classification, event collection, and transaction bookkeeping. They are inclusive across resolver operations that can nest; do not sum them with delegated resolver intervals or wrapper totals.", "", "| Scope | Stage | Calls | Elapsed ms | Exclusive ms |", "| --- | --- | ---: | ---: | ---: |"]
     for (scope, stage), values in sorted(resolver_stage_totals.items(), key=lambda row: (-row[1]["elapsed_us"], row[0])):
-        lines.append(f"| `{scope}` | `{stage}` | {values['calls']} | {values['elapsed_us'] / 1000:.3f} |")
+        lines.append(f"| `{scope}` | `{stage}` | {values['calls']} | {values['elapsed_us'] / 1000:.3f} | {values['exclusive_ns'] / 1_000_000:.3f} |")
     lines += ["", "## Largest classpath request roots", "", "Existing resolver observations sorted these by completed-class fanout; paths and method/tree identities are unchanged.", "", "| Root | File and method | Classes touched | Completions | Cache hits |", "| --- | --- | ---: | ---: | ---: |"]
     sorted_roots = sorted(load_root_rows, key=lambda item: (-item[1]["distinct_classes"], item[1]["root"], item[1]["file"], item[1]["method"], item[0]))
     lines += [
@@ -766,12 +892,12 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     if not timing_only:
         lines += [
         "",
-        "All three hot roots spend nearly all observed method time in delegated `resolve_member`; this bounded profile therefore supports a focused follow-up that attributes resolver-internal work (prefix/package traversal, classpath lookup, and member selection) per request family. Recheck repeated request keys before proposing request-local reuse. Do not add cross-session semantic caches or claim an optimization speedup from this baseline.",
+        "All three hot roots spend most observed method-attempt time in delegated member resolution. The largest nested interval is module completion, including classloader decode and resource work; exclusive target-selection time is small. Full-mode sidecars retain per-root exclusive/inclusive stages, stable-key outcomes, cache/completion counts, and exact method/match identities. Use `resolver-root-phases.tsv`, `resolver-roots.tsv`, `resolver-cache.tsv`, `match-resolver-cache.tsv`, and `resolver-stages.tsv` for those records. These timings stop at first blockers, overlap where marked inclusive, and do not establish an optimization speedup or justify cross-session semantic caching.",
         ]
     lines += [
         "",
         ("Resolver per-method durations are emitted in microseconds. A zero call count means that operation did not run for that method; zero elapsed time with calls is below timer resolution, not proof of zero cost." if not timing_only else "Per-method detailed resolver attribution is not collected in semantic-only or cheap-counters mode."),
-        ("The current implementation cannot attribute classfile parsing, TASTy decoding, shell creation, and semantic completion as disjoint CPU intervals. Do not add their inclusive timers together or infer a safe cross-store semantic cache from reuse counts." if not timing_only else "Classloader load and AuditResolver detailed observations are full-mode-only; cheap counters contain resolver boundary measurements only."),
+        ("Classloader decode intervals are separated from resource lookup, but nested dependencies and semantic projection may still overlap with inclusive load timings. Shell creation and semantic completion are represented by counts, not disjoint CPU intervals; do not add inclusive timers or infer a safe cross-store cache from reuse counts." if not timing_only else "Classloader load and AuditResolver detailed observations are full-mode-only; cheap counters contain resolver boundary measurements only."),
         "",
     ]
     (out_dir / "resolver-operations.tsv").write_text(
@@ -894,6 +1020,7 @@ def main() -> int:
                 if not log_path.is_file():
                     fail(f"no saved profile log: {log_path}")
                 parsed = parse_run(log_path.read_text(encoding="utf-8"))
+                parsed["cargo_wall_ms"] = int(row["cargo_wall_ms"])
                 parsed["process_metrics"] = {
                     "child_cpu_user_s": float(row.get("child_cpu_user_s", "nan")),
                     "child_cpu_system_s": float(row.get("child_cpu_system_s", "nan")),
