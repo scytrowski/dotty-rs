@@ -1979,6 +1979,30 @@ fn unsupported_parameters_are_rejected_without_changing_linear_analysis() {
 }
 
 #[test]
+fn float_and_double_parameters_are_rejected_at_cfg_entry() {
+    let mut sequence = CodeSequence::new();
+    sequence.instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+
+    for (descriptor, parameter, actual) in [
+        ("(F)V", 0, ValueKind::Float),
+        ("(D)V", 0, ValueKind::Double),
+        ("(ID)V", 1, ValueKind::Double),
+    ] {
+        assert!(
+            matches!(
+                CfgCodeAnalyzer::analyze(&graph, descriptor, true, &ConstantPool::default()),
+                Err(AnalysisError::UnsupportedFlowParameter {
+                    parameter: actual_parameter,
+                    actual: actual_kind,
+                }) if actual_parameter == parameter && actual_kind == actual
+            ),
+            "{descriptor} must report the first unsupported FP parameter"
+        );
+    }
+}
+
+#[test]
 fn long_parameter_branch_join_uses_physical_slots_and_one_frame_entry() {
     let mut sequence = CodeSequence::new();
     let otherwise = sequence.new_label().unwrap();

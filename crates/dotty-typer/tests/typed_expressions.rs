@@ -116,6 +116,83 @@ fn types_a_small_source_program_with_no_resolver_or_jdk_fixture() {
 }
 
 #[test]
+fn source_float_and_double_literals_keep_exact_bits_and_canonical_types() {
+    let text = "class Floating:\n  def floatZero(): Float = 0.0f\n  def floatOne(): Float = 1.0f\n  def floatValue(): Float = 1.5f\n  def doubleZero(): Double = 0.0\n  def doubleOne(): Double = 1.0\n  def doubleValue(): Double = 3.5\n";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "floating-literals.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let methods = parsed
+        .ast
+        .iter()
+        .filter_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            Some((
+                store
+                    .names
+                    .resolve(definition.name.as_name().text())
+                    .to_owned(),
+                index.symbol_at(source, tree).unwrap(),
+                definition.rhs?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(methods.len(), 6);
+
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    );
+    for (name, method, rhs) in methods {
+        let (expected, expected_type) = match name.as_str() {
+            "floatZero" => (dotty_core::Constant::float(0.0), definitions.float),
+            "floatOne" => (dotty_core::Constant::float(1.0), definitions.float),
+            "floatValue" => (dotty_core::Constant::float(1.5), definitions.float),
+            "doubleZero" => (dotty_core::Constant::double(0.0), definitions.double),
+            "doubleOne" => (dotty_core::Constant::double(1.0), definitions.double),
+            "doubleValue" => (dotty_core::Constant::double(3.5), definitions.double),
+            _ => unreachable!("unexpected fixture method {name}"),
+        };
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer.type_expression(rhs, context).unwrap();
+        let TreeKind::Literal(literal) = &typer.typed_ast().get(typed).kind else {
+            panic!("{name} should produce a typed literal")
+        };
+        assert_eq!(literal.value, expected, "{name} literal bits");
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(typed).ty)
+                .unwrap(),
+            expected_type,
+            "{name} canonical widened type"
+        );
+    }
+}
+
+#[test]
 fn source_null_literal_uses_the_canonical_null_type() {
     let source_text = NULL_TYPING_SOURCE;
     let source = SourceId::from_index(1469);
