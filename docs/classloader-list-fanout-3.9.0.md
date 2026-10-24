@@ -11,6 +11,8 @@ The focused, serial profile uses the pinned Scala checkout at
 Temurin JDK 21.0.8. It selects only the three library source files in
 [`typer-list-fanout-manifest-3.9.0.tsv`](typer-list-fanout-manifest-3.9.0.tsv)
 and takes three warm runs. It does not run the full source corpus.
+The measurements below used dotty-rs source revision
+`59f5d14622c219ac175da370b7c0c1dac2c57e2a`.
 
 ```sh
 SCALA39_ROOT=/path/to/scala-3.9.0 \
