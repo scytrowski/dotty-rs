@@ -4625,6 +4625,87 @@ fn public_body_accessor_metadata_rejects_user_getter_collisions() {
 }
 
 #[test]
+fn public_body_var_metadata_rejects_user_setter_collisions() {
+    with_source(
+        "class BodyCollision { var value: Int = 1; def value_=(next: Int): Unit = {} }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "BodyCollision");
+            typer.complete_symbol(class).unwrap();
+            let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, "value");
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let field_context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, field_context, field_type)
+                .unwrap();
+            let proof = JvmPublicBodyFieldSourceProof::from_source(
+                class,
+                field,
+                source,
+                declaration,
+                initializer,
+                ast,
+                index,
+                typer.source_typed_index(),
+                typer.typed_ast(),
+                typer.store(),
+            )
+            .unwrap();
+            let (method, method_tree, method_rhs) =
+                method_tree_and_rhs(ast, index, source, typer, class, "value_=");
+            let TreeKind::DefDef(method_definition) = &ast.get(method_tree).kind else {
+                panic!("setter collision source is a method");
+            };
+            let parameters = method_definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .map(|tree| index.symbol_at(source, *tree).unwrap())
+                .collect();
+            typer.complete_symbol(method).unwrap();
+            let method_context = typer.expression_context_for(method).unwrap();
+            let method_body = typer.type_expression(method_rhs, method_context).unwrap();
+            let result = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: vec![JvmMethodPlan {
+                        method,
+                        parameters,
+                        locals: Vec::new(),
+                        body: Some(method_body),
+                    }],
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPublic(proof),
+                        initializer: Some(initializer),
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            }
+            .metadata(definitions);
+            assert!(matches!(
+                result,
+                Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                    class: found_class,
+                    field: found_field,
+                    previous,
+                    ref name,
+                    ref descriptor,
+                }) if found_class == class
+                    && found_field == field
+                    && previous == method
+                    && name == "value_$eq"
+                    && descriptor == "(I)V"
+            ));
+        },
+    );
+}
+
+#[test]
 fn public_body_field_initializers_preserve_earlier_self_and_forward_targets() {
     with_source(
         "class InitReads:\n  val earlier: Int = 1\n  val copied: Int = earlier\n  val self: Int = this.self\n  val forward: Int = later\n  val later: Int = 2\n",

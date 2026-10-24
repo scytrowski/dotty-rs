@@ -174,12 +174,6 @@ pub(super) fn emit_class(
     }
 
     for accessor in metadata.accessors() {
-        if matches!(
-            accessor.origin(),
-            crate::JvmAccessorOrigin::ClassBodyField(_)
-        ) {
-            continue;
-        }
         let getter = accessor.getter();
         let mut code = CodeBuilder::new();
         code.aload(0)
@@ -220,6 +214,13 @@ pub(super) fn emit_class(
             .map_err(|error| {
                 class_file_error(class_symbol, Some(accessor.source_field()), error)
             })?;
+
+        if matches!(
+            accessor.origin(),
+            crate::JvmAccessorOrigin::ClassBodyField(_)
+        ) {
+            continue;
+        }
 
         if let Some(setter) = accessor.setter() {
             let mut code = CodeBuilder::new();

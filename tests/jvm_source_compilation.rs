@@ -8358,6 +8358,48 @@ fn emitted_method_code<'a>(class: &ClassFile<'a>, name: &str) -> &'a [u8] {
     code.code
 }
 
+fn assert_emitted_getter(
+    class: &ClassFile<'_>,
+    method_name: &str,
+    method_descriptor: &str,
+    field_name: &str,
+    field_descriptor: &str,
+    return_opcode: u8,
+    max_stack: u16,
+) {
+    let methods = class
+        .methods
+        .iter()
+        .filter(|method| {
+            class.constant_pool.utf8(method.name_index) == Ok(method_name)
+                && class.constant_pool.utf8(method.descriptor_index) == Ok(method_descriptor)
+        })
+        .collect::<Vec<_>>();
+    let [method] = methods.as_slice() else {
+        panic!("expected exactly one {method_name}{method_descriptor} getter");
+    };
+    assert!(method.access_flags.is_public());
+    let [Attribute::Code(code)] = method.attributes.as_slice() else {
+        panic!("getter {method_name} has one Code attribute");
+    };
+    assert_eq!(code.code.len(), 5);
+    assert_eq!(code.code[0], 0x2a, "getter starts with aload_0");
+    assert_eq!(code.code[1], 0xb4, "getter reads private backing field");
+    assert_eq!(code.code[4], return_opcode);
+    assert_eq!(code.max_stack, max_stack);
+    assert_eq!(code.max_locals, 1);
+    assert_field_reference_sequence(
+        class,
+        code.code,
+        &[(
+            0xb4,
+            class.constant_pool.class_name(class.this_class).unwrap(),
+            field_name,
+            field_descriptor,
+        )],
+    );
+}
+
 fn code_max_locals(class: &ClassFile<'_>, name: &str) -> u16 {
     let method = class
         .methods
@@ -18470,8 +18512,8 @@ fn verify_private_fields_with_jdk(output_directory: &Path) {
 }
 
 #[test]
-fn public_body_fields_lower_to_source_ordered_constructor_stores() {
-    let source_text = "class BodyOnly:\n  val seed: Int = 10\n  var enabled: Boolean = true\n  val ratio: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  private val copied: Int = initial";
+fn public_body_fields_initialize_and_emit_verified_getters() {
+    let source_text = "class BodyOnly:\n  val seed: Int = 10\n  var enabled: Boolean = true\n  val ratio: Double = 1.5\n  val score: Float = -2.25f\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  private val copied: Int = initial\n\nclass Holder(value: Counter):\n  val selected: Counter = value";
     let output = TestOutputDirectory::new("public-body-field-initialization");
     let mut observed = false;
     let mut observe = |ast: &AstArena<Untyped>,
@@ -18494,8 +18536,8 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
         ) in [
             (
                 "BodyOnly",
-                &["seed", "enabled", "ratio"][..],
-                &["seed", "enabled", "ratio"][..],
+                &["seed", "enabled", "ratio", "score"][..],
+                &["seed", "enabled", "ratio", "score"][..],
                 0,
                 0,
             ),
@@ -18506,6 +18548,7 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
                 1,
                 1,
             ),
+            ("Holder", &["selected"][..], &["selected"][..], 0, 0),
         ] {
             let class = audit_class_named(unit, class_name);
             let plan = unit
@@ -18640,8 +18683,10 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
                     "seed" => "I",
                     "enabled" => "Z",
                     "ratio" => "D",
+                    "score" => "F",
                     "initial" => "I",
                     "current" => "J",
+                    "selected" => "LCounter;",
                     _ => panic!("source field has a covered primitive type"),
                 };
                 assert_eq!(accessor.field_descriptor(), expected_descriptor);
@@ -18854,7 +18899,7 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
         observed,
         "plan validation runs before the emission boundary"
     );
-    assert_eq!(output.class_files().len(), 2);
+    assert_eq!(output.class_files().len(), 3);
     let second_output = TestOutputDirectory::new("public-body-field-initialization-second");
     let second_artifacts = compile_source_batch(
         source_text,
@@ -18864,6 +18909,7 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
         SourceUnitCardinality::AtLeastTwo,
     )
     .expect("a fresh frontend session emits the same body-field classes");
+    assert_eq!(first_artifacts.len(), 3);
     assert_eq!(first_artifacts.len(), second_artifacts.len());
     assert!(
         first_artifacts
@@ -18884,6 +18930,7 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
     body_only
         .validate_references()
         .expect("valid BodyOnly references");
+    assert_eq!(body_only.version.major, JVM_CLASSFILE_MAJOR_VERSION);
     assert_field_reference_sequence(
         &body_only,
         emitted_method_code(&body_only, "<init>"),
@@ -18891,6 +18938,7 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
             (0xb5, "BodyOnly", "seed", "I"),
             (0xb5, "BodyOnly", "enabled", "Z"),
             (0xb5, "BodyOnly", "ratio", "D"),
+            (0xb5, "BodyOnly", "score", "F"),
         ],
     );
     let body_only_constructor = emitted_method_code(&body_only, "<init>");
@@ -18914,6 +18962,7 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
     counter
         .validate_references()
         .expect("valid Counter references");
+    assert_eq!(counter.version.major, JVM_CLASSFILE_MAJOR_VERSION);
     assert_field_reference_sequence(
         &counter,
         emitted_method_code(&counter, "<init>"),
@@ -18925,6 +18974,15 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
             (0xb5, "Counter", "copied", "I"),
         ],
     );
+    let holder_bytes =
+        fs::read(output.path().join("Holder.class")).expect("read emitted Holder class file");
+    let mut holder_reader = Reader::new(&holder_bytes);
+    let holder = ClassFile::decode(&mut holder_reader).expect("decode Holder class file");
+    assert!(holder_reader.is_at_end());
+    holder
+        .validate_references()
+        .expect("valid Holder references");
+    assert_eq!(holder.version.major, JVM_CLASSFILE_MAJOR_VERSION);
     let counter_constructor = emitted_method_code(&counter, "<init>");
     assert_eq!(
         decode_subset_instructions(counter_constructor)[..2],
@@ -18944,18 +19002,53 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
             .iter()
             .filter_map(|method| body_only.constant_pool.utf8(method.name_index).ok())
             .collect::<Vec<_>>(),
-        ["<init>"]
+        ["<init>", "seed", "enabled", "ratio", "score"]
     );
-    let [body_only_method] = body_only.methods.as_slice() else {
-        panic!("BodyOnly has exactly one generated constructor");
-    };
-    assert!(body_only_method.access_flags.is_public());
+    let body_only_constructor = body_only
+        .methods
+        .iter()
+        .find(|method| body_only.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .expect("BodyOnly has one generated constructor");
+    assert!(body_only_constructor.access_flags.is_public());
     assert_eq!(
         body_only
             .constant_pool
-            .utf8(body_only_method.descriptor_index),
+            .utf8(body_only_constructor.descriptor_index),
         Ok("()V")
     );
+    let counter_method_names = counter
+        .methods
+        .iter()
+        .filter_map(|method| counter.constant_pool.utf8(method.name_index).ok())
+        .collect::<Vec<_>>();
+    assert_eq!(counter_method_names, ["<init>", "id", "initial", "current"]);
+    let holder_method_names = holder
+        .methods
+        .iter()
+        .filter_map(|method| holder.constant_pool.utf8(method.name_index).ok())
+        .collect::<Vec<_>>();
+    assert_eq!(holder_method_names, ["<init>", "selected"]);
+
+    for (field_name, descriptor, is_final) in [
+        ("seed", "I", true),
+        ("enabled", "Z", false),
+        ("ratio", "D", true),
+        ("score", "F", true),
+    ] {
+        let fields = body_only
+            .fields
+            .iter()
+            .filter(|field| {
+                body_only.constant_pool.utf8(field.name_index) == Ok(field_name)
+                    && body_only.constant_pool.utf8(field.descriptor_index) == Ok(descriptor)
+            })
+            .collect::<Vec<_>>();
+        let [field] = fields.as_slice() else {
+            panic!("expected exactly one {field_name}:{descriptor} backing field");
+        };
+        assert!(field.access_flags.is_private());
+        assert_eq!(field.access_flags.is_final(), is_final);
+    }
     let counter_constructors = counter
         .methods
         .iter()
@@ -18969,18 +19062,68 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
             .utf8(counter_constructors[0].descriptor_index),
         Ok("(I)V")
     );
-    assert!(!counter.methods.iter().any(|method| {
-        matches!(
-            counter.constant_pool.utf8(method.name_index),
-            Ok("initial" | "current" | "enabled" | "ratio" | "seed")
-        )
-    }));
+    for (field_name, descriptor, is_final) in [("initial", "I", true), ("current", "J", false)] {
+        let fields = counter
+            .fields
+            .iter()
+            .filter(|field| {
+                counter.constant_pool.utf8(field.name_index) == Ok(field_name)
+                    && counter.constant_pool.utf8(field.descriptor_index) == Ok(descriptor)
+            })
+            .collect::<Vec<_>>();
+        let [field] = fields.as_slice() else {
+            panic!("expected exactly one {field_name}:{descriptor} backing field");
+        };
+        assert!(field.access_flags.is_private());
+        assert_eq!(field.access_flags.is_final(), is_final);
+    }
+    let selected_fields = holder
+        .fields
+        .iter()
+        .filter(|field| {
+            holder.constant_pool.utf8(field.name_index) == Ok("selected")
+                && holder.constant_pool.utf8(field.descriptor_index) == Ok("LCounter;")
+        })
+        .collect::<Vec<_>>();
+    let [selected_field] = selected_fields.as_slice() else {
+        panic!("Holder has exactly one private Counter backing field");
+    };
+    assert!(selected_field.access_flags.is_private());
+    assert!(selected_field.access_flags.is_final());
+
+    for (class, getter, descriptor, field_name, field_descriptor, return_opcode, stack) in [
+        (&body_only, "seed", "()I", "seed", "I", 0xac, 1),
+        (&body_only, "enabled", "()Z", "enabled", "Z", 0xac, 1),
+        (&body_only, "ratio", "()D", "ratio", "D", 0xaf, 2),
+        (&body_only, "score", "()F", "score", "F", 0xae, 1),
+        (&counter, "initial", "()I", "initial", "I", 0xac, 1),
+        (&counter, "current", "()J", "current", "J", 0xad, 2),
+        (
+            &holder,
+            "selected",
+            "()LCounter;",
+            "selected",
+            "LCounter;",
+            0xb0,
+            1,
+        ),
+    ] {
+        assert_emitted_getter(
+            class,
+            getter,
+            descriptor,
+            field_name,
+            field_descriptor,
+            return_opcode,
+            stack,
+        );
+    }
 
     if require_jdk_or_skip() {
         let harness_path = output.path().join("BodyFieldsHarness.java");
         fs::write(
             &harness_path,
-            "import java.lang.reflect.Field;\npublic final class BodyFieldsHarness {\n  private static Object read(Object instance, String name) throws Exception { Field field = instance.getClass().getDeclaredField(name); field.setAccessible(true); return field.get(instance); }\n  public static void main(String[] args) throws Exception {\n    BodyOnly body = new BodyOnly();\n    if (!Boolean.TRUE.equals(read(body, \"enabled\"))) throw new AssertionError(\"enabled\");\n    if (((Integer) read(body, \"seed\")) != 10) throw new AssertionError(\"seed\");\n    if (Double.doubleToRawLongBits((Double) read(body, \"ratio\")) != Double.doubleToRawLongBits(1.5d)) throw new AssertionError(\"ratio bits\");\n    Counter first = new Counter(7); Counter second = new Counter(13);\n    if (((Integer) read(first, \"id\")) != 7 || ((Integer) read(first, \"initial\")) != 10 || ((Long) read(first, \"current\")) != 0L || ((Integer) read(first, \"copied\")) != 10) throw new AssertionError(\"first counter values\");\n    if (((Integer) read(second, \"id\")) != 13 || ((Integer) read(second, \"copied\")) != 10) throw new AssertionError(\"independent instances\");\n  }\n}\n",
+            "public final class BodyFieldsHarness {\n  public static void main(String[] args) {\n    BodyOnly body = new BodyOnly();\n    if (body.seed() != 10 || !body.enabled()) throw new AssertionError(\"BodyOnly getters\");\n    if (Double.doubleToRawLongBits(body.ratio()) != Double.doubleToRawLongBits(1.5d)) throw new AssertionError(\"ratio bits\");\n    if (Float.floatToRawIntBits(body.score()) != Float.floatToRawIntBits(-2.25f)) throw new AssertionError(\"score bits\");\n    Counter first = new Counter(7); Counter second = new Counter(13);\n    if (first.id() != 7 || first.initial() != 10 || first.current() != 0L) throw new AssertionError(\"first counter getters\");\n    if (second.id() != 13 || second.initial() != 10 || second.current() != 0L) throw new AssertionError(\"independent counter getters\");\n    Holder holder = new Holder(first); if (holder.selected() != first) throw new AssertionError(\"reference getter\");\n  }\n}\n",
         )
         .expect("write body-field harness");
         let javac = Command::new("javac")
