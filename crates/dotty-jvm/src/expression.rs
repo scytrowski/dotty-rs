@@ -359,6 +359,12 @@ fn append_method_return(
                 JvmType::Long => code.lreturn(),
                 JvmType::Int | JvmType::Boolean => code.ireturn(),
                 JvmType::Reference(_) => unreachable!("reference returns handled above"),
+                JvmType::Float | JvmType::Double => {
+                    return Err(JvmCodegenError::UnsupportedTypedExpression {
+                        tree: body,
+                        node: "floating-point method return lowering",
+                    });
+                }
             }
             .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
         }
@@ -493,6 +499,12 @@ fn lower_leaf(
                     JvmType::Long => code.lload(usize::from(local.slot())),
                     JvmType::Int | JvmType::Boolean => code.iload(usize::from(local.slot())),
                     JvmType::Reference(_) => unreachable!("references use aload above"),
+                    JvmType::Float | JvmType::Double => {
+                        return Err(JvmCodegenError::UnsupportedTypedExpression {
+                            tree: tree_id,
+                            node: "floating-point local load",
+                        });
+                    }
                 };
                 load.map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -531,6 +543,12 @@ fn lower_leaf(
                 JvmType::Reference(_) => code.aload(usize::from(parameter.slot())),
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(parameter.slot())),
                 JvmType::Long => code.lload(usize::from(parameter.slot())),
+                JvmType::Float | JvmType::Double => {
+                    return Err(JvmCodegenError::UnsupportedTypedExpression {
+                        tree: tree_id,
+                        node: "floating-point parameter load",
+                    });
+                }
             }
             .map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
@@ -639,6 +657,14 @@ fn parameter_value_type(
                     found: None,
                 },
             )?
+        }
+        JvmType::Float | JvmType::Double => {
+            return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
+                tree,
+                parameter: symbol,
+                expected: parameter.ty(),
+                found: None,
+            });
         }
     };
     if found != parameter.ty() {
@@ -1320,6 +1346,12 @@ fn emit_assignment(
                 JvmType::Long => code.lstore(usize::from(local.slot())),
                 JvmType::Int | JvmType::Boolean => code.istore(usize::from(local.slot())),
                 JvmType::Reference(_) => unreachable!("references use astore above"),
+                JvmType::Float | JvmType::Double => {
+                    return Err(JvmCodegenError::UnsupportedTypedExpression {
+                        tree: tree_id,
+                        node: "floating-point local store",
+                    });
+                }
             };
             store.map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
@@ -1511,18 +1543,34 @@ fn emit_field_assignment(
                 JvmType::Reference(_) => code.astore(value_slot),
                 JvmType::Int | JvmType::Boolean => code.istore(value_slot),
                 JvmType::Long => code.lstore(value_slot),
+                JvmType::Float | JvmType::Double => {
+                    return Err(JvmCodegenError::UnsupportedTypedExpression {
+                        tree: tree_id,
+                        node: "floating-point field store",
+                    });
+                }
             };
-            store_value
+            let code = store_value
                 .and_then(|code| code.aload(receiver_slot))
-                .and_then(|code| match found {
-                    JvmType::Reference(_) => code.aload(value_slot),
-                    JvmType::Int | JvmType::Boolean => code.iload(value_slot),
-                    JvmType::Long => code.lload(value_slot),
-                })
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
                     error,
                 })?;
+            let code = match found {
+                JvmType::Reference(_) => code.aload(value_slot),
+                JvmType::Int | JvmType::Boolean => code.iload(value_slot),
+                JvmType::Long => code.lload(value_slot),
+                JvmType::Float | JvmType::Double => {
+                    return Err(JvmCodegenError::UnsupportedTypedExpression {
+                        tree: tree_id,
+                        node: "floating-point field store",
+                    });
+                }
+            }
+            .map_err(|error| JvmCodegenError::CodeBuilder {
+                tree: tree_id,
+                error,
+            })?;
             code.putfield(
                 class.identity().internal_name(),
                 field_metadata.name(),
@@ -1774,6 +1822,12 @@ fn emit_local_declaration(
             JvmType::Long => code.lstore(usize::from(local.slot())),
             JvmType::Int | JvmType::Boolean => code.istore(usize::from(local.slot())),
             JvmType::Reference(_) => unreachable!("references use astore above"),
+            JvmType::Float | JvmType::Double => {
+                return Err(JvmCodegenError::UnsupportedTypedExpression {
+                    tree: declaration,
+                    node: "floating-point local initializer",
+                });
+            }
         };
         store.map_err(|error| JvmCodegenError::CodeBuilder {
             tree: declaration,
@@ -3794,6 +3848,12 @@ fn emit_return(
                     JvmType::Reference(_) => code.areturn(),
                     JvmType::Int | JvmType::Boolean => code.ireturn(),
                     JvmType::Long => code.lreturn(),
+                    JvmType::Float | JvmType::Double => {
+                        return Err(JvmCodegenError::UnsupportedTypedExpression {
+                            tree: tree_id,
+                            node: "floating-point return lowering",
+                        });
+                    }
                 }
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -4047,7 +4107,9 @@ mod tests {
                 let param_type = match ty {
                     JvmType::Int => definitions.int,
                     JvmType::Boolean => definitions.boolean,
+                    JvmType::Float => definitions.float,
                     JvmType::Long => definitions.long,
+                    JvmType::Double => definitions.double,
                     JvmType::Reference(_) => {
                         panic!("test method descriptors do not accept references")
                     }
@@ -4074,7 +4136,9 @@ mod tests {
                     .map(|ty| match ty {
                         JvmType::Int => 'I',
                         JvmType::Boolean => 'Z',
+                        JvmType::Float => 'F',
                         JvmType::Long => 'J',
+                        JvmType::Double => 'D',
                         JvmType::Reference(_) => {
                             panic!("test method descriptors do not accept references")
                         }
@@ -4177,7 +4241,9 @@ mod tests {
                 .map(|ty| match ty {
                     JvmType::Int => 'I',
                     JvmType::Boolean => 'Z',
+                    JvmType::Float => 'F',
                     JvmType::Long => 'J',
+                    JvmType::Double => 'D',
                     JvmType::Reference(_) => {
                         panic!("test method descriptors do not accept references")
                     }
@@ -4186,7 +4252,9 @@ mod tests {
             let suffix = match result {
                 JvmReturnType::Value(JvmType::Int) => "I",
                 JvmReturnType::Value(JvmType::Boolean) => "Z",
+                JvmReturnType::Value(JvmType::Float) => "F",
                 JvmReturnType::Value(JvmType::Long) => "J",
+                JvmReturnType::Value(JvmType::Double) => "D",
                 JvmReturnType::Value(JvmType::Reference(_)) => {
                     panic!("test method descriptors do not accept references")
                 }

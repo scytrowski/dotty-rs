@@ -606,8 +606,14 @@ impl JvmPrimaryConstructorPlan {
                 (crate::JvmType::Boolean, Some(dotty_core::Type::TypeRef { .. })) => {
                     exact_type_matches(store, signature_param.ty, definitions.boolean)
                 }
+                (crate::JvmType::Float, Some(dotty_core::Type::TypeRef { .. })) => {
+                    exact_type_matches(store, signature_param.ty, definitions.float)
+                }
                 (crate::JvmType::Long, Some(dotty_core::Type::TypeRef { .. })) => {
                     exact_type_matches(store, signature_param.ty, definitions.long)
+                }
+                (crate::JvmType::Double, Some(dotty_core::Type::TypeRef { .. })) => {
+                    exact_type_matches(store, signature_param.ty, definitions.double)
                 }
                 (
                     crate::JvmType::Reference(class),

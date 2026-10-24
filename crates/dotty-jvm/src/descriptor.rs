@@ -19,7 +19,9 @@ use crate::{
 struct PrimitiveSymbols {
     int: SymbolId,
     boolean: SymbolId,
+    float: SymbolId,
     long: SymbolId,
+    double: SymbolId,
     unit: SymbolId,
 }
 
@@ -208,7 +210,21 @@ fn descriptor_for_with_references(
     let primitive_symbols = PrimitiveSymbols {
         int: builtin_symbol(store, definitions.int, PrimitiveBuiltin::Int)?,
         boolean: builtin_symbol(store, definitions.boolean, PrimitiveBuiltin::Boolean)?,
+        float: floating_builtin_symbol(
+            store,
+            definitions.float,
+            definitions.no_prefix,
+            PrimitiveBuiltin::Float,
+            "Float",
+        )?,
         long: long_builtin_symbol(store, definitions.long, definitions.no_prefix)?,
+        double: floating_builtin_symbol(
+            store,
+            definitions.double,
+            definitions.no_prefix,
+            PrimitiveBuiltin::Double,
+            "Double",
+        )?,
         unit: builtin_symbol(store, definitions.unit, PrimitiveBuiltin::Unit)?,
     };
 
@@ -365,7 +381,9 @@ fn descriptor_type(
     match ty {
         JvmType::Int => Ok("I".to_owned()),
         JvmType::Boolean => Ok("Z".to_owned()),
+        JvmType::Float => Ok("F".to_owned()),
         JvmType::Long => Ok("J".to_owned()),
+        JvmType::Double => Ok("D".to_owned()),
         JvmType::Reference(class) => {
             let Some(context) = context else {
                 return Err(JvmCodegenError::ReferenceMethodDescriptorUnsupported { symbol, ty });
@@ -475,6 +493,49 @@ fn long_builtin_symbol(
     Ok(*symbol)
 }
 
+fn floating_builtin_symbol(
+    store: &SemanticStore,
+    ty: TypeId,
+    no_prefix: TypeId,
+    builtin: PrimitiveBuiltin,
+    expected_name: &str,
+) -> Result<SymbolId, JvmCodegenError> {
+    let invalid = || JvmCodegenError::InvalidBuiltinDefinition { builtin, ty };
+    let Some(Type::TypeRef { prefix, target }) = store.types.try_get(ty) else {
+        return Err(invalid());
+    };
+    let TypeRefTarget::Symbol(symbol) = target else {
+        return Err(invalid());
+    };
+    if *prefix != no_prefix || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) {
+        return Err(invalid());
+    }
+    if !store.symbols.contains(*symbol) {
+        return Err(invalid());
+    }
+    let definition = store.symbols.get(*symbol);
+    let valid_info = match definition.info {
+        SymbolInfo::Missing => true,
+        SymbolInfo::Complete(info) => {
+            matches!(store.types.try_get(info), Some(Type::ClassInfo(class_info)) if class_info.class == *symbol)
+        }
+        SymbolInfo::Deferred(_) | SymbolInfo::Error => false,
+    };
+    if definition.name.namespace() != dotty_core::Namespace::Type
+        || store.names.try_resolve(definition.name.text()) != Some(expected_name)
+        || definition.kind != SymbolKind::Class
+        || definition.owner.is_some()
+        || definition.flags != SymbolFlags::EMPTY
+        || definition.visibility != Visibility::Public
+        || definition.origin != SymbolOrigin::Builtin
+        || !definition.annotations.is_empty()
+        || !valid_info
+    {
+        return Err(invalid());
+    }
+    Ok(*symbol)
+}
+
 fn primitive_value_type(
     store: &SemanticStore,
     ty: TypeId,
@@ -488,7 +549,9 @@ fn primitive_value_type(
     match store.types.try_get(ty) {
         Some(Type::Constant(Constant::Int(_))) => Ok(JvmType::Int),
         Some(Type::Constant(Constant::Boolean(_))) => Ok(JvmType::Boolean),
+        Some(Type::Constant(Constant::FloatBits(_))) => Ok(JvmType::Float),
         Some(Type::Constant(Constant::Long(_))) => Ok(JvmType::Long),
+        Some(Type::Constant(Constant::DoubleBits(_))) => Ok(JvmType::Double),
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..
@@ -497,6 +560,22 @@ fn primitive_value_type(
             target: TypeRefTarget::Symbol(target),
             ..
         }) if *target == primitives.boolean => Ok(JvmType::Boolean),
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(target),
+        }) if *target == primitives.float => {
+            if *prefix != definitions.no_prefix
+                || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix))
+            {
+                return Err(JvmCodegenError::InvalidPrimitiveTypePrefix {
+                    symbol,
+                    ty,
+                    prefix: *prefix,
+                    builtin: PrimitiveBuiltin::Float,
+                });
+            }
+            Ok(JvmType::Float)
+        }
         Some(Type::TypeRef {
             prefix,
             target: TypeRefTarget::Symbol(target),
@@ -512,6 +591,22 @@ fn primitive_value_type(
                 });
             }
             Ok(JvmType::Long)
+        }
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(target),
+        }) if *target == primitives.double => {
+            if *prefix != definitions.no_prefix
+                || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix))
+            {
+                return Err(JvmCodegenError::InvalidPrimitiveTypePrefix {
+                    symbol,
+                    ty,
+                    prefix: *prefix,
+                    builtin: PrimitiveBuiltin::Double,
+                });
+            }
+            Ok(JvmType::Double)
         }
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
@@ -551,11 +646,27 @@ pub(super) fn primitive_semantic_value_type(
     validate_semantic_type(store, symbol, ty)?;
     let int = builtin_symbol(store, definitions.int, PrimitiveBuiltin::Int)?;
     let boolean = builtin_symbol(store, definitions.boolean, PrimitiveBuiltin::Boolean)?;
+    let float = floating_builtin_symbol(
+        store,
+        definitions.float,
+        definitions.no_prefix,
+        PrimitiveBuiltin::Float,
+        "Float",
+    )?;
     let long = builtin_symbol(store, definitions.long, PrimitiveBuiltin::Long)?;
+    let double = floating_builtin_symbol(
+        store,
+        definitions.double,
+        definitions.no_prefix,
+        PrimitiveBuiltin::Double,
+        "Double",
+    )?;
     match store.types.try_get(ty) {
         Some(Type::Constant(Constant::Int(_))) => Ok(JvmType::Int),
         Some(Type::Constant(Constant::Boolean(_))) => Ok(JvmType::Boolean),
+        Some(Type::Constant(Constant::FloatBits(_))) => Ok(JvmType::Float),
         Some(Type::Constant(Constant::Long(_))) => Ok(JvmType::Long),
+        Some(Type::Constant(Constant::DoubleBits(_))) => Ok(JvmType::Double),
         Some(Type::TypeRef {
             target: TypeRefTarget::Symbol(target),
             ..
@@ -567,11 +678,43 @@ pub(super) fn primitive_semantic_value_type(
         Some(Type::TypeRef {
             prefix,
             target: TypeRefTarget::Symbol(target),
+        }) if *target == float => {
+            if *prefix != definitions.no_prefix
+                || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix))
+            {
+                return Err(JvmCodegenError::InvalidPrimitiveTypePrefix {
+                    symbol,
+                    ty,
+                    prefix: *prefix,
+                    builtin: PrimitiveBuiltin::Float,
+                });
+            }
+            Ok(JvmType::Float)
+        }
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(target),
         }) if *target == long
             && *prefix == definitions.no_prefix
             && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) =>
         {
             Ok(JvmType::Long)
+        }
+        Some(Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(target),
+        }) if *target == double => {
+            if *prefix != definitions.no_prefix
+                || !matches!(store.types.try_get(*prefix), Some(Type::NoPrefix))
+            {
+                return Err(JvmCodegenError::InvalidPrimitiveTypePrefix {
+                    symbol,
+                    ty,
+                    prefix: *prefix,
+                    builtin: PrimitiveBuiltin::Double,
+                });
+            }
+            Ok(JvmType::Double)
         }
         _ => Err(unsupported_type_error(store, symbol, ty)),
     }
@@ -682,22 +825,26 @@ fn unsupported_type_error(store: &SemanticStore, symbol: SymbolId, ty: TypeId) -
 }
 
 impl JvmType {
-    /// Primitive JVM descriptor letter (`I`, `Z`, or `J`), if primitive.
+    /// Primitive JVM descriptor letter, if primitive.
     pub const fn descriptor_char(self) -> Option<char> {
         match self {
             Self::Int => Some('I'),
             Self::Boolean => Some('Z'),
+            Self::Float => Some('F'),
             Self::Long => Some('J'),
+            Self::Double => Some('D'),
             Self::Reference(_) => None,
         }
     }
 
     /// JVM operand-stack category. `Int` and `Boolean` are int-like; `Long`
-    /// is category two.
+    /// and `Double` are distinct category-two values.
     pub const fn category(self) -> JvmValueCategory {
         match self {
             Self::Int | Self::Boolean => JvmValueCategory::IntLike,
+            Self::Float => JvmValueCategory::Float,
             Self::Long => JvmValueCategory::Long,
+            Self::Double => JvmValueCategory::Double,
             Self::Reference(_) => JvmValueCategory::Reference,
         }
     }
@@ -705,8 +852,8 @@ impl JvmType {
     /// Number of JVM local-variable slots occupied by this value.
     pub const fn slot_width(self) -> u8 {
         match self {
-            Self::Long => 2,
-            Self::Int | Self::Boolean | Self::Reference(_) => 1,
+            Self::Long | Self::Double => 2,
+            Self::Int | Self::Boolean | Self::Float | Self::Reference(_) => 1,
         }
     }
 
@@ -714,7 +861,9 @@ impl JvmType {
         match self {
             Self::Int => Some(FieldType::Int),
             Self::Boolean => Some(FieldType::Boolean),
+            Self::Float => Some(FieldType::Float),
             Self::Long => Some(FieldType::Long),
+            Self::Double => Some(FieldType::Double),
             Self::Reference(_) => None,
         }
     }
