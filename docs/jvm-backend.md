@@ -1033,15 +1033,17 @@ planned reference type. Each setter loads its exact typed argument, writes the
 validated private field once, and returns JVM `void`; no source `Method`
 symbols are synthesized for either generated method.
 
-Typed reads and writes of these canonical accessor fields lower to
-`invokevirtual` calls using the checked owner, name, and descriptor above.
-Supported source receivers are the current instance, a parameter, or a stable
-local `val`; an assignment evaluates that receiver once before evaluating its
-right-hand side once. The backend validates the accessor binding, field type,
-mutability, backing-field flags, and getter/setter signatures at each use.
-Ordinary source fields continue to use `getfield`/`putfield`; accessor call
-sites never reference another class's private backing field. Mutable local
-`var` receivers and accessor-bearing inheritance remain unsupported.
+Typed reads and writes of constructor and ordinary public class-body accessor
+fields lower to `invokevirtual` calls using the checked owner, name, and
+descriptor above. Supported source receivers are the current instance, a
+parameter, or a stable local `val`; an assignment evaluates that receiver once
+before evaluating its right-hand side once. The backend validates the
+constructor binding or exact class-body source proof, field type, mutability,
+backing-field flags, and getter/setter signatures at each use. Ordinary
+private source fields retain their same-class `getfield`/`putfield` path;
+accessor call sites never reference another class's private backing field.
+Mutable local `var` receivers and accessor-bearing inheritance remain
+unsupported.
 
 The root integration test
 `real_source_accessor_calls_dispatch_through_validated_getters_and_setters`
