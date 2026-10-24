@@ -68,6 +68,13 @@ AUDIT_RESOLVER_WRAPPER operation=member_lookup calls=3 wall_us=500 delegated_us=
 AUDIT_CHEAP_RESOLVER scope=source operation=member_lookup calls=5 wall_us=900 delegated_us=700 exclusive_us=200
 AUDIT_CHEAP_RESOLVER_OUTCOMES scope=source operation=member_lookup ok=2 none=2 errors=1
 AUDIT_ROLLBACK count=2 operation_observations=4 member_observations=6
+AUDIT_CLASSLOADER_RESOLVER_COUNTS member_lookups=7 successes=3 misses=3 errors=1 rollbacks=4
+AUDIT_RESOLVER_STAGE stage=delegate_target_resolution calls=7 elapsed_us=120
+AUDIT_MATCH_CLASSLOADER_RESOLVER_COUNTS file=compiler/A.scala member_lookups=5 successes=2 misses=3 errors=0 rollbacks=3
+AUDIT_MATCH_RESOLVER_STAGE file=compiler/A.scala stage=delegate_target_resolution calls=5 elapsed_us=80
+    space=Prefix::prefix=ModuleClass::namespace=term: requests=12, known_requests=10, distinct_keys=4, unknown_identity_requests=2, owners=3, names=5, files=1, repeated_hit_factor=3.000, known_repeated_hit_factor=2.500, outcomes={"none": 12}
+AUDIT_CLASSLOAD_TIMINGS resource_lookup_ns=1000 classfile_decode_ns=2000 tasty_decode_ns=3000 load_uncached_inclusive_ns=9000
+AUDIT_MATCH_CLASSLOAD_TIMINGS file=compiler/A.scala resource_lookup_ns=400 classfile_decode_ns=500 tasty_decode_ns=600 load_uncached_inclusive_ns=700
 AUDIT_CLASSPATH_RESOURCES requests=10 inner_calls=7 positive=4 negative=3 errors=0 negative_cache_hits=3 returned_bytes=900 inner_wall_us=70 bytes_semantics=logical_resource_bytes_not_physical_io
 AUDIT_METHOD_RESOLVER file=compiler/A.scala tree=8 module_identity_calls=2 module_identity_inner_ms=3 module_identity_inner_us=3400 module_completion_calls=1 module_completion_inner_ms=6 module_completion_inner_us=6400 class_completion_calls=2 class_completion_inner_ms=8 class_completion_inner_us=8200 classfile_completion_calls=1 classfile_completion_inner_us=5100 tasty_completion_calls=1 tasty_completion_inner_us=3100 member_calls=4 member_inner_ms=11 member_inner_us=11700 package_calls=1 package_inner_ms=1 package_inner_us=1500
 AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete parse_ms=12 inventory_ms=5 namer_ms=2 typer_setup_ms=3 typing_ms=45 postprocess_ms=1 match_ms=46 total_ms=68
@@ -105,6 +112,17 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["resolver_counts"]["resolver_member_requests"], 4)
         self.assertEqual(parsed["load_roots"][0]["root"], "scala/Function1")
         self.assertEqual(parsed["load_roots"][0]["distinct_classes"], 7)
+        self.assertEqual(parsed["resolver_profile"]["member_lookups"], 7)
+        self.assertEqual(parsed["resolver_profile"]["rollbacks"], 4)
+        self.assertEqual(parsed["match_resolver_profiles"][0]["member_lookups"], 5)
+        self.assertEqual(parsed["match_resolver_profiles"][0]["file"], "compiler/A.scala")
+        self.assertEqual(parsed["repeated_requests"][0]["distinct_keys"], 4)
+        self.assertEqual(parsed["repeated_requests"][0]["repeated_hit_factor"], 3.0)
+        self.assertEqual(parsed["classload_timings"]["tasty_decode_ns"], 3000)
+        self.assertEqual(parsed["match_classload_timings"][0]["file"], "compiler/A.scala")
+        self.assertEqual(parsed["match_classload_timings"][0]["tasty_decode_ns"], 600)
+        self.assertEqual(parsed["resolver_stages"][-1]["stage"], "delegate_target_resolution")
+        self.assertEqual(parsed["match_resolver_stages"][-1]["stage"], "delegate_target_resolution")
 
     def test_new_rollback_producer_fields_reach_report_with_exact_counts(self):
         log = """AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=10

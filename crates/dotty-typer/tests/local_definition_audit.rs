@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use dotty_classloader::classloader::{
     BinaryName, ClassFormat, ClassLoadProfile, ClassLoader, ClassOrigin, ClassPathEntry,
-    ClassPathError, ClassResource, ClasspathSymbolResolver, CompositeClassPath, DirectoryClassPath,
-    JarClassPath, JdkClassPath, LoadingSession, ModuleResolutionProfile,
+    ClassPathError, ClassResource, ClasspathResolverProfile, ClasspathSymbolResolver,
+    CompositeClassPath, DirectoryClassPath, JarClassPath, JdkClassPath, LoadingSession,
+    ModuleResolutionProfile,
 };
 use dotty_core::ast::{Match, Modifier, Tree, TreeKind, Untyped, UntypedNode, VisibilitySyntax};
 use dotty_core::ids::TreeId;
@@ -127,6 +128,7 @@ struct ResolverMetrics {
     class_member_prefixes: BTreeSet<String>,
     class_member_keys: BTreeSet<String>,
     module_resolution: ModuleResolutionProfile,
+    resolver_profile: ClasspathResolverProfile,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -2217,6 +2219,11 @@ impl<E: ClassPathEntry> SymbolResolver for AuditResolver<E> {
         let result = self.resolver_mut().resolve_member(store, request);
         let resolver_elapsed = resolver_started.map_or(Duration::ZERO, |started| started.elapsed());
         if resolver_started.is_some() {
+            let resolver_profile = self.resolver_mut().take_resolver_profile();
+            self.metrics
+                .borrow_mut()
+                .resolver_profile
+                .merge(&resolver_profile);
             self.metrics.borrow_mut().member_lookup_inner_time += resolver_elapsed;
         }
         let load_profiles = self.resolver_mut().take_load_profiles();
@@ -11826,6 +11833,9 @@ fn probe_supported_match_cases_in_index(
     let mut resolver = ClasspathSymbolResolver::new(classpath.clone(), definitions, session);
     if mode == AuditProfileMode::Full {
         resolver = resolver.with_load_profile_collection();
+        if profile_timing {
+            resolver = resolver.with_resolver_profile_collection();
+        }
         if !profile_timing
             || std::env::var("DOTTY_AUDIT_DISABLE_MODULE_PROFILE").as_deref() != Ok("1")
         {
@@ -12609,6 +12619,9 @@ fn audit_source_inner_filtered(
         );
         if mode == AuditProfileMode::Full {
             resolver = resolver.with_load_profile_collection();
+            if profile_timing {
+                resolver = resolver.with_resolver_profile_collection();
+            }
         }
         if mode == AuditProfileMode::Full
             && (!profile_timing
@@ -14344,6 +14357,53 @@ fn print_resolver_metrics(metrics: &ResolverMetrics) {
         metrics.tasty_completion_calls,
         metrics.tasty_completion_inner_time.as_micros()
     );
+    let resolver_profile = &metrics.resolver_profile;
+    if resolver_profile.member_lookups > 0 {
+        println!(
+            "AUDIT_CLASSLOADER_RESOLVER_COUNTS member_lookups={} successes={} misses={} errors={} rollbacks={}",
+            resolver_profile.member_lookups,
+            resolver_profile.member_successes,
+            resolver_profile.member_misses,
+            resolver_profile.member_errors,
+            resolver_profile.rollbacks,
+        );
+        for (stage, profile) in [
+            (
+                "delegate_member_lookup_inclusive",
+                resolver_profile.member_lookup_inclusive,
+            ),
+            (
+                "delegate_prefix_classification",
+                resolver_profile.prefix_classification,
+            ),
+            (
+                "delegate_module_cache_validation",
+                resolver_profile.module_cache_validation,
+            ),
+            (
+                "delegate_target_resolution",
+                resolver_profile.target_resolution,
+            ),
+            (
+                "delegate_declaration_selection",
+                resolver_profile.declaration_selection,
+            ),
+            (
+                "delegate_module_identity_resolution",
+                resolver_profile.module_identity_resolution,
+            ),
+            (
+                "delegate_class_loading_inclusive",
+                resolver_profile.class_loading_inclusive,
+            ),
+        ] {
+            println!(
+                "AUDIT_RESOLVER_STAGE stage={stage} calls={} elapsed_us={}",
+                profile.calls,
+                profile.elapsed_ns / 1_000
+            );
+        }
+    }
     println!(
         "AUDIT_ROLLBACK count={} checkpoint_count={} checkpoint_max_depth={} operation_appended={} member_appended={} operation_rollback_coverage={} member_rollback_coverage={} operation_rows_scanned={} member_rows_scanned={} operation_status_changes={} member_status_changes={}",
         metrics.rollback_count,
@@ -14720,12 +14780,41 @@ fn print_classpath_resource_metrics(classpath: &SharedClassPath) {
     );
 }
 
+fn print_classload_profile_timings(profiles: &[DependencyObservation], match_file: Option<&str>) {
+    let resource_lookup_ns = profiles
+        .iter()
+        .map(|observation| observation.profile.resource_lookup_ns)
+        .sum::<u128>();
+    let classfile_decode_ns = profiles
+        .iter()
+        .map(|observation| observation.profile.classfile_decode_ns)
+        .sum::<u128>();
+    let tasty_decode_ns = profiles
+        .iter()
+        .map(|observation| observation.profile.tasty_decode_ns)
+        .sum::<u128>();
+    let load_uncached_inclusive_ns = profiles
+        .iter()
+        .map(|observation| observation.profile.load_uncached_inclusive_ns)
+        .sum::<u128>();
+    if let Some(file) = match_file {
+        println!(
+            "AUDIT_MATCH_CLASSLOAD_TIMINGS file={file} resource_lookup_ns={resource_lookup_ns} classfile_decode_ns={classfile_decode_ns} tasty_decode_ns={tasty_decode_ns} load_uncached_inclusive_ns={load_uncached_inclusive_ns}"
+        );
+    } else {
+        println!(
+            "AUDIT_CLASSLOAD_TIMINGS resource_lookup_ns={resource_lookup_ns} classfile_decode_ns={classfile_decode_ns} tasty_decode_ns={tasty_decode_ns} load_uncached_inclusive_ns={load_uncached_inclusive_ns}"
+        );
+    }
+}
+
 fn print_match_resolver_metrics(
     path: &str,
     metrics: &ResolverMetrics,
     before: ClassPathCacheMetrics,
     after: ClassPathCacheMetrics,
 ) {
+    print_classload_profile_timings(&metrics.dependency_profiles, Some(path));
     println!(
         "AUDIT_MATCH_RESOLVER file={path} status=captured package_calls={} member_calls={} module_identity_calls={} module_completion_calls={} class_completion_calls={} classfile_completion_calls={} tasty_completion_calls={} package_inner_us={} member_inner_us={} module_identity_inner_us={} module_completion_inner_us={} class_completion_inner_us={} classfile_completion_inner_us={} tasty_completion_inner_us={} rollback_count={} rollback_operation_observations={} rollback_member_observations={} classpath_requests={} classpath_inner_calls={} classpath_positive={} classpath_negative={} classpath_errors={} classpath_negative_cache_hits={} classpath_returned_bytes={} classpath_inner_wall_us={}",
         metrics.resolver_package_requests,
@@ -14784,6 +14873,50 @@ fn print_match_resolver_metrics(
             timing.calls,
             timing.elapsed.as_micros()
         );
+    }
+    let profile = &metrics.resolver_profile;
+    if profile.member_lookups > 0 {
+        println!(
+            "AUDIT_MATCH_CLASSLOADER_RESOLVER_COUNTS file={path} member_lookups={} successes={} misses={} errors={} rollbacks={}",
+            profile.member_lookups,
+            profile.member_successes,
+            profile.member_misses,
+            profile.member_errors,
+            profile.rollbacks,
+        );
+        for (stage, timing) in [
+            (
+                "delegate_member_lookup_inclusive",
+                profile.member_lookup_inclusive,
+            ),
+            (
+                "delegate_prefix_classification",
+                profile.prefix_classification,
+            ),
+            (
+                "delegate_module_cache_validation",
+                profile.module_cache_validation,
+            ),
+            ("delegate_target_resolution", profile.target_resolution),
+            (
+                "delegate_declaration_selection",
+                profile.declaration_selection,
+            ),
+            (
+                "delegate_module_identity_resolution",
+                profile.module_identity_resolution,
+            ),
+            (
+                "delegate_class_loading_inclusive",
+                profile.class_loading_inclusive,
+            ),
+        ] {
+            println!(
+                "AUDIT_MATCH_RESOLVER_STAGE file={path} stage={stage} calls={} elapsed_us={}",
+                timing.calls,
+                timing.elapsed_ns / 1_000
+            );
+        }
     }
 }
 
@@ -16149,6 +16282,7 @@ fn print_dependency_profiles(metrics: &ResolverMetrics) {
     println!("  median_dependency_depth={median_depth:.1}");
     println!("  p95_dependency_depth={p95_depth}");
     println!("  max_distinct_classes_touched_by_one_request={max_classes}");
+    print_classload_profile_timings(&metrics.dependency_profiles, None);
 
     let mut observed_by_method: BTreeMap<&str, (BTreeSet<&str>, BTreeSet<&str>)> = BTreeMap::new();
     for observation in &metrics.dependency_profiles {
