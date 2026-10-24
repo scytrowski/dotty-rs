@@ -1903,6 +1903,30 @@ fn long_comparison_and_mixed_object_join_fail_closed_at_typer() {
 fn float_and_double_source_matrix_fails_at_backend_without_artifacts() {
     for (label, source) in [
         (
+            "FloatConstructorParameter",
+            "class FloatConstructorParameter(value: Float)\n",
+        ),
+        (
+            "DoubleConstructorParameter",
+            "class DoubleConstructorParameter(value: Double)\n",
+        ),
+        (
+            "FloatField",
+            "class FloatField:\n  private var value: Float = 0.0f\n",
+        ),
+        (
+            "DoubleField",
+            "class DoubleField:\n  private var value: Double = 0.0\n",
+        ),
+        (
+            "FloatGetterSignature",
+            "class FloatGetterSignature:\n  def get(value: Float): Float = value\n",
+        ),
+        (
+            "DoubleSetterSignature",
+            "class DoubleSetterSignature:\n  def set(value: Double): Unit = ()\n",
+        ),
+        (
             "FloatFieldsAndConstructor",
             "class NumericBox(initialF: Float, initialD: Double):\n  private var f: Float = initialF\n  private var d: Double = initialD\n  def getF(): Float = f\n  def getD(): Double = d\n  def setD(value: Double): Unit = d = value\n",
         ),

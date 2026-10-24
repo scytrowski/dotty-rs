@@ -74,7 +74,10 @@ class:
 
 | Source shape | Current first failure |
 | --- | --- |
-| Float field, Double field, constructor parameters, getters, setter | Backend projection: unsupported external JVM type; no class artifact |
+| Float and Double primary-constructor parameters | Backend projection: unsupported external JVM type; no class artifact |
+| Float and Double mutable instance fields | Backend projection: unsupported external JVM type; no class artifact |
+| Getter-shaped Float result/parameter and Double setter parameter | Backend projection: unsupported external JVM type; no class artifact |
+| Complete `NumericBox` fields, constructor, getters, and setter source batch | Backend projection of the class shape; no class artifact |
 | Float and Double literal return methods | Backend projection of the method signature; no class artifact |
 | Double parameter/local round trip | Backend projection of the method signature; no class artifact |
 | Float `if` join | Backend projection of the method signature; no class artifact |
