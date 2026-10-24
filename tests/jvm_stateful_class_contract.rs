@@ -1,6948 +1,2728 @@
-use dotty_classfile::access_flags::{ACC_FINAL, ACC_PRIVATE, ACC_PUBLIC, MethodAccessFlags};
-use dotty_classfile::class_file::ClassFileVersion;
-use dotty_classfile::class_file_builder::ClassFileBuilder;
-use dotty_classfile::reader::Reader;
-use dotty_core::ast::{
-    Apply, ApplyKind, AstArena, Select, Tree, TreeKind, Typed, Untyped, VisibilitySyntax,
-};
-use dotty_core::{
-    Definitions, Packages, SemanticStore, SourceId, SourceText, SymbolFlags, SymbolId, SymbolInfo,
-    SymbolKind, TermRefTarget, TreeId, Type, Visibility,
-};
-use dotty_jvm::{
-    JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit,
-    JvmConstructorInitializerInstruction, JvmFieldPlan, JvmMethodPlan, JvmPrimaryConstructorPlan,
-    JvmPublicBodyFieldSourceProof, emit_class,
-};
-use dotty_lexer::ContextualScanner;
-use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
-use dotty_parser::parse_compilation_unit;
-use dotty_typer::{SourceTyper, TyperError};
-use std::fs;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
-
-fn require_jdk21_or_skip() -> bool {
-    let unavailable = ["java", "javac"]
-        .into_iter()
-        .filter_map(|tool| match jdk_tool_major_version(tool) {
-            Some(major) if major >= 21 => None,
-            Some(major) => Some(format!("{tool} {major} (requires JDK 21+)")),
-            None => Some(format!("{tool} (missing or version unavailable)")),
-        })
-        .collect::<Vec<_>>();
-    if unavailable.is_empty() {
-        return true;
-    }
-
-    let message = format!(
-        "JVM bytecode harness requires java and javac from JDK 21+ on PATH; unavailable: {}",
-        unavailable.join(", ")
-    );
-    if std::env::var("DOTTY_CLASSFILE_REQUIRE_JDK").as_deref() == Ok("1") {
-        panic!("{message}");
-    }
-    eprintln!("skipping optional JVM bytecode harness: {message}");
-    false
-}
-
-fn jdk_tool_major_version(tool: &str) -> Option<u32> {
-    let output = Command::new(tool).arg("-version").output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let version_text = format!(
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    version_text
-        .split(|character: char| !character.is_ascii_digit())
-        .find_map(|component| component.parse::<u32>().ok())
-}
-
-fn with_source<R>(
-    source_text: &str,
-    f: impl FnOnce(
-        &dotty_core::AstArena<Untyped>,
-        SourceId,
-        &dotty_namer::SourceSemanticIndex,
-        &Definitions,
-        &mut SourceTyper<'_>,
-    ) -> R,
-) -> R {
-    let source_id = SourceId::from_index(1);
-    let source = SourceText::new(source_text).unwrap();
-    let scanner = ContextualScanner::new(source_text).unwrap();
-    assert!(scanner.diagnostics().is_empty());
-
-    let mut store = SemanticStore::new();
-    let definitions = Definitions::bootstrap(&mut store);
-    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let mut packages = Packages::new();
-    let index = match name_compilation_unit_with_diagnostics(
-        &parsed.ast,
-        parsed.root,
-        source_id,
-        "Stateful.scala",
-        SourceParseStatus::Clean,
-        &mut store,
-        &mut packages,
-    )
-    .unwrap()
-    {
-        NamingOutcome::Named { index, diagnostics } => {
-            assert!(diagnostics.is_empty(), "{diagnostics:?}");
-            index
-        }
-        NamingOutcome::Rejected { diagnostics } => panic!("namer rejected source: {diagnostics:?}"),
-    };
-    let mut typer = SourceTyper::new(
-        &parsed.ast,
-        source_id,
-        &index,
-        &mut store,
-        definitions,
-        &packages,
-    );
-    f(&parsed.ast, source_id, &index, &definitions, &mut typer)
-}
-
-fn symbol_named(
-    ast: &dotty_core::AstArena<Untyped>,
-    index: &dotty_namer::SourceSemanticIndex,
-    source: SourceId,
-    typer: &SourceTyper<'_>,
-    name: &str,
-) -> SymbolId {
-    ast.iter()
-        .find_map(|(tree, _)| {
-            let symbol = index.symbol_at(source, tree)?;
-            (typer
-                .store()
-                .names
-                .resolve(typer.store().symbols.get(symbol).name.text())
-                == name)
-                .then_some(symbol)
-        })
-        .unwrap_or_else(|| panic!("missing source symbol {name}"))
-}
-
-fn field_tree_and_rhs(
-    ast: &dotty_core::AstArena<Untyped>,
-    index: &dotty_namer::SourceSemanticIndex,
-    source: SourceId,
-    typer: &SourceTyper<'_>,
-    name: &str,
-) -> (SymbolId, TreeId<Untyped>, TreeId<Untyped>) {
-    ast.iter()
-        .find_map(|(tree, node)| {
-            let TreeKind::ValDef(definition) = &node.kind else {
-                return None;
-            };
-            let symbol = index.symbol_at(source, tree)?;
-            let symbol_name = typer
-                .store()
-                .names
-                .resolve(definition.name.as_name().text());
-            if symbol_name != name {
-                return None;
-            }
-            Some((symbol, tree, definition.rhs?))
-        })
-        .unwrap_or_else(|| panic!("missing initialized field {name}"))
-}
-
-fn method_tree_and_rhs(
-    ast: &dotty_core::AstArena<Untyped>,
-    index: &dotty_namer::SourceSemanticIndex,
-    source: SourceId,
-    typer: &SourceTyper<'_>,
-    owner: SymbolId,
-    name: &str,
-) -> (SymbolId, TreeId<Untyped>, TreeId<Untyped>) {
-    ast.iter()
-        .find_map(|(tree, node)| {
-            let TreeKind::DefDef(definition) = &node.kind else {
-                return None;
-            };
-            let method = index.symbol_at(source, tree)?;
-            if typer.store().symbols.get(method).owner == Some(owner)
-                && typer
-                    .store()
-                    .names
-                    .resolve(definition.name.as_name().text())
-                    == name
-            {
-                Some((method, tree, definition.rhs?))
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| panic!("missing method {name} on owner {owner:?}"))
-}
-
-fn complete_class_info(typer: &SourceTyper<'_>, class: SymbolId) -> dotty_core::types::ClassInfo {
-    let SymbolInfo::Complete(info_id) = typer.store().symbols.get(class).info else {
-        panic!("class symbol should have complete ClassInfo")
-    };
-    let Type::ClassInfo(info) = typer.store().types.get(info_id) else {
-        panic!("class symbol info should be ClassInfo")
-    };
-    info.clone()
-}
-
-#[test]
-fn private_primitive_field_initializers_keep_canonical_symbols_and_typed_roots() {
-    with_source(
-        "class Plain { private val seed: Int = 42; private val enabled: Boolean = true; private val large: Long = 9000000000L }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Plain");
-            assert_eq!(typer.store().symbols.get(class).kind, SymbolKind::Class);
-            assert_eq!(
-                typer.store().symbols.get(class).visibility,
-                Visibility::Public
-            );
-            typer.complete_symbol(class).unwrap();
-            assert!(matches!(
-                typer.store().symbols.get(class).info,
-                SymbolInfo::Complete(_)
-            ));
-            let fields = ["seed", "enabled", "large"]
-                .map(|name| field_tree_and_rhs(ast, index, source, typer, name));
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let body_order = template
-                .body
-                .iter()
-                .filter_map(|tree| index.symbol_at(source, *tree))
-                .collect::<Vec<_>>();
-            assert_eq!(
-                &body_order[..fields.len()],
-                fields
-                    .iter()
-                    .map(|(field, _, _)| *field)
-                    .collect::<Vec<_>>()
-            );
-
-            for ((field, declaration, rhs), (expected_type, expected_constant)) in
-                fields.into_iter().zip([
-                    (definitions.int, dotty_core::Constant::Int(42)),
-                    (definitions.boolean, dotty_core::Constant::Boolean(true)),
-                    (definitions.long, dotty_core::Constant::Long(9_000_000_000)),
-                ])
-            {
-                let symbol = typer.store().symbols.get(field);
-                assert_eq!(symbol.kind, SymbolKind::Field);
-                assert_eq!(symbol.owner, Some(class));
-                assert_eq!(symbol.visibility, Visibility::Private);
-                assert!(!symbol.flags.contains(SymbolFlags::MUTABLE));
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(ty) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                assert_eq!(
-                    typer.store().types.get(ty).reference_symbol(),
-                    typer.store().types.get(expected_type).reference_symbol()
-                );
-
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let typed_rhs = typer.type_expression_expected(rhs, context, ty).unwrap();
-                assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
-                assert_eq!(
-                    typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-                    &Type::Constant(expected_constant)
-                );
-                assert_eq!(index.symbol_at(source, declaration), Some(field));
-            }
-        },
-    );
-}
-
-#[test]
-fn reference_fields_and_constructor_parameters_keep_real_source_identity() {
-    let source_text = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/jvm/ReferenceFieldsAndConstructors.scala"),
-    )
-    .expect("read reference field and constructor fixture");
-    with_source(&source_text, |ast, source, index, definitions, typer| {
-        let class = |name: &str| symbol_named(ast, index, source, typer, name);
-        let counter = class("Counter");
-        let holder = class("Holder");
-        let mutable_holder = class("MutableHolder");
-        let client = class("Client");
-        for owner in [counter, holder, mutable_holder, client] {
-            typer.complete_symbol(owner).unwrap();
-            let info = complete_class_info(typer, owner);
-            let scope = index
-                .scope_of(owner)
-                .expect("class declaration scope is indexed");
-            assert_eq!(info.class, owner);
-            assert_eq!(info.declarations, scope);
-            assert_eq!(typer.store().scopes.get(scope).owner, Some(owner));
-            assert_eq!(info.parents, [definitions.object_type]);
-        }
-
-        let fields = [
-            (holder, "ref", false, None),
-            (holder, "own", false, Some("this")),
-            (mutable_holder, "current", true, None),
-        ];
-        for (owner, name, mutable, expected_qualifier) in fields {
-            let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-            let symbol = typer.store().symbols.get(field);
-            assert_eq!(symbol.kind, SymbolKind::Field);
-            assert_eq!(symbol.owner, Some(owner));
-            assert_eq!(symbol.visibility, Visibility::Private);
-            assert_eq!(
-                symbol.flags.contains(SymbolFlags::MUTABLE),
-                mutable,
-                "field mutability for {name} comes from the real source declaration"
-            );
-            let TreeKind::ValDef(definition) = &ast.get(declaration).kind else {
-                panic!("field source node should be ValDef");
-            };
-            match definition.metadata.visibility {
-                Some(VisibilitySyntax::Private { qualifier }) => {
-                    assert_eq!(
-                        qualifier.map(|name| typer.store().names.resolve(name.text())),
-                        expected_qualifier,
-                        "retain the plain private vs private[this] source distinction"
-                    );
-                }
-                other => panic!("expected source private visibility, got {other:?}"),
-            }
-
-            let marker = format!("{name}: Counter");
-            let name_offset = source_text.find(&marker).unwrap() as u32;
-            let tree_span = ast
-                .get(declaration)
-                .position
-                .expect("field has source range");
-            assert_eq!(tree_span.source(), source);
-            let tree_range = tree_span.span().range();
-            assert!(tree_range.start() <= name_offset && name_offset < tree_range.end());
-            let symbol_span = symbol
-                .position
-                .expect("field symbol retains source position");
-            assert_eq!(symbol_span.source(), source);
-            let symbol_range = symbol_span.span().range();
-            assert!(symbol_range.start() <= name_offset && name_offset < symbol_range.end());
-
-            let scope = complete_class_info(typer, owner).declarations;
-            let field_name = symbol.name;
-            assert!(
-                typer
-                    .store()
-                    .scopes
-                    .get(scope)
-                    .lookup_all(&field_name)
-                    .contains(&field)
-            );
-
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("reference field type should be complete")
-            };
-            assert!(matches!(
-                typer.store().types.get(field_type),
-                Type::TypeRef {
-                    target: dotty_core::types::TypeRefTarget::Symbol(target),
-                    ..
-                } if *target == counter
-            ));
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let typed_rhs = typer
-                .type_expression_expected(rhs, context, field_type)
-                .expect("constructor parameter is a valid typed reference field initializer");
-            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
-            assert!(matches!(
-                typer.typed_ast().get(typed_rhs).kind,
-                TreeKind::Ident(_)
-            ));
-            assert!(matches!(
-                typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-                Type::TermRef {
-                    target: dotty_core::types::TermRefTarget::Symbol(_),
-                    ..
-                }
-            ));
-        }
-
-        let mut constructor_parameters = Vec::new();
-        for (parameter_index, (owner, parameter_name)) in
-            [(holder, "initial"), (mutable_holder, "initial")]
-                .into_iter()
-                .enumerate()
-        {
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    (index.symbol_at(source, tree) == Some(owner)).then_some((tree, node))
-                })
-                .map(|(tree, _)| tree)
-                .expect("class declaration tree");
-            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
-                panic!("class declaration is a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
-                panic!("class definition contains a Template");
-            };
-            let constructor = index
-                .symbol_at(source, template.constructor)
-                .expect("canonical primary constructor symbol");
-            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
-            else {
-                panic!("primary constructor source node is DefDef");
-            };
-            let [parameter_tree] = constructor_definition.value_param_clauses[0].as_slice() else {
-                panic!("constructor has one source parameter");
-            };
-            let source_parameter = index
-                .symbol_at(source, *parameter_tree)
-                .expect("source parameter symbol");
-            let constructor_parameter = index
-                .derived_symbol_at(constructor, source, *parameter_tree)
-                .expect("constructor-owned parameter identity");
-            assert_eq!(
-                typer
-                    .store()
-                    .names
-                    .resolve(match &ast.get(*parameter_tree).kind {
-                        TreeKind::ValDef(parameter) => parameter.name.as_name().text(),
-                        _ => panic!("constructor parameter source is ValDef"),
-                    }),
-                parameter_name
-            );
-            assert_ne!(source_parameter, constructor_parameter);
-            assert_eq!(
-                typer.store().symbols.get(source_parameter).owner,
-                Some(owner)
-            );
-            assert_eq!(
-                typer.store().symbols.get(source_parameter).visibility,
-                Visibility::Private
-            );
-            assert_eq!(
-                typer.store().symbols.get(constructor_parameter).owner,
-                Some(constructor)
-            );
-            assert_eq!(
-                typer.store().symbols.get(constructor_parameter).kind,
-                SymbolKind::Parameter
-            );
-            assert_eq!(
-                typer.store().symbols.get(constructor_parameter).visibility,
-                Visibility::Public
-            );
-            constructor_parameters.push((owner, constructor_parameter));
-            let source_parameter_span = typer
-                .store()
-                .symbols
-                .get(source_parameter)
-                .position
-                .expect("source parameter retains source position");
-            let parameter_span = typer
-                .store()
-                .symbols
-                .get(constructor_parameter)
-                .position
-                .expect("constructor parameter retains source position");
-            assert_eq!(source_parameter_span.source(), source);
-            assert_eq!(parameter_span.source(), source);
-            assert_eq!(source_parameter_span.span(), parameter_span.span());
-            let parameter_offset = source_text
-                .match_indices("initial: Counter")
-                .nth(parameter_index)
-                .unwrap()
-                .0 as u32;
-            let parameter_range = parameter_span.span().range();
-            assert!(
-                parameter_range.start() <= parameter_offset
-                    && parameter_offset < parameter_range.end(),
-                "parameter source range {parameter_range:?} should cover offset {parameter_offset} for {owner:?}"
-            );
-
-            typer.complete_symbol(constructor).unwrap();
-            let SymbolInfo::Complete(constructor_type) =
-                typer.store().symbols.get(constructor).info
-            else {
-                panic!("constructor signature should be complete")
-            };
-            let Type::Method(signature) = typer.store().types.get(constructor_type) else {
-                panic!("constructor signature is a Method type")
-            };
-            assert_eq!(signature.params.len(), 1);
-            assert!(matches!(
-                typer.store().types.get(signature.params[0].ty),
-                Type::TypeRef {
-                    target: dotty_core::types::TypeRefTarget::Symbol(target),
-                    ..
-                } if *target == counter
-            ));
-        }
-
-        for (owner, field_name) in [
-            (holder, "ref"),
-            (holder, "own"),
-            (mutable_holder, "current"),
-        ] {
-            let (_, _, rhs) = field_tree_and_rhs(ast, index, source, typer, field_name);
-            let typed_rhs = typer
-                .source_typed_index()
-                .get(source, rhs)
-                .expect("reference field initializer was typed above");
-            let actual_parameter =
-                match typer.store().types.get(typer.typed_ast().get(typed_rhs).ty) {
-                    Type::TermRef {
-                        target: dotty_core::types::TermRefTarget::Symbol(parameter),
-                        ..
-                    } => *parameter,
-                    other => panic!("field initializer retains a parameter TermRef, got {other:?}"),
-                };
-            let expected_parameter = constructor_parameters
-                .iter()
-                .find_map(|(parameter_owner, parameter)| {
-                    (*parameter_owner == owner).then_some(*parameter)
-                })
-                .unwrap();
-            assert_eq!(actual_parameter, expected_parameter);
-        }
-
-        let (client_method, client_method_tree, construct_rhs) =
-            method_tree_and_rhs(ast, index, source, typer, client, "construct");
-        typer.complete_symbol(client_method).unwrap();
-        let construct_context = typer.expression_context_for(client_method).unwrap();
-        let construct = typer
-            .type_expression(construct_rhs, construct_context)
-            .expect("Client.construct types a real new Holder(c) call");
-        let TreeKind::Apply(application) = &typer.typed_ast().get(construct).kind else {
-            panic!("new Holder(c) remains an application");
-        };
-        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
-            panic!("constructor function remains selected from the new type");
-        };
-        let constructor = match typer
-            .store()
-            .types
-            .get(typer.typed_ast().get(application.function).ty)
-        {
-            Type::TermRef {
-                target: dotty_core::types::TermRefTarget::Symbol(constructor),
-                ..
-            } => *constructor,
-            other => panic!("constructor selection keeps canonical TermRef, got {other:?}"),
-        };
-        assert_eq!(typer.store().symbols.get(constructor).owner, Some(holder));
-        assert_eq!(
-            typer
-                .store()
-                .types
-                .get(typer.typed_ast().get(construct).ty)
-                .reference_symbol(),
-            Some(holder)
-        );
-        assert_eq!(application.args.len(), 1);
-        let TreeKind::DefDef(client_definition) = &ast.get(client_method_tree).kind else {
-            panic!("Client.construct source node is a DefDef");
-        };
-        let [client_parameter_tree] = client_definition.value_param_clauses[0].as_slice() else {
-            panic!("Client.construct has one source parameter");
-        };
-        let client_parameter = index
-            .symbol_at(source, *client_parameter_tree)
-            .expect("Client.construct parameter has canonical identity");
-        assert!(matches!(
-            typer
-                .store()
-                .types
-                .get(typer.typed_ast().get(application.args[0]).ty),
-            Type::TermRef {
-                target: dotty_core::types::TermRefTarget::Symbol(parameter),
-                ..
-            } if *parameter == client_parameter
-        ));
-        assert!(matches!(
-            typer.typed_ast().get(selection.qualifier).kind,
-            TreeKind::New(_)
-        ));
-
-        let (counter_get, _, _) = method_tree_and_rhs(ast, index, source, typer, counter, "get");
-        let (holder_read, _, holder_read_rhs) =
-            method_tree_and_rhs(ast, index, source, typer, holder, "read");
-        typer.complete_symbol(counter_get).unwrap();
-        typer.complete_symbol(holder_read).unwrap();
-        let context = typer.expression_context_for(holder_read).unwrap();
-        let holder_read_typed = typer
-            .type_expression(holder_read_rhs, context)
-            .expect("immutable reference field selection ref.get() types");
-        let TreeKind::Apply(application) = &typer.typed_ast().get(holder_read_typed).kind else {
-            panic!("ref.get() remains an application")
-        };
-        let TreeKind::Select(selection) = &typer.typed_ast().get(application.function).kind else {
-            panic!("ref.get() method selection retains its field receiver")
-        };
-        assert!(matches!(
-            typer.store().types.get(typer.typed_ast().get(application.function).ty),
-            Type::TermRef {
-                target: dotty_core::types::TermRefTarget::Symbol(method),
-                ..
-            } if *method == counter_get
-        ));
-        assert!(matches!(
-            &typer.typed_ast().get(selection.qualifier).kind,
-            TreeKind::Ident(_)
-        ));
-        assert!(matches!(
-            typer.store().types.get(typer.typed_ast().get(selection.qualifier).ty),
-            Type::TermRef {
-                target: dotty_core::types::TermRefTarget::Symbol(field),
-                ..
-            } if *field == field_tree_and_rhs(ast, index, source, typer, "ref").0
-        ));
-        assert_eq!(
-            typer
-                .store()
-                .types
-                .get(typer.typed_ast().get(holder_read_typed).ty),
-            typer.store().types.get(definitions.int)
-        );
-
-        for (owner, name) in [
-            (holder, "get"),
-            (mutable_holder, "get"),
-            (mutable_holder, "replace"),
-        ] {
-            let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, owner, name);
-            typer.complete_symbol(method).unwrap();
-            let context = typer.expression_context_for(method).unwrap();
-            typer
-                .type_expression(rhs, context)
-                .unwrap_or_else(|error| panic!("{name} body should type from source: {error:?}"));
-        }
-
-        let (mutable_read, _, mutable_read_rhs) =
-            method_tree_and_rhs(ast, index, source, typer, mutable_holder, "read");
-        typer.complete_symbol(mutable_read).unwrap();
-        let context = typer.expression_context_for(mutable_read).unwrap();
-        assert!(matches!(
-            typer.type_expression(mutable_read_rhs, context),
-            Err(dotty_typer::TyperError::UnstableSelectionPrefix {
-                source: error_source,
-                ..
-            }) if error_source == source
-        ));
-    });
-}
-
-#[test]
-fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
-    with_source(
-        "class Counter(start: Int, flag: Boolean) { private val seed: Int = 42; private var current: Int = start; private val doubled: Int = start + 1; private val active: Boolean = !flag; private val copied: Int = current; def get(): Int = current; def increment(): Unit = current = current + 1; def set(value: Int): Unit = current = value; def enabled(): Boolean = active }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Counter");
-            typer.complete_symbol(class).unwrap();
-            let TreeKind::TypeDef(definition) = &ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some(node)
-                })
-                .unwrap()
-                .kind
-            else {
-                panic!("Counter source declaration should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
-                panic!("Counter declaration should have a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
-                panic!("primary constructor should be a DefDef");
-            };
-            let constructor_parameters = constructor_def
-                .value_param_clauses
-                .iter()
-                .flatten()
-                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                .collect::<Vec<_>>();
-            typer.complete_symbol(constructor).unwrap();
-            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                constructor_parameters.clone(),
-                ast,
-                index,
-            )
-            .unwrap();
-
-            let mut source_fields = Vec::new();
-            for tree in &template.body {
-                let TreeKind::ValDef(field_def) = &ast.get(*tree).kind else {
-                    continue;
-                };
-                let Some(field) = index.symbol_at(source, *tree) else {
-                    continue;
-                };
-                let rhs = field_def
-                    .rhs
-                    .expect("supported fields have explicit initializers");
-                source_fields.push((field, rhs));
-            }
-            assert_eq!(source_fields.len(), 5);
-
-            let mut field_plans = Vec::new();
-            let mut field_symbols = Vec::new();
-            for (field, rhs) in source_fields {
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                assert_eq!(typer.source_typed_index().get(source, rhs), None);
-                let typed_rhs = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                assert_eq!(
-                    typer.source_typed_index().get(source, rhs),
-                    Some(typed_rhs),
-                    "the exact field RHS tree is retained once it is typed"
-                );
-                field_plans.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(typed_rhs),
-                });
-                field_symbols.push(field);
-            }
-
-            let mut method_plans = Vec::new();
-            for name in ["get", "increment", "set", "enabled"] {
-                let (method, method_tree, rhs) = template
-                    .body
-                    .iter()
-                    .find_map(|tree| {
-                        let TreeKind::DefDef(definition) = &ast.get(*tree).kind else {
-                            return None;
-                        };
-                        (typer
-                            .store()
-                            .names
-                            .resolve(definition.name.as_name().text())
-                            == name)
-                            .then_some((index.symbol_at(source, *tree)?, *tree, definition.rhs?))
-                    })
-                    .unwrap_or_else(|| panic!("missing method {name}"));
-                typer.complete_symbol(method).unwrap();
-                let TreeKind::DefDef(definition) = &ast.get(method_tree).kind else {
-                    unreachable!()
-                };
-                let parameters = definition
-                    .value_param_clauses
-                    .iter()
-                    .flatten()
-                    .map(|tree| index.symbol_at(source, *tree).unwrap())
-                    .collect();
-                let context = typer.expression_context_for(method).unwrap();
-                let body = typer.type_expression(rhs, context).unwrap();
-                method_plans.push(JvmMethodPlan {
-                    method,
-                    parameters,
-                    locals: Vec::new(),
-                    body: Some(body),
-                });
-            }
-
-            let class_plan = JvmClassPlan {
-                class,
-                methods: method_plans,
-                fields: field_plans,
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(constructor_plan),
-            };
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![class_plan],
-            };
-            let metadata = unit.metadata(definitions).unwrap();
-            let class_metadata = &metadata[0];
-            let constructor_metadata = class_metadata.constructor().unwrap();
-            let initializer_plan = unit
-                .lower_constructor_field_initializers(class, definitions)
-                .unwrap();
-            assert_eq!(initializer_plan.class(), class);
-            assert_eq!(
-                initializer_plan
-                    .constructor()
-                    .expect("primary-constructor initializer plan retains constructor metadata")
-                    .symbol(),
-                constructor
-            );
-            assert_eq!(
-                initializer_plan
-                    .fields()
-                    .iter()
-                    .map(|field| field.field())
-                    .collect::<Vec<_>>(),
-                field_symbols,
-                "lowering preserves source declaration order"
-            );
-
-            let [start_parameter, flag_parameter] = constructor_metadata.parameters() else {
-                panic!("expected two constructor parameters");
-            };
-            assert_eq!(start_parameter.symbol(), constructor_parameters[0]);
-            assert_eq!(start_parameter.slot(), 1);
-            assert_eq!(start_parameter.ty(), dotty_jvm::JvmType::Int);
-            assert_eq!(flag_parameter.symbol(), constructor_parameters[1]);
-            assert_eq!(flag_parameter.slot(), 2);
-            assert_eq!(flag_parameter.ty(), dotty_jvm::JvmType::Boolean);
-
-            let seed = initializer_plan.fields()[0].instructions();
-            assert!(matches!(
-                seed.first(),
-                Some(JvmConstructorInitializerInstruction::LoadThis)
-            ));
-            assert!(matches!(
-                seed.get(1),
-                Some(JvmConstructorInitializerInstruction::Constant(42))
-            ));
-            assert!(
-                matches!(seed.last(), Some(JvmConstructorInitializerInstruction::PutField { field, .. }) if *field == field_symbols[0])
-            );
-
-            let current = initializer_plan.fields()[1].instructions();
-            assert!(
-                matches!(current.get(1), Some(JvmConstructorInitializerInstruction::LoadParameter { symbol, slot: 1, value_type: dotty_jvm::JvmType::Int }) if *symbol == constructor_parameters[0])
-            );
-            assert!(
-                matches!(current.last(), Some(JvmConstructorInitializerInstruction::PutField { field, .. }) if *field == field_symbols[1])
-            );
-
-            let doubled = initializer_plan.fields()[2].instructions();
-            assert!(doubled.iter().any(|instruction| matches!(
-                instruction,
-                JvmConstructorInitializerInstruction::IntAdd
-            )));
-            assert_eq!(doubled.iter().filter(|instruction| matches!(instruction, JvmConstructorInitializerInstruction::LoadParameter { symbol, .. } if *symbol == constructor_parameters[0])).count(), 1);
-
-            let active = initializer_plan.fields()[3].instructions();
-            assert!(active.iter().any(|instruction| matches!(
-                instruction,
-                JvmConstructorInitializerInstruction::BooleanNot
-            )));
-            assert!(active.iter().any(|instruction| matches!(instruction, JvmConstructorInitializerInstruction::LoadParameter { symbol, slot: 2, value_type: dotty_jvm::JvmType::Boolean } if *symbol == constructor_parameters[1])));
-
-            let copied = initializer_plan.fields()[4].instructions();
-            assert!(copied.iter().any(|instruction| matches!(instruction, JvmConstructorInitializerInstruction::GetField { field, .. } if *field == field_symbols[1])));
-
-            let generated = emit_class(&unit, class, definitions).unwrap();
-            let mut reader = Reader::new(generated.bytes());
-            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
-            class_file.validate_references().unwrap();
-            assert_eq!(class_file.fields.len(), 5);
-            assert_eq!(class_file.methods.len(), 5);
-            assert_eq!(
-                class_file
-                    .constant_pool
-                    .utf8(class_file.methods[0].name_index)
-                    .unwrap(),
-                "<init>"
-            );
-            assert_eq!(
-                class_file
-                    .constant_pool
-                    .utf8(class_file.methods[0].descriptor_index)
-                    .unwrap(),
-                "(IZ)V"
-            );
-            assert_eq!(
-                class_file
-                    .fields
-                    .iter()
-                    .map(|field| class_file.constant_pool.utf8(field.name_index).unwrap())
-                    .collect::<Vec<_>>(),
-                ["seed", "current", "doubled", "active", "copied"]
-            );
-            assert!(class_file.fields[0].access_flags.is_private());
-            assert!(class_file.fields[0].access_flags.is_final());
-            assert!(class_file.fields[1].access_flags.is_private());
-            assert!(!class_file.fields[1].access_flags.is_final());
-            let method_identities = class_file.methods[1..]
-                .iter()
-                .map(|method| {
-                    (
-                        class_file.constant_pool.utf8(method.name_index).unwrap(),
-                        class_file
-                            .constant_pool
-                            .utf8(method.descriptor_index)
-                            .unwrap(),
-                    )
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                method_identities,
-                [
-                    ("get", "()I"),
-                    ("increment", "()V"),
-                    ("set", "(I)V"),
-                    ("enabled", "()Z")
-                ]
-            );
-
-            if require_jdk21_or_skip() {
-                let class_bytes = generated.into_bytes();
-                let nonce = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos();
-                let output = std::env::temp_dir().join(format!(
-                    "dotty-jvm-constructor-fields-{}-{nonce}",
-                    std::process::id()
-                ));
-                fs::create_dir_all(&output).unwrap();
-                fs::write(output.join("Counter.class"), class_bytes).unwrap();
-                let harness = output.join("ConstructorHarness.java");
-                fs::write(
-                    &harness,
-                    "public final class ConstructorHarness { private static java.lang.reflect.Field field(String name) throws Exception { java.lang.reflect.Field field = Counter.class.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Counter counter = new Counter(9, true); if (field(\"seed\").getInt(counter) != 42) throw new AssertionError(\"seed\"); if (field(\"current\").getInt(counter) != 9) throw new AssertionError(\"current\"); if (field(\"doubled\").getInt(counter) != 10) throw new AssertionError(\"doubled\"); if (field(\"active\").getBoolean(counter)) throw new AssertionError(\"active\"); if (field(\"copied\").getInt(counter) != 9) throw new AssertionError(\"copied\"); if (counter.get() != 9 || counter.enabled()) throw new AssertionError(\"getter\"); counter.increment(); if (counter.get() != 10) throw new AssertionError(\"increment\"); counter.set(17); if (counter.get() != 17) throw new AssertionError(\"setter\"); } }\n",
-                )
-                .unwrap();
-                let javac = Command::new("javac")
-                    .args(["-classpath", output.to_str().unwrap(), "-d"])
-                    .arg(output.to_str().unwrap())
-                    .arg(&harness)
-                    .output()
-                    .unwrap();
-                assert!(
-                    javac.status.success(),
-                    "javac rejected constructor harness\nstdout:\n{}\nstderr:\n{}",
-                    String::from_utf8_lossy(&javac.stdout),
-                    String::from_utf8_lossy(&javac.stderr)
-                );
-                let java = Command::new("java")
-                    .args([
-                        "-Xverify:all",
-                        "-classpath",
-                        output.to_str().unwrap(),
-                        "ConstructorHarness",
-                    ])
-                    .output()
-                    .unwrap();
-                assert!(
-                    java.status.success(),
-                    "java -Xverify:all rejected constructor initializer code\nstdout:\n{}\nstderr:\n{}",
-                    String::from_utf8_lossy(&java.stdout),
-                    String::from_utf8_lossy(&java.stderr)
-                );
-                fs::remove_dir_all(output).unwrap();
-            }
-        },
-    );
-}
-
-#[test]
-fn reference_fields_read_write_and_call_through_the_current_instance() {
-    let source_text = "class Counter():\n  def get(): Int = 7\nclass Other()\nclass Holder(left: Counter, enabled: Boolean, right: Other):\n  private val delegate: Counter = left\n  private var current: Counter = left\n  private val active: Boolean = enabled\n  private val peer: Other = right\n  def value(): Counter = delegate\n  def valueThis(): Counter = this.delegate\n  def read(): Int = delegate.get()\n  def readThis(): Int = this.delegate.get()\n  def replace(next: Counter): Unit = { current = next }\n  def replaceThis(next: Counter): Unit = { this.current = next }\n  def valueAfter(): Counter = current\n  def branch(flag: Boolean): Counter = if flag then delegate else current\n";
-    with_source(source_text, |ast, source, index, definitions, typer| {
-        let mut classes = Vec::new();
-        let mut class_symbols = Vec::new();
-        let mut field_symbols = Vec::new();
-        for name in ["Counter", "Other", "Holder"] {
-            let class = symbol_named(ast, index, source, typer, name);
-            class_symbols.push(class);
-            typer.complete_symbol(class).unwrap();
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, _)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
-                })
-                .unwrap();
-            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
-                panic!("class source node is a TypeDef")
-            };
-            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
-                panic!("class body is a template")
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
-            else {
-                panic!("primary constructor source node is a DefDef")
-            };
-            let parameters = constructor_definition
-                .value_param_clauses
-                .iter()
-                .flatten()
-                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                .collect::<Vec<_>>();
-            typer.complete_symbol(constructor).unwrap();
-            let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                parameters,
-                ast,
-                index,
-            )
-            .unwrap();
-            let mut fields = Vec::new();
-            for tree in &template.body {
-                let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
-                    continue;
-                };
-                let field = index.symbol_at(source, *tree).unwrap();
-                let rhs = definition.rhs.unwrap();
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field signature is complete")
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let typed_rhs = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(typed_rhs),
-                });
-                field_symbols.push(field);
-            }
-            classes.push(JvmClassPlan {
-                class,
-                methods: Vec::new(),
-                fields,
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-            });
-        }
-
-        for name in [
-            "get",
-            "value",
-            "valueThis",
-            "read",
-            "readThis",
-            "replace",
-            "replaceThis",
-            "valueAfter",
-            "branch",
-        ] {
-            let (method, body, parameters) = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    let TreeKind::DefDef(definition) = &node.kind else {
-                        return None;
-                    };
-                    if typer
-                        .store()
-                        .names
-                        .resolve(definition.name.as_name().text())
-                        != name
-                    {
-                        return None;
-                    }
-                    let method = index.symbol_at(source, tree)?;
-                    let expected_owner = if name == "get" {
-                        class_symbols[0]
-                    } else {
-                        class_symbols[2]
-                    };
-                    if typer.store().symbols.get(method).owner != Some(expected_owner) {
-                        return None;
-                    }
-                    let parameters = definition
-                        .value_param_clauses
-                        .iter()
-                        .flatten()
-                        .map(|parameter| index.symbol_at(source, *parameter))
-                        .collect::<Option<Vec<_>>>()?;
-                    Some((method, definition.rhs?, parameters))
-                })
-                .unwrap_or_else(|| panic!("missing method {name}"));
-            typer.complete_symbol(method).unwrap();
-            let context = typer.expression_context_for(method).unwrap();
-            let typed_body = typer.type_expression(body, context).unwrap();
-            let owner = if name == "get" {
-                class_symbols[0]
-            } else {
-                class_symbols[2]
-            };
-            let owner_index = class_symbols
-                .iter()
-                .position(|class| *class == owner)
-                .unwrap();
-            classes[owner_index].methods.push(JvmMethodPlan {
-                method,
-                parameters,
-                locals: Vec::new(),
-                body: Some(typed_body),
-            });
-        }
-
-        let unit = JvmCompilationUnit {
-            store: typer.store(),
-            typed_ast: typer.typed_ast(),
-            classes,
-        };
-        let metadata = unit.metadata(definitions).unwrap();
-        let holder_index = metadata
-            .iter()
-            .position(|class| class.identity().symbol() == class_symbols[2])
-            .unwrap();
-        let holder_metadata = &metadata[holder_index];
-        let constructor_parameters = holder_metadata.constructor().unwrap().parameters();
-        assert_eq!(constructor_parameters.len(), 3);
-        assert_eq!(constructor_parameters[0].slot(), 1);
-        assert_eq!(
-            constructor_parameters[0].ty(),
-            dotty_jvm::JvmType::Reference(class_symbols[0])
-        );
-        assert_eq!(constructor_parameters[1].slot(), 2);
-        assert_eq!(constructor_parameters[1].ty(), dotty_jvm::JvmType::Boolean);
-        assert_eq!(constructor_parameters[2].slot(), 3);
-        assert_eq!(
-            constructor_parameters[2].ty(),
-            dotty_jvm::JvmType::Reference(class_symbols[1])
-        );
-
-        let initializer = unit
-            .lower_constructor_field_initializers(class_symbols[2], definitions)
-            .unwrap();
-        let holder_methods = &unit.classes[2].methods;
-        for name in ["value", "valueThis", "valueAfter", "branch"] {
-            let method = holder_methods
-                .iter()
-                .find(|method| {
-                    typer
-                        .store()
-                        .names
-                        .resolve(typer.store().symbols.get(method.method).name.text())
-                        == name
-                })
-                .unwrap();
-            let code = unit
-                .lower_method_body(class_symbols[2], method.method, definitions)
-                .unwrap();
-            let debug = format!("{code:?}");
-            assert!(debug.contains("ALoad"), "{name} loads this: {debug}");
-            assert!(
-                debug.contains("operation: Get"),
-                "{name} reads field: {debug}"
-            );
-            assert!(
-                debug.contains("AReturn"),
-                "{name} returns reference: {debug}"
-            );
-        }
-        let read_method = holder_methods
-            .iter()
-            .find(|method| {
-                typer
-                    .store()
-                    .names
-                    .resolve(typer.store().symbols.get(method.method).name.text())
-                    == "read"
-            })
-            .unwrap();
-        let read_code = unit
-            .lower_method_body(class_symbols[2], read_method.method, definitions)
-            .unwrap();
-        let read_debug = format!("{read_code:?}");
-        assert!(read_debug.contains("operation: Get"), "read must getfield");
-        assert!(
-            read_debug.contains("operation: Virtual"),
-            "read must invokevirtual: {read_debug}"
-        );
-        let read_this_method = holder_methods
-            .iter()
-            .find(|method| {
-                typer
-                    .store()
-                    .names
-                    .resolve(typer.store().symbols.get(method.method).name.text())
-                    == "readThis"
-            })
-            .unwrap();
-        let read_this = unit
-            .lower_method_body(class_symbols[2], read_this_method.method, definitions)
-            .unwrap();
-        let read_this_debug = format!("{read_this:?}");
-        assert!(read_this_debug.contains("operation: Get"));
-        assert!(read_this_debug.contains("operation: Virtual"));
-        let replace_method = holder_methods
-            .iter()
-            .find(|method| {
-                typer
-                    .store()
-                    .names
-                    .resolve(typer.store().symbols.get(method.method).name.text())
-                    == "replace"
-            })
-            .unwrap();
-        let replace_code = unit
-            .lower_method_body(class_symbols[2], replace_method.method, definitions)
-            .unwrap();
-        let replace_debug = format!("{replace_code:?}");
-        assert!(replace_debug.contains("AStore"), "replace stores reference");
-        assert!(replace_debug.contains("ALoad"), "replace reloads reference");
-        assert!(
-            replace_debug.contains("operation: Put"),
-            "replace must putfield"
-        );
-        let replace_this_method = holder_methods
-            .iter()
-            .find(|method| {
-                typer
-                    .store()
-                    .names
-                    .resolve(typer.store().symbols.get(method.method).name.text())
-                    == "replaceThis"
-            })
-            .unwrap();
-        let replace_this = unit
-            .lower_method_body(class_symbols[2], replace_this_method.method, definitions)
-            .unwrap();
-        assert!(format!("{replace_this:?}").contains("operation: Put"));
-        assert_eq!(
-            initializer
-                .fields()
-                .iter()
-                .map(|field| field.field())
-                .collect::<Vec<_>>(),
-            field_symbols
-        );
-        for (field_index, (parameter_index, expected_type)) in [
-            (0, dotty_jvm::JvmType::Reference(class_symbols[0])),
-            (0, dotty_jvm::JvmType::Reference(class_symbols[0])),
-            (1, dotty_jvm::JvmType::Boolean),
-            (2, dotty_jvm::JvmType::Reference(class_symbols[1])),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let instructions = initializer.fields()[field_index].instructions();
-            assert!(matches!(
-                instructions.first(),
-                Some(JvmConstructorInitializerInstruction::LoadThis)
-            ));
-            assert!(matches!(
-                instructions.get(1),
-                Some(JvmConstructorInitializerInstruction::LoadParameter { symbol, slot, value_type })
-                    if *symbol == constructor_parameters[parameter_index].symbol()
-                        && *slot == constructor_parameters[parameter_index].slot()
-                        && *value_type == expected_type
-            ));
-            assert!(
-                matches!(instructions.last(), Some(JvmConstructorInitializerInstruction::PutField { field, .. }) if *field == field_symbols[field_index])
-            );
-        }
-
-        let generated = unit
-            .classes
-            .iter()
-            .map(|plan| emit_class(&unit, plan.class, definitions).unwrap())
-            .collect::<Vec<_>>();
-        let holder_bytes = generated
-            .iter()
-            .find(|class| class.internal_name() == "Holder")
-            .unwrap()
-            .bytes();
-        let mut reader = Reader::new(holder_bytes);
-        let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
-        class_file.validate_references().unwrap();
-        let constructor = &class_file.methods[0];
-        assert_eq!(
-            class_file
-                .constant_pool
-                .utf8(constructor.descriptor_index)
-                .unwrap(),
-            "(LCounter;ZLOther;)V"
-        );
-        assert_eq!(class_file.fields.len(), 4);
-        assert_eq!(
-            class_file
-                .fields
-                .iter()
-                .map(|field| class_file
-                    .constant_pool
-                    .utf8(field.descriptor_index)
-                    .unwrap())
-                .collect::<Vec<_>>(),
-            ["LCounter;", "LCounter;", "Z", "LOther;"]
-        );
-        assert!(
-            class_file.fields[0]
-                .access_flags
-                .contains(ACC_PRIVATE | ACC_FINAL)
-        );
-        assert!(class_file.fields[1].access_flags.contains(ACC_PRIVATE));
-        assert!(!class_file.fields[1].access_flags.contains(ACC_FINAL));
-        let code = constructor
-            .attributes
-            .iter()
-            .find_map(|attribute| match attribute {
-                dotty_classfile::attribute::Attribute::Code(code) => Some(code.code),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(code.len(), 25);
-        for (offset, opcode) in [
-            (0, 0x2a),  // aload_0
-            (1, 0xb7),  // invokespecial Object.<init>
-            (4, 0x2a),  // aload_0
-            (5, 0x2b),  // aload_1
-            (6, 0xb5),  // putfield delegate
-            (9, 0x2a),  // aload_0
-            (10, 0x2b), // aload_1
-            (11, 0xb5), // putfield current
-            (14, 0x2a), // aload_0
-            (15, 0x1c), // iload_2
-            (16, 0xb5), // putfield active
-            (19, 0x2a), // aload_0
-            (20, 0x2d), // aload_3
-            (21, 0xb5), // putfield peer
-            (24, 0xb1), // return
-        ] {
-            assert_eq!(
-                code[offset], opcode,
-                "wrong opcode at bytecode offset {offset}"
-            );
-        }
-
-        if require_jdk21_or_skip() {
-            let output = std::env::temp_dir().join(format!(
-                "dotty-jvm-reference-constructor-initializer-{}-{}",
-                std::process::id(),
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            fs::create_dir_all(&output).unwrap();
-            for generated in &generated {
-                fs::write(
-                    output.join(format!("{}.class", generated.internal_name())),
-                    generated.bytes(),
-                )
-                .unwrap();
-            }
-            let harness = output.join("ReferenceConstructorHarness.java");
-            fs::write(
-                &harness,
-                "public final class ReferenceConstructorHarness { private static java.lang.reflect.Field field(String name) throws Exception { java.lang.reflect.Field field = Holder.class.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Counter counter = new Counter(); Counter next = new Counter(); Other other = new Other(); Holder holder = new Holder(counter, true, other); if (field(\"delegate\").get(holder) != counter) throw new AssertionError(\"reference parameter\"); if (field(\"current\").get(holder) != counter) throw new AssertionError(\"mutable reference parameter\"); if (!field(\"active\").getBoolean(holder)) throw new AssertionError(\"boolean parameter\"); if (field(\"peer\").get(holder) != other) throw new AssertionError(\"second reference parameter\"); if (holder.value() != counter || holder.valueThis() != counter || holder.valueAfter() != counter) throw new AssertionError(\"getfield identity\"); if (holder.read() != 7 || holder.readThis() != 7) throw new AssertionError(\"field call receiver\"); if (holder.branch(true) != counter || holder.branch(false) != counter) throw new AssertionError(\"reference branch join\"); holder.replace(next); if (holder.valueAfter() != next) throw new AssertionError(\"putfield identity\"); holder.replaceThis(counter); if (holder.valueAfter() != counter) throw new AssertionError(\"explicit this putfield identity\"); } }\n",
-            )
-            .unwrap();
-            let javac = Command::new("javac")
-                .args(["-classpath", output.to_str().unwrap(), "-d"])
-                .arg(output.to_str().unwrap())
-                .arg(&harness)
-                .output()
-                .unwrap();
-            assert!(
-                javac.status.success(),
-                "javac rejected reference constructor initializer harness\\nstdout:\\n{}\\nstderr:\\n{}",
-                String::from_utf8_lossy(&javac.stdout),
-                String::from_utf8_lossy(&javac.stderr)
-            );
-            let java = Command::new("java")
-                .args([
-                    "-Xverify:all",
-                    "-classpath",
-                    output.to_str().unwrap(),
-                    "ReferenceConstructorHarness",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                java.status.success(),
-                "java -Xverify:all rejected reference constructor initializer code\\nstdout:\\n{}\\nstderr:\\n{}",
-                String::from_utf8_lossy(&java.stdout),
-                String::from_utf8_lossy(&java.stderr)
-            );
-            fs::remove_dir_all(output).unwrap();
-        }
-    });
-}
-
-#[test]
-fn constructor_field_initializer_rejects_qualified_parameter_references() {
-    with_source(
-        "class Qualified(start: Int) { private val value: Int = start }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Qualified");
-            typer.complete_symbol(class).unwrap();
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, _node)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
-                })
-                .unwrap();
-            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
-                panic!("Qualified source declaration should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
-                panic!("Qualified declaration should have a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
-                panic!("primary constructor should be a DefDef");
-            };
-            let parameters = constructor_def.value_param_clauses[0]
-                .iter()
-                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                .collect::<Vec<_>>();
-            typer.complete_symbol(constructor).unwrap();
-            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                parameters.clone(),
-                ast,
-                index,
-            )
-            .unwrap();
-            let (field, rhs) = template
-                .body
-                .iter()
-                .find_map(|tree| {
-                    let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
-                        return None;
-                    };
-                    Some((index.symbol_at(source, *tree)?, definition.rhs?))
-                })
-                .unwrap();
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let typed_rhs = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-            let typed_rhs_tree = typer.typed_ast().get(typed_rhs).clone();
-            assert!(matches!(typed_rhs_tree.kind, TreeKind::Ident(_)));
-
-            for missing_qualifier in [false, true] {
-                let mut typed_ast = AstArena::<Typed>::new();
-                for (_, tree) in typer.typed_ast().iter() {
-                    typed_ast.alloc(tree.clone());
-                }
-
-                let qualifier = if missing_qualifier {
-                    let checkpoint = typed_ast.checkpoint();
-                    typed_ast.alloc(typed_rhs_tree.clone());
-                    let missing = typed_ast.alloc(typed_rhs_tree.clone());
-                    typed_ast.rollback_to(checkpoint);
-                    missing
-                } else {
-                    typed_ast.alloc(Tree {
-                        kind: TreeKind::Apply(Apply {
-                            function: typed_rhs,
-                            args: Vec::new(),
-                            kind: ApplyKind::Regular,
-                        }),
-                        position: None,
-                        ty: typed_rhs_tree.ty,
-                    })
-                };
-                let initializer = typed_ast.alloc(Tree {
-                    kind: TreeKind::Select(Select {
-                        qualifier,
-                        name: typer.store().symbols.get(parameters[0]).name,
-                        backquoted: false,
-                    }),
-                    position: None,
-                    ty: typed_rhs_tree.ty,
-                });
-                if missing_qualifier {
-                    assert!(typed_ast.try_get(qualifier).is_none());
-                }
-
-                let unit = JvmCompilationUnit {
-                    store: typer.store(),
-                    typed_ast: &typed_ast,
-                    classes: vec![JvmClassPlan {
-                        class,
-                        methods: Vec::new(),
-                        fields: vec![JvmFieldPlan {
-                            field,
-                            source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                            initializer: Some(initializer),
-                        }],
-                        initialization: JvmClassInitializationPlan::PrimaryConstructor(
-                            constructor_plan.clone(),
-                        ),
-                    }],
-                };
-                assert!(matches!(
-                    unit.lower_constructor_field_initializers(class, definitions),
-                    Err(dotty_jvm::JvmCodegenError::UnsupportedConstructorFieldInitializer {
-                        field: found_field,
-                        tree,
-                        node: "qualified constructor parameter reference",
-                    }) if found_field == field && tree == initializer
-                ));
-            }
-        },
-    );
-}
-
-#[test]
-fn constructor_field_initializer_lowering_rejects_forward_field_reads() {
-    with_source(
-        "class Forward() { private val first: Int = second; private val second: Int = 2 }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Forward");
-            typer.complete_symbol(class).unwrap();
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some((tree, node))
-                })
-                .unwrap()
-                .0;
-            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
-                panic!("Forward source declaration should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
-                panic!("Forward declaration should have a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                Vec::new(),
-                ast,
-                index,
-            )
-            .unwrap();
-
-            let mut fields = Vec::new();
-            for tree in &template.body {
-                let TreeKind::ValDef(field_def) = &ast.get(*tree).kind else {
-                    continue;
-                };
-                let Some(field) = index.symbol_at(source, *tree) else {
-                    continue;
-                };
-                let rhs = field_def.rhs.unwrap();
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let typed_rhs = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(typed_rhs),
-                });
-            }
-            let first = fields[0].field;
-            let second = fields[1].field;
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields,
-                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
-                        constructor_plan,
-                    ),
-                }],
-            };
-            assert_eq!(
-                unit.lower_constructor_field_initializers(class, definitions),
-                Err(
-                    dotty_jvm::JvmCodegenError::FieldInitializerReadsUninitializedField {
-                        field: first,
-                        tree: unit.classes[0].fields[0].initializer.unwrap(),
-                        referenced_field: second,
-                    }
-                )
-            );
-        },
-    );
-}
-
-#[test]
-fn constructor_field_initializer_lowering_rejects_self_reads() {
-    with_source(
-        "class SelfRead() { private val value: Int = value }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "SelfRead");
-            typer.complete_symbol(class).unwrap();
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some((tree, node))
-                })
-                .unwrap()
-                .0;
-            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
-                panic!("SelfRead source declaration should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
-                panic!("SelfRead declaration should have a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                Vec::new(),
-                ast,
-                index,
-            )
-            .unwrap();
-            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "value");
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let typed_rhs = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(typed_rhs),
-                    }],
-                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
-                        constructor_plan,
-                    ),
-                }],
-            };
-            assert!(matches!(
-                unit.lower_constructor_field_initializers(class, definitions),
-                Err(dotty_jvm::JvmCodegenError::FieldInitializerReadsUninitializedField {
-                    field: found_field,
-                    referenced_field,
-                    ..
-                }) if found_field == field && referenced_field == field
-            ));
-        },
-    );
-}
-
-#[test]
-fn constructor_field_initializer_lowering_rejects_user_method_calls() {
-    with_source(
-        "class Calling() { private def value(): Int = 7; private val result: Int = value() }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Calling");
-            typer.complete_symbol(class).unwrap();
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some((tree, node))
-                })
-                .unwrap()
-                .0;
-            let TreeKind::TypeDef(definition) = &ast.get(class_tree).kind else {
-                panic!("Calling source declaration should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
-                panic!("Calling declaration should have a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let constructor_plan = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                Vec::new(),
-                ast,
-                index,
-            )
-            .unwrap();
-            let (field, rhs) = template
-                .body
-                .iter()
-                .find_map(|tree| {
-                    let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
-                        return None;
-                    };
-                    Some((index.symbol_at(source, *tree)?, definition.rhs?))
-                })
-                .unwrap();
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let typed_rhs = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
-
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(typed_rhs),
-                    }],
-                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
-                        constructor_plan,
-                    ),
-                }],
-            };
-            assert!(matches!(
-                unit.lower_constructor_field_initializers(class, definitions),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedConstructorFieldInitializer {
-                    field: found_field,
-                    tree,
-                    node: "non-approved constructor application",
-                }) if found_field == field && tree == typed_rhs
-            ));
-        },
-    );
-}
-
-#[test]
-fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
-    with_source(
-        "class Counter(start: Long) { private var current: Long = start; def get(): Long = current }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Counter");
-            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "current");
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let method = symbol_named(ast, index, source, typer, "get");
-            let method_rhs = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    let TreeKind::DefDef(definition) = &node.kind else {
-                        return None;
-                    };
-                    (index.symbol_at(source, tree) == Some(method))
-                        .then_some(definition.rhs)
-                        .flatten()
-                })
-                .expect("get method should have a source body");
-            assert_eq!(
-                template
-                    .body
-                    .iter()
-                    .filter_map(|tree| index.symbol_at(source, *tree))
-                    .collect::<Vec<_>>(),
-                vec![field, method]
-            );
-            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
-                panic!("primary constructor should be a DefDef");
-            };
-            assert_eq!(constructor_def.value_param_clauses.len(), 1);
-            assert_eq!(constructor_def.value_param_clauses[0].len(), 1);
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            assert_eq!(
-                typer.store().symbols.get(constructor).kind,
-                SymbolKind::Constructor
-            );
-            assert_eq!(typer.store().symbols.get(constructor).owner, Some(class));
-            assert_eq!(
-                typer.store().symbols.get(constructor).visibility,
-                Visibility::Public
-            );
-            let parameter_tree = constructor_def.value_param_clauses[0][0];
-            let canonical_parameter = index.symbol_at(source, parameter_tree).unwrap();
-            let constructor_parameter = index
-                .derived_symbol_at(constructor, source, parameter_tree)
-                .unwrap();
-
-            assert_eq!(
-                typer.store().symbols.get(canonical_parameter).kind,
-                SymbolKind::Parameter
-            );
-            assert_eq!(
-                typer.store().symbols.get(canonical_parameter).owner,
-                Some(class)
-            );
-            assert_eq!(
-                typer.store().symbols.get(canonical_parameter).visibility,
-                Visibility::Private
-            );
-            assert_eq!(
-                typer.store().symbols.get(constructor_parameter).visibility,
-                Visibility::Public
-            );
-            assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
-            assert_eq!(typer.store().symbols.get(field).owner, Some(class));
-            assert!(
-                typer
-                    .store()
-                    .symbols
-                    .get(field)
-                    .flags
-                    .contains(SymbolFlags::MUTABLE)
-            );
-            assert_eq!(
-                typer.store().symbols.get(field).visibility,
-                Visibility::Private
-            );
-            assert_ne!(canonical_parameter, constructor_parameter);
-            assert_eq!(
-                typer.store().symbols.get(canonical_parameter).owner,
-                Some(class)
-            );
-            assert_eq!(
-                typer.store().symbols.get(constructor_parameter).kind,
-                SymbolKind::Parameter
-            );
-            assert_eq!(
-                typer.store().symbols.get(constructor_parameter).owner,
-                Some(constructor)
-            );
-            assert!(
-                !typer
-                    .store()
-                    .symbols
-                    .get(constructor_parameter)
-                    .flags
-                    .contains(SymbolFlags::MUTABLE)
-            );
-            assert_ne!(field, constructor_parameter);
-
-            typer.complete_symbol(constructor).unwrap();
-            typer.complete_symbol(class).unwrap();
-            let SymbolInfo::Complete(constructor_type) =
-                typer.store().symbols.get(constructor).info
-            else {
-                panic!("constructor signature should be complete");
-            };
-            let Type::Method(signature) = typer.store().types.get(constructor_type) else {
-                panic!("ordinary primary constructor should have one method clause");
-            };
-            assert_eq!(signature.params.len(), 1);
-            assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
-            assert_eq!(signature.params[0].ty, definitions.long);
-            let constructor_parameter_type = signature.params[0].ty;
-            assert_eq!(
-                typer.store().types.get(signature.result).reference_symbol(),
-                Some(class)
-            );
-            assert!(matches!(
-                typer.store().symbols.get(class).info,
-                SymbolInfo::Complete(_)
-            ));
-
-            typer.complete_symbol(field).unwrap();
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let typed_rhs = typer
-                .type_expression_expected(rhs, context, constructor_parameter_type)
-                .unwrap();
-            assert_eq!(typer.type_expression(rhs, context).unwrap(), typed_rhs);
-            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
-            assert!(matches!(
-                typer
-                    .store()
-                    .types
-                    .get(typer.typed_ast().get(typed_rhs).ty),
-                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
-                    if *symbol == constructor_parameter
-            ));
-            assert_eq!(
-                typer.store().types.get(constructor_parameter_type),
-                typer.store().types.get(definitions.long)
-            );
-
-            typer.complete_symbol(method).unwrap();
-            let method_context = typer.expression_context_for(method).unwrap();
-            let typed_method_rhs = typer.type_expression(method_rhs, method_context).unwrap();
-            assert!(matches!(
-                typer
-                    .store()
-                    .types
-                    .get(typer.typed_ast().get(typed_method_rhs).ty),
-                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
-                    if *symbol == field
-            ));
-
-            let constructor_plan = JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                vec![constructor_parameter],
-                ast,
-                index,
-            )
-            .unwrap();
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: vec![JvmMethodPlan {
-                        method,
-                        parameters: Vec::new(),
-                        locals: Vec::new(),
-                        body: Some(typed_method_rhs),
-                    }],
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(typed_rhs),
-                    }],
-                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
-                        constructor_plan,
-                    ),
-                }],
-            };
-            let metadata = unit.metadata(definitions).unwrap();
-            assert_eq!(metadata[0].fields()[0].descriptor(), "J");
-            assert_eq!(metadata[0].constructor().unwrap().parameters()[0].slot(), 1);
-            assert_eq!(
-                metadata[0].constructor().unwrap().parameters()[0].width(),
-                2
-            );
-            let initializer = unit
-                .lower_constructor_field_initializers(class, definitions)
-                .unwrap();
-            assert!(matches!(
-                initializer.fields()[0].instructions(),
-                [
-                    JvmConstructorInitializerInstruction::LoadThis,
-                    JvmConstructorInitializerInstruction::LoadParameter {
-                        symbol,
-                        slot: 1,
-                        value_type: dotty_jvm::JvmType::Long,
-                    },
-                    JvmConstructorInitializerInstruction::PutField {
-                        field: actual_field,
-                        descriptor,
-                        ..
-                    },
-                ] if *symbol == constructor_parameter
-                    && *actual_field == field
-                    && descriptor == "J"
-            ));
-        },
-    );
-}
-
-#[test]
-fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols() {
-    let source_text = "class Measurement(val id: Int, var value: Double); class Mixed(val enabled: Boolean, var count: Long); class Ref(val item: Measurement)";
-    with_source(source_text, |ast, source, index, definitions, typer| {
-        let mut class_plans = Vec::new();
-        for (class_name, fields) in [
-            (
-                "Measurement",
-                vec![
-                    ("id", Some(definitions.int), None, false),
-                    ("value", Some(definitions.double), None, true),
-                ],
-            ),
-            (
-                "Mixed",
-                vec![
-                    ("enabled", Some(definitions.boolean), None, false),
-                    ("count", Some(definitions.long), None, true),
-                ],
-            ),
-            (
-                "Ref",
-                vec![(
-                    "item",
-                    None,
-                    Some(symbol_named(ast, index, source, typer, "Measurement")),
-                    false,
-                )],
-            ),
-        ] {
-            let class = symbol_named(ast, index, source, typer, class_name);
-            typer.complete_symbol(class).unwrap();
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, _node)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
-                })
-                .unwrap();
-            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
-                panic!("class declaration should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
-                panic!("class body should be a Template");
-            };
-            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
-                panic!("primary constructor should be a DefDef");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let parameter_trees = constructor_def.value_param_clauses[0].clone();
-            assert_eq!(parameter_trees.len(), fields.len());
-            let mut parameters = Vec::with_capacity(parameter_trees.len());
-            for (parameter_tree, (name, expected_type, expected_symbol, mutable)) in
-                parameter_trees.iter().copied().zip(fields)
-            {
-                let TreeKind::ValDef(parameter_definition) = &ast.get(parameter_tree).kind else {
-                    panic!("constructor parameter source node should be a ValDef");
-                };
-                let expected_modifiers = if mutable {
-                    vec![
-                        dotty_core::ast::Modifier::ParamAccessor,
-                        dotty_core::ast::Modifier::Var,
-                    ]
-                } else {
-                    vec![dotty_core::ast::Modifier::ParamAccessor]
-                };
-                assert_eq!(parameter_definition.metadata.modifiers, expected_modifiers);
-                assert!(parameter_definition.metadata.visibility.is_none());
-                assert_eq!(
-                    typer
-                        .store()
-                        .names
-                        .resolve(parameter_definition.name.as_name().text()),
-                    name,
-                    "{class_name} constructor parameter order"
-                );
-                let field = index.symbol_at(source, parameter_tree).unwrap();
-                let parameter = index
-                    .derived_symbol_at(constructor, source, parameter_tree)
-                    .unwrap();
-                parameters.push(parameter);
-
-                assert_ne!(field, parameter, "{class_name}.{name} identities");
-                assert_eq!(
-                    index.definition_of(field),
-                    Some(dotty_namer::SourceDefinition::Canonical {
-                        source,
-                        tree: parameter_tree,
-                    })
-                );
-                assert_eq!(
-                    index.definition_of(parameter),
-                    Some(dotty_namer::SourceDefinition::Derived {
-                        source,
-                        tree: parameter_tree,
-                    })
-                );
-                assert_eq!(ast.get(parameter_tree).position.unwrap().source(), source);
-                assert_eq!(typer.store().symbols.get(field).kind, SymbolKind::Field);
-                assert_eq!(typer.store().symbols.get(field).owner, Some(class));
-                assert_eq!(
-                    typer.store().symbols.get(field).visibility,
-                    Visibility::Public
-                );
-                assert_eq!(
-                    typer.store().symbols.get(parameter).kind,
-                    SymbolKind::Parameter
-                );
-                assert_eq!(
-                    typer.store().symbols.get(parameter).owner,
-                    Some(constructor)
-                );
-                assert!(
-                    !typer
-                        .store()
-                        .symbols
-                        .get(parameter)
-                        .flags
-                        .contains(SymbolFlags::MUTABLE)
-                );
-                assert_eq!(
-                    typer
-                        .store()
-                        .symbols
-                        .get(field)
-                        .flags
-                        .contains(SymbolFlags::MUTABLE),
-                    mutable,
-                    "{class_name}.{name} mutability belongs to the source field"
-                );
-                typer.complete_symbol(field).unwrap();
-                typer.complete_symbol(parameter).unwrap();
-                let field_ty = match typer.store().symbols.get(field).info {
-                    SymbolInfo::Complete(ty) => ty,
-                    _ => panic!("{class_name}.{name} field type should be complete"),
-                };
-                let parameter_ty = match typer.store().symbols.get(parameter).info {
-                    SymbolInfo::Complete(ty) => ty,
-                    _ => panic!("{class_name}.{name} parameter type should be complete"),
-                };
-                for (label, ty) in [("field", field_ty), ("derived parameter", parameter_ty)] {
-                    if let Some(expected_type) = expected_type {
-                        assert_eq!(
-                            typer.store().types.get(ty).reference_symbol(),
-                            typer.store().types.get(expected_type).reference_symbol(),
-                            "{class_name}.{name} {label} type"
-                        );
-                    }
-                    if let Some(expected_symbol) = expected_symbol {
-                        assert!(
-                            matches!(
-                                typer.store().types.get(ty),
-                                Type::TypeRef { target: dotty_core::types::TypeRefTarget::Symbol(actual), .. }
-                                    if *actual == expected_symbol
-                            ),
-                            "{class_name}.{name} {label} should retain its class type identity"
-                        );
-                    }
-                }
-            }
-            let proof = JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                parameters.clone(),
-                ast,
-                index,
-            )
-            .unwrap();
-            assert_eq!(proof.accessor_bindings().len(), parameter_trees.len());
-            for (ordinal, (binding, tree)) in proof
-                .accessor_bindings()
-                .iter()
-                .zip(&parameter_trees)
-                .enumerate()
-            {
-                assert_eq!(binding.class(), class);
-                assert_eq!(binding.constructor(), constructor);
-                assert_eq!(binding.source_id(), source);
-                assert_eq!(binding.source_parameter(), *tree);
-                assert_eq!(binding.field(), index.symbol_at(source, *tree).unwrap());
-                assert_eq!(
-                    binding.parameter(),
-                    index.derived_symbol_at(constructor, source, *tree).unwrap()
-                );
-                assert_eq!(binding.source_ordinal(), ordinal);
-                assert_eq!(binding.is_mutable(), ordinal == 1);
-            }
-            class_plans.push(JvmClassPlan {
-                class,
-                methods: Vec::new(),
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof.clone()),
-            });
-            typer.complete_symbol(constructor).unwrap();
-            if class_name != "Ref" {
-                let metadata = class_plans
-                    .last()
-                    .unwrap()
-                    .metadata(typer.store(), definitions)
-                    .unwrap();
-                assert_eq!(metadata.accessor_bindings(), proof.accessor_bindings());
-            }
-        }
-        let unit = JvmCompilationUnit {
-            store: typer.store(),
-            typed_ast: typer.typed_ast(),
-            classes: class_plans,
-        };
-        let metadata = unit.metadata(definitions).unwrap();
-        assert_eq!(metadata.len(), 3);
-        assert_eq!(
-            metadata
-                .iter()
-                .map(|class| class.accessor_bindings().len())
-                .collect::<Vec<_>>(),
-            [2, 2, 1],
-            "same-batch accessor metadata remains canonical"
-        );
-        for class_name in ["Measurement", "Mixed", "Ref"] {
-            let class = symbol_named(ast, index, source, typer, class_name);
-            let class_metadata = metadata
-                .iter()
-                .find(|metadata| metadata.identity().symbol() == class)
-                .unwrap();
-            assert!(class_metadata.methods().is_empty());
-            assert_eq!(
-                class_metadata.accessors().len(),
-                class_metadata.accessor_bindings().len()
-            );
-            for (ordinal, accessor) in class_metadata.accessors().iter().enumerate() {
-                assert_eq!(accessor.owner(), class);
-                assert_eq!(accessor.source_ordinal(), ordinal);
-                let binding = accessor.binding().expect("constructor accessor origin");
-                assert_eq!(accessor.source_field(), binding.field());
-                assert_eq!(accessor.constructor_parameter(), Some(binding.parameter()));
-                assert!(accessor.field_access_flags().contains(ACC_PRIVATE));
-                assert!(accessor.getter().access_flags().contains(ACC_PUBLIC));
-            }
-        }
-        let measurement = metadata
-            .iter()
-            .find(|metadata| {
-                metadata.identity().symbol()
-                    == symbol_named(ast, index, source, typer, "Measurement")
-            })
-            .unwrap();
-        let [id, value] = measurement.accessors() else {
-            panic!("Measurement should retain two accessor metadata records");
-        };
-        assert_eq!((id.field_name(), id.field_descriptor()), ("id", "I"));
-        assert!(id.field_access_flags().contains(ACC_FINAL));
-        assert_eq!(
-            (id.getter().name(), id.getter().descriptor().as_str()),
-            ("id", "()I")
-        );
-        assert!(id.setter().is_none(), "val must not have a JVM setter");
-        assert_eq!(
-            (value.field_name(), value.field_descriptor()),
-            ("value", "D")
-        );
-        assert!(!value.field_access_flags().contains(ACC_FINAL));
-        assert_eq!(
-            (value.getter().name(), value.getter().descriptor().as_str()),
-            ("value", "()D")
-        );
-        let setter = value.setter().unwrap();
-        assert_eq!(
-            (setter.name(), setter.descriptor().as_str()),
-            ("value_$eq", "(D)V")
-        );
-        assert!(setter.access_flags().contains(ACC_PUBLIC));
-        let mixed = metadata
-            .iter()
-            .find(|metadata| {
-                metadata.identity().symbol() == symbol_named(ast, index, source, typer, "Mixed")
-            })
-            .unwrap();
-        assert_eq!(
-            mixed
-                .accessors()
-                .iter()
-                .map(|accessor| (accessor.field_name(), accessor.field_descriptor()))
-                .collect::<Vec<_>>(),
-            [("enabled", "Z"), ("count", "J")]
-        );
-        assert_eq!(
-            mixed.accessors()[1].setter().unwrap().descriptor().as_str(),
-            "(J)V"
-        );
-        let reference = metadata
-            .iter()
-            .find(|metadata| {
-                metadata.identity().symbol() == symbol_named(ast, index, source, typer, "Ref")
-            })
-            .unwrap();
-        assert_eq!(reference.accessors()[0].field_descriptor(), "LMeasurement;");
-        assert_eq!(
-            reference.accessors()[0].getter().descriptor().as_str(),
-            "()LMeasurement;"
-        );
-    });
-}
-
-#[test]
-fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
-    let source_text = "class Measurement(val id: Int, var value: Double) { private val copied: Int = 42 }; class Mixed(start: Int, val total: Long, var enabled: Boolean, var ratio: Float); class Ref(val item: Measurement)";
-    with_source(source_text, |ast, source, index, definitions, typer| {
-        let mut classes = Vec::new();
-        let mut class_symbols = Vec::new();
-        for class_name in ["Measurement", "Mixed", "Ref"] {
-            let class = symbol_named(ast, index, source, typer, class_name);
-            class_symbols.push(class);
-            typer.complete_symbol(class).unwrap();
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, _)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
-                })
-                .unwrap();
-            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
-                panic!("{class_name} source declaration should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
-                panic!("{class_name} should have a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
-            else {
-                panic!("{class_name} primary constructor should be a DefDef");
-            };
-            let parameter_trees = constructor_definition
-                .value_param_clauses
-                .iter()
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>();
-            let parameters = parameter_trees
-                .iter()
-                .map(|tree| {
-                    let field_or_parameter = index.symbol_at(source, *tree).unwrap();
-                    let parameter = index.derived_symbol_at(constructor, source, *tree).unwrap();
-                    typer.complete_symbol(field_or_parameter).unwrap();
-                    typer.complete_symbol(parameter).unwrap();
-                    parameter
-                })
-                .collect::<Vec<_>>();
-            typer.complete_symbol(constructor).unwrap();
-            let proof = JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                parameters.clone(),
-                ast,
-                index,
-            )
-            .unwrap();
-            let mut field_plans = Vec::new();
-            for tree in &template.body {
-                let TreeKind::ValDef(field_definition) = &ast.get(*tree).kind else {
-                    continue;
-                };
-                let Some(field) = index.symbol_at(source, *tree) else {
-                    continue;
-                };
-                let rhs = field_definition.rhs.expect("body field has an initializer");
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("body field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let typed_rhs = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                field_plans.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(typed_rhs),
-                });
-            }
-            classes.push(JvmClassPlan {
-                class,
-                methods: Vec::new(),
-                fields: field_plans,
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-            });
-        }
-
-        let unit = JvmCompilationUnit {
-            store: typer.store(),
-            typed_ast: typer.typed_ast(),
-            classes,
-        };
-        let metadata = unit.metadata(definitions).unwrap();
-        let expected = [
-            (
-                "Measurement",
-                vec![("id", "I", 1, 1), ("value", "D", 2, 2)],
-                "(ID)V",
-            ),
-            (
-                "Mixed",
-                vec![
-                    ("total", "J", 2, 2),
-                    ("enabled", "Z", 4, 1),
-                    ("ratio", "F", 5, 1),
-                ],
-                "(IJZF)V",
-            ),
-            (
-                "Ref",
-                vec![("item", "LMeasurement;", 1, 1)],
-                "(LMeasurement;)V",
-            ),
-        ];
-        for (class_name, fields, constructor_descriptor) in expected {
-            let class = symbol_named(ast, index, source, typer, class_name);
-            let class_metadata = metadata
-                .iter()
-                .find(|metadata| metadata.identity().symbol() == class)
-                .unwrap();
-            let initializer_plan = unit
-                .lower_constructor_field_initializers(class, definitions)
-                .unwrap();
-            assert_eq!(initializer_plan.accessors().len(), fields.len());
-            assert_eq!(
-                initializer_plan.fields().len(),
-                usize::from(class_name == "Measurement"),
-                "ordinary private initializers remain in their existing plan"
-            );
-            for (initializer, (name, descriptor, slot, width)) in initializer_plan
-                .accessors()
-                .iter()
-                .zip(fields.iter().copied())
-            {
-                let accessor = class_metadata
-                    .accessors()
-                    .iter()
-                    .find(|accessor| accessor.source_field() == initializer.field())
-                    .unwrap();
-                assert_eq!(accessor.field_name(), name);
-                assert_eq!(accessor.field_descriptor(), descriptor);
-                assert_eq!(
-                    Some(initializer.parameter()),
-                    accessor.constructor_parameter()
-                );
-                assert_eq!(initializer.source_ordinal(), accessor.source_ordinal());
-                assert_eq!(initializer.slot(), slot);
-                assert_eq!(initializer.width(), width);
-            }
-
-            let generated = emit_class(&unit, class, definitions).unwrap();
-            let repeated = emit_class(&unit, class, definitions).unwrap();
-            assert_eq!(
-                generated.bytes(),
-                repeated.bytes(),
-                "emission is deterministic"
-            );
-            let mut reader = Reader::new(generated.bytes());
-            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
-            class_file.validate_references().unwrap();
-            let emitted_fields = class_file
-                .fields
-                .iter()
-                .map(|field| {
-                    (
-                        class_file.constant_pool.utf8(field.name_index).unwrap(),
-                        class_file
-                            .constant_pool
-                            .utf8(field.descriptor_index)
-                            .unwrap(),
-                        field.access_flags,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let accessor_fields = fields
-                .iter()
-                .map(|(name, descriptor, _, _)| (*name, *descriptor))
-                .collect::<Vec<_>>();
-            assert_eq!(
-                emitted_fields
-                    .iter()
-                    .take(accessor_fields.len())
-                    .map(|(name, descriptor, _)| (*name, *descriptor))
-                    .collect::<Vec<_>>(),
-                accessor_fields
-            );
-            assert_eq!(
-                emitted_fields
-                    .iter()
-                    .skip(accessor_fields.len())
-                    .map(|(name, descriptor, _)| (*name, *descriptor))
-                    .collect::<Vec<_>>(),
-                class_metadata
-                    .fields()
-                    .iter()
-                    .map(|field| (field.name(), field.descriptor()))
-                    .collect::<Vec<_>>()
-            );
-            assert!(
-                emitted_fields
-                    .iter()
-                    .all(|(_, _, flags)| flags.is_private())
-            );
-            let emitted_method_names = class_file
-                .methods
-                .iter()
-                .map(|method| class_file.constant_pool.utf8(method.name_index).unwrap())
-                .collect::<Vec<_>>();
-            let expected_method_names = std::iter::once("<init>")
-                .chain(class_metadata.accessors().iter().flat_map(|accessor| {
-                    std::iter::once(accessor.getter())
-                        .chain(accessor.setter())
-                        .map(|method| method.name())
-                }))
-                .collect::<Vec<_>>();
-            assert_eq!(emitted_method_names, expected_method_names);
-            let constructor = &class_file.methods[0];
-            assert_eq!(
-                class_file
-                    .constant_pool
-                    .utf8(constructor.name_index)
-                    .unwrap(),
-                "<init>"
-            );
-            assert_eq!(
-                class_file
-                    .constant_pool
-                    .utf8(constructor.descriptor_index)
-                    .unwrap(),
-                constructor_descriptor
-            );
-            let code = constructor
-                .attributes
-                .iter()
-                .find_map(|attribute| match attribute {
-                    dotty_classfile::attribute::Attribute::Code(code) => Some(code),
-                    _ => None,
-                })
-                .unwrap();
-            let expected_stack = if fields.iter().any(|(_, _, _, width)| *width == 2) {
-                3
-            } else {
-                2
-            };
-            assert!(
-                code.max_stack >= expected_stack,
-                "accessor copies need {expected_stack} stack slots"
-            );
-            let expected_locals = initializer_plan
-                .constructor()
-                .expect("primary-constructor initializer plan retains constructor metadata")
-                .parameters()
-                .last()
-                .map(|parameter| parameter.slot() + u16::from(parameter.width()))
-                .unwrap_or(1);
-            assert_eq!(code.max_locals, expected_locals);
-            let puts = code.code.iter().filter(|opcode| **opcode == 0xb5).count();
-            assert_eq!(
-                puts,
-                initializer_plan.accessors().len() + initializer_plan.fields().len(),
-                "each accessor and ordinary field is stored exactly once"
-            );
-            assert_eq!(code.code[0], 0x2a, "constructor starts by loading this");
-            assert_eq!(
-                code.code[1], 0xb7,
-                "direct-super initialization precedes stores"
-            );
-            let first_put = code.code.iter().position(|opcode| *opcode == 0xb5).unwrap();
-            assert!(
-                first_put > 1,
-                "no accessor store may use uninitialized this"
-            );
-            if class_name == "Measurement" {
-                let putfield_references = code
-                    .code
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, opcode)| **opcode == 0xb5)
-                    .map(|(offset, _)| {
-                        let index =
-                            u16::from_be_bytes([code.code[offset + 1], code.code[offset + 2]]);
-                        let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
-                            class_index,
-                            name_and_type_index,
-                        } = class_file
-                            .constant_pool
-                            .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
-                            .unwrap()
-                        else {
-                            panic!("putfield must use a Fieldref");
-                        };
-                        let owner = class_file.constant_pool.class_name(*class_index).unwrap();
-                        let (name, descriptor) = class_file
-                            .constant_pool
-                            .name_and_type(*name_and_type_index)
-                            .unwrap();
-                        (owner, name, descriptor)
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    putfield_references,
-                    [
-                        ("Measurement", "id", "I"),
-                        ("Measurement", "value", "D"),
-                        ("Measurement", "copied", "I"),
-                    ]
-                );
-            }
-        }
-
-        if require_jdk21_or_skip() {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let output = std::env::temp_dir().join(format!(
-                "dotty-jvm-accessor-initializers-{}-{nonce}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&output).unwrap();
-            for class in class_symbols {
-                let generated = emit_class(&unit, class, definitions).unwrap();
-                fs::write(
-                    output.join(format!("{}.class", generated.internal_name())),
-                    generated.bytes(),
-                )
-                .unwrap();
-            }
-            let harness = output.join("AccessorInitializerHarness.java");
-            fs::write(
-                &harness,
-                "public final class AccessorInitializerHarness { private static java.lang.reflect.Field field(Class<?> type, String name) throws Exception { java.lang.reflect.Field field = type.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Measurement first = new Measurement(7, 1.5d); Measurement second = new Measurement(-4, -2.25d); if (field(Measurement.class, \"id\").getInt(first) != 7 || field(Measurement.class, \"value\").getDouble(first) != 1.5d || field(Measurement.class, \"copied\").getInt(first) != 42) throw new AssertionError(\"Measurement first\"); if (field(Measurement.class, \"id\").getInt(second) != -4 || field(Measurement.class, \"value\").getDouble(second) != -2.25d || field(Measurement.class, \"copied\").getInt(second) != 42) throw new AssertionError(\"Measurement second\"); Mixed mixed = new Mixed(99, Long.MIN_VALUE + 17, true, 3.25f); if (field(Mixed.class, \"total\").getLong(mixed) != Long.MIN_VALUE + 17 || !field(Mixed.class, \"enabled\").getBoolean(mixed) || field(Mixed.class, \"ratio\").getFloat(mixed) != 3.25f) throw new AssertionError(\"Mixed\"); try { field(Mixed.class, \"start\"); throw new AssertionError(\"plain parameter must not become a field\"); } catch (NoSuchFieldException expected) { } Ref ref = new Ref(first); if (field(Ref.class, \"item\").get(ref) != first) throw new AssertionError(\"Ref\"); } }\n",
-            )
-            .unwrap();
-            let javac = Command::new("javac")
-                .args(["-classpath", output.to_str().unwrap(), "-d"])
-                .arg(output.to_str().unwrap())
-                .arg(&harness)
-                .output()
-                .unwrap();
-            assert!(
-                javac.status.success(),
-                "javac rejected accessor initialization harness\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&javac.stdout),
-                String::from_utf8_lossy(&javac.stderr)
-            );
-            let java = Command::new("java")
-                .args([
-                    "-Xverify:all",
-                    "-classpath",
-                    output.to_str().unwrap(),
-                    "AccessorInitializerHarness",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                java.status.success(),
-                "java -Xverify:all rejected accessor initialization\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&java.stdout),
-                String::from_utf8_lossy(&java.stderr)
-            );
-            fs::remove_dir_all(output).unwrap();
-        }
-    });
-}
-
-#[test]
-fn constructor_accessor_getters_and_setters_emit_verified_abi_methods() {
-    let source_text = "class Measurement(val id: Int, var value: Double) { def marker(): Int = 9 }; class Mixed(var enabled: Boolean, var count: Long, var ratio: Float, var number: Int); class Ref(var item: Measurement); class Plain(start: Int)";
-    with_source(source_text, |ast, source, index, definitions, typer| {
-        let mut classes = Vec::new();
-        let mut class_symbols = Vec::new();
-        for class_name in ["Measurement", "Mixed", "Ref", "Plain"] {
-            let class = symbol_named(ast, index, source, typer, class_name);
-            class_symbols.push(class);
-            typer.complete_symbol(class).unwrap();
-            let class_tree = ast
-                .iter()
-                .find_map(|(tree, _)| {
-                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
-                })
-                .unwrap();
-            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
-                panic!("{class_name} should be a type definition");
-            };
-            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
-                panic!("{class_name} should have a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
-            else {
-                panic!("{class_name} constructor should be a definition");
-            };
-            let parameters = constructor_definition
-                .value_param_clauses
-                .iter()
-                .flatten()
-                .map(|tree| {
-                    let source_symbol = index.symbol_at(source, *tree).unwrap();
-                    typer.complete_symbol(source_symbol).unwrap();
-                    let parameter = index.derived_symbol_at(constructor, source, *tree).unwrap();
-                    typer.complete_symbol(parameter).unwrap();
-                    parameter
-                })
-                .collect::<Vec<_>>();
-            typer.complete_symbol(constructor).unwrap();
-            let constructor_plan =
-                JvmPrimaryConstructorPlan::from_source(class, constructor, parameters, ast, index)
-                    .unwrap();
-
-            let mut methods = Vec::new();
-            for tree in template.body.iter().copied() {
-                let TreeKind::DefDef(definition) = &ast.get(tree).kind else {
-                    continue;
-                };
-                let method = index.symbol_at(source, tree).unwrap();
-                typer.complete_symbol(method).unwrap();
-                let body = definition.rhs.unwrap();
-                let context = typer.expression_context_for(method).unwrap();
-                let typed_body = typer.type_expression(body, context).unwrap();
-                methods.push(JvmMethodPlan {
-                    method,
-                    parameters: definition
-                        .value_param_clauses
-                        .iter()
-                        .flatten()
-                        .map(|tree| index.symbol_at(source, *tree).unwrap())
-                        .collect(),
-                    locals: Vec::new(),
-                    body: Some(typed_body),
-                });
-            }
-            classes.push(JvmClassPlan {
-                class,
-                methods,
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(constructor_plan),
-            });
-        }
-
-        let unit = JvmCompilationUnit {
-            store: typer.store(),
-            typed_ast: typer.typed_ast(),
-            classes,
-        };
-        let metadata = unit.metadata(definitions).unwrap();
-        let expected = [
-            (
-                "Measurement",
-                vec![("id", "()I", 0xac), ("value", "()D", 0xaf)],
-                vec!["<init>", "id", "value", "value_$eq", "marker"],
-            ),
-            (
-                "Mixed",
-                vec![
-                    ("enabled", "()Z", 0xac),
-                    ("count", "()J", 0xad),
-                    ("ratio", "()F", 0xae),
-                    ("number", "()I", 0xac),
-                ],
-                vec![
-                    "<init>",
-                    "enabled",
-                    "enabled_$eq",
-                    "count",
-                    "count_$eq",
-                    "ratio",
-                    "ratio_$eq",
-                    "number",
-                    "number_$eq",
-                ],
-            ),
-            (
-                "Ref",
-                vec![("item", "()LMeasurement;", 0xb0)],
-                vec!["<init>", "item", "item_$eq"],
-            ),
-            ("Plain", vec![], vec!["<init>"]),
-        ];
-        let mut generated_classes = Vec::new();
-        for (class_name, getters, expected_methods) in expected {
-            let class = symbol_named(ast, index, source, typer, class_name);
-            let class_metadata = metadata
-                .iter()
-                .find(|metadata| metadata.identity().symbol() == class)
-                .unwrap();
-            let generated = emit_class(&unit, class, definitions).unwrap();
-            assert_eq!(
-                generated.bytes(),
-                emit_class(&unit, class, definitions).unwrap().bytes(),
-                "getter emission is deterministic for {class_name}"
-            );
-            let mut reader = Reader::new(generated.bytes());
-            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
-            class_file.validate_references().unwrap();
-            let method_names = class_file
-                .methods
-                .iter()
-                .map(|method| class_file.constant_pool.utf8(method.name_index).unwrap())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                method_names, expected_methods,
-                "method order for {class_name}"
-            );
-            for (accessor, (name, descriptor, return_opcode)) in class_metadata
-                .accessors()
-                .iter()
-                .zip(getters.iter().copied())
-            {
-                assert_eq!(accessor.getter().name(), name);
-                assert_eq!(accessor.getter().descriptor().as_str(), descriptor);
-                assert!(accessor.getter().access_flags().contains(ACC_PUBLIC));
-                let method = class_file
-                    .methods
-                    .iter()
-                    .find(|method| {
-                        class_file.constant_pool.utf8(method.name_index).unwrap() == name
-                            && class_file
-                                .constant_pool
-                                .utf8(method.descriptor_index)
-                                .unwrap()
-                                == descriptor
-                    })
-                    .unwrap();
-                assert!(method.access_flags.is_public());
-                let code = method
-                    .attributes
-                    .iter()
-                    .find_map(|attribute| match attribute {
-                        dotty_classfile::attribute::Attribute::Code(code) => Some(code),
-                        _ => None,
-                    })
-                    .unwrap();
-                assert_eq!(code.code.len(), 5);
-                assert_eq!(
-                    &code.code[..2],
-                    &[0x2a, 0xb4],
-                    "aload_0/getfield for {name}"
-                );
-                assert_eq!(code.code[4], return_opcode, "return opcode for {name}");
-                assert_eq!(code.max_locals, 1);
-                assert_eq!(
-                    code.max_stack,
-                    if matches!(
-                        accessor.value_type(),
-                        dotty_jvm::JvmType::Long | dotty_jvm::JvmType::Double
-                    ) {
-                        2
-                    } else {
-                        1
-                    },
-                    "getter stack bound for {name}"
-                );
-                let fieldref_index = u16::from_be_bytes([code.code[2], code.code[3]]);
-                let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
-                    class_index,
-                    name_and_type_index,
-                } = class_file
-                    .constant_pool
-                    .get(dotty_classfile::constant_pool::ConstantPoolIndex(
-                        fieldref_index,
-                    ))
-                    .unwrap()
-                else {
-                    panic!("getter must read a Fieldref");
-                };
-                assert_eq!(
-                    class_file.constant_pool.class_name(*class_index).unwrap(),
-                    class_metadata.identity().internal_name()
-                );
-                let (field_name, field_descriptor) = class_file
-                    .constant_pool
-                    .name_and_type(*name_and_type_index)
-                    .unwrap();
-                assert_eq!(field_name, accessor.field_name());
-                assert_eq!(field_descriptor, accessor.field_descriptor());
-            }
-            for accessor in class_metadata.accessors() {
-                let Some(setter) = accessor.setter() else {
-                    assert!(
-                        method_names
-                            .iter()
-                            .all(|name| *name != format!("{}_$eq", accessor.field_name())),
-                        "immutable/plain accessors do not gain their own setter"
-                    );
-                    continue;
-                };
-                assert_eq!(setter.name(), format!("{}_$eq", accessor.field_name()));
-                assert_eq!(
-                    setter.descriptor().as_str(),
-                    format!("({})V", accessor.field_descriptor())
-                );
-                assert!(setter.access_flags().contains(ACC_PUBLIC));
-                let method = class_file
-                    .methods
-                    .iter()
-                    .find(|method| {
-                        class_file.constant_pool.utf8(method.name_index).unwrap() == setter.name()
-                            && class_file
-                                .constant_pool
-                                .utf8(method.descriptor_index)
-                                .unwrap()
-                                == setter.descriptor().as_str()
-                    })
-                    .unwrap_or_else(|| panic!("missing generated setter {}", setter.name()));
-                assert!(method.access_flags.is_public());
-                let code = method
-                    .attributes
-                    .iter()
-                    .find_map(|attribute| match attribute {
-                        dotty_classfile::attribute::Attribute::Code(code) => Some(code),
-                        _ => None,
-                    })
-                    .unwrap();
-                assert_eq!(code.code.len(), 6);
-                assert_eq!(code.code[0], 0x2a, "setter starts with aload_0");
-                assert_eq!(
-                    code.code[1],
-                    match accessor.value_type() {
-                        dotty_jvm::JvmType::Int | dotty_jvm::JvmType::Boolean => 0x1b,
-                        dotty_jvm::JvmType::Long => 0x1f,
-                        dotty_jvm::JvmType::Float => 0x23,
-                        dotty_jvm::JvmType::Double => 0x27,
-                        dotty_jvm::JvmType::Reference(_) => 0x2b,
-                    },
-                    "setter loads the exact category from local 1"
-                );
-                assert_eq!(code.code[2], 0xb5, "setter uses putfield");
-                assert_eq!(code.code[5], 0xb1, "setter returns void");
-                let width = usize::from(matches!(
-                    accessor.value_type(),
-                    dotty_jvm::JvmType::Long | dotty_jvm::JvmType::Double
-                )) + 1;
-                assert_eq!(code.max_stack, 1 + width as u16, "setter stack bound");
-                assert_eq!(code.max_locals, 1 + width as u16, "setter local bound");
-                let fieldref_index = u16::from_be_bytes([code.code[3], code.code[4]]);
-                let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
-                    class_index,
-                    name_and_type_index,
-                } = class_file
-                    .constant_pool
-                    .get(dotty_classfile::constant_pool::ConstantPoolIndex(
-                        fieldref_index,
-                    ))
-                    .unwrap()
-                else {
-                    panic!("setter must write a Fieldref");
-                };
-                assert_eq!(
-                    class_file.constant_pool.class_name(*class_index).unwrap(),
-                    class_metadata.identity().internal_name()
-                );
-                let (field_name, field_descriptor) = class_file
-                    .constant_pool
-                    .name_and_type(*name_and_type_index)
-                    .unwrap();
-                assert_eq!(field_name, accessor.field_name());
-                assert_eq!(field_descriptor, accessor.field_descriptor());
-            }
-            generated_classes.push((
-                generated.internal_name().to_owned(),
-                generated.bytes().to_vec(),
-            ));
-        }
-
-        if require_jdk21_or_skip() {
-            let nonce = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos();
-            let output = std::env::temp_dir().join(format!(
-                "dotty-jvm-accessor-getters-{}-{nonce}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&output).unwrap();
-            for (internal_name, bytes) in generated_classes {
-                fs::write(output.join(format!("{internal_name}.class")), bytes).unwrap();
-            }
-            let harness = output.join("AccessorGetterHarness.java");
-            fs::write(
-                &harness,
-                "public final class AccessorGetterHarness { public static void main(String[] args) { Measurement first = new Measurement(7, 1.5d); Measurement second = new Measurement(-4, -2.25d); if (first.id() != 7 || first.value() != 1.5d || second.id() != -4 || second.value() != -2.25d || first.marker() != 9) throw new AssertionError(\"Measurement getters\"); first.value_$eq(4.75d); if (first.value() != 4.75d || second.value() != -2.25d) throw new AssertionError(\"Double setter\"); Mixed mixed = new Mixed(true, Long.MIN_VALUE + 17, 3.25f, 5); if (!mixed.enabled() || mixed.count() != Long.MIN_VALUE + 17 || mixed.ratio() != 3.25f || mixed.number() != 5) throw new AssertionError(\"Mixed getters\"); mixed.enabled_$eq(false); mixed.count_$eq(Long.MAX_VALUE - 9); mixed.ratio_$eq(-8.5f); mixed.number_$eq(-23); if (mixed.enabled() || mixed.count() != Long.MAX_VALUE - 9 || mixed.ratio() != -8.5f || mixed.number() != -23) throw new AssertionError(\"primitive setters\"); Ref ref = new Ref(first); if (ref.item() != first) throw new AssertionError(\"reference getter\"); ref.item_$eq(second); if (ref.item() != second) throw new AssertionError(\"reference setter\"); new Plain(99); } }\n",
-            )
-            .unwrap();
-            let javac = Command::new("javac")
-                .args(["-classpath", output.to_str().unwrap(), "-d"])
-                .arg(output.to_str().unwrap())
-                .arg(&harness)
-                .output()
-                .unwrap();
-            assert!(
-                javac.status.success(),
-                "javac rejected accessor getter harness\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&javac.stdout),
-                String::from_utf8_lossy(&javac.stderr)
-            );
-            let java = Command::new("java")
-                .args([
-                    "-Xverify:all",
-                    "-classpath",
-                    output.to_str().unwrap(),
-                    "AccessorGetterHarness",
-                ])
-                .output()
-                .unwrap();
-            assert!(
-                java.status.success(),
-                "java -Xverify:all rejected accessor getter harness\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&java.stdout),
-                String::from_utf8_lossy(&java.stderr)
-            );
-            fs::remove_dir_all(output).unwrap();
-        }
-    });
-}
-
-#[test]
-fn constructor_accessor_source_selections_record_current_typer_boundary() {
-    let source_text = "class Measurement(val id: Int, var value: Double) { def externalId(m: Measurement): Int = m.id; def externalValue(m: Measurement): Double = m.value; def externalSet(m: Measurement): Unit = m.value = 42.0; def ownId: Int = this.id; def ownValue: Double = this.value; def forwarded(m: Measurement): Int = accept(m.id); def accept(value: Int): Int = value }";
-    with_source(source_text, |ast, source, index, _, typer| {
-        let class = symbol_named(ast, index, source, typer, "Measurement");
-        let methods = [
-            "externalId",
-            "externalValue",
-            "externalSet",
-            "ownId",
-            "ownValue",
-            "forwarded",
-        ];
-        for name in methods {
-            let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, class, name);
-            typer.complete_symbol(method).unwrap();
-            let context = typer.expression_context_for(method).unwrap();
-            let typed = typer.type_expression(rhs, context).unwrap_or_else(|error| {
-                panic!("{name} should type through a source field: {error:?}")
-            });
-            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
-        }
-
-        let source_accessor_methods = ast
-            .iter()
-            .filter_map(|(tree, node)| {
-                let TreeKind::DefDef(definition) = &node.kind else {
-                    return None;
-                };
-                let symbol = index.symbol_at(source, tree)?;
-                (typer.store().symbols.get(symbol).owner == Some(class)
-                    && typer.store().symbols.get(symbol).kind == SymbolKind::Method
-                    && ["id", "value"].contains(
-                        &typer
-                            .store()
-                            .names
-                            .resolve(definition.name.as_name().text()),
-                    ))
-                .then_some(symbol)
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            source_accessor_methods.is_empty(),
-            "JVM accessors must not be fabricated as source Method symbols"
-        );
-
-        let field_for = |name: &str| {
-            let source_tree = ast
-                .iter()
-                .find_map(|(tree, node)| match &node.kind {
-                    TreeKind::ValDef(definition)
-                        if index.symbol_at(source, tree).is_some_and(|symbol| {
-                            typer.store().symbols.get(symbol).owner == Some(class)
-                                && typer.store().symbols.get(symbol).kind == SymbolKind::Field
-                                && typer
-                                    .store()
-                                    .names
-                                    .resolve(definition.name.as_name().text())
-                                    == name
-                        }) =>
-                    {
-                        Some(tree)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("missing source field {name}"));
-            index.symbol_at(source, source_tree).unwrap()
-        };
-        let expected_selections = [("id", 3), ("value", 3)];
-        for (name, expected_count) in expected_selections {
-            let expected_field = field_for(name);
-            let selections = ast
-                .iter()
-                .filter_map(|(tree, node)| match &node.kind {
-                    TreeKind::Select(selection)
-                        if typer.store().names.resolve(selection.name.text()) == name =>
-                    {
-                        Some(tree)
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                selections.len(),
-                expected_count,
-                "source selection count for {name}"
-            );
-            for selection in selections {
-                let typed = typer
-                    .source_typed_index()
-                    .get(source, selection)
-                    .unwrap_or_else(|| {
-                        panic!("source selection {name} should have typed identity")
-                    });
-                assert!(
-                    matches!(
-                        typer.store().types.get(typer.typed_ast().get(typed).ty),
-                        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
-                            if *symbol == expected_field
-                    ),
-                    "source selection {name} must designate the canonical field symbol"
-                );
-            }
-        }
-    });
-}
-
-#[test]
-fn constructor_accessor_source_readiness_matrix_preserves_field_identity() {
-    let source_text = r#"
-class Counter(val id: Int, var count: Long) {
-  def ownReadId: Int = this.id
-  def ownReadCount: Long = this.count
-  def ownReadUnqualified: Long = count
-  def ownWrite(next: Long): Unit = this.count = next
-}
-class Reader {
-  def readId(c: Counter): Int = c.id
-  def readCount(c: Counter): Long = c.count
-  def write(c: Counter, next: Long): Unit = c.count = next
-  def readLocalVal: Int = { val c = new Counter(7, 9L); c.id }
-  def readLocalCount: Long = { val c = new Counter(7, 9L); c.count }
-  def writeLocalVal: Unit = { val c = new Counter(7, 9L); c.count = 11L }
-}
-class Other {}
-"#;
-    with_source(source_text, |ast, source, index, definitions, typer| {
-        let counter = symbol_named(ast, index, source, typer, "Counter");
-        let reader = symbol_named(ast, index, source, typer, "Reader");
-        let field_for = |name: &str| {
-            let field_tree = ast
-                .iter()
-                .find_map(|(tree, node)| match &node.kind {
-                    TreeKind::ValDef(definition)
-                        if index.symbol_at(source, tree).is_some_and(|symbol| {
-                            let info = typer.store().symbols.get(symbol);
-                            info.owner == Some(counter)
-                                && info.kind == SymbolKind::Field
-                                && typer
-                                    .store()
-                                    .names
-                                    .resolve(definition.name.as_name().text())
-                                    == name
-                        }) =>
-                    {
-                        Some(tree)
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| panic!("missing source accessor field {name}"));
-            index.symbol_at(source, field_tree).unwrap()
-        };
-        let id_field = field_for("id");
-        let count_field = field_for("count");
-        assert!(
-            !typer
-                .store()
-                .symbols
-                .get(id_field)
-                .flags
-                .contains(SymbolFlags::MUTABLE)
-        );
-        assert!(
-            typer
-                .store()
-                .symbols
-                .get(count_field)
-                .flags
-                .contains(SymbolFlags::MUTABLE)
-        );
-
-        for (owner, name) in [
-            (counter, "ownReadId"),
-            (counter, "ownReadCount"),
-            (counter, "ownReadUnqualified"),
-            (counter, "ownWrite"),
-            (reader, "readId"),
-            (reader, "readCount"),
-            (reader, "write"),
-            (reader, "readLocalVal"),
-            (reader, "readLocalCount"),
-            (reader, "writeLocalVal"),
-        ] {
-            let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, owner, name);
-            typer.complete_symbol(method).unwrap();
-            let context = typer.expression_context_for(method).unwrap();
-            let typed = typer.type_expression(rhs, context).unwrap_or_else(|error| {
-                panic!("{name} should type through a source accessor field: {error:?}")
-            });
-            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
-        }
-
-        let source_accessor_methods = ast
-            .iter()
-            .filter_map(|(tree, node)| {
-                let TreeKind::DefDef(definition) = &node.kind else {
-                    return None;
-                };
-                let symbol = index.symbol_at(source, tree)?;
-                (typer.store().symbols.get(symbol).owner == Some(counter)
-                    && typer.store().symbols.get(symbol).kind == SymbolKind::Method
-                    && ["id", "count"].contains(
-                        &typer
-                            .store()
-                            .names
-                            .resolve(definition.name.as_name().text()),
-                    ))
-                .then_some(symbol)
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            source_accessor_methods.is_empty(),
-            "generated JVM accessors remain absent from source Method lookup"
-        );
-
-        let mut selection_counts = [("id", 0usize), ("count", 0usize)];
-        for (selection_tree, node) in ast.iter() {
-            let TreeKind::Select(selection) = &node.kind else {
-                continue;
-            };
-            let name = typer.store().names.resolve(selection.name.text());
-            let (expected_field, expected_type, count) = match name {
-                "id" => (id_field, definitions.int, &mut selection_counts[0].1),
-                "count" => (count_field, definitions.long, &mut selection_counts[1].1),
-                _ => continue,
-            };
-            *count += 1;
-            let typed_selection = typer
-                .source_typed_index()
-                .get(source, selection_tree)
-                .unwrap_or_else(|| panic!("source selection {name} must have a typed identity"));
-            let typed_qualifier = match &typer.typed_ast().get(typed_selection).kind {
-                TreeKind::Select(typed_select) => typed_select.qualifier,
-                _ => panic!("typed source selection {name} remains a Select"),
-            };
-            let selected_type = typer.typed_ast().get(typed_selection).ty;
-            assert!(matches!(
-                typer.store().types.get(selected_type),
-                Type::TermRef {
-                    target: TermRefTarget::Symbol(symbol),
-                    ..
-                } if *symbol == expected_field
-            ));
-            assert_eq!(
-                typer.widen_expression_type(selected_type).unwrap(),
-                expected_type
-            );
-            assert!(
-                typer.typed_ast().get(typed_qualifier).position.is_some(),
-                "the real receiver expression retains source position"
-            );
-            assert!(
-                typer
-                    .source_typed_index()
-                    .get(source, selection.qualifier)
-                    .is_some(),
-                "receiver has its own source-to-typed mapping"
-            );
-            assert_eq!(
-                typer.source_typed_index().get(source, selection.qualifier),
-                Some(typed_qualifier),
-                "typed selection keeps the exact mapped source receiver"
-            );
-            match &typer.typed_ast().get(typed_qualifier).kind {
-                TreeKind::This(_) => assert!(matches!(
-                    typer
-                        .store()
-                        .types
-                        .get(typer.typed_ast().get(typed_qualifier).ty),
-                    Type::ThisType { class } if *class == counter
-                )),
-                TreeKind::Ident(_) => {
-                    let receiver_type = typer.typed_ast().get(typed_qualifier).ty;
-                    let Type::TermRef {
-                        target: TermRefTarget::Symbol(receiver),
-                        ..
-                    } = typer.store().types.get(receiver_type)
-                    else {
-                        panic!("identifier receiver retains a canonical term symbol")
-                    };
-                    assert!(matches!(
-                        typer.store().symbols.get(*receiver).kind,
-                        SymbolKind::Parameter | SymbolKind::Local | SymbolKind::Variable
-                    ));
-                    let source_name = match &ast.get(selection.qualifier).kind {
-                        TreeKind::Ident(identifier) => {
-                            typer.store().names.resolve(identifier.name.text())
-                        }
-                        kind => panic!("identifier receiver remains source-shaped: {kind:?}"),
-                    };
-                    assert_eq!(
-                        typer
-                            .store()
-                            .names
-                            .resolve(typer.store().symbols.get(*receiver).name.text()),
-                        source_name,
-                        "typed receiver symbol matches the exact source identifier"
-                    );
-                    if typer.store().symbols.get(*receiver).kind == SymbolKind::Local {
-                        assert!(
-                            !typer
-                                .store()
-                                .symbols
-                                .get(*receiver)
-                                .flags
-                                .contains(SymbolFlags::MUTABLE),
-                            "the accepted local receiver is the immutable val form"
-                        );
-                    }
-                    typer.widen_expression_type(receiver_type).unwrap();
-                }
-                kind => panic!("accessor receiver must remain a real expression, got {kind:?}"),
-            }
-        }
-        assert_eq!(selection_counts, [("id", 3), ("count", 6)]);
-
-        let unqualified_count = ast
-            .iter()
-            .find_map(|(tree, node)| match &node.kind {
-                TreeKind::Ident(identifier)
-                    if typer.store().names.resolve(identifier.name.text()) == "count" =>
-                {
-                    Some(tree)
-                }
-                _ => None,
-            })
-            .expect("the own unqualified count reference is present");
-        let typed_unqualified = typer
-            .source_typed_index()
-            .get(source, unqualified_count)
-            .expect("the unqualified source reference has a typed identity");
-        assert!(matches!(
-            typer
-                .store()
-                .types
-                .get(typer.typed_ast().get(typed_unqualified).ty),
-            Type::TermRef {
-                target: TermRefTarget::Symbol(symbol),
-                ..
-            } if *symbol == count_field
-        ));
-
-        for (owner, name) in [
-            (counter, "ownWrite"),
-            (reader, "write"),
-            (reader, "writeLocalVal"),
-        ] {
-            let (method, _, source_rhs) =
-                method_tree_and_rhs(ast, index, source, typer, owner, name);
-            let source_assign_tree = match &ast.get(source_rhs).kind {
-                TreeKind::Assign(_) => source_rhs,
-                TreeKind::Block(block) => block.expr,
-                _ => panic!("{name} source body contains an assignment"),
-            };
-            let TreeKind::Assign(source_assign) = &ast.get(source_assign_tree).kind else {
-                panic!("{name} source body ends in an assignment");
-            };
-            let typed_assign = typer
-                .source_typed_index()
-                .get(source, source_assign_tree)
-                .expect("successful assignment retains its source mapping");
-            let (typed_lhs, typed_rhs) = match &typer.typed_ast().get(typed_assign).kind {
-                TreeKind::Assign(typed_assignment) => (typed_assignment.lhs, typed_assignment.rhs),
-                _ => panic!("{name} remains a typed assignment"),
-            };
-            assert_eq!(typer.typed_ast().get(typed_assign).ty, definitions.unit);
-            assert_eq!(
-                typer.source_typed_index().get(source, source_assign.lhs),
-                Some(typed_lhs)
-            );
-            assert_eq!(
-                typer.source_typed_index().get(source, source_assign.rhs),
-                Some(typed_rhs)
-            );
-            assert!(matches!(
-                typer
-                    .store()
-                    .types
-                    .get(typer.typed_ast().get(typed_lhs).ty),
-                Type::TermRef {
-                    target: TermRefTarget::Symbol(symbol),
-                    ..
-                } if *symbol == count_field
-            ));
-            assert_eq!(
-                typer
-                    .widen_expression_type(typer.typed_ast().get(typed_rhs).ty)
-                    .unwrap(),
-                definitions.long,
-                "{name} RHS keeps its declared Long type"
-            );
-            let typed_lhs_qualifier = match &typer.typed_ast().get(typed_lhs).kind {
-                TreeKind::Select(typed_lhs) => typed_lhs.qualifier,
-                _ => panic!("{name} keeps the selected field as its assignment target"),
-            };
-            assert!(
-                typer
-                    .typed_ast()
-                    .get(typed_lhs_qualifier)
-                    .position
-                    .is_some()
-            );
-            assert_eq!(
-                typer.store().symbols.get(method).kind,
-                SymbolKind::Method,
-                "the assignment belongs to its original source method"
-            );
-        }
-    });
-}
-
-#[test]
-fn constructor_accessor_source_invalid_cases_fail_at_the_typer_boundary() {
-    let source_text = r#"
-class Counter(val id: Int, var count: Long) {
-  def rejectOwnValWrite: Unit = this.id = 2
-  def rejectWrongRhs: Unit = this.count = true
-}
-class Reader {
-  def rejectExternalValWrite(c: Counter): Unit = c.id = 2
-  def rejectWrongRhs(c: Counter): Unit = c.count = true
-  def rejectOtherOwner(other: Other): Long = other.count
-  def rejectMutableLocalSelection: Int = { var c = new Counter(7, 9L); c.id }
-}
-class Other {}
-"#;
-    with_source(source_text, |ast, source, index, definitions, typer| {
-        let counter = symbol_named(ast, index, source, typer, "Counter");
-        let field_for = |name: &str| {
-            ast.iter()
-                .find_map(|(tree, node)| match &node.kind {
-                    TreeKind::ValDef(definition)
-                        if index.symbol_at(source, tree).is_some_and(|symbol| {
-                            let info = typer.store().symbols.get(symbol);
-                            info.owner == Some(counter)
-                                && info.kind == SymbolKind::Field
-                                && typer
-                                    .store()
-                                    .names
-                                    .resolve(definition.name.as_name().text())
-                                    == name
-                        }) =>
-                    {
-                        index.symbol_at(source, tree)
-                    }
-                    _ => None,
-                })
-                .expect("counter field is entered")
-        };
-        let id_field = field_for("id");
-        let cases = [
-            (counter, "rejectOwnValWrite"),
-            (
-                symbol_named(ast, index, source, typer, "Reader"),
-                "rejectExternalValWrite",
-            ),
-            (counter, "rejectWrongRhs"),
-            (
-                symbol_named(ast, index, source, typer, "Reader"),
-                "rejectWrongRhs",
-            ),
-            (
-                symbol_named(ast, index, source, typer, "Reader"),
-                "rejectOtherOwner",
-            ),
-            (
-                symbol_named(ast, index, source, typer, "Reader"),
-                "rejectMutableLocalSelection",
-            ),
-        ];
-        for (owner, name) in cases {
-            let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, owner, name);
-            typer.complete_symbol(method).unwrap();
-            let context = typer.expression_context_for(method).unwrap();
-            assert!(ast.get(rhs).position.is_some(), "{name} has a source span");
-            let mappings_before = typer.source_typed_index().len();
-            let error = typer.type_expression(rhs, context).unwrap_err();
-            match name {
-                "rejectOwnValWrite" | "rejectExternalValWrite" => assert!(
-                    matches!(
-                        &error,
-                        TyperError::AssignmentTargetImmutable { target, tree_index, .. }
-                            if *target == id_field && *tree_index == rhs.index()
-                    ),
-                    "{name} rejects the canonical immutable field at assignment: {error:?}"
-                ),
-                "rejectOtherOwner" => assert!(
-                    matches!(
-                        &error,
-                        TyperError::MemberNotFound { tree_index, name: missing, .. }
-                            if *tree_index == rhs.index()
-                                && typer.store().names.resolve(missing.text()) == "count"
-                    ),
-                    "{name} fails member lookup on the actual receiver type: {error:?}"
-                ),
-                "rejectMutableLocalSelection" => {
-                    let TreeKind::Block(block) = &ast.get(rhs).kind else {
-                        panic!("mutable local selection is retained inside the source block");
-                    };
-                    let selected_id = block.expr;
-                    assert!(
-                        matches!(
-                            &error,
-                            TyperError::UnstableSelectionPrefix { tree_index, .. }
-                                if *tree_index == selected_id.index()
-                        ),
-                        "{name} stops at the selected mutable-local receiver: {error:?}"
-                    );
-                    assert!(ast.get(selected_id).position.is_some());
-                }
-                "rejectWrongRhs" => assert!(
-                    matches!(
-                        &error,
-                        TyperError::ExpectedExpressionTypeMismatch { tree_index, actual, expected, .. }
-                            if *tree_index == match &ast.get(rhs).kind {
-                                TreeKind::Assign(assignment) => assignment.rhs.index(),
-                                _ => unreachable!(),
-                            }
-                                && *expected == definitions.long
-                                && *actual == definitions.boolean
-                    ),
-                    "{name} rejects Boolean for the canonical Long field: {error:?}"
-                ),
-                _ => unreachable!(),
-            }
-            assert_eq!(
-                typer.source_typed_index().len(),
-                mappings_before,
-                "failed {name} rolls back nested source-to-typed mappings"
-            );
-            assert_eq!(typer.source_typed_index().get(source, rhs), None);
-        }
-    });
-}
-
-#[test]
-fn mixed_plain_and_accessor_constructor_parameters_keep_source_ordinals() {
-    with_source(
-        "class Mixed(first: Int, val second: Long, var enabled: Boolean)",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Mixed");
-            typer.complete_symbol(class).unwrap();
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(definition) = &ast.get(template.constructor).kind else {
-                panic!("primary constructor should be a DefDef");
-            };
-            let parameter_trees = &definition.value_param_clauses[0];
-            assert_eq!(parameter_trees.len(), 3);
-            let parameters = parameter_trees
-                .iter()
-                .map(|tree| {
-                    let field_or_parameter = index.symbol_at(source, *tree).unwrap();
-                    let formal = index.derived_symbol_at(constructor, source, *tree).unwrap();
-                    typer.complete_symbol(field_or_parameter).unwrap();
-                    typer.complete_symbol(formal).unwrap();
-                    formal
-                })
-                .collect::<Vec<_>>();
-            typer.complete_symbol(constructor).unwrap();
-            let proof = JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                parameters.clone(),
-                ast,
-                index,
-            )
-            .unwrap();
-            assert_eq!(proof.parameters(), parameters);
-            assert_eq!(proof.accessor_bindings().len(), 2);
-            let [second, enabled] = proof.accessor_bindings() else {
-                panic!("the plain first parameter must not become an accessor");
-            };
-            assert_eq!(second.source_ordinal(), 1);
-            assert_eq!(
-                second.field(),
-                index.symbol_at(source, parameter_trees[1]).unwrap()
-            );
-            assert_eq!(second.parameter(), parameters[1]);
-            assert!(!second.is_mutable());
-            assert_eq!(enabled.source_ordinal(), 2);
-            assert_eq!(
-                enabled.field(),
-                index.symbol_at(source, parameter_trees[2]).unwrap()
-            );
-            assert_eq!(enabled.parameter(), parameters[2]);
-            assert!(enabled.is_mutable());
-            assert_eq!(
-                typer
-                    .store()
-                    .symbols
-                    .get(index.symbol_at(source, parameter_trees[0]).unwrap())
-                    .kind,
-                SymbolKind::Parameter,
-                "plain constructor input remains distinct from source accessor fields"
-            );
-
-            let metadata = JvmClassPlan {
-                class,
-                methods: Vec::new(),
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-            }
-            .metadata(typer.store(), definitions)
-            .unwrap();
-            assert_eq!(metadata.accessor_bindings().len(), 2);
-            let constructor_metadata = metadata.constructor().unwrap();
-            assert_eq!(
-                constructor_metadata
-                    .parameters()
-                    .iter()
-                    .map(|parameter| parameter.slot())
-                    .collect::<Vec<_>>(),
-                [1, 2, 4],
-                "JVM parameter slots still account for Long's two slots"
-            );
-        },
-    );
-}
-
-#[test]
-fn constructor_accessor_metadata_rejects_user_method_signature_collisions() {
-    with_source(
-        "class Collision(val id: Int) { def id(): Int = 1 }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Collision");
-            typer.complete_symbol(class).unwrap();
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
-            else {
-                panic!("primary constructor should be a DefDef");
-            };
-            let parameter_tree = constructor_definition.value_param_clauses[0][0];
-            let parameter = index
-                .derived_symbol_at(constructor, source, parameter_tree)
-                .unwrap();
-            typer
-                .complete_symbol(index.symbol_at(source, parameter_tree).unwrap())
-                .unwrap();
-            typer.complete_symbol(parameter).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let proof = JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                vec![parameter],
-                ast,
-                index,
-            )
-            .unwrap();
-
-            let (method, method_tree, rhs) =
-                method_tree_and_rhs(ast, index, source, typer, class, "id");
-            typer.complete_symbol(method).unwrap();
-            let context = typer.expression_context_for(method).unwrap();
-            let body = typer.type_expression(rhs, context).unwrap();
-            let result = JvmClassPlan {
-                class,
-                methods: vec![JvmMethodPlan {
-                    method,
-                    parameters: Vec::new(),
-                    locals: Vec::new(),
-                    body: Some(body),
-                }],
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-            }
-            .metadata(typer.store(), definitions);
-            let source_field = index.symbol_at(source, parameter_tree).unwrap();
-            assert!(matches!(
-                &result,
-                Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
-                    class: found_class,
-                    field,
-                    previous,
-                    name,
-                    descriptor,
-                }) if *found_class == class
-                    && *field == source_field
-                    && *previous == method
-                    && name == "id"
-                    && descriptor == "()I"
-            ));
-            assert!(ast.try_get(method_tree).is_some());
-        },
-    );
-}
-
-#[test]
-fn constructor_accessor_metadata_rejects_user_setter_signature_collisions() {
-    with_source(
-        "class Collision(var id: Int) { def id_=(value: Int): Unit = {} }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Collision");
-            typer.complete_symbol(class).unwrap();
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
-            else {
-                panic!("primary constructor should be a DefDef");
-            };
-            let parameter_tree = constructor_definition.value_param_clauses[0][0];
-            let parameter = index
-                .derived_symbol_at(constructor, source, parameter_tree)
-                .unwrap();
-            typer
-                .complete_symbol(index.symbol_at(source, parameter_tree).unwrap())
-                .unwrap();
-            typer.complete_symbol(parameter).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let proof = JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                vec![parameter],
-                ast,
-                index,
-            )
-            .unwrap();
-
-            let (method, method_tree, rhs) =
-                method_tree_and_rhs(ast, index, source, typer, class, "id_=");
-            let TreeKind::DefDef(method_definition) = &ast.get(method_tree).kind else {
-                panic!("user setter should be a DefDef");
-            };
-            let setter_parameter_tree = method_definition.value_param_clauses[0][0];
-            let setter_parameter = index.symbol_at(source, setter_parameter_tree).unwrap();
-            typer.complete_symbol(setter_parameter).unwrap();
-            typer.complete_symbol(method).unwrap();
-            let context = typer.expression_context_for(method).unwrap();
-            let body = typer.type_expression(rhs, context).unwrap();
-            let result = JvmClassPlan {
-                class,
-                methods: vec![JvmMethodPlan {
-                    method,
-                    parameters: vec![setter_parameter],
-                    locals: Vec::new(),
-                    body: Some(body),
-                }],
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-            }
-            .metadata(typer.store(), definitions);
-            let source_field = index.symbol_at(source, parameter_tree).unwrap();
-            assert!(
-                matches!(
-                    &result,
-                    Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
-                        class: found_class,
-                        field,
-                        previous,
-                        name,
-                        descriptor,
-                    }) if *found_class == class
-                        && *field == source_field
-                        && *previous == method
-                        && name == "id_$eq"
-                        && descriptor == "(I)V"
-                ),
-                "unexpected result: {result:?}"
-            );
-        },
-    );
-}
-
-#[test]
-fn accessor_bearing_subclass_is_rejected_before_inherited_method_validation() {
-    with_source(
-        "class Parent { final def id(): Int = 1 }\nclass Child(val id: Int) extends Parent",
-        |ast, source, index, definitions, typer| {
-            let parent = symbol_named(ast, index, source, typer, "Parent");
-            let child = symbol_named(ast, index, source, typer, "Child");
-            typer.complete_symbol(parent).unwrap();
-            typer.complete_symbol(child).unwrap();
-
-            let (parent_method, _, parent_rhs) =
-                method_tree_and_rhs(ast, index, source, typer, parent, "id");
-            typer.complete_symbol(parent_method).unwrap();
-            let context = typer.expression_context_for(parent_method).unwrap();
-            let parent_body = typer.type_expression(parent_rhs, context).unwrap();
-            let Some(dotty_namer::SourceDefinition::Canonical {
-                source: parent_source,
-                tree: parent_tree,
-            }) = index.definition_of(parent)
-            else {
-                panic!("Parent must have a canonical source definition");
-            };
-            let TreeKind::TypeDef(parent_definition) = &ast.get(parent_tree).kind else {
-                panic!("Parent source definition should be a TypeDef");
-            };
-            let TreeKind::Template(parent_template) = &ast.get(parent_definition.rhs).kind else {
-                panic!("Parent definition should contain a template");
-            };
-            let parent_constructor = index
-                .symbol_at(parent_source, parent_template.constructor)
-                .unwrap();
-            typer.complete_symbol(parent_constructor).unwrap();
-            let parent_proof = JvmPrimaryConstructorPlan::from_source(
-                parent,
-                parent_constructor,
-                Vec::new(),
-                ast,
-                index,
-            )
-            .unwrap();
-            let parent_plan = JvmClassPlan {
-                class: parent,
-                methods: vec![JvmMethodPlan {
-                    method: parent_method,
-                    parameters: Vec::new(),
-                    locals: Vec::new(),
-                    body: Some(parent_body),
-                }],
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(parent_proof),
-            };
-
-            let Some(dotty_namer::SourceDefinition::Canonical { source, tree }) =
-                index.definition_of(child)
-            else {
-                panic!("Child must have a canonical source definition");
-            };
-            let TreeKind::TypeDef(class_definition) = &ast.get(tree).kind else {
-                panic!("Child source definition should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
-                panic!("Child definition should contain a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
-            else {
-                panic!("Child primary constructor should be a DefDef");
-            };
-            let parameter_tree = constructor_definition.value_param_clauses[0][0];
-            let field = index.symbol_at(source, parameter_tree).unwrap();
-            let parameter = index
-                .derived_symbol_at(constructor, source, parameter_tree)
-                .unwrap();
-            typer.complete_symbol(field).unwrap();
-            typer.complete_symbol(parameter).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let proof = JvmPrimaryConstructorPlan::from_source(
-                child,
-                constructor,
-                vec![parameter],
-                ast,
-                index,
-            )
-            .unwrap();
-            assert_eq!(proof.accessor_bindings().len(), 1);
-
-            let result = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![
-                    parent_plan,
-                    JvmClassPlan {
-                        class: child,
-                        methods: Vec::new(),
-                        fields: Vec::new(),
-                        initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-                    },
-                ],
-            }
-            .metadata(definitions);
-            assert!(
-                matches!(
-                    &result,
-                    Err(dotty_jvm::JvmCodegenError::UnsupportedJvmAccessorInheritance {
-                        class: found_class,
-                        parent: found_parent,
-                    }) if *found_class == child && *found_parent == parent
-                ),
-                "unexpected result: {result:?}"
-            );
-        },
-    );
-}
-
-#[test]
-fn wrong_typed_field_initializer_is_a_typer_error_and_rolls_back_mapping() {
-    with_source(
-        "class Broken { private val count: Int = true }",
-        |ast, source, index, definitions, typer| {
-            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "count");
-            typer.complete_symbol(field).unwrap();
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let store_checkpoint = typer.store().checkpoint();
-            let typed_checkpoint = typer.typed_ast().checkpoint();
-
-            let result = typer.type_expression_expected(rhs, context, definitions.int);
-            assert!(
-                matches!(
-                    result,
-                    Err(dotty_typer::TyperError::ExpectedExpressionTypeMismatch {
-                        source: actual_source,
-                        tree_index,
-                        expected,
-                        ..
-                    }) if actual_source == source && tree_index == rhs.index() && expected == definitions.int
-                ),
-                "unexpected typing result: {result:?}"
-            );
-            assert_eq!(typer.store().checkpoint(), store_checkpoint);
-            assert_eq!(typer.typed_ast().checkpoint(), typed_checkpoint);
-            assert_eq!(typer.source_typed_index().get(source, rhs), None);
-
-            let unchecked = typer.type_expression(rhs, context).unwrap();
-            assert_eq!(typer.source_typed_index().get(source, rhs), Some(unchecked));
-            assert_eq!(
-                typer.store().types.get(typer.typed_ast().get(unchecked).ty),
-                &Type::Constant(dotty_core::Constant::Boolean(true))
-            );
-        },
-    );
-}
-
-#[test]
-fn duplicate_source_fields_are_not_yet_rejected_by_frontend() {
-    let source_text = "class Duplicate { val value: Int = 1; val value: Int = 2 }";
-    let source_id = SourceId::from_index(1);
-    let source = SourceText::new(source_text).unwrap();
-    let scanner = ContextualScanner::new(source_text).unwrap();
-    assert!(scanner.diagnostics().is_empty());
-    let mut store = SemanticStore::new();
-    let parsed = parse_compilation_unit(source, source_id, scanner, &mut store.names);
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let mut packages = Packages::new();
-    let outcome = name_compilation_unit_with_diagnostics(
-        &parsed.ast,
-        parsed.root,
-        source_id,
-        "Duplicate.scala",
-        SourceParseStatus::Clean,
-        &mut store,
-        &mut packages,
-    )
-    .unwrap();
-    let index = match outcome {
-        NamingOutcome::Named { index, diagnostics } => {
-            assert!(diagnostics.is_empty(), "{diagnostics:?}");
-            index
-        }
-        NamingOutcome::Rejected { diagnostics } => {
-            panic!("this audit expects to observe current namer behavior: {diagnostics:?}")
-        }
-    };
-    let TreeKind::PackageDef(package) = &parsed.ast.get(parsed.root).kind else {
-        panic!("parser should return a package root");
-    };
-    let TreeKind::TypeDef(class_def) = &parsed.ast.get(package.stats[0]).kind else {
-        panic!("source declaration should be a class");
-    };
-    let class = index.symbol_at(source_id, package.stats[0]).unwrap();
-    let TreeKind::Template(template) = &parsed.ast.get(class_def.rhs).kind else {
-        panic!("class RHS should be a template");
-    };
-    let duplicate_fields = template
-        .body
-        .iter()
-        .filter_map(|tree| {
-            let symbol = index.symbol_at(source_id, *tree)?;
-            (store.symbols.get(symbol).kind == SymbolKind::Field).then_some(symbol)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(duplicate_fields.len(), 2);
-    assert_ne!(duplicate_fields[0], duplicate_fields[1]);
-    for field in duplicate_fields {
-        assert_eq!(store.symbols.get(field).owner, Some(class));
-        assert_eq!(
-            store.names.resolve(store.symbols.get(field).name.text()),
-            "value"
-        );
-    }
-}
-
-#[test]
-fn unsupported_constructor_forms_are_accepted_with_canonical_typer_signatures() {
-    with_source(
-        "class WithSecondary(value: Int) { def this() = this(0) }",
-        |ast, source, index, definitions, typer| {
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let primary = index.symbol_at(source, template.constructor).unwrap();
-            let secondary = template
-                .body
-                .iter()
-                .find_map(|tree| {
-                    let symbol = index.symbol_at(source, *tree)?;
-                    (symbol != primary
-                        && typer.store().symbols.get(symbol).kind == SymbolKind::Constructor)
-                        .then_some(symbol)
-                })
-                .expect("secondary constructor should have a source symbol");
-
-            for (constructor, parameter_count) in [(primary, 1), (secondary, 0)] {
-                typer.complete_symbol(constructor).unwrap();
-                let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
-                    panic!("constructor signature should be complete");
-                };
-                let Type::Method(signature) = typer.store().types.get(ty) else {
-                    panic!("constructor should have a method signature");
-                };
-                assert_eq!(signature.params.len(), parameter_count);
-                assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
-                if parameter_count == 1 {
-                    assert_eq!(signature.params[0].ty, definitions.int);
-                }
-            }
-        },
-    );
-
-    with_source(
-        "class WithUsing(using context: Int)",
-        |ast, source, index, definitions, typer| {
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
-                panic!("using constructor signature should be complete");
-            };
-            let Type::Method(signature) = typer.store().types.get(ty) else {
-                panic!("using constructor should have a method signature");
-            };
-            assert_eq!(signature.params.len(), 1);
-            assert_eq!(signature.params[0].ty, definitions.int);
-            assert_eq!(signature.kind, dotty_core::MethodKind::Contextual);
-        },
-    );
-
-    with_source(
-        "class WithDefault(value: Int = 1)",
-        |ast, source, index, definitions, typer| {
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let SymbolInfo::Complete(ty) = typer.store().symbols.get(constructor).info else {
-                panic!("defaulted constructor signature should be complete");
-            };
-            let Type::Method(signature) = typer.store().types.get(ty) else {
-                panic!("defaulted constructor should have a method signature");
-            };
-            assert_eq!(signature.params.len(), 1);
-            assert_eq!(signature.params[0].ty, definitions.int);
-            assert_eq!(signature.kind, dotty_core::MethodKind::Plain);
-        },
-    );
-}
-
-#[test]
-fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_roots() {
-    with_source(
-        "class BodyOnly:\n  val seed: Int = 10\n  var active: Boolean = true\n  var reading: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  val fromId: Int = id\n  def snapshot(): Long = current\n  def snapshotThis(): Long = this.current\n\nclass Reader:\n  def read(c: Counter): Long = c.current\n  def write(c: Counter, n: Long): Unit = c.current = n\n  def rejectSeedWrite(c: BodyOnly, n: Int): Unit = c.seed = n\n",
-        |ast, source, index, definitions, typer| {
-            for (class_name, expected_fields) in [
-                ("BodyOnly", &["seed", "active", "reading"][..]),
-                ("Counter", &["initial", "current", "fromId"][..]),
-            ] {
-                let class = symbol_named(ast, index, source, typer, class_name);
-                assert_eq!(typer.store().symbols.get(class).kind, SymbolKind::Class);
-                typer.complete_symbol(class).unwrap();
-                let info = complete_class_info(typer, class);
-                let scope = info.declarations;
-                let mut template_fields = Vec::new();
-                for (_, node) in ast.iter() {
-                    let TreeKind::Template(template) = &node.kind else {
-                        continue;
-                    };
-                    if index
-                        .symbol_at(source, template.constructor)
-                        .is_some_and(|constructor| {
-                            typer.store().symbols.get(constructor).owner == Some(class)
-                        })
-                    {
-                        template_fields = template
-                            .body
-                            .iter()
-                            .filter_map(|tree| {
-                                let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
-                                    return None;
-                                };
-                                let field = index.symbol_at(source, *tree)?;
-                                (typer.store().symbols.get(field).kind == SymbolKind::Field).then(
-                                    || {
-                                        typer
-                                            .store()
-                                            .names
-                                            .resolve(definition.name.as_name().text())
-                                            .to_owned()
-                                    },
-                                )
-                            })
-                            .collect();
-                        break;
-                    }
-                }
-                assert_eq!(template_fields, expected_fields);
-
-                for name in expected_fields {
-                    let (field, declaration, rhs) =
-                        field_tree_and_rhs(ast, index, source, typer, name);
-                    let symbol = typer.store().symbols.get(field);
-                    assert_eq!(symbol.kind, SymbolKind::Field);
-                    assert_eq!(symbol.owner, Some(class));
-                    assert_eq!(symbol.visibility, Visibility::Public);
-                    assert_eq!(
-                        index.definition_of(field),
-                        Some(dotty_namer::SourceDefinition::Canonical {
-                            source,
-                            tree: declaration,
-                        })
-                    );
-                    assert!(
-                        typer
-                            .store()
-                            .scopes
-                            .get(scope)
-                            .lookup_all(&symbol.name)
-                            .contains(&field)
-                    );
-                    let mutable = matches!(*name, "active" | "reading" | "current");
-                    assert_eq!(symbol.flags.contains(SymbolFlags::MUTABLE), mutable);
-                    let TreeKind::ValDef(definition) = &ast.get(declaration).kind else {
-                        panic!("body field source tree should be ValDef");
-                    };
-                    assert!(definition.metadata.visibility.is_none());
-
-                    typer.complete_symbol(field).unwrap();
-                    let dotty_core::SymbolInfo::Complete(field_type) =
-                        typer.store().symbols.get(field).info
-                    else {
-                        panic!("body field type should be complete");
-                    };
-                    let expected_type = match *name {
-                        "seed" | "initial" | "fromId" => definitions.int,
-                        "active" => definitions.boolean,
-                        "reading" => definitions.double,
-                        "current" => definitions.long,
-                        _ => panic!("unexpected audit body field {name}"),
-                    };
-                    assert_eq!(field_type, expected_type, "completed type for {name}");
-                    let context = typer.field_initializer_context_for(field).unwrap();
-                    let typed_rhs = typer
-                        .type_expression_expected(rhs, context, field_type)
-                        .unwrap();
-                    assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
-                    assert!(typer.typed_ast().get(typed_rhs).position.is_some());
-                    if *name == "fromId" {
-                        assert!(matches!(
-                            typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-                            Type::TermRef {
-                                target: TermRefTarget::Symbol(_),
-                                ..
-                            }
-                        ));
-                    } else {
-                        assert!(matches!(
-                            typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-                            Type::Constant(_)
-                        ));
-                    }
-                }
-            }
-
-            let counter = symbol_named(ast, index, source, typer, "Counter");
-            let (snapshot, _, rhs) =
-                method_tree_and_rhs(ast, index, source, typer, counter, "snapshot");
-            let context = typer.expression_context_for(snapshot).unwrap();
-            let typed_rhs = typer.type_expression(rhs, context).unwrap();
-            let current = field_tree_and_rhs(ast, index, source, typer, "current").0;
-            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
-            assert!(matches!(
-                typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-                Type::TermRef {
-                    target: TermRefTarget::Symbol(target),
-                    ..
-                } if *target == current
-            ));
-
-            let (snapshot_this, _, rhs_this) =
-                method_tree_and_rhs(ast, index, source, typer, counter, "snapshotThis");
-            let context_this = typer.expression_context_for(snapshot_this).unwrap();
-            let typed_rhs_this = typer.type_expression(rhs_this, context_this).unwrap();
-            assert_eq!(
-                typer.source_typed_index().get(source, rhs_this),
-                Some(typed_rhs_this)
-            );
-            assert!(matches!(
-                typer.store().types.get(typer.typed_ast().get(typed_rhs_this).ty),
-                Type::TermRef {
-                    target: TermRefTarget::Symbol(target),
-                    ..
-                } if *target == current
-            ));
-
-            let reader = symbol_named(ast, index, source, typer, "Reader");
-            let (read, _, read_rhs) =
-                method_tree_and_rhs(ast, index, source, typer, reader, "read");
-            let read_context = typer.expression_context_for(read).unwrap();
-            let typed_read = typer.type_expression(read_rhs, read_context).unwrap();
-            assert_eq!(
-                typer.source_typed_index().get(source, read_rhs),
-                Some(typed_read)
-            );
-            let TreeKind::Select(source_read) = &ast.get(read_rhs).kind else {
-                panic!("Reader.read RHS should be a source selection");
-            };
-            let TreeKind::Select(typed_read_selection) = &typer.typed_ast().get(typed_read).kind
-            else {
-                panic!("Reader.read RHS should remain a typed selection");
-            };
-            assert_eq!(
-                typer
-                    .source_typed_index()
-                    .get(source, source_read.qualifier),
-                Some(typed_read_selection.qualifier)
-            );
-            assert!(matches!(
-                typer.store().types.get(typer.typed_ast().get(typed_read).ty),
-                Type::TermRef {
-                    target: TermRefTarget::Symbol(target),
-                    ..
-                } if *target == current
-            ));
-
-            let (write, _, write_rhs) =
-                method_tree_and_rhs(ast, index, source, typer, reader, "write");
-            let write_context = typer.expression_context_for(write).unwrap();
-            let typed_write = typer.type_expression(write_rhs, write_context).unwrap();
-            assert_eq!(
-                typer.source_typed_index().get(source, write_rhs),
-                Some(typed_write)
-            );
-            let TreeKind::Assign(source_assignment) = &ast.get(write_rhs).kind else {
-                panic!("Reader.write source RHS should be an assignment");
-            };
-            let TreeKind::Assign(assignment) = &typer.typed_ast().get(typed_write).kind else {
-                panic!("Reader.write RHS should remain a typed assignment");
-            };
-            assert_eq!(
-                typer
-                    .source_typed_index()
-                    .get(source, source_assignment.lhs),
-                Some(assignment.lhs)
-            );
-            let TreeKind::Select(source_lhs) = &ast.get(source_assignment.lhs).kind else {
-                panic!("Reader.write target should be a source selection");
-            };
-            let TreeKind::Select(typed_lhs) = &typer.typed_ast().get(assignment.lhs).kind else {
-                panic!("Reader.write target should remain a typed selection");
-            };
-            assert_eq!(
-                typer.source_typed_index().get(source, source_lhs.qualifier),
-                Some(typed_lhs.qualifier)
-            );
-            assert!(matches!(
-                typer.store().types.get(typer.typed_ast().get(assignment.lhs).ty),
-                Type::TermRef {
-                    target: TermRefTarget::Symbol(target),
-                    ..
-                } if *target == current
-            ));
-            assert!(matches!(
-                typer
-                    .store()
-                    .types
-                    .get(typer.typed_ast().get(assignment.rhs).ty),
-                Type::TermRef {
-                    target: TermRefTarget::Symbol(_),
-                    ..
-                }
-            ));
-
-            let (reject_write, _, reject_rhs) =
-                method_tree_and_rhs(ast, index, source, typer, reader, "rejectSeedWrite");
-            let reject_context = typer.expression_context_for(reject_write).unwrap();
-            let error = typer
-                .type_expression(reject_rhs, reject_context)
-                .expect_err("immutable class-body seed cannot be assigned through a receiver");
-            assert!(matches!(
-                error,
-                TyperError::AssignmentTargetImmutable {
-                    target,
-                    tree_index,
-                    ..
-                } if target == field_tree_and_rhs(ast, index, source, typer, "seed").0
-                    && tree_index == reject_rhs.index()
-            ));
-            assert!(typer.source_typed_index().get(source, reject_rhs).is_none());
-
-            let constructor = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template)
-                        if index.symbol_at(source, template.constructor).is_some_and(
-                            |symbol| typer.store().symbols.get(symbol).owner == Some(counter),
-                        ) =>
-                    {
-                        index.symbol_at(source, template.constructor)
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            assert_eq!(
-                typer.store().symbols.get(constructor).kind,
-                SymbolKind::Constructor
-            );
-            assert_eq!(typer.store().symbols.get(constructor).owner, Some(counter));
-            let dotty_core::SymbolInfo::Complete(constructor_type) =
-                typer.store().symbols.get(constructor).info
-            else {
-                panic!("Counter constructor signature should complete");
-            };
-            let Type::Method(signature) = typer.store().types.get(constructor_type) else {
-                panic!("Counter constructor should have a method signature");
-            };
-            assert_eq!(signature.params.len(), 1);
-            assert_eq!(signature.params[0].ty, definitions.int);
-            let constructor_tree = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template)
-                        if index.symbol_at(source, template.constructor) == Some(constructor) =>
-                    {
-                        Some(template.constructor)
-                    }
-                    _ => None,
-                })
-                .unwrap();
-            assert_eq!(
-                index.definition_of(constructor),
-                Some(dotty_namer::SourceDefinition::Canonical {
-                    source,
-                    tree: constructor_tree,
-                })
-            );
-            let TreeKind::DefDef(constructor_definition) = &ast.get(constructor_tree).kind else {
-                panic!("Counter constructor definition should be DefDef");
-            };
-            let [id_parameter] = constructor_definition.value_param_clauses[0].as_slice() else {
-                panic!("Counter should have exactly one constructor parameter");
-            };
-            let id_field = index.symbol_at(source, *id_parameter).unwrap();
-            let id_formal = index
-                .derived_symbol_at(constructor, source, *id_parameter)
-                .unwrap();
-            assert_ne!(id_field, id_formal);
-            assert_eq!(
-                index.definition_of(id_field),
-                Some(dotty_namer::SourceDefinition::Canonical {
-                    source,
-                    tree: *id_parameter,
-                })
-            );
-            assert_eq!(typer.store().symbols.get(id_field).kind, SymbolKind::Field);
-            assert_eq!(typer.store().symbols.get(id_field).owner, Some(counter));
-            assert_eq!(
-                typer.store().symbols.get(id_formal).kind,
-                SymbolKind::Parameter
-            );
-            assert_eq!(
-                typer.store().symbols.get(id_formal).owner,
-                Some(constructor)
-            );
-            assert_eq!(
-                index.definition_of(id_formal),
-                Some(dotty_namer::SourceDefinition::Derived {
-                    source,
-                    tree: *id_parameter,
-                })
-            );
-            let (from_id, _, from_id_rhs) = field_tree_and_rhs(ast, index, source, typer, "fromId");
-            let from_id_type = match typer.store().symbols.get(from_id).info {
-                dotty_core::SymbolInfo::Complete(ty) => ty,
-                _ => panic!("fromId field type should be complete"),
-            };
-            let from_id_context = typer.field_initializer_context_for(from_id).unwrap();
-            let typed_from_id = typer
-                .type_expression_expected(from_id_rhs, from_id_context, from_id_type)
-                .unwrap();
-            let from_id_rhs_type = typer
-                .store()
-                .types
-                .get(typer.typed_ast().get(typed_from_id).ty);
-            assert!(
-                matches!(
-                    from_id_rhs_type,
-                    Type::TermRef {
-                        target: TermRefTarget::Symbol(target),
-                        ..
-                    } if *target == id_formal && *target != id_field
-                ),
-                "fromId type {from_id_rhs_type:?}, id field {id_field:?}, derived formal {id_formal:?}"
-            );
-        },
-    );
-}
-
-#[test]
-fn public_body_fields_project_to_origin_aware_accessor_metadata() {
-    with_source(
-        "class Counter(val id: Int) { val initial: Int = 10; var current: Long = 0L; val precise: Double = 2.5 }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Counter");
-            typer.complete_symbol(class).unwrap();
-            let Some(dotty_namer::SourceDefinition::Canonical { tree, .. }) =
-                index.definition_of(class)
-            else {
-                panic!("Counter needs a canonical source definition");
-            };
-            let TreeKind::TypeDef(class_definition) = &ast.get(tree).kind else {
-                panic!("Counter source definition should be a TypeDef");
-            };
-            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
-                panic!("Counter definition should contain a template");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
-            else {
-                panic!("Counter constructor should be a DefDef");
-            };
-            let parameter_tree = constructor_definition.value_param_clauses[0][0];
-            let field = index.symbol_at(source, parameter_tree).unwrap();
-            let parameter = index
-                .derived_symbol_at(constructor, source, parameter_tree)
-                .unwrap();
-            typer.complete_symbol(field).unwrap();
-            typer.complete_symbol(parameter).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let constructor_plan = JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                vec![parameter],
-                ast,
-                index,
-            )
-            .unwrap();
-            let mut plans = Vec::new();
-            let mut typed_roots = Vec::new();
-            for name in ["initial", "current", "precise"] {
-                let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("{name} field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let initializer = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                let proof = JvmPublicBodyFieldSourceProof::from_source(
-                    class,
-                    field,
-                    source,
-                    declaration,
-                    initializer,
-                    ast,
-                    index,
-                    typer.source_typed_index(),
-                    typer.typed_ast(),
-                    typer.store(),
-                )
-                .unwrap();
-                typed_roots.push(initializer);
-                plans.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPublic(proof),
-                    initializer: Some(initializer),
-                });
-            }
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: plans,
-                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
-                        constructor_plan,
-                    ),
-                }],
-            };
-            let metadata = unit.metadata(definitions).unwrap();
-            let class_metadata = &metadata[0];
-            assert!(class_metadata.fields().is_empty());
-            let body_fields = class_metadata
-                .accessors()
-                .iter()
-                .map(|accessor| accessor.source_field())
-                .collect::<Vec<_>>();
-            assert_eq!(body_fields.len(), 4);
-            let initializer_plan = unit
-                .lower_constructor_field_initializers(class, definitions)
-                .expect("public body fields lower from exact source proofs");
-            assert_eq!(initializer_plan.fields().len(), 3);
-            assert_eq!(
-                initializer_plan
-                    .fields()
-                    .iter()
-                    .map(|initializer| initializer.field())
-                    .collect::<Vec<_>>(),
-                body_fields[1..]
-            );
-            assert!(
-                !emit_class(&unit, class, definitions)
-                    .expect("validated public body initializers emit")
-                    .bytes()
-                    .is_empty()
-            );
-            let accessors = class_metadata.accessors();
-            assert_eq!(accessors.len(), 4);
-            assert_eq!(accessors[0].source_field(), field);
-            assert_eq!(accessors[0].constructor_parameter(), Some(parameter));
-            assert!(matches!(
-                accessors[0].origin(),
-                dotty_jvm::JvmAccessorOrigin::ConstructorParameter(binding)
-                    if binding.field() == field && binding.parameter() == parameter
-            ));
-            for (accessor, expected) in accessors[1..].iter().zip([
-                ("initial", "I", false, 0),
-                ("current", "J", true, 1),
-                ("precise", "D", false, 2),
-            ]) {
-                let (name, descriptor, mutable, ordinal) = expected;
-                assert_eq!(accessor.field_name(), name);
-                assert_eq!(accessor.field_descriptor(), descriptor);
-                assert_eq!(accessor.source_ordinal(), ordinal);
-                assert_eq!(accessor.is_mutable(), mutable);
-                assert_eq!(accessor.owner(), class);
-                assert_eq!(accessor.constructor_parameter(), None);
-                assert!(accessor.binding().is_none());
-                assert!(accessor.field_access_flags().is_private());
-                assert_eq!(
-                    accessor.field_access_flags().is_final(),
-                    !mutable,
-                    "val storage is final; var storage is not"
-                );
-                assert_eq!(accessor.getter().name(), name);
-                assert_eq!(
-                    accessor.getter().descriptor().as_str(),
-                    &format!("(){descriptor}")
-                );
-                assert!(accessor.getter().access_flags().is_public());
-                if mutable {
-                    let setter = accessor.setter().expect("var has a setter");
-                    assert_eq!(setter.name(), "current_$eq");
-                    assert_eq!(setter.descriptor().as_str(), "(J)V");
-                    assert!(setter.access_flags().is_public());
-                } else {
-                    assert!(accessor.setter().is_none());
-                }
-                assert!(matches!(
-                    accessor.origin(),
-                    dotty_jvm::JvmAccessorOrigin::ClassBodyField(proof)
-                        if proof.field() == accessor.source_field()
-                            && proof.initializer() == typed_roots[ordinal]
-                ));
-            }
-        },
-    );
-}
-
-#[test]
-fn public_body_accessor_metadata_rejects_user_getter_collisions() {
-    with_source(
-        "class BodyCollision { val value: Int = 1; def value(): Int = 2 }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "BodyCollision");
-            typer.complete_symbol(class).unwrap();
-            let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, "value");
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let field_context = typer.field_initializer_context_for(field).unwrap();
-            let initializer = typer
-                .type_expression_expected(rhs, field_context, field_type)
-                .unwrap();
-            let proof = JvmPublicBodyFieldSourceProof::from_source(
-                class,
-                field,
-                source,
-                declaration,
-                initializer,
-                ast,
-                index,
-                typer.source_typed_index(),
-                typer.typed_ast(),
-                typer.store(),
-            )
-            .unwrap();
-            let (method, _, method_rhs) =
-                method_tree_and_rhs(ast, index, source, typer, class, "value");
-            typer.complete_symbol(method).unwrap();
-            let method_context = typer.expression_context_for(method).unwrap();
-            let method_body = typer.type_expression(method_rhs, method_context).unwrap();
-            let result = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: vec![JvmMethodPlan {
-                        method,
-                        parameters: Vec::new(),
-                        locals: Vec::new(),
-                        body: Some(method_body),
-                    }],
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPublic(proof),
-                        initializer: Some(initializer),
-                    }],
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            }
-            .metadata(definitions);
-            assert!(matches!(
-                result,
-                Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
-                    class: found_class,
-                    field: found_field,
-                    previous,
-                    ref name,
-                    ref descriptor,
-                }) if found_class == class
-                    && found_field == field
-                    && previous == method
-                    && name == "value"
-                    && descriptor == "()I"
-            ));
-        },
-    );
-}
-
-#[test]
-fn public_body_field_initializers_preserve_earlier_self_and_forward_targets() {
-    with_source(
-        "class InitReads:\n  val earlier: Int = 1\n  val copied: Int = earlier\n  val self: Int = this.self\n  val forward: Int = later\n  val later: Int = 2\n",
-        |ast, source, index, _, typer| {
-            let class = symbol_named(ast, index, source, typer, "InitReads");
-            typer.complete_symbol(class).unwrap();
-            for (name, target_name) in [
-                ("copied", "earlier"),
-                ("self", "self"),
-                ("forward", "later"),
-            ] {
-                let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                let target = field_tree_and_rhs(ast, index, source, typer, target_name).0;
-                assert_eq!(
-                    index.definition_of(field),
-                    Some(dotty_namer::SourceDefinition::Canonical {
-                        source,
-                        tree: declaration,
-                    })
-                );
-                typer.complete_symbol(field).unwrap();
-                let dotty_core::SymbolInfo::Complete(field_type) =
-                    typer.store().symbols.get(field).info
-                else {
-                    panic!("{name} field type should complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let typed_rhs = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
-                assert!(matches!(
-                    typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-                    Type::TermRef {
-                        target: TermRefTarget::Symbol(actual),
-                        ..
-                    } if *actual == target
-                ));
-            }
-        },
-    );
-}
-
-#[test]
-fn non_private_visibility_forms_are_canonicalized_and_self_forward_reads_type() {
-    with_source(
-        "class Visibility { val publicField: Int = 1; protected val protectedField: Int = 2; private[this] val thisOnly: Int = 3 }",
-        |ast, source, index, _definitions, typer| {
-            for (name, visibility) in [
-                ("publicField", Visibility::Public),
-                ("protectedField", Visibility::Protected),
-                ("thisOnly", Visibility::Private),
-            ] {
-                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                assert_eq!(typer.store().symbols.get(field).visibility, visibility);
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(expected) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let typed = typer
-                    .type_expression_expected(rhs, context, expected)
-                    .unwrap();
-                assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed));
-            }
-        },
-    );
-
-    with_source(
-        "class Reads { private val self: Int = this.self; private val earlier: Int = 1; private val forward: Int = later; private val later: Int = 2 }",
-        |ast, source, index, _, typer| {
-            for (name, target_name) in [("self", "self"), ("forward", "later")] {
-                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                let target = field_tree_and_rhs(ast, index, source, typer, target_name).0;
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(expected) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let typed = typer
-                    .type_expression_expected(rhs, context, expected)
-                    .unwrap();
-                assert!(matches!(
-                    typer.store().types.get(typer.typed_ast().get(typed).ty),
-                    Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
-                        if *symbol == target
-                ));
-            }
-        },
-    );
-}
-
-#[test]
-fn real_source_private_primitive_fields_project_in_frontend_order() {
-    let snapshot = || {
-        with_source(
-            "class Fields { private val seed: Int = 42; private var enabled: Boolean = true; private val large: Long = 9000000000L; private val small: Float = 1.5f; private var precise: Double = 2.5 }",
-            |ast, source, index, definitions, typer| {
-                let class = symbol_named(ast, index, source, typer, "Fields");
-                typer.complete_symbol(class).unwrap();
-
-                let mut fields = Vec::new();
-                for name in ["seed", "enabled", "large", "small", "precise"] {
-                    let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                    typer.complete_symbol(field).unwrap();
-                    let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info
-                    else {
-                        panic!("field type should be complete");
-                    };
-                    let context = typer.field_initializer_context_for(field).unwrap();
-                    let initializer = typer
-                        .type_expression_expected(rhs, context, field_type)
-                        .unwrap();
-                    fields.push(JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(initializer),
-                    });
-                }
-
-                let unit = JvmCompilationUnit {
-                    store: typer.store(),
-                    typed_ast: typer.typed_ast(),
-                    classes: vec![JvmClassPlan {
-                        class,
-                        methods: Vec::new(),
-                        fields,
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    }],
-                };
-                let metadata = unit.metadata(definitions).unwrap();
-                let projected = metadata[0].fields();
-                assert_eq!(projected.len(), 5);
-                assert_eq!(projected[0].name(), "seed");
-                assert_eq!(projected[0].descriptor(), "I");
-                assert!(projected[0].access_flags().is_private());
-                assert!(projected[0].access_flags().is_final());
-                assert_eq!(projected[1].name(), "enabled");
-                assert_eq!(projected[1].descriptor(), "Z");
-                assert!(projected[1].access_flags().is_private());
-                assert!(!projected[1].access_flags().is_final());
-                assert_eq!(projected[2].name(), "large");
-                assert_eq!(projected[2].descriptor(), "J");
-                assert!(projected[2].access_flags().is_private());
-                assert!(projected[2].access_flags().is_final());
-                assert_eq!(projected[3].name(), "small");
-                assert_eq!(projected[3].descriptor(), "F");
-                assert!(projected[3].access_flags().is_private());
-                assert!(projected[3].access_flags().is_final());
-                assert_eq!(projected[4].name(), "precise");
-                assert_eq!(projected[4].descriptor(), "D");
-                assert!(projected[4].access_flags().is_private());
-                assert!(!projected[4].access_flags().is_final());
-
-                assert_eq!(unit.metadata(definitions).unwrap(), metadata);
-                let snapshot = projected
-                    .iter()
-                    .map(|field| {
-                        (
-                            field.name().to_owned(),
-                            field.descriptor().to_owned(),
-                            field.access_flags().0,
-                        )
-                    })
-                    .collect::<Vec<_>>();
-
-                let mut emission_plan = unit.classes[0].clone();
-                emission_plan.initialization = JvmClassInitializationPlan::ImplicitNoArg;
-                let emission_unit = JvmCompilationUnit {
-                    store: unit.store,
-                    typed_ast: unit.typed_ast,
-                    classes: vec![emission_plan],
-                };
-                let initializer_plan = emission_unit
-                    .lower_constructor_field_initializers(class, definitions)
-                    .expect("implicit no-arg constructor lowers private source fields");
-                assert_eq!(initializer_plan.fields().len(), 5);
-                assert_eq!(
-                    initializer_plan
-                        .fields()
-                        .iter()
-                        .map(|initializer| {
-                            unit.store
-                                .names
-                                .resolve(unit.store.symbols.get(initializer.field()).name.text())
-                        })
-                        .collect::<Vec<_>>(),
-                    ["seed", "enabled", "large", "small", "precise"]
-                );
-                assert!(initializer_plan.fields().iter().all(|initializer| {
-                    initializer.origin()
-                        == dotty_jvm::JvmConstructorFieldInitializerOrigin::PrivateField
-                }));
-                assert!(
-                    !emit_class(&emission_unit, class, definitions)
-                        .expect("valid implicit no-arg field initializers emit")
-                        .bytes()
-                        .is_empty()
-                );
-                snapshot
-            },
-        )
-    };
-    assert_eq!(snapshot(), snapshot());
-
-    with_source(
-        "class Counter(start: Long) { private var current: Long = start }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Counter");
-            typer.complete_symbol(class).unwrap();
-            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "current");
-            typer.complete_symbol(field).unwrap();
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let TreeKind::DefDef(constructor_def) = &ast.get(template.constructor).kind else {
-                panic!("primary constructor should be a DefDef");
-            };
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let source_parameter = constructor_def.value_param_clauses[0][0];
-            let constructor_parameter = index
-                .derived_symbol_at(constructor, source, source_parameter)
-                .unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let initializer = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-            assert!(matches!(
-                typer.store().types.get(typer.typed_ast().get(initializer).ty),
-                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
-                    if *symbol == constructor_parameter
-            ));
-
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(initializer),
-                    }],
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-            let metadata = unit.metadata(definitions).unwrap();
-            let field_metadata = &metadata[0].fields()[0];
-            assert_eq!(field_metadata.symbol(), field);
-            assert_eq!(field_metadata.descriptor(), "J");
-            assert!(field_metadata.access_flags().is_private());
-            assert!(!field_metadata.access_flags().is_final());
-        },
-    );
-}
-
-#[test]
-fn real_typed_current_instance_field_reads_lower_to_aload_getfield() {
-    with_source(
-        "class Current { private var current: Int = 5; private val flag: Boolean = true; def get(): Int = current; def getThis(): Int = this.current; def isEnabled(): Boolean = this.flag }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Current");
-            typer.complete_symbol(class).unwrap();
-
-            let mut fields = Vec::new();
-            for name in ["current", "flag"] {
-                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let initializer = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(initializer),
-                });
-            }
-
-            let mut methods = Vec::new();
-            for name in ["get", "getThis", "isEnabled"] {
-                let (method, rhs) = ast
-                    .iter()
-                    .find_map(|(tree, node)| {
-                        let TreeKind::DefDef(definition) = &node.kind else {
-                            return None;
-                        };
-                        if typer
-                            .store()
-                            .names
-                            .resolve(definition.name.as_name().text())
-                            == name
-                        {
-                            Some((index.symbol_at(source, tree)?, definition.rhs?))
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_else(|| panic!("missing method {name}"));
-                typer.complete_symbol(method).unwrap();
-                let context = typer.expression_context_for(method).unwrap();
-                let body = typer.type_expression(rhs, context).unwrap();
-                methods.push(JvmMethodPlan {
-                    method,
-                    parameters: Vec::new(),
-                    locals: Vec::new(),
-                    body: Some(body),
-                });
-            }
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods,
-                    fields,
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-
-            let lower_and_encode = |name: &str, descriptor: &str| {
-                let method = unit.classes[0]
-                    .methods
-                    .iter()
-                    .find(|method| {
-                        typer
-                            .store()
-                            .names
-                            .resolve(typer.store().symbols.get(method.method).name.text())
-                            == name
-                    })
-                    .unwrap()
-                    .method;
-                let code = unit.lower_method_body(class, method, definitions).unwrap();
-                let mut builder = ClassFileBuilder::new(
-                    "Current",
-                    ClassFileVersion {
-                        major: 65,
-                        minor: 0,
-                    },
-                )
-                .unwrap();
-                builder
-                    .add_prebuilt_code_method(name, descriptor, MethodAccessFlags(ACC_PUBLIC), code)
-                    .unwrap();
-                let bytes = builder.encode().unwrap();
-                let mut reader = Reader::new(&bytes);
-                let class_file =
-                    dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
-                let code = class_file.methods[0]
-                    .attributes
-                    .iter()
-                    .find_map(|attribute| match attribute {
-                        dotty_classfile::attribute::Attribute::Code(code) => {
-                            Some(code.code.to_vec())
-                        }
-                        _ => None,
-                    })
-                    .unwrap();
-                let index = u16::from_be_bytes([code[2], code[3]]);
-                let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
-                    class_index,
-                    name_and_type_index,
-                } = class_file
-                    .constant_pool
-                    .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
-                    .unwrap()
-                else {
-                    panic!("getfield must reference Fieldref")
-                };
-                let owner = class_file
-                    .constant_pool
-                    .class_name(*class_index)
-                    .unwrap()
-                    .to_owned();
-                let (field, field_descriptor) = class_file
-                    .constant_pool
-                    .name_and_type(*name_and_type_index)
-                    .unwrap();
-                (code, owner, field.to_owned(), field_descriptor.to_owned())
-            };
-
-            let integer = lower_and_encode("get", "()I");
-            let explicit = lower_and_encode("getThis", "()I");
-            let boolean = lower_and_encode("isEnabled", "()Z");
-            for ((code, owner, field, descriptor), method, expected_field, expected_descriptor) in [
-                (&integer, "get", "current", "I"),
-                (&explicit, "getThis", "current", "I"),
-                (&boolean, "isEnabled", "flag", "Z"),
-            ] {
-                assert_eq!(&code[0..1], &[0x2a], "aload_0 for {method}");
-                assert_eq!(code[1], 0xb4, "getfield for {method}");
-                assert_eq!(code[4], 0xac, "ireturn for {method}");
-                assert_eq!(owner, "Current");
-                assert_eq!(field, expected_field);
-                assert_eq!(descriptor, expected_descriptor);
-            }
-        },
-    );
-}
-
-#[test]
-fn real_typed_mutable_field_assignments_lower_to_putfield_in_evaluation_order() {
-    with_source(
-        "class State { private var current: Int = 0; private var active: Boolean = false; private val fixed: Int = 1; def set(current: Int): Unit = { this.current = current }; def setUnqualified(value: Int): Unit = { current = value }; def setActive(value: Boolean): Unit = { this.active = value }; def increment(): Unit = { current = current + 1 }; def stop(): Unit = { current = { return } }; def localShadow(): Unit = { var current = 1; current = 2 }; def branch(flag: Boolean): Unit = if (flag) { current = 3 } else (); def loop(flag: Boolean): Unit = while (flag) { current = 4 }; def external(other: State): Unit = { other.current = 5 } }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "State");
-            typer.complete_symbol(class).unwrap();
-
-            let mut fields = Vec::new();
-            for name in ["current", "active", "fixed"] {
-                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let initializer = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(initializer),
-                });
-            }
-
-            let method_names = [
-                "set",
-                "setUnqualified",
-                "setActive",
-                "increment",
-                "stop",
-                "localShadow",
-                "branch",
-                "loop",
-            ];
-            let mut methods = Vec::new();
-            let mut typed_bodies = Vec::new();
-            for name in method_names {
-                let (method, rhs, parameters) = ast
-                    .iter()
-                    .find_map(|(tree, node)| {
-                        let TreeKind::DefDef(definition) = &node.kind else {
-                            return None;
-                        };
-                        if typer
-                            .store()
-                            .names
-                            .resolve(definition.name.as_name().text())
-                            != name
-                        {
-                            return None;
-                        }
-                        let method = index.symbol_at(source, tree)?;
-                        if typer.store().symbols.get(method).owner != Some(class) {
-                            return None;
-                        }
-                        let rhs = definition.rhs?;
-                        let parameters = definition
-                            .value_param_clauses
-                            .iter()
-                            .flatten()
-                            .map(|parameter| index.symbol_at(source, *parameter))
-                            .collect::<Option<Vec<_>>>()?;
-                        Some((method, rhs, parameters))
-                    })
-                    .unwrap_or_else(|| panic!("missing source method {name}"));
-                typer.complete_symbol(method).unwrap();
-                let context = typer.expression_context_for(method).unwrap();
-                let body = typer.type_expression(rhs, context).unwrap();
-                let locals = if name == "localShadow" {
-                    let TreeKind::Block(block) = &ast.get(rhs).kind else {
-                        panic!("localShadow should have a block body");
-                    };
-                    let declaration = block
-                        .stats
-                        .iter()
-                        .copied()
-                        .find(|tree| matches!(ast.get(*tree).kind, TreeKind::ValDef(_)))
-                        .unwrap();
-                    let binding = typer
-                        .typed_local_binding_at(source, declaration)
-                        .expect("local shadow should have a canonical typed binding");
-                    vec![dotty_jvm::JvmLocalBinding {
-                        declaration: binding.declaration(),
-                        symbol: binding.symbol(),
-                        mutable: typer
-                            .store()
-                            .symbols
-                            .get(binding.symbol())
-                            .flags
-                            .contains(SymbolFlags::MUTABLE),
-                    }]
-                } else {
-                    Vec::new()
-                };
-                methods.push(JvmMethodPlan {
-                    method,
-                    parameters,
-                    locals,
-                    body: Some(body),
-                });
-                typed_bodies.push((name, method, body));
-            }
-
-            let (external_method, external_rhs) = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    let TreeKind::DefDef(definition) = &node.kind else {
-                        return None;
-                    };
-                    (typer
-                        .store()
-                        .names
-                        .resolve(definition.name.as_name().text())
-                        == "external")
-                        .then_some((index.symbol_at(source, tree)?, definition.rhs?))
-                })
-                .expect("missing external receiver method");
-            typer.complete_symbol(external_method).unwrap();
-            let external_context = typer.expression_context_for(external_method).unwrap();
-            let external_body = typer
-                .type_expression(external_rhs, external_context)
-                .unwrap();
-
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods,
-                    fields: fields.clone(),
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-            let typed_body = |name: &str| {
-                typed_bodies
-                    .iter()
-                    .find(|(candidate, _, _)| *candidate == name)
-                    .copied()
-                    .unwrap()
-            };
-            let encode_body = |name: &str, descriptor: &str| {
-                let (_, method, _) = typed_body(name);
-                let code = unit.lower_method_body(class, method, definitions).unwrap();
-                let mut builder = ClassFileBuilder::new(
-                    "State",
-                    ClassFileVersion {
-                        major: 65,
-                        minor: 0,
-                    },
-                )
-                .unwrap();
-                builder
-                    .add_field(
-                        "current",
-                        "I",
-                        dotty_classfile::access_flags::FieldAccessFlags(
-                            dotty_classfile::access_flags::ACC_PRIVATE,
-                        ),
-                    )
-                    .unwrap();
-                builder
-                    .add_field(
-                        "active",
-                        "Z",
-                        dotty_classfile::access_flags::FieldAccessFlags(
-                            dotty_classfile::access_flags::ACC_PRIVATE,
-                        ),
-                    )
-                    .unwrap();
-                builder
-                    .add_field(
-                        "fixed",
-                        "I",
-                        dotty_classfile::access_flags::FieldAccessFlags(
-                            dotty_classfile::access_flags::ACC_PRIVATE
-                                | dotty_classfile::access_flags::ACC_FINAL,
-                        ),
-                    )
-                    .unwrap();
-                builder
-                    .add_prebuilt_code_method(name, descriptor, MethodAccessFlags(ACC_PUBLIC), code)
-                    .unwrap();
-                let mut constructor = dotty_classfile::bytecode::CodeBuilder::new();
-                constructor
-                    .aload(0)
-                    .and_then(|code| code.invokespecial("java/lang/Object", "<init>", "()V"))
-                    .and_then(|code| code.return_void())
-                    .unwrap();
-                builder
-                    .add_prebuilt_code_method(
-                        "<init>",
-                        "()V",
-                        MethodAccessFlags(ACC_PUBLIC),
-                        constructor,
-                    )
-                    .unwrap();
-                let bytes = builder.encode().unwrap();
-                let mut reader = Reader::new(&bytes);
-                let class_file =
-                    dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
-                let code = class_file.methods[0]
-                    .attributes
-                    .iter()
-                    .find_map(|attribute| match attribute {
-                        dotty_classfile::attribute::Attribute::Code(code) => {
-                            Some(code.code.to_vec())
-                        }
-                        _ => None,
-                    })
-                    .unwrap();
-                let field_ref = code
-                    .iter()
-                    .position(|opcode| *opcode == 0xb5)
-                    .map(|putfield| {
-                        let index = u16::from_be_bytes([code[putfield + 1], code[putfield + 2]]);
-                        let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
-                            class_index,
-                            name_and_type_index,
-                        } = class_file
-                            .constant_pool
-                            .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
-                            .unwrap()
-                        else {
-                            panic!("putfield must reference Fieldref");
-                        };
-                        let (field, descriptor) = class_file
-                            .constant_pool
-                            .name_and_type(*name_and_type_index)
-                            .unwrap();
-                        (
-                            class_file
-                                .constant_pool
-                                .class_name(*class_index)
-                                .unwrap()
-                                .to_owned(),
-                            field.to_owned(),
-                            descriptor.to_owned(),
-                        )
-                    });
-                (code, field_ref, bytes)
-            };
-
-            for (name, descriptor, field, field_descriptor) in [
-                ("set", "(I)V", "current", "I"),
-                ("setUnqualified", "(I)V", "current", "I"),
-                ("setActive", "(Z)V", "active", "Z"),
-            ] {
-                let (code, field_ref, _) = encode_body(name, descriptor);
-                assert_eq!(
-                    code[0], 0x2a,
-                    "aload_0 evaluates the receiver first for {name}"
-                );
-                let rhs_load = code
-                    .iter()
-                    .position(|opcode| *opcode == 0x1b)
-                    .expect("parameter is loaded for the RHS");
-                let receiver_reload = code
-                    .iter()
-                    .rposition(|opcode| *opcode == 0x2c)
-                    .expect("saved receiver is reloaded after the RHS");
-                assert!(
-                    rhs_load < receiver_reload,
-                    "RHS follows receiver for {name}"
-                );
-                let putfield = code.iter().position(|opcode| *opcode == 0xb5).unwrap();
-                assert_eq!(code.iter().filter(|opcode| **opcode == 0xb5).count(), 1);
-                assert!(!code.contains(&0xb4), "LHS is not evaluated as a read");
-                assert_eq!(code[putfield + 3], 0xb1, "Unit return for {name}");
-                assert_eq!(
-                    field_ref,
-                    Some((
-                        "State".to_owned(),
-                        field.to_owned(),
-                        field_descriptor.to_owned()
-                    ))
-                );
-            }
-
-            let (increment_code, increment_field, _) = encode_body("increment", "()V");
-            assert_eq!(increment_code[0], 0x2a, "field receiver is loaded first");
-            assert!(
-                increment_code.contains(&0xb4),
-                "RHS reads the current field"
-            );
-            assert!(
-                increment_code.contains(&0x60),
-                "RHS adds one before storing"
-            );
-            assert!(
-                increment_code.contains(&0xb5),
-                "composite assignment stores once"
-            );
-            assert_eq!(
-                increment_code
-                    .iter()
-                    .filter(|opcode| **opcode == 0xb5)
-                    .count(),
-                1
-            );
-            assert_eq!(
-                increment_field,
-                Some(("State".to_owned(), "current".to_owned(), "I".to_owned()))
-            );
-
-            let (local_code, local_field, _) = encode_body("localShadow", "()V");
-            assert!(!local_code.contains(&0xb5), "shadowing local uses istore");
-            assert!(
-                !local_code.contains(&0xb4),
-                "shadowing local does not read field"
-            );
-            assert!(local_code.contains(&0x3c), "local var stores to its slot");
-            assert!(local_field.is_none());
-
-            let (stop_code, stop_field, _) = encode_body("stop", "()V");
-            assert!(stop_code.contains(&0xb1), "local return is encoded");
-            assert!(!stop_code.contains(&0xb5), "diverging RHS does not store");
-            assert!(stop_field.is_none());
-
-            if require_jdk21_or_skip() {
-                for (name, descriptor, harness_body) in [
-                    (
-                        "set",
-                        "(I)V",
-                        "state.set(41); java.lang.reflect.Field field = State.class.getDeclaredField(\"current\"); field.setAccessible(true); if (field.getInt(state) != 41) throw new AssertionError(\"Int putfield\");",
-                    ),
-                    (
-                        "setActive",
-                        "(Z)V",
-                        "state.setActive(true); java.lang.reflect.Field field = State.class.getDeclaredField(\"active\"); field.setAccessible(true); if (!field.getBoolean(state)) throw new AssertionError(\"Boolean putfield\");",
-                    ),
-                    (
-                        "increment",
-                        "()V",
-                        "state.increment(); java.lang.reflect.Field field = State.class.getDeclaredField(\"current\"); field.setAccessible(true); if (field.getInt(state) != 1) throw new AssertionError(\"compound putfield\");",
-                    ),
-                ] {
-                    let (_, _, class_bytes) = encode_body(name, descriptor);
-                    let nonce = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos();
-                    let output = std::env::temp_dir().join(format!(
-                        "dotty-jvm-field-write-{}-{nonce}",
-                        std::process::id()
-                    ));
-                    fs::create_dir_all(&output).unwrap();
-                    fs::write(output.join("State.class"), class_bytes).unwrap();
-                    let harness = output.join("WriteHarness.java");
-                    fs::write(
-                        &harness,
-                        format!(
-                            "public final class WriteHarness {{ public static void main(String[] args) throws Exception {{ State state = new State(); {harness_body} }} }}\n"
-                        ),
-                    )
-                    .unwrap();
-                    let javac = Command::new("javac")
-                        .args(["-classpath", output.to_str().unwrap(), "-d"])
-                        .arg(output.to_str().unwrap())
-                        .arg(&harness)
-                        .output()
-                        .unwrap();
-                    assert!(
-                        javac.status.success(),
-                        "javac rejected {name} harness\nstdout:\n{}\nstderr:\n{}",
-                        String::from_utf8_lossy(&javac.stdout),
-                        String::from_utf8_lossy(&javac.stderr)
-                    );
-                    let java = Command::new("java")
-                        .args([
-                            "-Xverify:all",
-                            "-classpath",
-                            output.to_str().unwrap(),
-                            "WriteHarness",
-                        ])
-                        .output()
-                        .unwrap();
-                    assert!(
-                        java.status.success(),
-                        "java -Xverify:all rejected {name}\nstdout:\n{}\nstderr:\n{}",
-                        String::from_utf8_lossy(&java.stdout),
-                        String::from_utf8_lossy(&java.stderr)
-                    );
-                    fs::remove_dir_all(output).unwrap();
-                }
-            }
-
-            let (_, branch_method, _) = typed_body("branch");
-            let branch_code = unit
-                .lower_method_body(class, branch_method, definitions)
-                .expect("current-instance field writes are supported in branches");
-            assert!(format!("{branch_code:?}").contains("operation: Put"));
-
-            let (_, loop_method, _) = typed_body("loop");
-            let loop_code = unit
-                .lower_method_body(class, loop_method, definitions)
-                .expect("current-instance field writes are supported in loops");
-            assert!(format!("{loop_code:?}").contains("operation: Put"));
-
-            let (_, setter_method, _) = typed_body("setUnqualified");
-            let mut no_fields = unit.classes[0].clone();
-            no_fields.fields.clear();
-            let unplanned = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![no_fields],
-            };
-            assert!(matches!(
-                unplanned.lower_method_body(class, setter_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::FieldNotInJvmPlan { field, .. })
-                    if field == fields[0].field
-            ));
-
-            let mut external_method_plan = unit.classes[0].methods[1].clone();
-            external_method_plan.body = Some(external_body);
-            let mut external_class_plan = unit.classes[0].clone();
-            external_class_plan.methods = vec![external_method_plan];
-            let external = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![external_class_plan],
-            };
-            assert!(matches!(
-                external.lower_method_body(class, setter_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmFieldReceiver { field, .. })
-                    if field == fields[0].field
-            ));
-        },
-    );
-}
-
-#[test]
-fn field_reads_follow_canonical_bindings_in_control_flow_and_fail_closed_elsewhere() {
-    with_source(
-        "class Current { private val current: Int = 5; private val hidden: Int = 6; private val flag: Boolean = true; def get(): Int = current; def shadow(current: Int): Int = current; def branch(flag: Boolean): Int = if (flag) current else 0; def shortCircuit(): Boolean = this.flag && true; def compared(): Boolean = this.current < 7; def select(other: Current): Int = other.current; def readHidden(): Int = hidden }\nclass Other { private val foreign: Int = 1; def read(): Int = this.foreign }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Current");
-            let other_class = symbol_named(ast, index, source, typer, "Other");
-            typer.complete_symbol(class).unwrap();
-            typer.complete_symbol(other_class).unwrap();
-
-            let mut fields = Vec::new();
-            for name in ["current", "hidden", "flag", "foreign"] {
-                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let initializer = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(initializer),
-                });
-            }
-
-            let mut methods = Vec::new();
-            for (owner, name) in [
-                (class, "get"),
-                (class, "shadow"),
-                (class, "branch"),
-                (class, "shortCircuit"),
-                (class, "compared"),
-                (class, "select"),
-                (class, "readHidden"),
-                (other_class, "read"),
-            ] {
-                let (method, rhs, parameters) = ast
-                    .iter()
-                    .find_map(|(tree, node)| {
-                        let TreeKind::DefDef(definition) = &node.kind else {
-                            return None;
-                        };
-                        if typer
-                            .store()
-                            .names
-                            .resolve(definition.name.as_name().text())
-                            != name
-                        {
-                            return None;
-                        }
-                        let method = index.symbol_at(source, tree)?;
-                        if typer.store().symbols.get(method).owner != Some(owner) {
-                            return None;
-                        }
-                        let rhs = definition.rhs?;
-                        let parameters = definition
-                            .value_param_clauses
-                            .iter()
-                            .flatten()
-                            .map(|parameter| index.symbol_at(source, *parameter))
-                            .collect::<Option<Vec<_>>>()?;
-                        Some((method, rhs, parameters))
-                    })
-                    .unwrap_or_else(|| panic!("missing source method {name}"));
-                typer.complete_symbol(method).unwrap();
-                let context = typer.expression_context_for(method).unwrap();
-                let body = typer.type_expression(rhs, context).unwrap();
-                methods.push((name, method, body, parameters));
-            }
-
-            let method = |name: &str| {
-                methods
-                    .iter()
-                    .find(|(candidate, _, _, _)| *candidate == name)
-                    .unwrap()
-            };
-            let plan_for = |method: SymbolId, body, parameters: Vec<SymbolId>, planned_fields| {
-                JvmCompilationUnit {
-                    store: typer.store(),
-                    typed_ast: typer.typed_ast(),
-                    classes: vec![JvmClassPlan {
-                        class,
-                        methods: vec![JvmMethodPlan {
-                            method,
-                            parameters,
-                            locals: Vec::new(),
-                            body: Some(body),
-                        }],
-                        fields: planned_fields,
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    }],
-                }
-            };
-            let current_field = fields
-                .iter()
-                .find(|field| {
-                    typer
-                        .store()
-                        .names
-                        .resolve(typer.store().symbols.get(field.field).name.text())
-                        == "current"
-                })
-                .unwrap();
-            let current_plan = vec![*current_field];
-            let current_id = current_field.field;
-            let flag_field = fields
-                .iter()
-                .find(|field| {
-                    typer
-                        .store()
-                        .names
-                        .resolve(typer.store().symbols.get(field.field).name.text())
-                        == "flag"
-                })
-                .unwrap();
-
-            let (_, shadow_method, shadow_body, shadow_parameters) = method("shadow");
-            let shadow = plan_for(
-                *shadow_method,
-                *shadow_body,
-                shadow_parameters.clone(),
-                current_plan.clone(),
-            );
-            let shadow_code = shadow
-                .lower_method_body(class, *shadow_method, definitions)
-                .unwrap();
-            assert!(format!("{shadow_code:?}").contains("ILoad"));
-            assert!(!format!("{shadow_code:?}").contains("GetField"));
-
-            let (_, branch_method, branch_body, branch_parameters) = method("branch");
-            let branch = plan_for(
-                *branch_method,
-                *branch_body,
-                branch_parameters.clone(),
-                current_plan.clone(),
-            );
-            let branch_code = branch
-                .lower_method_body(class, *branch_method, definitions)
-                .expect("planned current-instance field reads are supported in branches");
-            assert!(format!("{branch_code:?}").contains("operation: Get"));
-
-            let (_, short_circuit_method, short_circuit_body, _) = method("shortCircuit");
-            let short_circuit = plan_for(
-                *short_circuit_method,
-                *short_circuit_body,
-                Vec::new(),
-                vec![*current_field, *flag_field],
-            );
-            let short_circuit_code = short_circuit
-                .lower_method_body(class, *short_circuit_method, definitions)
-                .expect("planned Boolean field reads are supported in short-circuit flow");
-            assert!(format!("{short_circuit_code:?}").contains("operation: Get"));
-
-            let (_, compared_method, compared_body, _) = method("compared");
-            let compared = plan_for(
-                *compared_method,
-                *compared_body,
-                Vec::new(),
-                current_plan.clone(),
-            );
-            let compared_result = compared.lower_method_body(class, *compared_method, definitions);
-            let compared_code = compared_result
-                .expect("planned field reads are supported in relational conditions");
-            assert!(format!("{compared_code:?}").contains("operation: Get"));
-
-            let (_, get_method, _, _) = method("get");
-            let (_, _, select_body, _) = method("select");
-            let other_receiver =
-                plan_for(*get_method, *select_body, Vec::new(), current_plan.clone());
-            assert!(matches!(
-                other_receiver.lower_method_body(class, *get_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmFieldReceiver {
-                    field,
-                    ..
-                }) if field == current_id
-            ));
-            let (_, _, hidden_body, _) = method("readHidden");
-            let hidden = plan_for(*get_method, *hidden_body, Vec::new(), current_plan.clone());
-            let hidden_field = fields
-                .iter()
-                .find(|field| {
-                    typer
-                        .store()
-                        .names
-                        .resolve(typer.store().symbols.get(field.field).name.text())
-                        == "hidden"
-                })
-                .unwrap()
-                .field;
-            assert!(matches!(
-                hidden.lower_method_body(class, *get_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::FieldNotInJvmPlan {
-                    class: actual_class,
-                    field,
-                    ..
-                }) if actual_class == class && field == hidden_field
-            ));
-            let (_, _, foreign_body, _) = method("read");
-            let wrong_owner = plan_for(*get_method, *foreign_body, Vec::new(), current_plan);
-            let foreign_field = fields
-                .iter()
-                .find(|field| {
-                    typer
-                        .store()
-                        .names
-                        .resolve(typer.store().symbols.get(field.field).name.text())
-                        == "foreign"
-                })
-                .unwrap()
-                .field;
-            assert!(matches!(
-                wrong_owner.lower_method_body(class, *get_method, definitions),
-                Err(dotty_jvm::JvmCodegenError::WrongOwner {
-                    symbol,
-                    expected,
-                    actual: Some(actual),
-                }) if symbol == foreign_field && expected == class && actual == other_class
-            ));
-        },
-    );
-}
-
-#[test]
-fn field_metadata_fails_closed_for_invalid_bindings_types_and_modifiers() {
-    with_source(
-        "class Fields { private val seed: Int = 42; private var enabled: Boolean = true; val visible: Int = 1; private lazy val delayed: Int = 2 }\nclass Other { private val foreign: Int = 3 }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Fields");
-            let other = symbol_named(ast, index, source, typer, "Other");
-            typer.complete_symbol(class).unwrap();
-            typer.complete_symbol(other).unwrap();
-
-            let typed_field = |typer: &mut SourceTyper<'_>, name: &str| {
-                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let initializer = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                (field, initializer)
-            };
-            let (seed, seed_rhs) = typed_field(typer, "seed");
-            let (_enabled, enabled_rhs) = typed_field(typer, "enabled");
-            let (visible, visible_rhs) = typed_field(typer, "visible");
-            let (delayed, delayed_rhs) = typed_field(typer, "delayed");
-            let (foreign, foreign_rhs) = typed_field(typer, "foreign");
-            let plan = |fields| JvmClassPlan {
-                class,
-                methods: Vec::new(),
-                fields,
-                initialization: JvmClassInitializationPlan::Unsupported,
-            };
-            let metadata = |plan: &JvmClassPlan| {
-                plan.metadata_with_typed_ast(typer.store(), typer.typed_ast(), definitions)
-            };
-
-            assert!(matches!(
-                metadata(&plan(vec![JvmFieldPlan {
-                    field: foreign,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(foreign_rhs),
-                }])),
-                Err(dotty_jvm::JvmCodegenError::WrongOwner {
-                    symbol,
-                    expected,
-                    actual: Some(actual),
-                }) if symbol == foreign && expected == class && actual == other
-            ));
-            assert_eq!(
-                metadata(&plan(vec![
-                    JvmFieldPlan {
-                        field: seed,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(seed_rhs),
-                    };
-                    2
-                ])),
-                Err(dotty_jvm::JvmCodegenError::DuplicateFieldPlan { field: seed })
-            );
-            assert_eq!(
-                metadata(&plan(vec![JvmFieldPlan {
-                    field: seed,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: None,
-                }])),
-                Err(dotty_jvm::JvmCodegenError::MissingFieldInitializer { field: seed })
-            );
-            assert_eq!(
-                metadata(&plan(vec![JvmFieldPlan {
-                    field: seed,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(enabled_rhs),
-                }])),
-                Err(dotty_jvm::JvmCodegenError::FieldInitializerTypeMismatch {
-                    field: seed,
-                    initializer: enabled_rhs,
-                    expected: dotty_jvm::JvmType::Int,
-                    found: Some(dotty_jvm::JvmType::Boolean),
-                })
-            );
-            assert_eq!(
-                metadata(&plan(vec![JvmFieldPlan {
-                    field: visible,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(visible_rhs),
-                }])),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmVisibility {
-                    symbol: visible,
-                    visibility: Visibility::Public,
-                })
-            );
-            assert_eq!(
-                metadata(&plan(vec![JvmFieldPlan {
-                    field: delayed,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(delayed_rhs),
-                }])),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmFieldFlag {
-                    field: delayed,
-                    flag: dotty_jvm::UnsupportedJvmFieldFlag::Lazy,
-                })
-            );
-        },
-    );
-
-    with_source(
-        "class Missing { private val value: Int = 1 }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Missing");
-            let field = field_tree_and_rhs(ast, index, source, typer, "value").0;
-            typer.complete_symbol(class).unwrap();
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: None,
-                    }],
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-            assert_eq!(
-                unit.metadata(definitions),
-                Err(dotty_jvm::JvmCodegenError::MissingSemanticInfo { symbol: field })
-            );
-        },
-    );
-
-    with_source(
-        "class Duplicate { private val value: Int = 1; private val value: Boolean = true }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Duplicate");
-            typer.complete_symbol(class).unwrap();
-            let mut fields = Vec::new();
-            for tree in ast
-                .iter()
-                .filter_map(|(tree, node)| matches!(node.kind, TreeKind::ValDef(_)).then_some(tree))
-            {
-                let Some(field) = index.symbol_at(source, tree) else {
-                    continue;
-                };
-                if typer.store().symbols.get(field).owner != Some(class) {
-                    continue;
-                }
-                let TreeKind::ValDef(definition) = &ast.get(tree).kind else {
-                    unreachable!();
-                };
-                let rhs = definition.rhs.unwrap();
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let initializer = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(initializer),
-                });
-            }
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields,
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-            assert!(matches!(
-                unit.metadata(definitions),
-                Err(dotty_jvm::JvmCodegenError::DuplicateJvmFieldName {
-                    class: actual_class,
-                    name,
-                    ..
-                }) if actual_class == class && name == "value"
-            ));
-        },
-    );
-}
-
-#[test]
-fn field_metadata_never_resolves_a_shadowing_local_by_name() {
-    with_source(
-        "class Shadow { private val seed: Int = 42; private def read(): Int = { val seed = 7; seed } }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "Shadow");
-            let field = field_tree_and_rhs(ast, index, source, typer, "seed").0;
-            let method = symbol_named(ast, index, source, typer, "read");
-            typer.complete_symbol(class).unwrap();
-            let (field, field_rhs) = {
-                let (_, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "seed");
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let typed = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                (field, typed)
-            };
-            typer.complete_symbol(method).unwrap();
-            let method_rhs = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    let TreeKind::DefDef(definition) = &node.kind else {
-                        return None;
-                    };
-                    (index.symbol_at(source, tree) == Some(method))
-                        .then_some(definition.rhs)
-                        .flatten()
-                })
-                .unwrap();
-            let context = typer.expression_context_for(method).unwrap();
-            typer
-                .type_expression_expected(method_rhs, context, definitions.int)
-                .unwrap();
-            let local_tree = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    let TreeKind::ValDef(definition) = &node.kind else {
-                        return None;
-                    };
-                    (typer
-                        .store()
-                        .names
-                        .resolve(definition.name.as_name().text())
-                        == "seed"
-                        && index.symbol_at(source, tree) != Some(field))
-                    .then_some(tree)
-                })
-                .unwrap();
-            let local = typer
-                .typed_local_binding_at(source, local_tree)
-                .expect("the shadowing local should have a typed binding");
-
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: vec![JvmFieldPlan {
-                        field: local.symbol(),
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(field_rhs),
-                    }],
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-            assert_eq!(
-                unit.metadata(definitions),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedSymbolKind {
-                    symbol: local.symbol(),
-                    expected: dotty_jvm::SymbolRole::Field,
-                    found: SymbolKind::Local,
-                })
-            );
-        },
-    );
-}
-
-#[test]
-fn field_metadata_projects_private_reference_fields_from_the_full_unit() {
-    with_source(
-        "class Counter {}\nclass Holder(initial: Counter) { private val original: Counter = initial; private var current: Counter = initial; val exposed: Counter = initial }",
-        |ast, source, index, definitions, typer| {
-            let counter = symbol_named(ast, index, source, typer, "Counter");
-            let holder = symbol_named(ast, index, source, typer, "Holder");
-            typer.complete_symbol(counter).unwrap();
-            typer.complete_symbol(holder).unwrap();
-
-            let mut fields = Vec::new();
-            for name in ["original", "current"] {
-                let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
-                typer.complete_symbol(field).unwrap();
-                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                    panic!("field type should be complete");
-                };
-                let context = typer.field_initializer_context_for(field).unwrap();
-                let initializer = typer
-                    .type_expression_expected(rhs, context, field_type)
-                    .unwrap();
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                    initializer: Some(initializer),
-                });
-            }
-            let (field, declaration, rhs) =
-                field_tree_and_rhs(ast, index, source, typer, "exposed");
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("exposed field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let initializer = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-            let proof = JvmPublicBodyFieldSourceProof::from_source(
-                holder,
-                field,
-                source,
-                declaration,
-                initializer,
-                ast,
-                index,
-                typer.source_typed_index(),
-                typer.typed_ast(),
-                typer.store(),
-            )
-            .unwrap();
-            fields.push(JvmFieldPlan {
-                field,
-                source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPublic(proof),
-                initializer: Some(initializer),
-            });
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![
-                    JvmClassPlan {
-                        class: counter,
-                        methods: Vec::new(),
-                        fields: Vec::new(),
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    },
-                    JvmClassPlan {
-                        class: holder,
-                        methods: Vec::new(),
-                        fields,
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    },
-                ],
-            };
-            let metadata = unit.metadata(definitions).unwrap();
-            let fields = metadata[1].fields();
-            let counter_descriptor = format!("L{};", metadata[0].identity().internal_name());
-            assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0].name(), "original");
-            assert_eq!(fields[0].descriptor(), counter_descriptor);
-            assert_eq!(
-                fields[0].value_type(),
-                dotty_jvm::JvmType::Reference(counter)
-            );
-            assert!(fields[0].access_flags().is_private());
-            assert!(fields[0].access_flags().is_final());
-            assert_eq!(fields[1].name(), "current");
-            assert_eq!(fields[1].descriptor(), counter_descriptor);
-            assert_eq!(
-                fields[1].value_type(),
-                dotty_jvm::JvmType::Reference(counter)
-            );
-            assert!(fields[1].access_flags().is_private());
-            assert!(!fields[1].access_flags().is_final());
-            assert_eq!(metadata[1].fields().len(), 2);
-            let [exposed] = metadata[1].accessors() else {
-                panic!("public reference field should use accessor metadata");
-            };
-            assert_eq!(exposed.source_field(), field);
-            assert_eq!(exposed.field_descriptor(), counter_descriptor);
-            assert_eq!(exposed.value_type(), dotty_jvm::JvmType::Reference(counter));
-            assert!(matches!(
-                exposed.origin(),
-                dotty_jvm::JvmAccessorOrigin::ClassBodyField(proof)
-                    if proof.initializer() == initializer
-            ));
-
-            let standalone =
-                unit.classes[1].metadata_with_typed_ast(unit.store, unit.typed_ast, definitions);
-            assert!(matches!(
-                standalone,
-                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmType {
-                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
-                    ..
-                })
-            ));
-        },
-    );
-}
-
-#[test]
-fn field_metadata_rejects_a_reference_identifier_without_a_parameter_term_ref() {
-    with_source(
-        "class Counter {}\nclass Holder(initial: Counter) { private val item: Counter = initial }",
-        |ast, source, index, definitions, typer| {
-            let counter = symbol_named(ast, index, source, typer, "Counter");
-            let holder = symbol_named(ast, index, source, typer, "Holder");
-            typer.complete_symbol(counter).unwrap();
-            typer.complete_symbol(holder).unwrap();
-            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "item");
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let initializer = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-
-            let mut malformed_ast = dotty_core::ast::TypedAst::new();
-            let mut malformed_initializer_tree = typer.typed_ast().get(initializer).clone();
-            malformed_initializer_tree.ty = field_type;
-            let malformed_initializer = malformed_ast.alloc(malformed_initializer_tree);
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: &malformed_ast,
-                classes: vec![
-                    JvmClassPlan {
-                        class: counter,
-                        methods: Vec::new(),
-                        fields: Vec::new(),
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    },
-                    JvmClassPlan {
-                        class: holder,
-                        methods: Vec::new(),
-                        fields: vec![JvmFieldPlan {
-                            field,
-                            source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                            initializer: Some(malformed_initializer),
-                        }],
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    },
-                ],
-            };
-            assert_eq!(
-                unit.metadata(definitions),
-                Err(
-                    dotty_jvm::JvmCodegenError::UnsupportedJvmReferenceFieldInitializer {
-                        field,
-                        initializer: malformed_initializer,
-                        symbol: None,
-                    }
-                )
-            );
-        },
-    );
-}
-
-#[test]
-fn field_metadata_rejects_reference_fields_outside_the_unit_and_self_initialization() {
-    with_source(
-        "class Outside {}\nclass Holder(initial: Outside) { private val item: Outside = initial }",
-        |ast, source, index, definitions, typer| {
-            let outside = symbol_named(ast, index, source, typer, "Outside");
-            let holder = symbol_named(ast, index, source, typer, "Holder");
-            typer.complete_symbol(outside).unwrap();
-            typer.complete_symbol(holder).unwrap();
-            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "item");
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let initializer = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class: holder,
-                    methods: Vec::new(),
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(initializer),
-                    }],
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-            assert_eq!(
-                unit.metadata(definitions),
-                Err(dotty_jvm::JvmCodegenError::ReferenceClassNotInJvmPlan { class: outside })
-            );
-        },
-    );
-
-    with_source(
-        "class References { private val self: References = this }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "References");
-            typer.complete_symbol(class).unwrap();
-            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "self");
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let initializer = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                        initializer: Some(initializer),
-                    }],
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-            assert!(matches!(
-                unit.metadata(definitions),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmReferenceType {
-                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::NotCanonicalTypeRef,
-                    ..
-                })
-            ));
-        },
-    );
-}
-
-#[test]
-fn field_metadata_rejects_a_reference_initializer_with_another_class_identity() {
-    with_source(
-        "class Counter {}\nclass Other {}\nclass Holder(counter: Counter, other: Other) { private val first: Counter = counter; private val second: Other = other }",
-        |ast, source, index, definitions, typer| {
-            let counter = symbol_named(ast, index, source, typer, "Counter");
-            let other = symbol_named(ast, index, source, typer, "Other");
-            let holder = symbol_named(ast, index, source, typer, "Holder");
-            for class in [counter, other, holder] {
-                typer.complete_symbol(class).unwrap();
-            }
-            let (counter_field, _, _) = field_tree_and_rhs(ast, index, source, typer, "first");
-            let (other_field, _, other_rhs) =
-                field_tree_and_rhs(ast, index, source, typer, "second");
-            for field in [counter_field, other_field] {
-                typer.complete_symbol(field).unwrap();
-            }
-            let SymbolInfo::Complete(other_type) = typer.store().symbols.get(other_field).info
-            else {
-                panic!("Other field type should be complete");
-            };
-            let other_context = typer.field_initializer_context_for(other_field).unwrap();
-            let other_initializer = typer
-                .type_expression_expected(other_rhs, other_context, other_type)
-                .unwrap();
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: [counter, other, holder]
-                    .into_iter()
-                    .map(|class| JvmClassPlan {
-                        class,
-                        methods: Vec::new(),
-                        fields: if class == holder {
-                            vec![JvmFieldPlan {
-                                field: counter_field,
-                                source_visibility:
-                                    dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
-                                initializer: Some(other_initializer),
-                            }]
-                        } else {
-                            Vec::new()
-                        },
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    })
-                    .collect(),
-            };
-            assert_eq!(
-                unit.metadata(definitions),
-                Err(dotty_jvm::JvmCodegenError::FieldInitializerTypeMismatch {
-                    field: counter_field,
-                    initializer: other_initializer,
-                    expected: dotty_jvm::JvmType::Reference(counter),
-                    found: Some(dotty_jvm::JvmType::Reference(other)),
-                })
-            );
-        },
-    );
-}
-
-#[test]
-fn field_metadata_distinguishes_private_this_from_plain_private() {
-    with_source(
-        "class ObjectPrivate { private[this] val value: Int = 1 }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "ObjectPrivate");
-            let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, "value");
-            typer.complete_symbol(class).unwrap();
-            typer.complete_symbol(field).unwrap();
-            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
-                panic!("field type should be complete");
-            };
-            let context = typer.field_initializer_context_for(field).unwrap();
-            let initializer = typer
-                .type_expression_expected(rhs, context, field_type)
-                .unwrap();
-            assert_eq!(
-                typer.store().symbols.get(field).visibility,
-                Visibility::Private
-            );
-
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: vec![JvmFieldPlan {
-                        field,
-                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PrivateThis,
-                        initializer: Some(initializer),
-                    }],
-                    initialization: JvmClassInitializationPlan::Unsupported,
-                }],
-            };
-            assert_eq!(
-                unit.metadata(definitions),
-                Err(
-                    dotty_jvm::JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
-                        field,
-                        visibility: dotty_jvm::JvmFieldSourceVisibility::PrivateThis,
-                    }
-                )
-            );
-        },
-    );
-}
-
-#[test]
-fn primary_constructor_metadata_projects_exact_unit_references_and_mixed_slots() {
-    with_source(
-        "package sample\nclass Counter {}\nclass Holder(initial: Counter) {}\nclass Duo(value: Int, counter: Counter, enabled: Boolean) {}\nclass Client { def make(counter: Counter): Unit = { new Holder(counter); () } }",
-        |ast, source, index, definitions, typer| {
-            let counter = symbol_named(ast, index, source, typer, "Counter");
-            let holder = symbol_named(ast, index, source, typer, "Holder");
-            let duo = symbol_named(ast, index, source, typer, "Duo");
-            let client = symbol_named(ast, index, source, typer, "Client");
-            for class in [counter, holder, duo, client] {
-                typer.complete_symbol(class).unwrap();
-            }
-
-            let source_constructor = |class| {
-                let (constructor, parameter_trees) = ast
-                    .iter()
-                    .find_map(|(tree, node)| {
-                        if index.symbol_at(source, tree) != Some(class) {
-                            return None;
-                        }
-                        let TreeKind::TypeDef(definition) = &node.kind else {
-                            return None;
-                        };
-                        let TreeKind::Template(template) = &ast.get(definition.rhs).kind else {
-                            return None;
-                        };
-                        let TreeKind::DefDef(constructor) = &ast.get(template.constructor).kind
-                        else {
-                            return None;
-                        };
-                        Some((
-                            index.symbol_at(source, template.constructor)?,
-                            constructor
-                                .value_param_clauses
-                                .iter()
-                                .flatten()
-                                .copied()
-                                .collect::<Vec<_>>(),
-                        ))
-                    })
-                    .expect("class has source primary constructor");
-                let parameters = parameter_trees
-                    .iter()
-                    .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                    .collect::<Vec<_>>();
-                let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                    class,
-                    constructor,
-                    parameters,
-                    ast,
-                    index,
-                )
-                .unwrap();
-                (constructor, parameter_trees, proof)
-            };
-            let (holder_constructor, holder_parameter_trees, holder_proof) =
-                source_constructor(holder);
-            let (duo_constructor, duo_parameter_trees, duo_proof) = source_constructor(duo);
-            typer.complete_symbol(holder_constructor).unwrap();
-            typer.complete_symbol(duo_constructor).unwrap();
-
-            let (client_method, client_parameters, client_rhs) = ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    let TreeKind::DefDef(definition) = &node.kind else {
-                        return None;
-                    };
-                    let method = index.symbol_at(source, tree)?;
-                    if typer.store().symbols.get(method).owner != Some(client) {
-                        return None;
-                    }
-                    let parameter_trees = definition
-                        .value_param_clauses
-                        .iter()
-                        .flatten()
-                        .copied()
-                        .collect::<Vec<_>>();
-                    let parameters = parameter_trees
-                        .iter()
-                        .map(|tree| index.symbol_at(source, *tree).unwrap())
-                        .collect::<Vec<_>>();
-                    Some((method, parameters, definition.rhs?))
-                })
-                .expect("Client.make source method");
-            typer.complete_symbol(client_method).unwrap();
-            let context = typer.expression_context_for(client_method).unwrap();
-            let client_body = typer.type_expression(client_rhs, context).unwrap();
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![
-                    JvmClassPlan {
-                        class: counter,
-                        methods: Vec::new(),
-                        fields: Vec::new(),
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    },
-                    JvmClassPlan {
-                        class: holder,
-                        methods: Vec::new(),
-                        fields: Vec::new(),
-                        initialization: JvmClassInitializationPlan::PrimaryConstructor(
-                            holder_proof,
-                        ),
-                    },
-                    JvmClassPlan {
-                        class: duo,
-                        methods: Vec::new(),
-                        fields: Vec::new(),
-                        initialization: JvmClassInitializationPlan::PrimaryConstructor(duo_proof),
-                    },
-                    JvmClassPlan {
-                        class: client,
-                        methods: vec![JvmMethodPlan {
-                            method: client_method,
-                            parameters: client_parameters.clone(),
-                            locals: Vec::new(),
-                            body: Some(client_body),
-                        }],
-                        fields: Vec::new(),
-                        initialization: JvmClassInitializationPlan::Unsupported,
-                    },
-                ],
-            };
-
-            let metadata = unit.metadata(definitions).unwrap();
-            let holder_metadata = metadata
-                .iter()
-                .find(|metadata| metadata.identity().symbol() == holder)
-                .unwrap()
-                .constructor()
-                .unwrap();
-            let holder_parameter = &holder_metadata.parameters()[0];
-            assert_eq!(holder_metadata.descriptor().as_str(), "(Lsample/Counter;)V");
-            assert_eq!(holder_metadata.owner_internal_name(), "sample/Holder");
-            assert_eq!(holder_metadata.symbol(), holder_constructor);
-            assert_eq!(
-                holder_parameter.symbol(),
-                index
-                    .derived_symbol_at(holder_constructor, source, holder_parameter_trees[0])
-                    .unwrap()
-            );
-            assert_eq!(
-                holder_parameter.ty(),
-                dotty_jvm::JvmType::Reference(counter)
-            );
-            assert_eq!(holder_parameter.slot(), 1);
-            assert_eq!(holder_parameter.width(), 1);
-
-            let duo_metadata = metadata
-                .iter()
-                .find(|metadata| metadata.identity().symbol() == duo)
-                .unwrap()
-                .constructor()
-                .unwrap();
-            assert_eq!(duo_metadata.descriptor().as_str(), "(ILsample/Counter;Z)V");
-            assert_eq!(duo_metadata.symbol(), duo_constructor);
-            assert_eq!(
-                duo_metadata
-                    .parameters()
-                    .iter()
-                    .map(|parameter| (parameter.ty(), parameter.slot(), parameter.width()))
-                    .collect::<Vec<_>>(),
-                [
-                    (dotty_jvm::JvmType::Int, 1, 1),
-                    (dotty_jvm::JvmType::Reference(counter), 2, 1),
-                    (dotty_jvm::JvmType::Boolean, 3, 1),
-                ]
-            );
-            for (parameter, tree) in duo_metadata.parameters().iter().zip(duo_parameter_trees) {
-                assert_eq!(
-                    parameter.symbol(),
-                    index
-                        .derived_symbol_at(duo_constructor, source, tree)
-                        .unwrap()
-                );
-                assert_eq!(
-                    typer.store().symbols.get(parameter.symbol()).owner,
-                    Some(duo_constructor)
-                );
-            }
-
-            assert!(matches!(
-                unit.classes[1].metadata_with_typed_ast(unit.store, unit.typed_ast, definitions),
-                Err(dotty_jvm::JvmCodegenError::UnsupportedJvmType {
-                    kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
-                    ..
-                })
-            ));
-
-            let unplanned_unit = JvmCompilationUnit {
-                store: unit.store,
-                typed_ast: unit.typed_ast,
-                classes: unit.classes.iter().skip(1).cloned().collect(),
-            };
-            assert_eq!(
-                unplanned_unit.metadata(definitions),
-                Err(dotty_jvm::JvmCodegenError::ReferenceClassNotInJvmPlan { class: counter })
-            );
-
-            let JvmClassInitializationPlan::PrimaryConstructor(holder_proof) =
-                &unit.classes[1].initialization
-            else {
-                unreachable!()
-            };
-            let wrong_owner_plan = JvmClassPlan {
-                class: counter,
-                methods: Vec::new(),
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(
-                    holder_proof.clone(),
-                ),
-            };
-            assert_eq!(
-                wrong_owner_plan.metadata(unit.store, definitions),
-                Err(dotty_jvm::JvmCodegenError::InvalidPrimaryConstructor {
-                    constructor: holder_constructor,
-                    issue: dotty_jvm::JvmConstructorIssue::SourceIdentity,
-                })
-            );
-
-            let application = unit
-                .typed_ast
-                .iter()
-                .find_map(|(tree, node)| {
-                    let TreeKind::Apply(application) = &node.kind else {
-                        return None;
-                    };
-                    let function = unit.typed_ast.try_get(application.function)?;
-                    let TreeKind::Select(select) = &function.kind else {
-                        return None;
-                    };
-                    let qualifier = unit.typed_ast.try_get(select.qualifier)?;
-                    (unit.store.names.resolve(select.name.text()) == "<init>"
-                        && matches!(qualifier.kind, TreeKind::New(_)))
-                    .then_some(tree)
-                })
-                .expect("typed new Holder(counter) application");
-            let target = unit
-                .resolve_constructor_call(client, client_method, application, definitions)
-                .unwrap();
-            assert_eq!(target.descriptor().as_str(), "(Lsample/Counter;)V");
-            assert_eq!(
-                target.argument_types(),
-                &[dotty_jvm::JvmType::Reference(counter)]
-            );
-            assert_eq!(target.owner_class(), holder);
-            unit.lower_method_body(client, client_method, definitions)
-                .expect("planned reference parameter is a supported constructor argument");
-        },
-    );
-}
-
-#[test]
-fn ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result() {
-    for (text, descriptor) in [
-        ("class C()", "()V"),
-        ("class C", "()V"),
-        ("class C(x: Int)", "(I)V"),
-        ("class C(flag: Boolean, x: Int)", "(ZI)V"),
-        ("class C private (x: Int)", "(I)V"),
-    ] {
-        with_source(text, |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "C");
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(template) => Some(template),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
-                panic!()
-            };
-            let parameters = def
-                .value_param_clauses
-                .iter()
-                .flatten()
-                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                .collect::<Vec<_>>();
-            let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                parameters.clone(),
-                ast,
-                index,
-            )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "{text}: {e:?}, {def:?}, params: {:?}",
-                    def.value_param_clauses
-                        .iter()
-                        .flatten()
-                        .map(|id| ast.get(*id))
-                        .collect::<Vec<_>>()
-                )
-            });
-            typer.complete_symbol(class).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let plan = JvmClassPlan {
-                class,
-                methods: Vec::new(),
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-            };
-            let metadata = plan.metadata(typer.store(), definitions).unwrap();
-            let unit = JvmCompilationUnit {
-                store: typer.store(),
-                typed_ast: typer.typed_ast(),
-                classes: vec![plan],
-            };
-            let generated = emit_class(&unit, class, definitions).unwrap();
-            let mut reader = Reader::new(generated.bytes());
-            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
-            assert_eq!(class_file.methods.len(), 1);
-            let emitted_constructor = &class_file.methods[0];
-            assert_eq!(
-                class_file
-                    .constant_pool
-                    .utf8(emitted_constructor.descriptor_index)
-                    .unwrap(),
-                descriptor
-            );
-            assert_eq!(
-                class_file
-                    .constant_pool
-                    .utf8(emitted_constructor.name_index)
-                    .unwrap(),
-                "<init>"
-            );
-            let constructor_metadata = metadata.constructor().unwrap();
-            assert_eq!(constructor_metadata.descriptor().as_str(), descriptor);
-            assert_eq!(constructor_metadata.owner_internal_name(), "C");
-            assert_eq!(constructor_metadata.symbol(), constructor);
-            assert_eq!(
-                constructor_metadata.access_flags().is_private(),
-                text.contains("private")
-            );
-            assert_eq!(
-                constructor_metadata.access_flags().is_public(),
-                !text.contains("private")
-            );
-            for (i, (actual, expected)) in constructor_metadata
-                .parameters()
-                .iter()
-                .zip(parameters)
-                .enumerate()
-            {
-                assert_eq!(actual.symbol(), expected);
-                assert_eq!(actual.slot(), (i + 1) as u16);
-                assert_eq!(typer.store().symbols.get(expected).owner, Some(constructor));
-            }
-        });
-    }
-}
-
-#[test]
-fn primary_constructor_source_proof_rejects_wrong_identities_and_unsupported_forms() {
-    use dotty_jvm::{JvmCodegenError, JvmConstructorIssue, JvmPrimaryConstructorPlan};
-    for text in [
-        "class C(x: Int = 1)",
-        "class C(using x: Int)",
-        "class C[A](x: Int)",
-        "class C(x: Int)(y: Boolean)",
-    ] {
-        with_source(text, |ast, source, index, _, typer| {
-            let class = symbol_named(ast, index, source, typer, "C");
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(t) => Some(t),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
-                panic!()
-            };
-            let parameters = def
-                .value_param_clauses
-                .iter()
-                .flatten()
-                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                .collect::<Vec<_>>();
-            assert!(
-                matches!(
-                    JvmPrimaryConstructorPlan::from_source(
-                        class,
-                        constructor,
-                        parameters,
-                        ast,
-                        index
-                    ),
-                    Err(JvmCodegenError::InvalidPrimaryConstructor {
-                        issue: JvmConstructorIssue::SourceShape,
-                        ..
-                    })
-                ),
-                "{text}"
-            );
-        });
-    }
-    with_source(
-        "class C(a: Int, b: Int) { def this() = this(0, 0) }",
-        |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "C");
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(t) => Some(t),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
-                panic!()
-            };
-            let parameters = def.value_param_clauses[0]
-                .iter()
-                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                .collect::<Vec<_>>();
-            for wrong in [
-                Vec::new(),
-                vec![parameters[0], parameters[0]],
-                vec![parameters[1], parameters[0]],
-                vec![
-                    index
-                        .symbol_at(source, def.value_param_clauses[0][0])
-                        .unwrap(),
-                    parameters[1],
-                ],
-            ] {
-                assert!(matches!(
-                    JvmPrimaryConstructorPlan::from_source(class, constructor, wrong, ast, index),
-                    Err(JvmCodegenError::InvalidPrimaryConstructor {
-                        issue: JvmConstructorIssue::ParameterIdentity,
-                        ..
-                    })
-                ));
-            }
-            assert!(matches!(
-                JvmPrimaryConstructorPlan::from_source(
-                    class,
-                    class,
-                    parameters.clone(),
-                    ast,
-                    index
-                ),
-                Err(JvmCodegenError::InvalidPrimaryConstructor {
-                    issue: JvmConstructorIssue::SourceIdentity,
-                    ..
-                })
-            ));
-            let proof =
-                JvmPrimaryConstructorPlan::from_source(class, constructor, parameters, ast, index)
-                    .unwrap();
-            typer.complete_symbol(class).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let plan = JvmClassPlan {
-                class,
-                methods: Vec::new(),
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-            };
-            assert!(matches!(
-                plan.metadata(typer.store(), definitions),
-                Err(JvmCodegenError::InvalidPrimaryConstructor {
-                    issue: JvmConstructorIssue::SecondaryConstructor,
-                    ..
-                })
-            ));
-        },
-    );
-}
-
-#[test]
-fn primary_constructor_signature_rejects_reference_and_special_parameter_types() {
-    for text in [
-        "class C(x: C)",
-        "class C(x: => Int)",
-        "class C(xs: Int*)",
-        "class C(x: 1)",
-    ] {
-        with_source(text, |ast, source, index, definitions, typer| {
-            let class = symbol_named(ast, index, source, typer, "C");
-            let template = ast
-                .iter()
-                .find_map(|(_, node)| match &node.kind {
-                    TreeKind::Template(t) => Some(t),
-                    _ => None,
-                })
-                .unwrap();
-            let constructor = index.symbol_at(source, template.constructor).unwrap();
-            let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
-                panic!()
-            };
-            let parameters = def.value_param_clauses[0]
-                .iter()
-                .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                .collect();
-            let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                class,
-                constructor,
-                parameters,
-                ast,
-                index,
-            )
-            .unwrap();
-            typer.complete_symbol(class).unwrap();
-            typer.complete_symbol(constructor).unwrap();
-            let plan = JvmClassPlan {
-                class,
-                methods: Vec::new(),
-                fields: Vec::new(),
-                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-            };
-            let error = plan.metadata(typer.store(), definitions).unwrap_err();
-            match text {
-                "class C(x: C)" => assert!(matches!(
-                    error,
-                    dotty_jvm::JvmCodegenError::UnsupportedJvmType {
-                        kind: dotty_jvm::UnsupportedJvmTypeKind::ReferenceClass,
-                        ..
-                    }
-                )),
-                "class C(x: => Int)" => assert!(matches!(
-                    error,
-                    dotty_jvm::JvmCodegenError::UnsupportedJvmType {
-                        kind: dotty_jvm::UnsupportedJvmTypeKind::ByName,
-                        ..
-                    }
-                )),
-                "class C(xs: Int*)" => assert!(matches!(
-                    error,
-                    dotty_jvm::JvmCodegenError::UnsupportedMethodParameter {
-                        kind: dotty_jvm::UnsupportedMethodParameterKind::Varargs,
-                        ..
-                    }
-                )),
-                _ => assert!(matches!(
-                    error,
-                    dotty_jvm::JvmCodegenError::InvalidPrimaryConstructor {
-                        issue: dotty_jvm::JvmConstructorIssue::ParameterSignature,
-                        ..
-                    }
-                )),
-            }
-        });
-    }
-}
-
-#[test]
-fn primary_constructor_enforces_the_instance_parameter_slot_limit() {
-    for count in [254, 255] {
-        let params = (0..count)
-            .map(|i| format!("p{i}: Int"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        with_source(
-            &format!("class C({params})"),
-            |ast, source, index, definitions, typer| {
-                let class = symbol_named(ast, index, source, typer, "C");
-                let template = ast
-                    .iter()
-                    .find_map(|(_, node)| match &node.kind {
-                        TreeKind::Template(t) => Some(t),
-                        _ => None,
-                    })
-                    .unwrap();
-                let constructor = index.symbol_at(source, template.constructor).unwrap();
-                let TreeKind::DefDef(def) = &ast.get(template.constructor).kind else {
-                    panic!()
-                };
-                let parameters = def.value_param_clauses[0]
-                    .iter()
-                    .map(|tree| index.derived_symbol_at(constructor, source, *tree).unwrap())
-                    .collect();
-                let proof = dotty_jvm::JvmPrimaryConstructorPlan::from_source(
-                    class,
-                    constructor,
-                    parameters,
-                    ast,
-                    index,
-                )
-                .unwrap();
-                typer.complete_symbol(class).unwrap();
-                typer.complete_symbol(constructor).unwrap();
-                let plan = JvmClassPlan {
-                    class,
-                    methods: Vec::new(),
-                    fields: Vec::new(),
-                    initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
-                };
-                let result = plan.metadata(typer.store(), definitions);
-                if count == 254 {
-                    assert_eq!(
-                        result
-                            .unwrap()
-                            .constructor()
-                            .unwrap()
-                            .parameters()
-                            .last()
-                            .unwrap()
-                            .slot(),
-                        254
-                    );
-                } else {
-                    assert!(matches!(
-                        result,
-                        Err(dotty_jvm::JvmCodegenError::TooManyParameterSlots { slots: 256, .. })
-                    ));
-                }
-            },
-        );
-    }
-}
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×Mıëdèµ©hºÚn¶X§zÍ]\ÙHİWØÛ\ÜÙš[N˜XØÙ\Ü×Ù›YÜÎĞPĞ×Ñ’SSPĞ×Ô’UUKPĞ×ÔP“PËY]ÙXØÙ\ÜÑ›YÜßNÂ\ÙHİWØÛ\ÜÙš[N˜Û\Ü×Ùš[NÛ\ÜÑš[U™\œÚ[ÛÂ\ÙHİWØÛ\ÜÙš[N˜Û\Ü×Ùš[WØZ[\Û\ÜÑš[PZ[\Â\ÙHİWØÛ\ÜÙš[Nœ™XY\”™XY\Â\ÙHİWØÛÜ™N˜\İÂˆ\K\RÚ[™\İ\™[˜KÙ[Xİ™YK™YRÚ[™\Y[\Yš\ÚXš[]TŞ[^ŸNÂ\ÙHİWØÛÜ™NÂˆYš[š][ÛœËXÚØYÙ\ËÙ[X[XÔİÜ™KÛİ\˜ÙRYÛİ\˜ÙU^Ş[X›Û›YÜËŞ[X›ÛYŞ[X›Û[™›ËˆŞ[X›ÛÚ[™\›T™Y•\™Ù]™YRY\Kš\ÚXš[]KŸNÂ\ÙHİWÚ›NÂˆ›PÛ\ÜÒ[š]X[^˜][Û”[‹›PÛ\ÜÔ[‹›PÛÛ\[][Û•[š]ˆ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û‹›QšY[[‹›SY]Ù[‹›Tš[X\PÛÛœİXİÜ”[‹ˆ›TX›XĞ›ÙQšY[Ûİ\˜ÙT›ÛÙ‹[Z]ØÛ\ÜËŸNÂ\ÙHİWÛ^\ÛÛ^X[ØØ[›™\Â\ÙHİWÛ˜[Y\Ó˜[Z[™Óİ]ÛÛYKÛİ\˜ÙT\œÙTİ]\Ë˜[YWØÛÛ\[][Û—İ[š]İÚ]ÙXYÛ›ÜİXÜßNÂ\ÙHİWÜ\œÙ\œ\œÙWØÛÛ\[][Û—İ[š]Â\ÙHİWİ\\ÔÛİ\˜ÙU\\‹\\‘\œ›ÜŸNÂ\ÙHİ™œÎÂ\ÙHİœ›ØÙ\ÜÎÛÛ[X[™Â\ÙHİ[YNÔŞ\İ[U[YKS’VÑTĞÒNÂ‚™›ˆ™\]Z\™WÚ™ÌŒWÛÜ—ÜÚÚ\
+
+HOˆ›ÛÛÂˆ][˜]˜Z[X›HHÈš˜]˜H‹š˜]˜XÈ—Bˆš[×Ú]\Š
+Bˆ™š[\—ÛX\
+ÛÛX]Ú™×İÛÛÛXZ›Ü—İ™\œÚ[ÛŠÛÛ
+HÂˆÛÛYJXZ›ÜŠHYˆXZ›ÜˆHŒHOˆ›Û™KˆÛÛYJXZ›ÜŠHOˆÛÛYJ›Ü›X]JİÛÛHÛXZ›ÜŸH
+™\]Z\™\È‘ÈŒJÊHŠJKˆ›Û™HOˆÛÛYJ›Ü›X]JİÛÛH
+Z\ÜÚ[™ÈÜˆ™\œÚ[Ûˆ[˜]˜Z[X›JHŠJKˆJBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆYˆ[˜]˜Z[X›Kš\×Ù[\J
+HÂˆ™]\›ˆYNÂˆB‚ˆ]Y\ÜØYÙHH›Ü›X]Jˆ’•“H]XÛÙH\›™\ÜÈ™\]Z\™\È˜]˜H[™˜]˜XÈœ›ÛH‘ÈŒJÈÛˆUÈ[˜]˜Z[X›NˆßH‹ˆ[˜]˜Z[X›Kš›Ú[Š‹ŠBˆ
+NÂˆYˆİ™[˜\Š‘ÕWĞÓTÔÑ’SWÔ‘TURT‘WÒ‘ÈŠK˜\×Ù\™YŠ
+HOHÚÊŒHŠHÂˆ[šXÈJÛY\ÜØYÙ_HŠNÂˆBˆ\š[ˆJœÚÚ\[™ÈÜ[Û˜[•“H]XÛÙH\›™\ÜÎˆÛY\ÜØYÙ_HŠNÂˆ˜[ÙBŸB‚™›ˆ™×İÛÛÛXZ›Ü—İ™\œÚ[ÛŠÛÛˆ	œİŠHOˆÜ[ÛLÌˆÂˆ]İ]]HÛÛ[X[™›™]ÊÛÛ
+K˜\™Ê‹]™\œÚ[ÛˆŠK›İ]]
+
+K›ÚÊ
+OÎÂˆYˆ[İ]]œİ]\ËœİXØÙ\ÜÊ
+HÂˆ™]\›ˆ›Û™NÂˆBˆ]™\œÚ[Û—İ^H›Ü›X]JˆßWßH‹ˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	›İ]]œİİ]
+Kˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	›İ]]œİ\œŠBˆ
+NÂˆ™\œÚ[Û—İ^ˆœÜ]
+Ú\˜Xİ\ˆÚ\ŸXÚ\˜Xİ\‹š\×Ø\ØÚZWÙYÚ]
+
+JBˆ™š[™ÛX\
+ÛÛ\Û™[ÛÛ\Û™[œ\œÙNLÌŠ
+K›ÚÊ
+JBŸB‚™›ˆÚ]ÜÛİ\˜ÙOŠˆÛİ\˜ÙWİ^ˆ	œİ‹ˆˆ[\›“Û˜ÙJˆ	™İWØÛÜ™N\İ\™[˜O[\Y‹ˆÛİ\˜ÙRYˆ	™İWÛ˜[Y\”Ûİ\˜ÙTÙ[X[XÒ[™^ˆ	‘Yš[š][ÛœËˆ	›]]Ûİ\˜ÙU\\	×Ï‹ˆ
+HOˆ‹ŠHOˆˆÂˆ]Ûİ\˜ÙWÚYHÛİ\˜ÙRY™œ›ÛWÚ[™^
+JNÂˆ]Ûİ\˜ÙHHÛİ\˜ÙU^›™]ÊÛİ\˜ÙWİ^
+K[Ü˜\
+
+NÂˆ]ØØ[›™\ˆHÛÛ^X[ØØ[›™\›™]ÊÛİ\˜ÙWİ^
+K[Ü˜\
+
+NÂˆ\ÜÙ\JØØ[›™\‹™XYÛ›ÜİXÜÊ
+Kš\×Ù[\J
+JNÂ‚ˆ]]]İÜ™HHÙ[X[XÔİÜ™N›™]Ê
+NÂˆ]Yš[š][ÛœÈHYš[š][ÛœÎ˜›Ûİİ˜\
+	›]]İÜ™JNÂˆ]\œÙYH\œÙWØÛÛ\[][Û—İ[š]
+Ûİ\˜ÙKÛİ\˜ÙWÚYØØ[›™\‹	›]]İÜ™K›˜[Y\ÊNÂˆ\ÜÙ\J\œÙY™XYÛ›ÜİXÜËš\×Ù[\J
+KÎßH‹\œÙY™XYÛ›ÜİXÜÊNÂˆ]]]XÚØYÙ\ÈHXÚØYÙ\Î›™]Ê
+NÂˆ][™^HX]Ú˜[YWØÛÛ\[][Û—İ[š]İÚ]ÙXYÛ›ÜİXÜÊˆ	œ\œÙY˜\İˆ\œÙYœ›ÛİˆÛİ\˜ÙWÚYˆ”İ]Y[œØØ[H‹ˆÛİ\˜ÙT\œÙTİ]\ÎÛX[‹ˆ	›]]İÜ™Kˆ	›]]XÚØYÙ\Ëˆ
+Bˆ[Ü˜\
+
+BˆÂˆ˜[Z[™Óİ]ÛÛYN“˜[YYÈ[™^XYÛ›ÜİXÜÈHOˆÂˆ\ÜÙ\JXYÛ›ÜİXÜËš\×Ù[\J
+KÙXYÛ›ÜİXÜÎßHŠNÂˆ[™^ˆBˆ˜[Z[™Óİ]ÛÛYN”™Z™XİYÈXYÛ›ÜİXÜÈHOˆ[šXÈJ›˜[Y\ˆ™Z™XİYÛİ\˜ÙNˆÙXYÛ›ÜİXÜÎßHŠKˆNÂˆ]]]\\ˆHÛİ\˜ÙU\\›™]Êˆ	œ\œÙY˜\İˆÛİ\˜ÙWÚYˆ	š[™^ˆ	›]]İÜ™KˆYš[š][ÛœËˆ	œXÚØYÙ\Ëˆ
+NÂˆŠ	œ\œÙY˜\İÛİ\˜ÙWÚY	š[™^	™Yš[š][ÛœË	›]]\\ŠBŸB‚™›ˆŞ[X›ÛÛ˜[YY
+ˆ\İˆ	™İWØÛÜ™N\İ\™[˜O[\Y‹ˆ[™^ˆ	™İWÛ˜[Y\”Ûİ\˜ÙTÙ[X[XÒ[™^ˆÛİ\˜ÙNˆÛİ\˜ÙRYˆ\\ˆ	”Ûİ\˜ÙU\\	×Ï‹ˆ˜[YNˆ	œİ‹ŠHOˆŞ[X›ÛYÂˆ\İš]\Š
+Bˆ™š[™ÛX\
+
+™YKÊ_Âˆ]Ş[X›ÛH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJOÎÂˆ
+\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Ş[X›Û
+K›˜[YK^
+
+JBˆOH˜[YJBˆ[—ÜÛÛYJŞ[X›Û
+BˆJBˆ[Ü˜\ÛÜ—Ù[ÙJ[šXÈJ›Z\ÜÚ[™ÈÛİ\˜ÙHŞ[X›ÛÛ˜[Y_HŠJBŸB‚™›ˆšY[İ™YWØ[™ÜšÊˆ\İˆ	™İWØÛÜ™N\İ\™[˜O[\Y‹ˆ[™^ˆ	™İWÛ˜[Y\”Ûİ\˜ÙTÙ[X[XÒ[™^ˆÛİ\˜ÙNˆÛİ\˜ÙRYˆ\\ˆ	”Ûİ\˜ÙU\\	×Ï‹ˆ˜[YNˆ	œİ‹ŠHOˆ
+Ş[X›ÛY™YRY[\Y‹™YRY[\YŠHÂˆ\İš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ]™YRÚ[™•˜[YŠYš[š][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ]Ş[X›ÛH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJOÎÂˆ]Ş[X›ÛÛ˜[YHH\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™JYš[š][Û‹›˜[YK˜\×Û˜[YJ
+K^
+
+JNÂˆYˆŞ[X›ÛÛ˜[YHOH˜[YHÂˆ™]\›ˆ›Û™NÂˆBˆÛÛYJ
+Ş[X›Û™YKYš[š][Û‹œšÏÊJBˆJBˆ[Ü˜\ÛÜ—Ù[ÙJ[šXÈJ›Z\ÜÚ[™È[š]X[^™YšY[Û˜[Y_HŠJBŸB‚™›ˆY]Ùİ™YWØ[™ÜšÊˆ\İˆ	™İWØÛÜ™N\İ\™[˜O[\Y‹ˆ[™^ˆ	™İWÛ˜[Y\”Ûİ\˜ÙTÙ[X[XÒ[™^ˆÛİ\˜ÙNˆÛİ\˜ÙRYˆ\\ˆ	”Ûİ\˜ÙU\\	×Ï‹ˆİÛ™\ˆŞ[X›ÛYˆ˜[YNˆ	œİ‹ŠHOˆ
+Ş[X›ÛY™YRY[\Y‹™YRY[\YŠHÂˆ\İš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ]™YRÚ[™‘Y‘YŠYš[š][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ]Y]ÙH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJOÎÂˆYˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù
+K›İÛ™\ˆOHÛÛYJİÛ™\ŠBˆ	‰ˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™JYš[š][Û‹›˜[YK˜\×Û˜[YJ
+K^
+
+JBˆOH˜[YBˆÂˆÛÛYJ
+Y]Ù™YKYš[š][Û‹œšÏÊJBˆH[ÙHÂˆ›Û™BˆBˆJBˆ[Ü˜\ÛÜ—Ù[ÙJ[šXÈJ›Z\ÜÚ[™ÈY]ÙÛ˜[Y_HÛˆİÛ™\ˆÛİÛ™\ßHŠJBŸB‚™›ˆÛÛ\]WØÛ\Ü×Ú[™›Ê\\ˆ	”Ûİ\˜ÙU\\	×Ï‹Û\ÜÎˆŞ[X›ÛY
+HOˆİWØÛÜ™N\\ÎÛ\ÜÒ[™›ÈÂˆ]Ş[X›Û[™›ÎÛÛ\]J[™›×ÚY
+HH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Û\ÜÊKš[™›È[ÙHÂˆ[šXÈJ˜Û\ÜÈŞ[X›ÛÚİ[]™HÛÛ\]HÛ\ÜÒ[™›ÈŠBˆNÂˆ]\NÛ\ÜÒ[™›Ê[™›ÊHH\\‹œİÜ™J
+K\\Ë™Ù]
+[™›×ÚY
+H[ÙHÂˆ[šXÈJ˜Û\ÜÈŞ[X›Û[™›ÈÚİ[™HÛ\ÜÒ[™›ÈŠBˆNÂˆ[™›Ë˜ÛÛ™J
+BŸB‚ˆÖİ\İB™›ˆš]˜]WÜš[Z]]™WÙšY[Ú[š]X[^™\œ×ÚÙY\ØØ[›ÛšXØ[ÜŞ[X›Û×Ø[™İ\YÜ›ÛİÊ
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈZ[ˆÈš]˜]H˜[ÙYYˆ[HÈš]˜]H˜[[˜X›Yˆ›ÛÛX[ˆHYNÈš]˜]H˜[\™ÙNˆÛ™ÈHLH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹”Z[ˆŠNÂˆ\ÜÙ\Ù\HJ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Û\ÜÊKšÚ[™Ş[X›ÛÚ[™Û\ÜÊNÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Û\ÜÊKš\ÚXš[]Kˆš\ÚXš[]N”X›XÂˆ
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Û\ÜÊKš[™›ËˆŞ[X›Û[™›ÎÛÛ\]JÊBˆ
+JNÂˆ]šY[ÈHÈœÙYY‹™[˜X›Y‹›\™ÙH—Bˆ›X\
+˜[Y_šY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹˜[YJJNÂˆ][\]HH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+Ë›ÙJ_X]Ú	››ÙKšÚ[™Âˆ™YRÚ[™•[\]J[\]JHOˆÛÛYJ[\]JKˆÈOˆ›Û™KˆJBˆ[Ü˜\
+
+NÂˆ]›ÙWÛÜ™\ˆH[\]Bˆ˜›ÙBˆš]\Š
+Bˆ™š[\—ÛX\
+™Y_[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJJBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ\ÜÙ\Ù\HJˆ	˜›ÙWÛÜ™\–Ë‹™šY[Ë›[Š
+WKˆšY[Âˆš]\Š
+Bˆ›X\
+
+šY[ËÊ_
+™šY[
+Bˆ˜ÛÛXİ™XÏÏŠ
+Bˆ
+NÂ‚ˆ›Üˆ
+
+šY[XÛ\˜][Û‹šÊK
+^XİYİ\K^XİYØÛÛœİ[
+JH[‚ˆšY[Ëš[×Ú]\Š
+Kš\
+Âˆ
+Yš[š][ÛœËš[İWØÛÜ™NÛÛœİ[’[
+ŠJKˆ
+Yš[š][ÛœË˜›ÛÛX[‹İWØÛÜ™NÛÛœİ[›ÛÛX[ŠYJJKˆ
+Yš[š][ÛœË›Û™ËİWØÛÜ™NÛÛœİ[“Û™ÊWÌÌÌ
+JKˆJBˆÂˆ]Ş[X›ÛH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+NÂˆ\ÜÙ\Ù\HJŞ[X›ÛšÚ[™Ş[X›ÛÚ[™‘šY[
+NÂˆ\ÜÙ\Ù\HJŞ[X›Û›İÛ™\‹ÛÛYJÛ\ÜÊJNÂˆ\ÜÙ\Ù\HJŞ[X›Ûš\ÚXš[]Kš\ÚXš[]N”š]˜]JNÂˆ\ÜÙ\J\Ş[X›Û™›YÜË˜ÛÛZ[œÊŞ[X›Û›YÜÎ“UUP“JJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JJHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+K\\Ë™Ù]
+JKœ™Y™\™[˜ÙWÜŞ[X›Û
+
+Kˆ\\‹œİÜ™J
+K\\Ë™Ù]
+^XİYİ\JKœ™Y™\™[˜ÙWÜŞ[X›Û
+
+Bˆ
+NÂ‚ˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ]\YÜšÈH\\‹\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^JK[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJ\\‹œÛİ\˜ÙWİ\YÚ[™^
+
+K™Ù]
+Ûİ\˜ÙKšÊKÛÛYJ\YÜšÊJNÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+K\\Ë™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+\YÜšÊKJKˆ	•\NÛÛœİ[
+^XİYØÛÛœİ[
+Bˆ
+NÂˆ\ÜÙ\Ù\HJ[™^œŞ[X›ÛØ]
+Ûİ\˜ÙKXÛ\˜][ÛŠKÛÛYJšY[
+JNÂˆBˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆ™Y™\™[˜ÙWÙšY[×Ø[™ØÛÛœİXİÜ—Ü\˜[Y]\œ×ÚÙY\Ü™X[ÜÛİ\˜ÙWÚY[]J
+HÂˆ]Ûİ\˜ÙWİ^HœÎœ™XYİ×Üİš[™Êˆİœ]”]›™]Ê[ˆJĞT‘Ó×ÓPS’Q‘TÕÑTˆŠJBˆš›Ú[Š\İËÙš^\™\ËÚ›KÔ™Y™\™[˜ÙQšY[Ğ[™ÛÛœİXİÜœËœØØ[HŠKˆ
+Bˆ™^Xİ
+œ™XY™Y™\™[˜ÙHšY[[™ÛÛœİXİÜˆš^\™HŠNÂˆÚ]ÜÛİ\˜ÙJ	œÛİ\˜ÙWİ^\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈH˜[YNˆ	œİŸŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹˜[YJNÂˆ]Ûİ[\ˆHÛ\ÜÊÛİ[\ˆŠNÂˆ]Û\ˆHÛ\ÜÊ’Û\ˆŠNÂˆ]]]X›WÚÛ\ˆHÛ\ÜÊ“]]X›RÛ\ˆŠNÂˆ]ÛY[HÛ\ÜÊÛY[ŠNÂˆ›ÜˆİÛ™\ˆ[ˆØÛİ[\‹Û\‹]]X›WÚÛ\‹ÛY[HÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+İÛ™\ŠK[Ü˜\
+
+NÂˆ][™›ÈHÛÛ\]WØÛ\Ü×Ú[™›Ê\\‹İÛ™\ŠNÂˆ]ØÛÜHH[™^ˆœØÛÜWÛÙŠİÛ™\ŠBˆ™^Xİ
+˜Û\ÜÈXÛ\˜][ÛˆØÛÜH\È[™^YŠNÂˆ\ÜÙ\Ù\HJ[™›Ë˜Û\ÜËİÛ™\ŠNÂˆ\ÜÙ\Ù\HJ[™›Ë™XÛ\˜][ÛœËØÛÜJNÂˆ\ÜÙ\Ù\HJ\\‹œİÜ™J
+KœØÛÜ\Ë™Ù]
+ØÛÜJK›İÛ™\‹ÛÛYJİÛ™\ŠJNÂˆ\ÜÙ\Ù\HJ[™›Ëœ\™[ËÙYš[š][ÛœË›Øš™Xİİ\WJNÂˆB‚ˆ]šY[ÈHÂˆ
+Û\‹œ™Yˆ‹˜[ÙK›Û™JKˆ
+Û\‹›İÛˆ‹˜[ÙKÛÛYJ\ÈŠJKˆ
+]]X›WÚÛ\‹˜İ\œ™[‹YK›Û™JKˆNÂˆ›Üˆ
+İÛ™\‹˜[YK]]X›K^XİYÜ]X[YšY\ŠH[ˆšY[ÈÂˆ]
+šY[XÛ\˜][Û‹šÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹˜[YJNÂˆ]Ş[X›ÛH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+NÂˆ\ÜÙ\Ù\HJŞ[X›ÛšÚ[™Ş[X›ÛÚ[™‘šY[
+NÂˆ\ÜÙ\Ù\HJŞ[X›Û›İÛ™\‹ÛÛYJİÛ™\ŠJNÂˆ\ÜÙ\Ù\HJŞ[X›Ûš\ÚXš[]Kš\ÚXš[]N”š]˜]JNÂˆ\ÜÙ\Ù\HJˆŞ[X›Û™›YÜË˜ÛÛZ[œÊŞ[X›Û›YÜÎ“UUP“JKˆ]]X›Kˆ™šY[]]Xš[]H›ÜˆÛ˜[Y_HÛÛY\Èœ›ÛHH™X[Ûİ\˜ÙHXÛ\˜][Ûˆ‚ˆ
+NÂˆ]™YRÚ[™•˜[YŠYš[š][ÛŠHH	˜\İ™Ù]
+XÛ\˜][ÛŠKšÚ[™[ÙHÂˆ[šXÈJ™šY[Ûİ\˜ÙH›ÙHÚİ[™H˜[YˆŠNÂˆNÂˆX]ÚYš[š][Û‹›Y]Y]Kš\ÚXš[]HÂˆÛÛYJš\ÚXš[]TŞ[^”š]˜]HÈ]X[YšY\ˆJHOˆÂˆ\ÜÙ\Ù\HJˆ]X[YšY\‹›X\
+˜[Y_\\‹œİÜ™J
+K›˜[Y\Ëœ™\ÛÛ™J˜[YK^
+
+JJKˆ^XİYÜ]X[YšY\‹ˆœ™]Z[ˆHZ[ˆš]˜]HœÈš]˜]Vİ\×HÛİ\˜ÙH\İ[˜İ[Ûˆ‚ˆ
+NÂˆBˆİ\ˆOˆ[šXÈJ™^XİYÛİ\˜ÙHš]˜]Hš\ÚXš[]KÛİÛİ\ßHŠKˆB‚ˆ]X\šÙ\ˆH›Ü›X]JÛ˜[Y_NˆÛİ[\ˆŠNÂˆ]˜[YWÛÙ™œÙ]HÛİ\˜ÙWİ^™š[™
+	›X\šÙ\ŠK[Ü˜\
+
+H\ÈLÌÂˆ]™YWÜÜ[ˆH\İˆ™Ù]
+XÛ\˜][ÛŠBˆœÜÚ][Û‚ˆ™^Xİ
+™šY[\ÈÛİ\˜ÙH˜[™ÙHŠNÂˆ\ÜÙ\Ù\HJ™YWÜÜ[‹œÛİ\˜ÙJ
+KÛİ\˜ÙJNÂˆ]™YWÜ˜[™ÙHH™YWÜÜ[‹œÜ[Š
+Kœ˜[™ÙJ
+NÂˆ\ÜÙ\J™YWÜ˜[™ÙKœİ\
+
+HH˜[YWÛÙ™œÙ]	‰ˆ˜[YWÛÙ™œÙ]™YWÜ˜[™ÙK™[™
+
+JNÂˆ]Ş[X›ÛÜÜ[ˆHŞ[X›ÛˆœÜÚ][Û‚ˆ™^Xİ
+™šY[Ş[X›Û™]Z[œÈÛİ\˜ÙHÜÚ][ÛˆŠNÂˆ\ÜÙ\Ù\HJŞ[X›ÛÜÜ[‹œÛİ\˜ÙJ
+KÛİ\˜ÙJNÂˆ]Ş[X›ÛÜ˜[™ÙHHŞ[X›ÛÜÜ[‹œÜ[Š
+Kœ˜[™ÙJ
+NÂˆ\ÜÙ\JŞ[X›ÛÜ˜[™ÙKœİ\
+
+HH˜[YWÛÙ™œÙ]	‰ˆ˜[YWÛÙ™œÙ]Ş[X›ÛÜ˜[™ÙK™[™
+
+JNÂ‚ˆ]ØÛÜHHÛÛ\]WØÛ\Ü×Ú[™›Ê\\‹İÛ™\ŠK™XÛ\˜][ÛœÎÂˆ]šY[Û˜[YHHŞ[X›Û›˜[YNÂˆ\ÜÙ\Jˆ\\‚ˆœİÜ™J
+BˆœØÛÜ\Âˆ™Ù]
+ØÛÜJBˆ›ÛÚİ\Ø[
+	™šY[Û˜[YJBˆ˜ÛÛZ[œÊ	™šY[
+Bˆ
+NÂ‚ˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJœ™Y™\™[˜ÙHšY[\HÚİ[™HÛÛ\]HŠBˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹œİÜ™J
+K\\Ë™Ù]
+šY[İ\JKˆ\N•\T™YˆÂˆ\™Ù]ˆİWØÛÜ™N\\Î•\T™Y•\™Ù]”Ş[X›Û
+\™Ù]
+Kˆ‹‚ˆHYˆ
+\™Ù]OHÛİ[\‚ˆ
+JNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ]\YÜšÈH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ™^Xİ
+˜ÛÛœİXİÜˆ\˜[Y]\ˆ\ÈH˜[Y\Y™Y™\™[˜ÙHšY[[š]X[^™\ˆŠNÂˆ\ÜÙ\Ù\HJ\\‹œÛİ\˜ÙWİ\YÚ[™^
+
+K™Ù]
+Ûİ\˜ÙKšÊKÛÛYJ\YÜšÊJNÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹\YØ\İ
+
+K™Ù]
+\YÜšÊKšÚ[™ˆ™YRÚ[™’Y[
+ÊBˆ
+JNÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹œİÜ™J
+K\\Ë™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+\YÜšÊKJKˆ\N•\›T™YˆÂˆ\™Ù]ˆİWØÛÜ™N\\Î•\›T™Y•\™Ù]”Ş[X›Û
+ÊKˆ‹‚ˆBˆ
+JNÂˆB‚ˆ]]]ÛÛœİXİÜ—Ü\˜[Y]\œÈH™XÎ›™]Ê
+NÂˆ›Üˆ
+\˜[Y]\—Ú[™^
+İÛ™\‹\˜[Y]\—Û˜[YJJH[‚ˆÊÛ\‹š[š]X[ŠK
+]]X›WÚÛ\‹š[š]X[ŠWBˆš[×Ú]\Š
+Bˆ™[[Y\˜]J
+BˆÂˆ]Û\Ü×İ™YHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJİÛ™\ŠJK[—ÜÛÛYJ
+™YK›ÙJJBˆJBˆ›X\
+
+™YKÊ_™YJBˆ™^Xİ
+˜Û\ÜÈXÛ\˜][Ûˆ™YHŠNÂˆ]™YRÚ[™•\QYŠÛ\Ü×ÙYš[š][ÛŠHH	˜\İ™Ù]
+Û\Ü×İ™YJKšÚ[™[ÙHÂˆ[šXÈJ˜Û\ÜÈXÛ\˜][Ûˆ\ÈH\QYˆŠNÂˆNÂˆ]™YRÚ[™•[\]J[\]JHH	˜\İ™Ù]
+Û\Ü×ÙYš[š][Û‹œšÊKšÚ[™[ÙHÂˆ[šXÈJ˜Û\ÜÈYš[š][ÛˆÛÛZ[œÈH[\]HŠNÂˆNÂˆ]ÛÛœİXİÜˆH[™^ˆœŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠBˆ™^Xİ
+˜Ø[›ÛšXØ[š[X\HÛÛœİXİÜˆŞ[X›ÛŠNÂˆ]™YRÚ[™‘Y‘YŠÛÛœİXİÜ—ÙYš[š][ÛŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™ˆ[ÙHÂˆ[šXÈJœš[X\HÛÛœİXİÜˆÛİ\˜ÙH›ÙH\ÈY‘YˆŠNÂˆNÂˆ]Ü\˜[Y]\—İ™YWHHÛÛœİXİÜ—ÙYš[š][Û‹˜[YWÜ\˜[WØÛ]\Ù\ÖÌK˜\×ÜÛXÙJ
+H[ÙHÂˆ[šXÈJ˜ÛÛœİXİÜˆ\ÈÛ™HÛİ\˜ÙH\˜[Y]\ˆŠNÂˆNÂˆ]Ûİ\˜ÙWÜ\˜[Y]\ˆH[™^ˆœŞ[X›ÛØ]
+Ûİ\˜ÙK
+œ\˜[Y]\—İ™YJBˆ™^Xİ
+œÛİ\˜ÙH\˜[Y]\ˆŞ[X›ÛŠNÂˆ]ÛÛœİXİÜ—Ü\˜[Y]\ˆH[™^ˆ™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+œ\˜[Y]\—İ™YJBˆ™^Xİ
+˜ÛÛœİXİÜ‹[İÛ™Y\˜[Y]\ˆY[]HŠNÂˆ\ÜÙ\Ù\HJˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™JX]Ú	˜\İ™Ù]
+
+œ\˜[Y]\—İ™YJKšÚ[™Âˆ™YRÚ[™•˜[YŠ\˜[Y]\ŠHOˆ\˜[Y]\‹›˜[YK˜\×Û˜[YJ
+K^
+
+KˆÈOˆ[šXÈJ˜ÛÛœİXİÜˆ\˜[Y]\ˆÛİ\˜ÙH\È˜[YˆŠKˆJKˆ\˜[Y]\—Û˜[YBˆ
+NÂˆ\ÜÙ\Û™HJÛİ\˜ÙWÜ\˜[Y]\‹ÛÛœİXİÜ—Ü\˜[Y]\ŠNÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Ûİ\˜ÙWÜ\˜[Y]\ŠK›İÛ™\‹ˆÛÛYJİÛ™\ŠBˆ
+NÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Ûİ\˜ÙWÜ\˜[Y]\ŠKš\ÚXš[]Kˆš\ÚXš[]N”š]˜]Bˆ
+NÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+ÛÛœİXİÜ—Ü\˜[Y]\ŠK›İÛ™\‹ˆÛÛYJÛÛœİXİÜŠBˆ
+NÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+ÛÛœİXİÜ—Ü\˜[Y]\ŠKšÚ[™ˆŞ[X›ÛÚ[™”\˜[Y]\‚ˆ
+NÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+ÛÛœİXİÜ—Ü\˜[Y]\ŠKš\ÚXš[]Kˆš\ÚXš[]N”X›XÂˆ
+NÂˆÛÛœİXİÜ—Ü\˜[Y]\œËœ\Ú
+
+İÛ™\‹ÛÛœİXİÜ—Ü\˜[Y]\ŠJNÂˆ]Ûİ\˜ÙWÜ\˜[Y]\—ÜÜ[ˆH\\‚ˆœİÜ™J
+BˆœŞ[X›ÛÂˆ™Ù]
+Ûİ\˜ÙWÜ\˜[Y]\ŠBˆœÜÚ][Û‚ˆ™^Xİ
+œÛİ\˜ÙH\˜[Y]\ˆ™]Z[œÈÛİ\˜ÙHÜÚ][ÛˆŠNÂˆ]\˜[Y]\—ÜÜ[ˆH\\‚ˆœİÜ™J
+BˆœŞ[X›ÛÂˆ™Ù]
+ÛÛœİXİÜ—Ü\˜[Y]\ŠBˆœÜÚ][Û‚ˆ™^Xİ
+˜ÛÛœİXİÜˆ\˜[Y]\ˆ™]Z[œÈÛİ\˜ÙHÜÚ][ÛˆŠNÂˆ\ÜÙ\Ù\HJÛİ\˜ÙWÜ\˜[Y]\—ÜÜ[‹œÛİ\˜ÙJ
+KÛİ\˜ÙJNÂˆ\ÜÙ\Ù\HJ\˜[Y]\—ÜÜ[‹œÛİ\˜ÙJ
+KÛİ\˜ÙJNÂˆ\ÜÙ\Ù\HJÛİ\˜ÙWÜ\˜[Y]\—ÜÜ[‹œÜ[Š
+K\˜[Y]\—ÜÜ[‹œÜ[Š
+JNÂˆ]\˜[Y]\—ÛÙ™œÙ]HÛİ\˜ÙWİ^ˆ›X]ÚÚ[™XÙ\Êš[š]X[ˆÛİ[\ˆŠBˆ›
+\˜[Y]\—Ú[™^
+Bˆ[Ü˜\
+
+BˆŒ\ÈLÌÂˆ]\˜[Y]\—Ü˜[™ÙHH\˜[Y]\—ÜÜ[‹œÜ[Š
+Kœ˜[™ÙJ
+NÂˆ\ÜÙ\Jˆ\˜[Y]\—Ü˜[™ÙKœİ\
+
+HH\˜[Y]\—ÛÙ™œÙ]ˆ	‰ˆ\˜[Y]\—ÛÙ™œÙ]\˜[Y]\—Ü˜[™ÙK™[™
+
+Kˆœ\˜[Y]\ˆÛİ\˜ÙH˜[™ÙHÜ\˜[Y]\—Ü˜[™ÙNßHÚİ[Ûİ™\ˆÙ™œÙ]Ü\˜[Y]\—ÛÙ™œÙ]H›ÜˆÛİÛ™\ßH‚ˆ
+NÂ‚ˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JÛÛœİXİÜ—İ\JHBˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+ÛÛœİXİÜŠKš[™›Âˆ[ÙHÂˆ[šXÈJ˜ÛÛœİXİÜˆÚYÛ˜]\™HÚİ[™HÛÛ\]HŠBˆNÂˆ]\N“Y]Ù
+ÚYÛ˜]\™JHH\\‹œİÜ™J
+K\\Ë™Ù]
+ÛÛœİXİÜ—İ\JH[ÙHÂˆ[šXÈJ˜ÛÛœİXİÜˆÚYÛ˜]\™H\ÈHY]Ù\HŠBˆNÂˆ\ÜÙ\Ù\HJÚYÛ˜]\™Kœ\˜[\Ë›[Š
+KJNÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹œİÜ™J
+K\\Ë™Ù]
+ÚYÛ˜]\™Kœ\˜[\ÖÌKJKˆ\N•\T™YˆÂˆ\™Ù]ˆİWØÛÜ™N\\Î•\T™Y•\™Ù]”Ş[X›Û
+\™Ù]
+Kˆ‹‚ˆHYˆ
+\™Ù]OHÛİ[\‚ˆ
+JNÂˆB‚ˆ›Üˆ
+İÛ™\‹šY[Û˜[YJH[ˆÂˆ
+Û\‹œ™YˆŠKˆ
+Û\‹›İÛˆŠKˆ
+]]X›WÚÛ\‹˜İ\œ™[ŠKˆHÂˆ]
+ËËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹šY[Û˜[YJNÂˆ]\YÜšÈH\\‚ˆœÛİ\˜ÙWİ\YÚ[™^
+
+Bˆ™Ù]
+Ûİ\˜ÙKšÊBˆ™^Xİ
+œ™Y™\™[˜ÙHšY[[š]X[^™\ˆØ\È\YX›İ™HŠNÂˆ]XİX[Ü\˜[Y]\ˆBˆX]Ú\\‹œİÜ™J
+K\\Ë™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+\YÜšÊKJHÂˆ\N•\›T™YˆÂˆ\™Ù]ˆİWØÛÜ™N\\Î•\›T™Y•\™Ù]”Ş[X›Û
+\˜[Y]\ŠKˆ‹‚ˆHOˆ
+œ\˜[Y]\‹ˆİ\ˆOˆ[šXÈJ™šY[[š]X[^™\ˆ™]Z[œÈH\˜[Y]\ˆ\›T™Y‹ÛİÛİ\ßHŠKˆNÂˆ]^XİYÜ\˜[Y]\ˆHÛÛœİXİÜ—Ü\˜[Y]\œÂˆš]\Š
+Bˆ™š[™ÛX\
+
+\˜[Y]\—ÛİÛ™\‹\˜[Y]\Š_Âˆ
+
+œ\˜[Y]\—ÛİÛ™\ˆOHİÛ™\ŠK[—ÜÛÛYJ
+œ\˜[Y]\ŠBˆJBˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJXİX[Ü\˜[Y]\‹^XİYÜ\˜[Y]\ŠNÂˆB‚ˆ]
+ÛY[ÛY]ÙÛY[ÛY]Ùİ™YKÛÛœİXİÜšÊHBˆY]Ùİ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹ÛY[˜ÛÛœİXİŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛY[ÛY]Ù
+K[Ü˜\
+
+NÂˆ]ÛÛœİXİØÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠÛY[ÛY]Ù
+K[Ü˜\
+
+NÂˆ]ÛÛœİXİH\\‚ˆ\WÙ^™\ÜÚ[ÛŠÛÛœİXİÜšËÛÛœİXİØÛÛ^
+Bˆ™^Xİ
+ÛY[˜ÛÛœİXİ\\ÈH™X[™]ÈÛ\ŠÊHØ[ŠNÂˆ]™YRÚ[™\J\XØ][ÛŠHH	\\‹\YØ\İ
+
+K™Ù]
+ÛÛœİXİ
+KšÚ[™[ÙHÂˆ[šXÈJ›™]ÈÛ\ŠÊH™[XZ[œÈ[ˆ\XØ][ÛˆŠNÂˆNÂˆ]™YRÚ[™”Ù[Xİ
+Ù[Xİ[ÛŠHH	\\‹\YØ\İ
+
+K™Ù]
+\XØ][Û‹™[˜İ[ÛŠKšÚ[™[ÙHÂˆ[šXÈJ˜ÛÛœİXİÜˆ[˜İ[Ûˆ™[XZ[œÈÙ[XİYœ›ÛHH™]È\HŠNÂˆNÂˆ]ÛÛœİXİÜˆHX]Ú\\‚ˆœİÜ™J
+Bˆ\\Âˆ™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+\XØ][Û‹™[˜İ[ÛŠKJBˆÂˆ\N•\›T™YˆÂˆ\™Ù]ˆİWØÛÜ™N\\Î•\›T™Y•\™Ù]”Ş[X›Û
+ÛÛœİXİÜŠKˆ‹‚ˆHOˆ
+˜ÛÛœİXİÜ‹ˆİ\ˆOˆ[šXÈJ˜ÛÛœİXİÜˆÙ[Xİ[ÛˆÙY\ÈØ[›ÛšXØ[\›T™Y‹ÛİÛİ\ßHŠKˆNÂˆ\ÜÙ\Ù\HJ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+ÛÛœİXİÜŠK›İÛ™\‹ÛÛYJÛ\ŠJNÂˆ\ÜÙ\Ù\HJˆ\\‚ˆœİÜ™J
+Bˆ\\Âˆ™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+ÛÛœİXİ
+KJBˆœ™Y™\™[˜ÙWÜŞ[X›Û
+
+KˆÛÛYJÛ\ŠBˆ
+NÂˆ\ÜÙ\Ù\HJ\XØ][Û‹˜\™ÜË›[Š
+KJNÂˆ]™YRÚ[™‘Y‘YŠÛY[ÙYš[š][ÛŠHH	˜\İ™Ù]
+ÛY[ÛY]Ùİ™YJKšÚ[™[ÙHÂˆ[šXÈJÛY[˜ÛÛœİXİÛİ\˜ÙH›ÙH\ÈHY‘YˆŠNÂˆNÂˆ]ØÛY[Ü\˜[Y]\—İ™YWHHÛY[ÙYš[š][Û‹˜[YWÜ\˜[WØÛ]\Ù\ÖÌK˜\×ÜÛXÙJ
+H[ÙHÂˆ[šXÈJÛY[˜ÛÛœİXİ\ÈÛ™HÛİ\˜ÙH\˜[Y]\ˆŠNÂˆNÂˆ]ÛY[Ü\˜[Y]\ˆH[™^ˆœŞ[X›ÛØ]
+Ûİ\˜ÙK
+˜ÛY[Ü\˜[Y]\—İ™YJBˆ™^Xİ
+ÛY[˜ÛÛœİXİ\˜[Y]\ˆ\ÈØ[›ÛšXØ[Y[]HŠNÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‚ˆœİÜ™J
+Bˆ\\Âˆ™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+\XØ][Û‹˜\™ÜÖÌJKJKˆ\N•\›T™YˆÂˆ\™Ù]ˆİWØÛÜ™N\\Î•\›T™Y•\™Ù]”Ş[X›Û
+\˜[Y]\ŠKˆ‹‚ˆHYˆ
+œ\˜[Y]\ˆOHÛY[Ü\˜[Y]\‚ˆ
+JNÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹\YØ\İ
+
+K™Ù]
+Ù[Xİ[Û‹œ]X[YšY\ŠKšÚ[™ˆ™YRÚ[™“™]ÊÊBˆ
+JNÂ‚ˆ]
+Ûİ[\—ÙÙ]ËÊHHY]Ùİ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹Ûİ[\‹™Ù]ŠNÂˆ]
+Û\—Ü™XYËÛ\—Ü™XYÜšÊHBˆY]Ùİ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹Û\‹œ™XYŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Ûİ[\—ÙÙ]
+K[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\—Ü™XY
+K[Ü˜\
+
+NÂˆ]ÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠÛ\—Ü™XY
+K[Ü˜\
+
+NÂˆ]Û\—Ü™XYİ\YH\\‚ˆ\WÙ^™\ÜÚ[ÛŠÛ\—Ü™XYÜšËÛÛ^
+Bˆ™^Xİ
+š[[]]X›H™Y™\™[˜ÙHšY[Ù[Xİ[Ûˆ™Y‹™Ù]
+
+H\\ÈŠNÂˆ]™YRÚ[™\J\XØ][ÛŠHH	\\‹\YØ\İ
+
+K™Ù]
+Û\—Ü™XYİ\Y
+KšÚ[™[ÙHÂˆ[šXÈJœ™Y‹™Ù]
+
+H™[XZ[œÈ[ˆ\XØ][ÛˆŠBˆNÂˆ]™YRÚ[™”Ù[Xİ
+Ù[Xİ[ÛŠHH	\\‹\YØ\İ
+
+K™Ù]
+\XØ][Û‹™[˜İ[ÛŠKšÚ[™[ÙHÂˆ[šXÈJœ™Y‹™Ù]
+
+HY]ÙÙ[Xİ[Ûˆ™]Z[œÈ]ÈšY[™XÙZ]™\ˆŠBˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹œİÜ™J
+K\\Ë™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+\XØ][Û‹™[˜İ[ÛŠKJKˆ\N•\›T™YˆÂˆ\™Ù]ˆİWØÛÜ™N\\Î•\›T™Y•\™Ù]”Ş[X›Û
+Y]Ù
+Kˆ‹‚ˆHYˆ
+›Y]ÙOHÛİ[\—ÙÙ]ˆ
+JNÂˆ\ÜÙ\JX]Ú\ÈJˆ	\\‹\YØ\İ
+
+K™Ù]
+Ù[Xİ[Û‹œ]X[YšY\ŠKšÚ[™ˆ™YRÚ[™’Y[
+ÊBˆ
+JNÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹œİÜ™J
+K\\Ë™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+Ù[Xİ[Û‹œ]X[YšY\ŠKJKˆ\N•\›T™YˆÂˆ\™Ù]ˆİWØÛÜ™N\\Î•\›T™Y•\™Ù]”Ş[X›Û
+šY[
+Kˆ‹‚ˆHYˆ
+™šY[OHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹œ™YˆŠKŒˆ
+JNÂˆ\ÜÙ\Ù\HJˆ\\‚ˆœİÜ™J
+Bˆ\\Âˆ™Ù]
+\\‹\YØ\İ
+
+K™Ù]
+Û\—Ü™XYİ\Y
+KJKˆ\\‹œİÜ™J
+K\\Ë™Ù]
+Yš[š][ÛœËš[
+Bˆ
+NÂ‚ˆ›Üˆ
+İÛ™\‹˜[YJH[ˆÂˆ
+Û\‹™Ù]ŠKˆ
+]]X›WÚÛ\‹™Ù]ŠKˆ
+]]X›WÚÛ\‹œ™\XÙHŠKˆHÂˆ]
+Y]ÙËšÊHHY]Ùİ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹İÛ™\‹˜[YJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Y]Ù
+K[Ü˜\
+
+NÂˆ]ÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠY]Ù
+K[Ü˜\
+
+NÂˆ\\‚ˆ\WÙ^™\ÜÚ[ÛŠšËÛÛ^
+Bˆ[Ü˜\ÛÜ—Ù[ÙJ\œ›ÜŸ[šXÈJÛ˜[Y_H›ÙHÚİ[\Hœ›ÛHÛİ\˜ÙNˆÙ\œ›ÜßHŠJNÂˆB‚ˆ]
+]]X›WÜ™XYË]]X›WÜ™XYÜšÊHBˆY]Ùİ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹]]X›WÚÛ\‹œ™XYŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+]]X›WÜ™XY
+K[Ü˜\
+
+NÂˆ]ÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠ]]X›WÜ™XY
+K[Ü˜\
+
+NÂˆ\ÜÙ\JX]Ú\ÈJˆ\\‹\WÙ^™\ÜÚ[ÛŠ]]X›WÜ™XYÜšËÛÛ^
+Kˆ\œŠİWİ\\•\\‘\œ›Ü•[œİX›TÙ[Xİ[Û”™Yš^ÂˆÛİ\˜ÙNˆ\œ›Ü—ÜÛİ\˜ÙKˆ‹‚ˆJHYˆ\œ›Ü—ÜÛİ\˜ÙHOHÛİ\˜ÙBˆ
+JNÂˆJNÂŸB‚ˆÖİ\İB™›ˆ™X[İ\YÜš[Z]]™WÙšY[Ú[š]X[^™\œ×ÛİÙ\—Ú[—ØÛÛœİXİÜ—ÜÛİ\˜ÙWÛÜ™\Š
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈÛİ[\Šİ\ˆ[›YÎˆ›ÛÛX[ŠHÈš]˜]H˜[ÙYYˆ[HÈš]˜]H˜\ˆİ\œ™[ˆ[Hİ\Èš]˜]H˜[İX›Yˆ[Hİ\
+ÈNÈš]˜]H˜[Xİ]™Nˆ›ÛÛX[ˆHY›YÎÈš]˜]H˜[ÛÜYYˆ[Hİ\œ™[ÈYˆÙ]
+
+Nˆ[Hİ\œ™[ÈYˆ[˜Ü™[Y[
+
+Nˆ[š]Hİ\œ™[Hİ\œ™[
+ÈNÈYˆÙ]
+˜[YNˆ[
+Nˆ[š]Hİ\œ™[H˜[YNÈYˆ[˜X›Y
+
+Nˆ›ÛÛX[ˆHXİ]™HH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹Ûİ[\ˆŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]™YRÚ[™•\QYŠYš[š][ÛŠHH	˜\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJÛ\ÜÊJK[—ÜÛÛYJ›ÙJBˆJBˆ[Ü˜\
+
+BˆšÚ[™ˆ[ÙHÂˆ[šXÈJÛİ[\ˆÛİ\˜ÙHXÛ\˜][ÛˆÚİ[™HH\QYˆŠNÂˆNÂˆ]™YRÚ[™•[\]J[\]JHH	˜\İ™Ù]
+Yš[š][Û‹œšÊKšÚ[™[ÙHÂˆ[šXÈJÛİ[\ˆXÛ\˜][ÛˆÚİ[]™HH[\]HŠNÂˆNÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠÛÛœİXİÜ—ÙYŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™[ÙHÂˆ[šXÈJœš[X\HÛÛœİXİÜˆÚİ[™HHY‘YˆŠNÂˆNÂˆ]ÛÛœİXİÜ—Ü\˜[Y]\œÈHÛÛœİXİÜ—ÙY‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]ÛÛœİXİÜ—Ü[ˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆÛÛœİXİÜ—Ü\˜[Y]\œË˜ÛÛ™J
+Kˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂ‚ˆ]]]Ûİ\˜ÙWÙšY[ÈH™XÎ›™]Ê
+NÂˆ›Üˆ™YH[ˆ	[\]K˜›ÙHÂˆ]™YRÚ[™•˜[YŠšY[ÙYŠHH	˜\İ™Ù]
+
+™YJKšÚ[™[ÙHÂˆÛÛ[YNÂˆNÂˆ]ÛÛYJšY[
+HH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJH[ÙHÂˆÛÛ[YNÂˆNÂˆ]šÈHšY[ÙY‚ˆœšÂˆ™^Xİ
+œİ\ÜYšY[È]™H^XÚ][š]X[^™\œÈŠNÂˆÛİ\˜ÙWÙšY[Ëœ\Ú
+
+šY[šÊJNÂˆBˆ\ÜÙ\Ù\HJÛİ\˜ÙWÙšY[Ë›[Š
+KJNÂ‚ˆ]]]šY[Ü[œÈH™XÎ›™]Ê
+NÂˆ]]]šY[ÜŞ[X›ÛÈH™XÎ›™]Ê
+NÂˆ›Üˆ
+šY[šÊH[ˆÛİ\˜ÙWÙšY[ÈÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJ\\‹œÛİ\˜ÙWİ\YÚ[™^
+
+K™Ù]
+Ûİ\˜ÙKšÊK›Û™JNÂˆ]\YÜšÈH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJˆ\\‹œÛİ\˜ÙWİ\YÚ[™^
+
+K™Ù]
+Ûİ\˜ÙKšÊKˆÛÛYJ\YÜšÊKˆH^XİšY[’È™YH\È™]Z[™YÛ˜ÙH]\È\Y‚ˆ
+NÂˆšY[Ü[œËœ\Ú
+›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ\YÜšÊKˆJNÂˆšY[ÜŞ[X›ÛËœ\Ú
+šY[
+NÂˆB‚ˆ]]]Y]ÙÜ[œÈH™XÎ›™]Ê
+NÂˆ›Üˆ˜[YH[ˆÈ™Ù]‹š[˜Ü™[Y[‹œÙ]‹™[˜X›Y—HÂˆ]
+Y]ÙY]Ùİ™YKšÊHH[\]Bˆ˜›ÙBˆš]\Š
+Bˆ™š[™ÛX\
+™Y_Âˆ]™YRÚ[™‘Y‘YŠYš[š][ÛŠHH	˜\İ™Ù]
+
+™YJKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ
+\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™JYš[š][Û‹›˜[YK˜\×Û˜[YJ
+K^
+
+JBˆOH˜[YJBˆ[—ÜÛÛYJ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJOË
+™YKYš[š][Û‹œšÏÊJBˆJBˆ[Ü˜\ÛÜ—Ù[ÙJ[šXÈJ›Z\ÜÚ[™ÈY]ÙÛ˜[Y_HŠJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Y]Ù
+K[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠYš[š][ÛŠHH	˜\İ™Ù]
+Y]Ùİ™YJKšÚ[™[ÙHÂˆ[œ™XXÚX›HJ
+BˆNÂˆ]\˜[Y]\œÈHYš[š][Û‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ›X\
+™Y_[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ
+
+NÂˆ]ÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠY]Ù
+K[Ü˜\
+
+NÂˆ]›ÙHH\\‹\WÙ^™\ÜÚ[ÛŠšËÛÛ^
+K[Ü˜\
+
+NÂˆY]ÙÜ[œËœ\Ú
+›SY]Ù[ˆÂˆY]Ùˆ\˜[Y]\œËˆØØ[Îˆ™XÎ›™]Ê
+Kˆ›ÙNˆÛÛYJ›ÙJKˆJNÂˆB‚ˆ]Û\Ü×Ü[ˆH›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆY]ÙÜ[œËˆšY[ÎˆšY[Ü[œËˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠÛÛœİXİÜ—Ü[ŠKˆNÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVØÛ\Ü×Ü[—KˆNÂˆ]Y]Y]HH[š]›Y]Y]JYš[š][ÛœÊK[Ü˜\
+
+NÂˆ]Û\Ü×ÛY]Y]HH	›Y]Y]VÌNÂˆ]ÛÛœİXİÜ—ÛY]Y]HHÛ\Ü×ÛY]Y]K˜ÛÛœİXİÜŠ
+K[Ü˜\
+
+NÂˆ][š]X[^™\—Ü[ˆH[š]ˆ›İÙ\—ØÛÛœİXİÜ—ÙšY[Ú[š]X[^™\œÊÛ\ÜËYš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJ[š]X[^™\—Ü[‹˜Û\ÜÊ
+KÛ\ÜÊNÂˆ\ÜÙ\Ù\HJˆ[š]X[^™\—Ü[‚ˆ˜ÛÛœİXİÜŠ
+Bˆ™^Xİ
+œš[X\KXÛÛœİXİÜˆ[š]X[^™\ˆ[ˆ™]Z[œÈÛÛœİXİÜˆY]Y]HŠBˆœŞ[X›Û
+
+KˆÛÛœİXİÜ‚ˆ
+NÂˆ\ÜÙ\Ù\HJˆ[š]X[^™\—Ü[‚ˆ™šY[Ê
+Bˆš]\Š
+Bˆ›X\
+šY[šY[™šY[
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+KˆšY[ÜŞ[X›ÛËˆ›İÙ\š[™È™\Ù\™\ÈÛİ\˜ÙHXÛ\˜][ÛˆÜ™\ˆ‚ˆ
+NÂ‚ˆ]Üİ\Ü\˜[Y]\‹›Y×Ü\˜[Y]\—HHÛÛœİXİÜ—ÛY]Y]Kœ\˜[Y]\œÊ
+H[ÙHÂˆ[šXÈJ™^XİYÛÈÛÛœİXİÜˆ\˜[Y]\œÈŠNÂˆNÂˆ\ÜÙ\Ù\HJİ\Ü\˜[Y]\‹œŞ[X›Û
+
+KÛÛœİXİÜ—Ü\˜[Y]\œÖÌJNÂˆ\ÜÙ\Ù\HJİ\Ü\˜[Y]\‹œÛİ
+
+KJNÂˆ\ÜÙ\Ù\HJİ\Ü\˜[Y]\‹J
+KİWÚ›N’›U\N’[
+NÂˆ\ÜÙ\Ù\HJ›Y×Ü\˜[Y]\‹œŞ[X›Û
+
+KÛÛœİXİÜ—Ü\˜[Y]\œÖÌWJNÂˆ\ÜÙ\Ù\HJ›Y×Ü\˜[Y]\‹œÛİ
+
+KŠNÂˆ\ÜÙ\Ù\HJ›Y×Ü\˜[Y]\‹J
+KİWÚ›N’›U\N›ÛÛX[ŠNÂ‚ˆ]ÙYYH[š]X[^™\—Ü[‹™šY[Ê
+VÌKš[œİXİ[ÛœÊ
+NÂˆ\ÜÙ\JX]Ú\ÈJˆÙYY™š\œİ
+
+KˆÛÛYJ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û“ØY\ÊBˆ
+JNÂˆ\ÜÙ\JX]Ú\ÈJˆÙYY™Ù]
+JKˆÛÛYJ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[ÛÛÛœİ[
+ŠJBˆ
+JNÂˆ\ÜÙ\JˆX]Ú\ÈJÙYY›\İ
+
+KÛÛYJ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û”]šY[ÈšY[‹ˆJHYˆ
+™šY[OHšY[ÜŞ[X›ÛÖÌJBˆ
+NÂ‚ˆ]İ\œ™[H[š]X[^™\—Ü[‹™šY[Ê
+VÌWKš[œİXİ[ÛœÊ
+NÂˆ\ÜÙ\JˆX]Ú\ÈJİ\œ™[™Ù]
+JKÛÛYJ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û“ØY\˜[Y]\ˆÈŞ[X›ÛÛİˆK˜[YWİ\NˆİWÚ›N’›U\N’[JHYˆ
+œŞ[X›ÛOHÛÛœİXİÜ—Ü\˜[Y]\œÖÌJBˆ
+NÂˆ\ÜÙ\JˆX]Ú\ÈJİ\œ™[›\İ
+
+KÛÛYJ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û”]šY[ÈšY[‹ˆJHYˆ
+™šY[OHšY[ÜŞ[X›ÛÖÌWJBˆ
+NÂ‚ˆ]İX›YH[š]X[^™\—Ü[‹™šY[Ê
+VÌ—Kš[œİXİ[ÛœÊ
+NÂˆ\ÜÙ\JİX›Yš]\Š
+K˜[J[œİXİ[ÛŸX]Ú\ÈJˆ[œİXİ[Û‹ˆ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û’[Yˆ
+JJNÂˆ\ÜÙ\Ù\HJİX›Yš]\Š
+K™š[\Š[œİXİ[ÛŸX]Ú\ÈJ[œİXİ[Û‹›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û“ØY\˜[Y]\ˆÈŞ[X›Û‹ˆHYˆ
+œŞ[X›ÛOHÛÛœİXİÜ—Ü\˜[Y]\œÖÌJJK˜Ûİ[
+
+KJNÂ‚ˆ]Xİ]™HH[š]X[^™\—Ü[‹™šY[Ê
+VÌ×Kš[œİXİ[ÛœÊ
+NÂˆ\ÜÙ\JXİ]™Kš]\Š
+K˜[J[œİXİ[ÛŸX]Ú\ÈJˆ[œİXİ[Û‹ˆ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û›ÛÛX[“›İˆ
+JJNÂˆ\ÜÙ\JXİ]™Kš]\Š
+K˜[J[œİXİ[ÛŸX]Ú\ÈJ[œİXİ[Û‹›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û“ØY\˜[Y]\ˆÈŞ[X›ÛÛİˆ‹˜[YWİ\NˆİWÚ›N’›U\N›ÛÛX[ˆHYˆ
+œŞ[X›ÛOHÛÛœİXİÜ—Ü\˜[Y]\œÖÌWJJJNÂ‚ˆ]ÛÜYYH[š]X[^™\—Ü[‹™šY[Ê
+VÍKš[œİXİ[ÛœÊ
+NÂˆ\ÜÙ\JÛÜYYš]\Š
+K˜[J[œİXİ[ÛŸX]Ú\ÈJ[œİXİ[Û‹›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û‘Ù]šY[ÈšY[‹ˆHYˆ
+™šY[OHšY[ÜŞ[X›ÛÖÌWJJJNÂ‚ˆ]Ù[™\˜]YH[Z]ØÛ\ÜÊ	[š]Û\ÜËYš[š][ÛœÊK[Ü˜\
+
+NÂˆ]]]™XY\ˆH™XY\›™]ÊÙ[™\˜]Y˜]\Ê
+JNÂˆ]Û\Ü×Ùš[HHİWØÛ\ÜÙš[N˜Û\Ü×Ùš[NÛ\ÜÑš[N™XÛÙJ	›]]™XY\ŠK[Ü˜\
+
+NÂˆÛ\Ü×Ùš[K˜[Y]WÜ™Y™\™[˜Ù\Ê
+K[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJÛ\Ü×Ùš[K™šY[Ë›[Š
+KJNÂˆ\ÜÙ\Ù\HJÛ\Ü×Ùš[K›Y]ÙË›[Š
+KJNÂˆ\ÜÙ\Ù\HJˆÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ]
+Û\Ü×Ùš[K›Y]ÙÖÌK›˜[YWÚ[™^
+Bˆ[Ü˜\
+
+Kˆ[š]ˆ‚ˆ
+NÂˆ\ÜÙ\Ù\HJˆÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ]
+Û\Ü×Ùš[K›Y]ÙÖÌK™\ØÜš\Ü—Ú[™^
+Bˆ[Ü˜\
+
+KˆŠVŠUˆ‚ˆ
+NÂˆ\ÜÙ\Ù\HJˆÛ\Ü×Ùš[Bˆ™šY[Âˆš]\Š
+Bˆ›X\
+šY[Û\Ü×Ùš[K˜ÛÛœİ[ÜÛÛ]
+šY[›˜[YWÚ[™^
+K[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+KˆÈœÙYY‹˜İ\œ™[‹™İX›Y‹˜Xİ]™H‹˜ÛÜYY—Bˆ
+NÂˆ\ÜÙ\JÛ\Ü×Ùš[K™šY[ÖÌK˜XØÙ\Ü×Ù›YÜËš\×Üš]˜]J
+JNÂˆ\ÜÙ\JÛ\Ü×Ùš[K™šY[ÖÌK˜XØÙ\Ü×Ù›YÜËš\×Ùš[˜[
+
+JNÂˆ\ÜÙ\JÛ\Ü×Ùš[K™šY[ÖÌWK˜XØÙ\Ü×Ù›YÜËš\×Üš]˜]J
+JNÂˆ\ÜÙ\JXÛ\Ü×Ùš[K™šY[ÖÌWK˜XØÙ\Ü×Ù›YÜËš\×Ùš[˜[
+
+JNÂˆ]Y]ÙÚY[]Y\ÈHÛ\Ü×Ùš[K›Y]ÙÖÌK‹—Bˆš]\Š
+Bˆ›X\
+Y]ÙÂˆ
+ˆÛ\Ü×Ùš[K˜ÛÛœİ[ÜÛÛ]
+Y]Ù›˜[YWÚ[™^
+K[Ü˜\
+
+KˆÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ]
+Y]Ù™\ØÜš\Ü—Ú[™^
+Bˆ[Ü˜\
+
+Kˆ
+BˆJBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ\ÜÙ\Ù\HJˆY]ÙÚY[]Y\ËˆÂˆ
+™Ù]‹Š
+RHŠKˆ
+š[˜Ü™[Y[‹Š
+UˆŠKˆ
+œÙ]‹ŠJUˆŠKˆ
+™[˜X›Y‹Š
+VˆŠBˆBˆ
+NÂ‚ˆYˆ™\]Z\™WÚ™ÌŒWÛÜ—ÜÚÚ\
+
+HÂˆ]Û\Ü×Ø]\ÈHÙ[™\˜]Yš[×Ø]\Ê
+NÂˆ]›Û˜ÙHHŞ\İ[U[YN››İÊ
+Bˆ™\˜][Û—ÜÚ[˜ÙJS’VÑTĞÒ
+Bˆ[Ü˜\
+
+Bˆ˜\×Û˜[›ÜÊ
+NÂˆ]İ]]Hİ™[[\Ù\Š
+Kš›Ú[Š›Ü›X]Jˆ™İKZ›KXÛÛœİXİÜ‹YšY[Ë^ßK^Û›Û˜Ù_H‹ˆİœ›ØÙ\ÜÎšY
+
+Bˆ
+JNÂˆœÎ˜Ü™X]WÙ\—Ø[
+	›İ]]
+K[Ü˜\
+
+NÂˆœÎÜš]Jİ]]š›Ú[ŠÛİ[\‹˜Û\ÜÈŠKÛ\Ü×Ø]\ÊK[Ü˜\
+
+NÂˆ]\›™\ÜÈHİ]]š›Ú[ŠÛÛœİXİÜ’\›™\ÜËš˜]˜HŠNÂˆœÎÜš]Jˆ	š\›™\ÜËˆœX›XÈš[˜[Û\ÜÈÛÛœİXİÜ’\›™\ÜÈÈš]˜]Hİ]XÈ˜]˜K›[™Ëœ™Y›Xİ‘šY[šY[
+İš[™È˜[YJH›İÜÈ^Ù\[ÛˆÈ˜]˜K›[™Ëœ™Y›Xİ‘šY[šY[HÛİ[\‹˜Û\ÜË™Ù]XÛ\™YšY[
+˜[YJNÈšY[œÙ]XØÙ\ÜÚX›JYJNÈ™]\›ˆšY[ÈHX›XÈİ]XÈ›ÚYXZ[Šİš[™Ö×H\™ÜÊH›İÜÈ^Ù\[ÛˆÈÛİ[\ˆÛİ[\ˆH™]ÈÛİ[\ŠKYJNÈYˆ
+šY[
+œÙYYŠK™Ù][
+Ûİ[\ŠHOHŠH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠœÙYYŠNÈYˆ
+šY[
+˜İ\œ™[ŠK™Ù][
+Ûİ[\ŠHOHJH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ˜İ\œ™[ŠNÈYˆ
+šY[
+™İX›YŠK™Ù][
+Ûİ[\ŠHOHL
+H›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ™İX›YŠNÈYˆ
+šY[
+˜Xİ]™WŠK™Ù]›ÛÛX[ŠÛİ[\ŠJH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ˜Xİ]™WŠNÈYˆ
+šY[
+˜ÛÜYYŠK™Ù][
+Ûİ[\ŠHOHJH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ˜ÛÜYYŠNÈYˆ
+Ûİ[\‹™Ù]
+
+HOHHÛİ[\‹™[˜X›Y
+
+JH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ™Ù]\—ŠNÈÛİ[\‹š[˜Ü™[Y[
+
+NÈYˆ
+Ûİ[\‹™Ù]
+
+HOHL
+H›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠš[˜Ü™[Y[ŠNÈÛİ[\‹œÙ]
+MÊNÈYˆ
+Ûİ[\‹™Ù]
+
+HOHMÊH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠœÙ]\—ŠNÈHWˆ‹ˆ
+Bˆ[Ü˜\
+
+NÂˆ]˜]˜XÈHÛÛ[X[™›™]Êš˜]˜XÈŠBˆ˜\™ÜÊÈ‹XÛ\ÜÜ]‹İ]]×ÜİŠ
+K[Ü˜\
+
+K‹Y—JBˆ˜\™Êİ]]×ÜİŠ
+K[Ü˜\
+
+JBˆ˜\™Ê	š\›™\ÜÊBˆ›İ]]
+
+Bˆ[Ü˜\
+
+NÂˆ\ÜÙ\Jˆ˜]˜XËœİ]\ËœİXØÙ\ÜÊ
+Kˆš˜]˜XÈ™Z™XİYÛÛœİXİÜˆ\›™\Ü×œİİ]—ßWœİ\œ—ßH‹ˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜XËœİİ]
+Kˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜XËœİ\œŠBˆ
+NÂˆ]˜]˜HHÛÛ[X[™›™]Êš˜]˜HŠBˆ˜\™ÜÊÂˆ‹V™\šYN˜[‹ˆ‹XÛ\ÜÜ]‹ˆİ]]×ÜİŠ
+K[Ü˜\
+
+KˆÛÛœİXİÜ’\›™\ÜÈ‹ˆJBˆ›İ]]
+
+Bˆ[Ü˜\
+
+NÂˆ\ÜÙ\Jˆ˜]˜Kœİ]\ËœİXØÙ\ÜÊ
+Kˆš˜]˜HV™\šYN˜[™Z™XİYÛÛœİXİÜˆ[š]X[^™\ˆÛÙWœİİ]—ßWœİ\œ—ßH‹ˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜Kœİİ]
+Kˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜Kœİ\œŠBˆ
+NÂˆœÎœ™[[İ™WÙ\—Ø[
+İ]]
+K[Ü˜\
+
+NÂˆBˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆ™Y™\™[˜ÙWÙšY[×Ü™XYİÜš]WØ[™ØØ[İ›İYÚİWØİ\œ™[Ú[œİ[˜ÙJ
+HÂˆ]Ûİ\˜ÙWİ^H˜Û\ÜÈÛİ[\Š
+N—ˆYˆÙ]
+
+Nˆ[H×˜Û\ÜÈİ\Š
+W˜Û\ÜÈÛ\ŠYˆÛİ[\‹[˜X›Yˆ›ÛÛX[‹šYÚˆİ\ŠN—ˆš]˜]H˜[[YØ]NˆÛİ[\ˆHYˆš]˜]H˜\ˆİ\œ™[ˆÛİ[\ˆHYˆš]˜]H˜[Xİ]™Nˆ›ÛÛX[ˆH[˜X›Yˆš]˜]H˜[Y\ˆİ\ˆHšYÚˆYˆ˜[YJ
+NˆÛİ[\ˆH[YØ]WˆYˆ˜[YU\Ê
+NˆÛİ[\ˆH\Ë™[YØ]WˆYˆ™XY
+
+Nˆ[H[YØ]K™Ù]
+
+WˆYˆ™XY\Ê
+Nˆ[H\Ë™[YØ]K™Ù]
+
+WˆYˆ™\XÙJ™^ˆÛİ[\ŠNˆ[š]HÈİ\œ™[H™^WˆYˆ™\XÙU\Ê™^ˆÛİ[\ŠNˆ[š]HÈ\Ë˜İ\œ™[H™^WˆYˆ˜[YPY\Š
+NˆÛİ[\ˆHİ\œ™[ˆYˆœ˜[˜Ú
+›YÎˆ›ÛÛX[ŠNˆÛİ[\ˆHYˆ›YÈ[ˆ[YØ]H[ÙHİ\œ™[ˆÂˆÚ]ÜÛİ\˜ÙJÛİ\˜ÙWİ^\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]]]Û\ÜÙ\ÈH™XÎ›™]Ê
+NÂˆ]]]Û\Ü×ÜŞ[X›ÛÈH™XÎ›™]Ê
+NÂˆ]]]šY[ÜŞ[X›ÛÈH™XÎ›™]Ê
+NÂˆ›Üˆ˜[YH[ˆÈÛİ[\ˆ‹“İ\ˆ‹’Û\ˆ—HÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹˜[YJNÂˆÛ\Ü×ÜŞ[X›ÛËœ\Ú
+Û\ÜÊNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]Û\Ü×İ™YHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YKÊ_Âˆ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJÛ\ÜÊJK[—ÜÛÛYJ™YJBˆJBˆ[Ü˜\
+
+NÂˆ]™YRÚ[™•\QYŠYš[š][ÛŠHH	˜\İ™Ù]
+Û\Ü×İ™YJKšÚ[™[ÙHÂˆ[šXÈJ˜Û\ÜÈÛİ\˜ÙH›ÙH\ÈH\QYˆŠBˆNÂˆ]™YRÚ[™•[\]J[\]JHH	˜\İ™Ù]
+Yš[š][Û‹œšÊKšÚ[™[ÙHÂˆ[šXÈJ˜Û\ÜÈ›ÙH\ÈH[\]HŠBˆNÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠÛÛœİXİÜ—ÙYš[š][ÛŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™ˆ[ÙHÂˆ[šXÈJœš[X\HÛÛœİXİÜˆÛİ\˜ÙH›ÙH\ÈHY‘YˆŠBˆNÂˆ]\˜[Y]\œÈHÛÛœİXİÜ—ÙYš[š][Û‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]›ÛÙˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ\˜[Y]\œËˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂˆ]]]šY[ÈH™XÎ›™]Ê
+NÂˆ›Üˆ™YH[ˆ	[\]K˜›ÙHÂˆ]™YRÚ[™•˜[YŠYš[š][ÛŠHH	˜\İ™Ù]
+
+™YJKšÚ[™[ÙHÂˆÛÛ[YNÂˆNÂˆ]šY[H[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJK[Ü˜\
+
+NÂˆ]šÈHYš[š][Û‹œšË[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[ÚYÛ˜]\™H\ÈÛÛ\]HŠBˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ]\YÜšÈH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆšY[Ëœ\Ú
+›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ\YÜšÊKˆJNÂˆšY[ÜŞ[X›ÛËœ\Ú
+šY[
+NÂˆBˆÛ\ÜÙ\Ëœ\Ú
+›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Ëˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠ›ÛÙŠKˆJNÂˆB‚ˆ›Üˆ˜[YH[ˆÂˆ™Ù]‹ˆ˜[YH‹ˆ˜[YU\È‹ˆœ™XY‹ˆœ™XY\È‹ˆœ™\XÙH‹ˆœ™\XÙU\È‹ˆ˜[YPY\ˆ‹ˆ˜œ˜[˜Ú‹ˆHÂˆ]
+Y]Ù›ÙK\˜[Y]\œÊHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ]™YRÚ[™‘Y‘YŠYš[š][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆYˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™JYš[š][Û‹›˜[YK˜\×Û˜[YJ
+K^
+
+JBˆOH˜[YBˆÂˆ™]\›ˆ›Û™NÂˆBˆ]Y]ÙH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJOÎÂˆ]^XİYÛİÛ™\ˆHYˆ˜[YHOH™Ù]ˆÂˆÛ\Ü×ÜŞ[X›ÛÖÌBˆH[ÙHÂˆÛ\Ü×ÜŞ[X›ÛÖÌ—BˆNÂˆYˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù
+K›İÛ™\ˆOHÛÛYJ^XİYÛİÛ™\ŠHÂˆ™]\›ˆ›Û™NÂˆBˆ]\˜[Y]\œÈHYš[š][Û‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ›X\
+\˜[Y]\Ÿ[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+œ\˜[Y]\ŠJBˆ˜ÛÛXİÜ[Û™XÏÏŠ
+OÎÂˆÛÛYJ
+Y]ÙYš[š][Û‹œšÏË\˜[Y]\œÊJBˆJBˆ[Ü˜\ÛÜ—Ù[ÙJ[šXÈJ›Z\ÜÚ[™ÈY]ÙÛ˜[Y_HŠJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Y]Ù
+K[Ü˜\
+
+NÂˆ]ÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠY]Ù
+K[Ü˜\
+
+NÂˆ]\YØ›ÙHH\\‹\WÙ^™\ÜÚ[ÛŠ›ÙKÛÛ^
+K[Ü˜\
+
+NÂˆ]İÛ™\ˆHYˆ˜[YHOH™Ù]ˆÂˆÛ\Ü×ÜŞ[X›ÛÖÌBˆH[ÙHÂˆÛ\Ü×ÜŞ[X›ÛÖÌ—BˆNÂˆ]İÛ™\—Ú[™^HÛ\Ü×ÜŞ[X›ÛÂˆš]\Š
+BˆœÜÚ][ÛŠÛ\Üß
+˜Û\ÜÈOHİÛ™\ŠBˆ[Ü˜\
+
+NÂˆÛ\ÜÙ\ÖÛİÛ™\—Ú[™^K›Y]ÙËœ\Ú
+›SY]Ù[ˆÂˆY]Ùˆ\˜[Y]\œËˆØØ[Îˆ™XÎ›™]Ê
+Kˆ›ÙNˆÛÛYJ\YØ›ÙJKˆJNÂˆB‚ˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\ËˆNÂˆ]Y]Y]HH[š]›Y]Y]JYš[š][ÛœÊK[Ü˜\
+
+NÂˆ]Û\—Ú[™^HY]Y]Bˆš]\Š
+BˆœÜÚ][ÛŠÛ\ÜßÛ\ÜËšY[]J
+KœŞ[X›Û
+
+HOHÛ\Ü×ÜŞ[X›ÛÖÌ—JBˆ[Ü˜\
+
+NÂˆ]Û\—ÛY]Y]HH	›Y]Y]VÚÛ\—Ú[™^NÂˆ]ÛÛœİXİÜ—Ü\˜[Y]\œÈHÛ\—ÛY]Y]K˜ÛÛœİXİÜŠ
+K[Ü˜\
+
+Kœ\˜[Y]\œÊ
+NÂˆ\ÜÙ\Ù\HJÛÛœİXİÜ—Ü\˜[Y]\œË›[Š
+KÊNÂˆ\ÜÙ\Ù\HJÛÛœİXİÜ—Ü\˜[Y]\œÖÌKœÛİ
+
+KJNÂˆ\ÜÙ\Ù\HJˆÛÛœİXİÜ—Ü\˜[Y]\œÖÌKJ
+KˆİWÚ›N’›U\N”™Y™\™[˜ÙJÛ\Ü×ÜŞ[X›ÛÖÌJBˆ
+NÂˆ\ÜÙ\Ù\HJÛÛœİXİÜ—Ü\˜[Y]\œÖÌWKœÛİ
+
+KŠNÂˆ\ÜÙ\Ù\HJÛÛœİXİÜ—Ü\˜[Y]\œÖÌWKJ
+KİWÚ›N’›U\N›ÛÛX[ŠNÂˆ\ÜÙ\Ù\HJÛÛœİXİÜ—Ü\˜[Y]\œÖÌ—KœÛİ
+
+KÊNÂˆ\ÜÙ\Ù\HJˆÛÛœİXİÜ—Ü\˜[Y]\œÖÌ—KJ
+KˆİWÚ›N’›U\N”™Y™\™[˜ÙJÛ\Ü×ÜŞ[X›ÛÖÌWJBˆ
+NÂ‚ˆ][š]X[^™\ˆH[š]ˆ›İÙ\—ØÛÛœİXİÜ—ÙšY[Ú[š]X[^™\œÊÛ\Ü×ÜŞ[X›ÛÖÌ—KYš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ]Û\—ÛY]ÙÈH	[š]˜Û\ÜÙ\ÖÌ—K›Y]ÙÎÂˆ›Üˆ˜[YH[ˆÈ˜[YH‹˜[YU\È‹˜[YPY\ˆ‹˜œ˜[˜Ú—HÂˆ]Y]ÙHÛ\—ÛY]ÙÂˆš]\Š
+Bˆ™š[™
+Y]ÙÂˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù›Y]Ù
+K›˜[YK^
+
+JBˆOH˜[YBˆJBˆ[Ü˜\
+
+NÂˆ]ÛÙHH[š]ˆ›İÙ\—ÛY]ÙØ›ÙJÛ\Ü×ÜŞ[X›ÛÖÌ—KY]Ù›Y]ÙYš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ]XYÈH›Ü›X]JØÛÙNßHŠNÂˆ\ÜÙ\JXYË˜ÛÛZ[œÊSØYŠKÛ˜[Y_HØYÈ\ÎˆÙXYßHŠNÂˆ\ÜÙ\JˆXYË˜ÛÛZ[œÊ›Ü\˜][ÛˆÙ]ŠKˆÛ˜[Y_H™XYÈšY[ˆÙXYßH‚ˆ
+NÂˆ\ÜÙ\JˆXYË˜ÛÛZ[œÊT™]\›ˆŠKˆÛ˜[Y_H™]\›œÈ™Y™\™[˜ÙNˆÙXYßH‚ˆ
+NÂˆBˆ]™XYÛY]ÙHÛ\—ÛY]ÙÂˆš]\Š
+Bˆ™š[™
+Y]ÙÂˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù›Y]Ù
+K›˜[YK^
+
+JBˆOHœ™XY‚ˆJBˆ[Ü˜\
+
+NÂˆ]™XYØÛÙHH[š]ˆ›İÙ\—ÛY]ÙØ›ÙJÛ\Ü×ÜŞ[X›ÛÖÌ—K™XYÛY]Ù›Y]ÙYš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ]™XYÙXYÈH›Ü›X]JÜ™XYØÛÙNßHŠNÂˆ\ÜÙ\J™XYÙXYË˜ÛÛZ[œÊ›Ü\˜][ÛˆÙ]ŠKœ™XY]\İÙ]šY[ŠNÂˆ\ÜÙ\Jˆ™XYÙXYË˜ÛÛZ[œÊ›Ü\˜][Ûˆš\X[ŠKˆœ™XY]\İ[›ÚÙ]š\X[ˆÜ™XYÙXYßH‚ˆ
+NÂˆ]™XYİ\×ÛY]ÙHÛ\—ÛY]ÙÂˆš]\Š
+Bˆ™š[™
+Y]ÙÂˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù›Y]Ù
+K›˜[YK^
+
+JBˆOHœ™XY\È‚ˆJBˆ[Ü˜\
+
+NÂˆ]™XYİ\ÈH[š]ˆ›İÙ\—ÛY]ÙØ›ÙJÛ\Ü×ÜŞ[X›ÛÖÌ—K™XYİ\×ÛY]Ù›Y]ÙYš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ]™XYİ\×ÙXYÈH›Ü›X]JÜ™XYİ\ÎßHŠNÂˆ\ÜÙ\J™XYİ\×ÙXYË˜ÛÛZ[œÊ›Ü\˜][ÛˆÙ]ŠJNÂˆ\ÜÙ\J™XYİ\×ÙXYË˜ÛÛZ[œÊ›Ü\˜][Ûˆš\X[ŠJNÂˆ]™\XÙWÛY]ÙHÛ\—ÛY]ÙÂˆš]\Š
+Bˆ™š[™
+Y]ÙÂˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù›Y]Ù
+K›˜[YK^
+
+JBˆOHœ™\XÙH‚ˆJBˆ[Ü˜\
+
+NÂˆ]™\XÙWØÛÙHH[š]ˆ›İÙ\—ÛY]ÙØ›ÙJÛ\Ü×ÜŞ[X›ÛÖÌ—K™\XÙWÛY]Ù›Y]ÙYš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ]™\XÙWÙXYÈH›Ü›X]JÜ™\XÙWØÛÙNßHŠNÂˆ\ÜÙ\J™\XÙWÙXYË˜ÛÛZ[œÊTİÜ™HŠKœ™\XÙHİÜ™\È™Y™\™[˜ÙHŠNÂˆ\ÜÙ\J™\XÙWÙXYË˜ÛÛZ[œÊSØYŠKœ™\XÙH™[ØYÈ™Y™\™[˜ÙHŠNÂˆ\ÜÙ\Jˆ™\XÙWÙXYË˜ÛÛZ[œÊ›Ü\˜][Ûˆ]ŠKˆœ™\XÙH]\İ]šY[‚ˆ
+NÂˆ]™\XÙWİ\×ÛY]ÙHÛ\—ÛY]ÙÂˆš]\Š
+Bˆ™š[™
+Y]ÙÂˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù›Y]Ù
+K›˜[YK^
+
+JBˆOHœ™\XÙU\È‚ˆJBˆ[Ü˜\
+
+NÂˆ]™\XÙWİ\ÈH[š]ˆ›İÙ\—ÛY]ÙØ›ÙJÛ\Ü×ÜŞ[X›ÛÖÌ—K™\XÙWİ\×ÛY]Ù›Y]ÙYš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ\ÜÙ\J›Ü›X]JÜ™\XÙWİ\ÎßHŠK˜ÛÛZ[œÊ›Ü\˜][Ûˆ]ŠJNÂˆ\ÜÙ\Ù\HJˆ[š]X[^™\‚ˆ™šY[Ê
+Bˆš]\Š
+Bˆ›X\
+šY[šY[™šY[
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+KˆšY[ÜŞ[X›ÛÂˆ
+NÂˆ›Üˆ
+šY[Ú[™^
+\˜[Y]\—Ú[™^^XİYİ\JJH[ˆÂˆ
+İWÚ›N’›U\N”™Y™\™[˜ÙJÛ\Ü×ÜŞ[X›ÛÖÌJJKˆ
+İWÚ›N’›U\N”™Y™\™[˜ÙJÛ\Ü×ÜŞ[X›ÛÖÌJJKˆ
+KİWÚ›N’›U\N›ÛÛX[ŠKˆ
+‹İWÚ›N’›U\N”™Y™\™[˜ÙJÛ\Ü×ÜŞ[X›ÛÖÌWJJKˆBˆš[×Ú]\Š
+Bˆ™[[Y\˜]J
+BˆÂˆ][œİXİ[ÛœÈH[š]X[^™\‹™šY[Ê
+VÙšY[Ú[™^Kš[œİXİ[ÛœÊ
+NÂˆ\ÜÙ\JX]Ú\ÈJˆ[œİXİ[ÛœË™š\œİ
+
+KˆÛÛYJ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û“ØY\ÊBˆ
+JNÂˆ\ÜÙ\JX]Ú\ÈJˆ[œİXİ[ÛœË™Ù]
+JKˆÛÛYJ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û“ØY\˜[Y]\ˆÈŞ[X›ÛÛİ˜[YWİ\HJBˆYˆ
+œŞ[X›ÛOHÛÛœİXİÜ—Ü\˜[Y]\œÖÜ\˜[Y]\—Ú[™^KœŞ[X›Û
+
+Bˆ	‰ˆ
+œÛİOHÛÛœİXİÜ—Ü\˜[Y]\œÖÜ\˜[Y]\—Ú[™^KœÛİ
+
+Bˆ	‰ˆ
+˜[YWİ\HOH^XİYİ\Bˆ
+JNÂˆ\ÜÙ\JˆX]Ú\ÈJ[œİXİ[ÛœË›\İ
+
+KÛÛYJ›PÛÛœİXİÜ’[š]X[^™\’[œİXİ[Û”]šY[ÈšY[‹ˆJHYˆ
+™šY[OHšY[ÜŞ[X›ÛÖÙšY[Ú[™^JBˆ
+NÂˆB‚ˆ]Ù[™\˜]YH[š]ˆ˜Û\ÜÙ\Âˆš]\Š
+Bˆ›X\
+[Ÿ[Z]ØÛ\ÜÊ	[š][‹˜Û\ÜËYš[š][ÛœÊK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ]Û\—Ø]\ÈHÙ[™\˜]Yˆš]\Š
+Bˆ™š[™
+Û\ÜßÛ\ÜËš[\›˜[Û˜[YJ
+HOH’Û\ˆŠBˆ[Ü˜\
+
+Bˆ˜]\Ê
+NÂˆ]]]™XY\ˆH™XY\›™]ÊÛ\—Ø]\ÊNÂˆ]Û\Ü×Ùš[HHİWØÛ\ÜÙš[N˜Û\Ü×Ùš[NÛ\ÜÑš[N™XÛÙJ	›]]™XY\ŠK[Ü˜\
+
+NÂˆÛ\Ü×Ùš[K˜[Y]WÜ™Y™\™[˜Ù\Ê
+K[Ü˜\
+
+NÂˆ]ÛÛœİXİÜˆH	˜Û\Ü×Ùš[K›Y]ÙÖÌNÂˆ\ÜÙ\Ù\HJˆÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ]
+ÛÛœİXİÜ‹™\ØÜš\Ü—Ú[™^
+Bˆ[Ü˜\
+
+KˆŠÛİ[\Ö“İ\ÊUˆ‚ˆ
+NÂˆ\ÜÙ\Ù\HJÛ\Ü×Ùš[K™šY[Ë›[Š
+K
+NÂˆ\ÜÙ\Ù\HJˆÛ\Ü×Ùš[Bˆ™šY[Âˆš]\Š
+Bˆ›X\
+šY[Û\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ]
+šY[™\ØÜš\Ü—Ú[™^
+Bˆ[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+KˆÈ“Ûİ[\È‹“Ûİ[\È‹–ˆ‹“İ\È—Bˆ
+NÂˆ\ÜÙ\JˆÛ\Ü×Ùš[K™šY[ÖÌBˆ˜XØÙ\Ü×Ù›YÜÂˆ˜ÛÛZ[œÊPĞ×Ô’UUHPĞ×Ñ’SS
+Bˆ
+NÂˆ\ÜÙ\JÛ\Ü×Ùš[K™šY[ÖÌWK˜XØÙ\Ü×Ù›YÜË˜ÛÛZ[œÊPĞ×Ô’UUJJNÂˆ\ÜÙ\JXÛ\Ü×Ùš[K™šY[ÖÌWK˜XØÙ\Ü×Ù›YÜË˜ÛÛZ[œÊPĞ×Ñ’SS
+JNÂˆ]ÛÙHHÛÛœİXİÜ‚ˆ˜]šX]\Âˆš]\Š
+Bˆ™š[™ÛX\
+]šX]_X]Ú]šX]HÂˆİWØÛ\ÜÙš[N˜]šX]N]šX]NÛÙJÛÙJHOˆÛÛYJÛÙK˜ÛÙJKˆÈOˆ›Û™KˆJBˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJÛÙK›[Š
+KJNÂˆ›Üˆ
+Ù™œÙ]ÜÛÙJH[ˆÂˆ
+˜JKËÈ[ØYÌˆ
+KÊKËÈ[›ÚÙ\ÜXÚX[Øš™Xİ[š]‚ˆ
+˜JKËÈ[ØYÌˆ
+K˜ŠKËÈ[ØYÌBˆ
+‹JKËÈ]šY[[YØ]Bˆ
+K˜JKËÈ[ØYÌˆ
+L˜ŠKËÈ[ØYÌBˆ
+LKJKËÈ]šY[İ\œ™[ˆ
+M˜JKËÈ[ØYÌˆ
+MKXÊKËÈ[ØYÌ‚ˆ
+M‹JKËÈ]šY[Xİ]™Bˆ
+NK˜JKËÈ[ØYÌˆ
+Œ™
+KËÈ[ØYÌÂˆ
+ŒKJKËÈ]šY[Y\‚ˆ
+ŒJKËÈ™]\›‚ˆHÂˆ\ÜÙ\Ù\HJˆÛÙVÛÙ™œÙ]KÜÛÙKˆÜ›Û™ÈÜÛÙH]]XÛÙHÙ™œÙ]ÛÙ™œÙ]H‚ˆ
+NÂˆB‚ˆYˆ™\]Z\™WÚ™ÌŒWÛÜ—ÜÚÚ\
+
+HÂˆ]İ]]Hİ™[[\Ù\Š
+Kš›Ú[Š›Ü›X]Jˆ™İKZ›K\™Y™\™[˜ÙKXÛÛœİXİÜ‹Z[š]X[^™\‹^ßK^ßH‹ˆİœ›ØÙ\ÜÎšY
+
+KˆŞ\İ[U[YN››İÊ
+Bˆ™\˜][Û—ÜÚ[˜ÙJS’VÑTĞÒ
+Bˆ[Ü˜\
+
+Bˆ˜\×Û˜[›ÜÊ
+Bˆ
+JNÂˆœÎ˜Ü™X]WÙ\—Ø[
+	›İ]]
+K[Ü˜\
+
+NÂˆ›ÜˆÙ[™\˜]Y[ˆ	™Ù[™\˜]YÂˆœÎÜš]Jˆİ]]š›Ú[Š›Ü›X]JßK˜Û\ÜÈ‹Ù[™\˜]Yš[\›˜[Û˜[YJ
+JJKˆÙ[™\˜]Y˜]\Ê
+Kˆ
+Bˆ[Ü˜\
+
+NÂˆBˆ]\›™\ÜÈHİ]]š›Ú[Š”™Y™\™[˜ÙPÛÛœİXİÜ’\›™\ÜËš˜]˜HŠNÂˆœÎÜš]Jˆ	š\›™\ÜËˆœX›XÈš[˜[Û\ÜÈ™Y™\™[˜ÙPÛÛœİXİÜ’\›™\ÜÈÈš]˜]Hİ]XÈ˜]˜K›[™Ëœ™Y›Xİ‘šY[šY[
+İš[™È˜[YJH›İÜÈ^Ù\[ÛˆÈ˜]˜K›[™Ëœ™Y›Xİ‘šY[šY[HÛ\‹˜Û\ÜË™Ù]XÛ\™YšY[
+˜[YJNÈšY[œÙ]XØÙ\ÜÚX›JYJNÈ™]\›ˆšY[ÈHX›XÈİ]XÈ›ÚYXZ[Šİš[™Ö×H\™ÜÊH›İÜÈ^Ù\[ÛˆÈÛİ[\ˆÛİ[\ˆH™]ÈÛİ[\Š
+NÈÛİ[\ˆ™^H™]ÈÛİ[\Š
+NÈİ\ˆİ\ˆH™]Èİ\Š
+NÈÛ\ˆÛ\ˆH™]ÈÛ\ŠÛİ[\‹YKİ\ŠNÈYˆ
+šY[
+™[YØ]WŠK™Ù]
+Û\ŠHOHÛİ[\ŠH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠœ™Y™\™[˜ÙH\˜[Y]\—ŠNÈYˆ
+šY[
+˜İ\œ™[ŠK™Ù]
+Û\ŠHOHÛİ[\ŠH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ›]]X›H™Y™\™[˜ÙH\˜[Y]\—ŠNÈYˆ
+YšY[
+˜Xİ]™WŠK™Ù]›ÛÛX[ŠÛ\ŠJH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ˜›ÛÛX[ˆ\˜[Y]\—ŠNÈYˆ
+šY[
+œY\—ŠK™Ù]
+Û\ŠHOHİ\ŠH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠœÙXÛÛ™™Y™\™[˜ÙH\˜[Y]\—ŠNÈYˆ
+Û\‹˜[YJ
+HOHÛİ[\ˆÛ\‹˜[YU\Ê
+HOHÛİ[\ˆÛ\‹˜[YPY\Š
+HOHÛİ[\ŠH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ™Ù]šY[Y[]WŠNÈYˆ
+Û\‹œ™XY
+
+HOHÈÛ\‹œ™XY\Ê
+HOHÊH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ™šY[Ø[™XÙZ]™\—ŠNÈYˆ
+Û\‹˜œ˜[˜Ú
+YJHOHÛİ[\ˆÛ\‹˜œ˜[˜Ú
+˜[ÙJHOHÛİ[\ŠH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠœ™Y™\™[˜ÙHœ˜[˜Ú›Ú[—ŠNÈÛ\‹œ™\XÙJ™^
+NÈYˆ
+Û\‹˜[YPY\Š
+HOH™^
+H›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠœ]šY[Y[]WŠNÈÛ\‹œ™\XÙU\ÊÛİ[\ŠNÈYˆ
+Û\‹˜[YPY\Š
+HOHÛİ[\ŠH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ™^XÚ]\È]šY[Y[]WŠNÈHWˆ‹ˆ
+Bˆ[Ü˜\
+
+NÂˆ]˜]˜XÈHÛÛ[X[™›™]Êš˜]˜XÈŠBˆ˜\™ÜÊÈ‹XÛ\ÜÜ]‹İ]]×ÜİŠ
+K[Ü˜\
+
+K‹Y—JBˆ˜\™Êİ]]×ÜİŠ
+K[Ü˜\
+
+JBˆ˜\™Ê	š\›™\ÜÊBˆ›İ]]
+
+Bˆ[Ü˜\
+
+NÂˆ\ÜÙ\Jˆ˜]˜XËœİ]\ËœİXØÙ\ÜÊ
+Kˆš˜]˜XÈ™Z™XİY™Y™\™[˜ÙHÛÛœİXİÜˆ[š]X[^™\ˆ\›™\Ü×œİİ]—ßWœİ\œ—ßH‹ˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜XËœİİ]
+Kˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜XËœİ\œŠBˆ
+NÂˆ]˜]˜HHÛÛ[X[™›™]Êš˜]˜HŠBˆ˜\™ÜÊÂˆ‹V™\šYN˜[‹ˆ‹XÛ\ÜÜ]‹ˆİ]]×ÜİŠ
+K[Ü˜\
+
+Kˆ”™Y™\™[˜ÙPÛÛœİXİÜ’\›™\ÜÈ‹ˆJBˆ›İ]]
+
+Bˆ[Ü˜\
+
+NÂˆ\ÜÙ\Jˆ˜]˜Kœİ]\ËœİXØÙ\ÜÊ
+Kˆš˜]˜HV™\šYN˜[™Z™XİY™Y™\™[˜ÙHÛÛœİXİÜˆ[š]X[^™\ˆÛÙWœİİ]—ßWœİ\œ—ßH‹ˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜Kœİİ]
+Kˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜Kœİ\œŠBˆ
+NÂˆœÎœ™[[İ™WÙ\—Ø[
+İ]]
+K[Ü˜\
+
+NÂˆBˆJNÂŸB‚ˆÖİ\İB™›ˆÛÛœİXİÜ—ÙšY[Ú[š]X[^™\—Ü™Z™Xİ×Ü]X[YšYYÜ\˜[Y]\—Ü™Y™\™[˜Ù\Ê
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈ]X[YšYY
+İ\ˆ[
+HÈš]˜]H˜[˜[YNˆ[Hİ\H‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹”]X[YšYYŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]Û\Ü×İ™YHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YKÛ›ÙJ_Âˆ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJÛ\ÜÊJK[—ÜÛÛYJ™YJBˆJBˆ[Ü˜\
+
+NÂˆ]™YRÚ[™•\QYŠYš[š][ÛŠHH	˜\İ™Ù]
+Û\Ü×İ™YJKšÚ[™[ÙHÂˆ[šXÈJ”]X[YšYYÛİ\˜ÙHXÛ\˜][ÛˆÚİ[™HH\QYˆŠNÂˆNÂˆ]™YRÚ[™•[\]J[\]JHH	˜\İ™Ù]
+Yš[š][Û‹œšÊKšÚ[™[ÙHÂˆ[šXÈJ”]X[YšYYXÛ\˜][ÛˆÚİ[]™HH[\]HŠNÂˆNÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠÛÛœİXİÜ—ÙYŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™[ÙHÂˆ[šXÈJœš[X\HÛÛœİXİÜˆÚİ[™HHY‘YˆŠNÂˆNÂˆ]\˜[Y]\œÈHÛÛœİXİÜ—ÙY‹˜[YWÜ\˜[WØÛ]\Ù\ÖÌBˆš]\Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]ÛÛœİXİÜ—Ü[ˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ\˜[Y]\œË˜ÛÛ™J
+Kˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂˆ]
+šY[šÊHH[\]Bˆ˜›ÙBˆš]\Š
+Bˆ™š[™ÛX\
+™Y_Âˆ]™YRÚ[™•˜[YŠYš[š][ÛŠHH	˜\İ™Ù]
+
+™YJKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆÛÛYJ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJOËYš[š][Û‹œšÏÊJBˆJBˆ[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ]\YÜšÈH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ]\YÜš×İ™YHH\\‹\YØ\İ
+
+K™Ù]
+\YÜšÊK˜ÛÛ™J
+NÂˆ\ÜÙ\JX]Ú\ÈJ\YÜš×İ™YKšÚ[™™YRÚ[™’Y[
+ÊJJNÂ‚ˆ›ÜˆZ\ÜÚ[™×Ü]X[YšY\ˆ[ˆÙ˜[ÙKYWHÂˆ]]]\YØ\İH\İ\™[˜N\Y›™]Ê
+NÂˆ›Üˆ
+Ë™YJH[ˆ\\‹\YØ\İ
+
+Kš]\Š
+HÂˆ\YØ\İ˜[ØÊ™YK˜ÛÛ™J
+JNÂˆB‚ˆ]]X[YšY\ˆHYˆZ\ÜÚ[™×Ü]X[YšY\ˆÂˆ]ÚXÚÜÚ[H\YØ\İ˜ÚXÚÜÚ[
+
+NÂˆ\YØ\İ˜[ØÊ\YÜš×İ™YK˜ÛÛ™J
+JNÂˆ]Z\ÜÚ[™ÈH\YØ\İ˜[ØÊ\YÜš×İ™YK˜ÛÛ™J
+JNÂˆ\YØ\İœ›Û˜XÚ×İÊÚXÚÜÚ[
+NÂˆZ\ÜÚ[™ÂˆH[ÙHÂˆ\YØ\İ˜[ØÊ™YHÂˆÚ[™ˆ™YRÚ[™\J\HÂˆ[˜İ[Ûˆ\YÜšËˆ\™ÜÎˆ™XÎ›™]Ê
+KˆÚ[™ˆ\RÚ[™”™Yİ[\‹ˆJKˆÜÚ][Ûˆ›Û™KˆNˆ\YÜš×İ™YKKˆJBˆNÂˆ][š]X[^™\ˆH\YØ\İ˜[ØÊ™YHÂˆÚ[™ˆ™YRÚ[™”Ù[Xİ
+Ù[XİÂˆ]X[YšY\‹ˆ˜[YNˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+\˜[Y]\œÖÌJK›˜[YKˆ˜XÚÜ][İYˆ˜[ÙKˆJKˆÜÚ][Ûˆ›Û™KˆNˆ\YÜš×İ™YKKˆJNÂˆYˆZ\ÜÚ[™×Ü]X[YšY\ˆÂˆ\ÜÙ\J\YØ\İWÙÙ]
+]X[YšY\ŠKš\×Û›Û™J
+JNÂˆB‚ˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ	\YØ\İˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ[š]X[^™\ŠKˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠˆÛÛœİXİÜ—Ü[‹˜ÛÛ™J
+Kˆ
+KˆWKˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ[š]›İÙ\—ØÛÛœİXİÜ—ÙšY[Ú[š]X[^™\œÊÛ\ÜËYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜYÛÛœİXİÜ‘šY[[š]X[^™\ˆÂˆšY[ˆ›İ[™ÙšY[ˆ™YKˆ›ÙNˆœ]X[YšYYÛÛœİXİÜˆ\˜[Y]\ˆ™Y™\™[˜ÙH‹ˆJHYˆ›İ[™ÙšY[OHšY[	‰ˆ™YHOH[š]X[^™\‚ˆ
+JNÂˆBˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆÛÛœİXİÜ—ÙšY[Ú[š]X[^™\—ÛİÙ\š[™×Ü™Z™Xİ×Ù›ÜØ\™ÙšY[Ü™XYÊ
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈ›ÜØ\™
+
+HÈš]˜]H˜[š\œİˆ[HÙXÛÛ™Èš]˜]H˜[ÙXÛÛ™ˆ[HˆH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹‘›ÜØ\™ŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]Û\Ü×İ™YHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJÛ\ÜÊJK[—ÜÛÛYJ
+™YK›ÙJJBˆJBˆ[Ü˜\
+
+BˆŒÂˆ]™YRÚ[™•\QYŠYš[š][ÛŠHH	˜\İ™Ù]
+Û\Ü×İ™YJKšÚ[™[ÙHÂˆ[šXÈJ‘›ÜØ\™Ûİ\˜ÙHXÛ\˜][ÛˆÚİ[™HH\QYˆŠNÂˆNÂˆ]™YRÚ[™•[\]J[\]JHH	˜\İ™Ù]
+Yš[š][Û‹œšÊKšÚ[™[ÙHÂˆ[šXÈJ‘›ÜØ\™XÛ\˜][ÛˆÚİ[]™HH[\]HŠNÂˆNÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]ÛÛœİXİÜ—Ü[ˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ™XÎ›™]Ê
+Kˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂ‚ˆ]]]šY[ÈH™XÎ›™]Ê
+NÂˆ›Üˆ™YH[ˆ	[\]K˜›ÙHÂˆ]™YRÚ[™•˜[YŠšY[ÙYŠHH	˜\İ™Ù]
+
+™YJKšÚ[™[ÙHÂˆÛÛ[YNÂˆNÂˆ]ÛÛYJšY[
+HH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJH[ÙHÂˆÛÛ[YNÂˆNÂˆ]šÈHšY[ÙY‹œšË[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ]\YÜšÈH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJ\\‹œÛİ\˜ÙWİ\YÚ[™^
+
+K™Ù]
+Ûİ\˜ÙKšÊKÛÛYJ\YÜšÊJNÂˆšY[Ëœ\Ú
+›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ\YÜšÊKˆJNÂˆBˆ]š\œİHšY[ÖÌK™šY[Âˆ]ÙXÛÛ™HšY[ÖÌWK™šY[Âˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Ëˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠˆÛÛœİXİÜ—Ü[‹ˆ
+KˆWKˆNÂˆ\ÜÙ\Ù\HJˆ[š]›İÙ\—ØÛÛœİXİÜ—ÙšY[Ú[š]X[^™\œÊÛ\ÜËYš[š][ÛœÊKˆ\œŠˆİWÚ›N’›PÛÙYÙ[‘\œ›Ü‘šY[[š]X[^™\”™XYÕ[š[š]X[^™YšY[ÂˆšY[ˆš\œİˆ™YNˆ[š]˜Û\ÜÙ\ÖÌK™šY[ÖÌKš[š]X[^™\‹[Ü˜\
+
+Kˆ™Y™\™[˜ÙYÙšY[ˆÙXÛÛ™ˆBˆ
+Bˆ
+NÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆÛÛœİXİÜ—ÙšY[Ú[š]X[^™\—ÛİÙ\š[™×Ü™Z™Xİ×ÜÙ[—Ü™XYÊ
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈÙ[”™XY
+
+HÈš]˜]H˜[˜[YNˆ[H˜[YHH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹”Ù[”™XYŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]Û\Ü×İ™YHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJÛ\ÜÊJK[—ÜÛÛYJ
+™YK›ÙJJBˆJBˆ[Ü˜\
+
+BˆŒÂˆ]™YRÚ[™•\QYŠYš[š][ÛŠHH	˜\İ™Ù]
+Û\Ü×İ™YJKšÚ[™[ÙHÂˆ[šXÈJ”Ù[”™XYÛİ\˜ÙHXÛ\˜][ÛˆÚİ[™HH\QYˆŠNÂˆNÂˆ]™YRÚ[™•[\]J[\]JHH	˜\İ™Ù]
+Yš[š][Û‹œšÊKšÚ[™[ÙHÂˆ[šXÈJ”Ù[”™XYXÛ\˜][ÛˆÚİ[]™HH[\]HŠNÂˆNÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]ÛÛœİXİÜ—Ü[ˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ™XÎ›™]Ê
+Kˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂˆ]
+šY[ËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹˜[YHŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ]\YÜšÈH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ\YÜšÊKˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠˆÛÛœİXİÜ—Ü[‹ˆ
+KˆWKˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ[š]›İÙ\—ØÛÛœİXİÜ—ÙšY[Ú[š]X[^™\œÊÛ\ÜËYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü‘šY[[š]X[^™\”™XYÕ[š[š]X[^™YšY[ÂˆšY[ˆ›İ[™ÙšY[ˆ™Y™\™[˜ÙYÙšY[ˆ‹‚ˆJHYˆ›İ[™ÙšY[OHšY[	‰ˆ™Y™\™[˜ÙYÙšY[OHšY[ˆ
+JNÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆÛÛœİXİÜ—ÙšY[Ú[š]X[^™\—ÛİÙ\š[™×Ü™Z™Xİ×İ\Ù\—ÛY]ÙØØ[Ê
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈØ[[™Ê
+HÈš]˜]HYˆ˜[YJ
+Nˆ[HÎÈš]˜]H˜[™\İ[ˆ[H˜[YJ
+HH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹Ø[[™ÈŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]Û\Ü×İ™YHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJÛ\ÜÊJK[—ÜÛÛYJ
+™YK›ÙJJBˆJBˆ[Ü˜\
+
+BˆŒÂˆ]™YRÚ[™•\QYŠYš[š][ÛŠHH	˜\İ™Ù]
+Û\Ü×İ™YJKšÚ[™[ÙHÂˆ[šXÈJØ[[™ÈÛİ\˜ÙHXÛ\˜][ÛˆÚİ[™HH\QYˆŠNÂˆNÂˆ]™YRÚ[™•[\]J[\]JHH	˜\İ™Ù]
+Yš[š][Û‹œšÊKšÚ[™[ÙHÂˆ[šXÈJØ[[™ÈXÛ\˜][ÛˆÚİ[]™HH[\]HŠNÂˆNÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]ÛÛœİXİÜ—Ü[ˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ™XÎ›™]Ê
+Kˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂˆ]
+šY[šÊHH[\]Bˆ˜›ÙBˆš]\Š
+Bˆ™š[™ÛX\
+™Y_Âˆ]™YRÚ[™•˜[YŠYš[š][ÛŠHH	˜\İ™Ù]
+
+™YJKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆÛÛYJ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJOËYš[š][Û‹œšÏÊJBˆJBˆ[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ]\YÜšÈH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJ\\‹œÛİ\˜ÙWİ\YÚ[™^
+
+K™Ù]
+Ûİ\˜ÙKšÊKÛÛYJ\YÜšÊJNÂ‚ˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ\YÜšÊKˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠˆÛÛœİXİÜ—Ü[‹ˆ
+KˆWKˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ[š]›İÙ\—ØÛÛœİXİÜ—ÙšY[Ú[š]X[^™\œÊÛ\ÜËYš[š][ÛœÊKˆ\œŠİyßŞ¶¶‰ËkºwµçH]]\ÈHZ[\‹™[˜ÛÙJ
+K[Ü˜\
+
+NÂˆ]]]™XY\ˆH™XY\›™]Ê	˜]\ÊNÂˆ]Û\Ü×Ùš[HBˆİWØÛ\ÜÙš[N˜Û\Ü×Ùš[NÛ\ÜÑš[N™XÛÙJ	›]]™XY\ŠK[Ü˜\
+
+NÂˆ]ÛÙHHÛ\Ü×Ùš[K›Y]ÙÖÌBˆ˜]šX]\Âˆš]\Š
+Bˆ™š[™ÛX\
+]šX]_X]Ú]šX]HÂˆİWØÛ\ÜÙš[N˜]šX]N]šX]NÛÙJÛÙJHOˆÂˆÛÛYJÛÙK˜ÛÙK×İ™XÊ
+JBˆBˆÈOˆ›Û™KˆJBˆ[Ü˜\
+
+NÂˆ]šY[Ü™YˆHÛÙBˆš]\Š
+BˆœÜÚ][ÛŠÜÛÙ_
+›ÜÛÙHOHJBˆ›X\
+]šY[Âˆ][™^HLM™œ›ÛWØ™WØ]\ÊØÛÙVÜ]šY[
+ÈWKÛÙVÜ]šY[
+È—WJNÂˆ]İWØÛ\ÜÙš[N˜ÛÛœİ[ÜÛÛÛÛœİ[ÛÛ[N‘šY[™YˆÂˆÛ\Ü×Ú[™^ˆ˜[YWØ[™İ\WÚ[™^ˆHHÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ™Ù]
+İWØÛ\ÜÙš[N˜ÛÛœİ[ÜÛÛÛÛœİ[ÛÛ[™^
+[™^
+JBˆ[Ü˜\
+
+Bˆ[ÙHÂˆ[šXÈJœ]šY[]\İ™Y™\™[˜ÙHšY[™YˆŠNÂˆNÂˆ]
+šY[\ØÜš\ÜŠHHÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ›˜[YWØ[™İ\J
+›˜[YWØ[™İ\WÚ[™^
+Bˆ[Ü˜\
+
+NÂˆ
+ˆÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ˜Û\Ü×Û˜[YJ
+˜Û\Ü×Ú[™^
+Bˆ[Ü˜\
+
+Bˆ×ÛİÛ™Y
+
+KˆšY[×ÛİÛ™Y
+
+Kˆ\ØÜš\Ü‹×ÛİÛ™Y
+
+Kˆ
+BˆJNÂˆ
+ÛÙKšY[Ü™Y‹]\ÊBˆNÂ‚ˆ›Üˆ
+˜[YK\ØÜš\Ü‹šY[šY[Ù\ØÜš\ÜŠH[ˆÂˆ
+œÙ]‹ŠJUˆ‹˜İ\œ™[‹’HŠKˆ
+œÙ][œ]X[YšYY‹ŠJUˆ‹˜İ\œ™[‹’HŠKˆ
+œÙ]Xİ]™H‹ŠŠUˆ‹˜Xİ]™H‹–ˆŠKˆHÂˆ]
+ÛÙKšY[Ü™Y‹ÊHH[˜ÛÙWØ›ÙJ˜[YK\ØÜš\ÜŠNÂˆ\ÜÙ\Ù\HJˆÛÙVÌK˜Kˆ˜[ØYÌ]˜[X]\ÈH™XÙZ]™\ˆš\œİ›ÜˆÛ˜[Y_H‚ˆ
+NÂˆ]š×ÛØYHÛÙBˆš]\Š
+BˆœÜÚ][ÛŠÜÛÙ_
+›ÜÛÙHOHXŠBˆ™^Xİ
+œ\˜[Y]\ˆ\ÈØYY›ÜˆH’ÈŠNÂˆ]™XÙZ]™\—Ü™[ØYHÛÙBˆš]\Š
+BˆœœÜÚ][ÛŠÜÛÙ_
+›ÜÛÙHOH˜ÊBˆ™^Xİ
+œØ]™Y™XÙZ]™\ˆ\È™[ØYYY\ˆH’ÈŠNÂˆ\ÜÙ\Jˆš×ÛØY™XÙZ]™\—Ü™[ØYˆ”’È›ÛİÜÈ™XÙZ]™\ˆ›ÜˆÛ˜[Y_H‚ˆ
+NÂˆ]]šY[HÛÙKš]\Š
+KœÜÚ][ÛŠÜÛÙ_
+›ÜÛÙHOHJK[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJÛÙKš]\Š
+K™š[\ŠÜÛÙ_
+Š›ÜÛÙHOHJK˜Ûİ[
+
+KJNÂˆ\ÜÙ\JXÛÙK˜ÛÛZ[œÊ	Œ
+K“È\È›İ]˜[X]Y\ÈH™XYŠNÂˆ\ÜÙ\Ù\HJÛÙVÜ]šY[
+È×KŒK•[š]™]\›ˆ›ÜˆÛ˜[Y_HŠNÂˆ\ÜÙ\Ù\HJˆšY[Ü™Y‹ˆÛÛYJ
+ˆ”İ]H‹×ÛİÛ™Y
+
+KˆšY[×ÛİÛ™Y
+
+KˆšY[Ù\ØÜš\Ü‹×ÛİÛ™Y
+
+Bˆ
+JBˆ
+NÂˆB‚ˆ]
+[˜Ü™[Y[ØÛÙK[˜Ü™[Y[ÙšY[ÊHH[˜ÛÙWØ›ÙJš[˜Ü™[Y[‹Š
+UˆŠNÂˆ\ÜÙ\Ù\HJ[˜Ü™[Y[ØÛÙVÌK˜K™šY[™XÙZ]™\ˆ\ÈØYYš\œİŠNÂˆ\ÜÙ\Jˆ[˜Ü™[Y[ØÛÙK˜ÛÛZ[œÊ	Œ
+Kˆ”’È™XYÈHİ\œ™[šY[‚ˆ
+NÂˆ\ÜÙ\Jˆ[˜Ü™[Y[ØÛÙK˜ÛÛZ[œÊ	ŒŒ
+Kˆ”’ÈYÈÛ™H™Y›Ü™HİÜš[™È‚ˆ
+NÂˆ\ÜÙ\Jˆ[˜Ü™[Y[ØÛÙK˜ÛÛZ[œÊ	ŒJKˆ˜ÛÛ\ÜÚ]H\ÜÚYÛ›Y[İÜ™\ÈÛ˜ÙH‚ˆ
+NÂˆ\ÜÙ\Ù\HJˆ[˜Ü™[Y[ØÛÙBˆš]\Š
+Bˆ™š[\ŠÜÛÙ_
+Š›ÜÛÙHOHJBˆ˜Ûİ[
+
+KˆBˆ
+NÂˆ\ÜÙ\Ù\HJˆ[˜Ü™[Y[ÙšY[ˆÛÛYJ
+”İ]H‹×ÛİÛ™Y
+
+K˜İ\œ™[‹×ÛİÛ™Y
+
+K’H‹×ÛİÛ™Y
+
+JJBˆ
+NÂ‚ˆ]
+ØØ[ØÛÙKØØ[ÙšY[ÊHH[˜ÛÙWØ›ÙJ›ØØ[ÚYİÈ‹Š
+UˆŠNÂˆ\ÜÙ\J[ØØ[ØÛÙK˜ÛÛZ[œÊ	ŒJKœÚYİÚ[™ÈØØ[\Ù\È\İÜ™HŠNÂˆ\ÜÙ\Jˆ[ØØ[ØÛÙK˜ÛÛZ[œÊ	Œ
+KˆœÚYİÚ[™ÈØØ[Ù\È›İ™XYšY[‚ˆ
+NÂˆ\ÜÙ\JØØ[ØÛÙK˜ÛÛZ[œÊ	ŒØÊK›ØØ[˜\ˆİÜ™\ÈÈ]ÈÛİŠNÂˆ\ÜÙ\JØØ[ÙšY[š\×Û›Û™J
+JNÂ‚ˆ]
+İÜØÛÙKİÜÙšY[ÊHH[˜ÛÙWØ›ÙJœİÜ‹Š
+UˆŠNÂˆ\ÜÙ\JİÜØÛÙK˜ÛÛZ[œÊ	ŒŒJK›ØØ[™]\›ˆ\È[˜ÛÙYŠNÂˆ\ÜÙ\J\İÜØÛÙK˜ÛÛZ[œÊ	ŒJK™]™\™Ú[™È’ÈÙ\È›İİÜ™HŠNÂˆ\ÜÙ\JİÜÙšY[š\×Û›Û™J
+JNÂ‚ˆYˆ™\]Z\™WÚ™ÌŒWÛÜ—ÜÚÚ\
+
+HÂˆ›Üˆ
+˜[YK\ØÜš\Ü‹\›™\Ü×Ø›ÙJH[ˆÂˆ
+ˆœÙ]‹ˆŠJUˆ‹ˆœİ]KœÙ]
+JNÈ˜]˜K›[™Ëœ™Y›Xİ‘šY[šY[Hİ]K˜Û\ÜË™Ù]XÛ\™YšY[
+˜İ\œ™[ŠNÈšY[œÙ]XØÙ\ÜÚX›JYJNÈYˆ
+šY[™Ù][
+İ]JHOHJH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ’[]šY[ŠNÈ‹ˆ
+Kˆ
+ˆœÙ]Xİ]™H‹ˆŠŠUˆ‹ˆœİ]KœÙ]Xİ]™JYJNÈ˜]˜K›[™Ëœ™Y›Xİ‘šY[šY[Hİ]K˜Û\ÜË™Ù]XÛ\™YšY[
+˜Xİ]™WŠNÈšY[œÙ]XØÙ\ÜÚX›JYJNÈYˆ
+YšY[™Ù]›ÛÛX[Šİ]JJH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ›ÛÛX[ˆ]šY[ŠNÈ‹ˆ
+Kˆ
+ˆš[˜Ü™[Y[‹ˆŠ
+Uˆ‹ˆœİ]Kš[˜Ü™[Y[
+
+NÈ˜]˜K›[™Ëœ™Y›Xİ‘šY[šY[Hİ]K˜Û\ÜË™Ù]XÛ\™YšY[
+˜İ\œ™[ŠNÈšY[œÙ]XØÙ\ÜÚX›JYJNÈYˆ
+šY[™Ù][
+İ]JHOHJH›İÈ™]È\ÜÙ\[Û‘\œ›ÜŠ˜ÛÛ\İ[™]šY[ŠNÈ‹ˆ
+KˆHÂˆ]
+ËËÛ\Ü×Ø]\ÊHH[˜ÛÙWØ›ÙJ˜[YK\ØÜš\ÜŠNÂˆ]›Û˜ÙHHŞ\İ[U[YN››İÊ
+Bˆ™\˜][Û—ÜÚ[˜ÙJS’VÑTĞÒ
+Bˆ[Ü˜\
+
+Bˆ˜\×Û˜[›ÜÊ
+NÂˆ]İ]]Hİ™[[\Ù\Š
+Kš›Ú[Š›Ü›X]Jˆ™İKZ›KYšY[]Üš]K^ßK^Û›Û˜Ù_H‹ˆİœ›ØÙ\ÜÎšY
+
+Bˆ
+JNÂˆœÎ˜Ü™X]WÙ\—Ø[
+	›İ]]
+K[Ü˜\
+
+NÂˆœÎÜš]Jİ]]š›Ú[Š”İ]K˜Û\ÜÈŠKÛ\Ü×Ø]\ÊK[Ü˜\
+
+NÂˆ]\›™\ÜÈHİ]]š›Ú[Š•Üš]R\›™\ÜËš˜]˜HŠNÂˆœÎÜš]Jˆ	š\›™\ÜËˆ›Ü›X]JˆœX›XÈš[˜[Û\ÜÈÜš]R\›™\ÜÈŞÈX›XÈİ]XÈ›ÚYXZ[Šİš[™Ö×H\™ÜÊH›İÜÈ^Ù\[ÛˆŞÈİ]Hİ]HH™]Èİ]J
+NÈÚ\›™\Ü×Ø›Ù_H_H_Wˆ‚ˆ
+Kˆ
+Bˆ[Ü˜\
+
+NÂˆ]˜]˜XÈHÛÛ[X[™›™]Êš˜]˜XÈŠBˆ˜\™ÜÊÈ‹XÛ\ÜÜ]‹İ]]×ÜİŠ
+K[Ü˜\
+
+K‹Y—JBˆ˜\™Êİ]]×ÜİŠ
+K[Ü˜\
+
+JBˆ˜\™Ê	š\›™\ÜÊBˆ›İ]]
+
+Bˆ[Ü˜\
+
+NÂˆ\ÜÙ\Jˆ˜]˜XËœİ]\ËœİXØÙ\ÜÊ
+Kˆš˜]˜XÈ™Z™XİYÛ˜[Y_H\›™\Ü×œİİ]—ßWœİ\œ—ßH‹ˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜XËœİİ]
+Kˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜XËœİ\œŠBˆ
+NÂˆ]˜]˜HHÛÛ[X[™›™]Êš˜]˜HŠBˆ˜\™ÜÊÂˆ‹V™\šYN˜[‹ˆ‹XÛ\ÜÜ]‹ˆİ]]×ÜİŠ
+K[Ü˜\
+
+Kˆ•Üš]R\›™\ÜÈ‹ˆJBˆ›İ]]
+
+Bˆ[Ü˜\
+
+NÂˆ\ÜÙ\Jˆ˜]˜Kœİ]\ËœİXØÙ\ÜÊ
+Kˆš˜]˜HV™\šYN˜[™Z™XİYÛ˜[Y_Wœİİ]—ßWœİ\œ—ßH‹ˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜Kœİİ]
+Kˆİš[™Î™œ›ÛWİ]ÛÜÜŞJ	š˜]˜Kœİ\œŠBˆ
+NÂˆœÎœ™[[İ™WÙ\—Ø[
+İ]]
+K[Ü˜\
+
+NÂˆBˆB‚ˆ]
+Ëœ˜[˜ÚÛY]ÙÊHH\YØ›ÙJ˜œ˜[˜ÚŠNÂˆ]œ˜[˜ÚØÛÙHH[š]ˆ›İÙ\—ÛY]ÙØ›ÙJÛ\ÜËœ˜[˜ÚÛY]ÙYš[š][ÛœÊBˆ™^Xİ
+˜İ\œ™[Z[œİ[˜ÙHšY[Üš]\È\™Hİ\ÜY[ˆœ˜[˜Ú\ÈŠNÂˆ\ÜÙ\J›Ü›X]JØœ˜[˜ÚØÛÙNßHŠK˜ÛÛZ[œÊ›Ü\˜][Ûˆ]ŠJNÂ‚ˆ]
+ËÛÜÛY]ÙÊHH\YØ›ÙJ›ÛÜŠNÂˆ]ÛÜØÛÙHH[š]ˆ›İÙ\—ÛY]ÙØ›ÙJÛ\ÜËÛÜÛY]ÙYš[š][ÛœÊBˆ™^Xİ
+˜İ\œ™[Z[œİ[˜ÙHšY[Üš]\È\™Hİ\ÜY[ˆÛÜÈŠNÂˆ\ÜÙ\J›Ü›X]JÛÛÜØÛÙNßHŠK˜ÛÛZ[œÊ›Ü\˜][Ûˆ]ŠJNÂ‚ˆ]
+ËÙ]\—ÛY]ÙÊHH\YØ›ÙJœÙ][œ]X[YšYYŠNÂˆ]]]›×ÙšY[ÈH[š]˜Û\ÜÙ\ÖÌK˜ÛÛ™J
+NÂˆ›×ÙšY[Ë™šY[Ë˜ÛX\Š
+NÂˆ][œ[›™YH›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÛ›×ÙšY[×KˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ[œ[›™Y›İÙ\—ÛY]ÙØ›ÙJÛ\ÜËÙ]\—ÛY]ÙYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü‘šY[›İ[’›T[ˆÈšY[‹ˆJBˆYˆšY[OHšY[ÖÌK™šY[ˆ
+JNÂ‚ˆ]]]^\›˜[ÛY]ÙÜ[ˆH[š]˜Û\ÜÙ\ÖÌK›Y]ÙÖÌWK˜ÛÛ™J
+NÂˆ^\›˜[ÛY]ÙÜ[‹˜›ÙHHÛÛYJ^\›˜[Ø›ÙJNÂˆ]]]^\›˜[ØÛ\Ü×Ü[ˆH[š]˜Û\ÜÙ\ÖÌK˜ÛÛ™J
+NÂˆ^\›˜[ØÛ\Ü×Ü[‹›Y]ÙÈH™XÈVÙ^\›˜[ÛY]ÙÜ[—NÂˆ]^\›˜[H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÙ^\›˜[ØÛ\Ü×Ü[—KˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ^\›˜[›İÙ\—ÛY]ÙØ›ÙJÛ\ÜËÙ]\—ÛY]ÙYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›QšY[™XÙZ]™\ˆÈšY[‹ˆJBˆYˆšY[OHšY[ÖÌK™šY[ˆ
+JNÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆšY[Ü™XY×Ù›Ûİ×ØØ[›ÛšXØ[Øš[™[™Ü×Ú[—ØÛÛ›ÛÙ›İ×Ø[™Ù˜Z[ØÛÜÙYÙ[Ù]Ú\™J
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈİ\œ™[Èš]˜]H˜[İ\œ™[ˆ[HNÈš]˜]H˜[Y[ˆ[HÈš]˜]H˜[›YÎˆ›ÛÛX[ˆHYNÈYˆÙ]
+
+Nˆ[Hİ\œ™[ÈYˆÚYİÊİ\œ™[ˆ[
+Nˆ[Hİ\œ™[ÈYˆœ˜[˜Ú
+›YÎˆ›ÛÛX[ŠNˆ[HYˆ
+›YÊHİ\œ™[[ÙHÈYˆÚÜÚ\˜İZ]
+
+Nˆ›ÛÛX[ˆH\Ë™›YÈ	‰ˆYNÈYˆÛÛ\\™Y
+
+Nˆ›ÛÛX[ˆH\Ë˜İ\œ™[ÎÈYˆÙ[Xİ
+İ\ˆİ\œ™[
+Nˆ[Hİ\‹˜İ\œ™[ÈYˆ™XYY[Š
+Nˆ[HY[ˆW˜Û\ÜÈİ\ˆÈš]˜]H˜[›Ü™ZYÛˆ[HNÈYˆ™XY
+
+Nˆ[H\Ë™›Ü™ZYÛˆH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹İ\œ™[ŠNÂˆ]İ\—ØÛ\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹“İ\ˆŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+İ\—ØÛ\ÜÊK[Ü˜\
+
+NÂ‚ˆ]]]šY[ÈH™XÎ›™]Ê
+NÂˆ›Üˆ˜[YH[ˆÈ˜İ\œ™[‹šY[ˆ‹™›YÈ‹™›Ü™ZYÛˆ—HÂˆ]
+šY[ËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹˜[YJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆšY[Ëœ\Ú
+›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ[š]X[^™\ŠKˆJNÂˆB‚ˆ]]]Y]ÙÈH™XÎ›™]Ê
+NÂˆ›Üˆ
+İÛ™\‹˜[YJH[ˆÂˆ
+Û\ÜË™Ù]ŠKˆ
+Û\ÜËœÚYİÈŠKˆ
+Û\ÜË˜œ˜[˜ÚŠKˆ
+Û\ÜËœÚÜÚ\˜İZ]ŠKˆ
+Û\ÜË˜ÛÛ\\™YŠKˆ
+Û\ÜËœÙ[XİŠKˆ
+Û\ÜËœ™XYY[ˆŠKˆ
+İ\—ØÛ\ÜËœ™XYŠKˆHÂˆ]
+Y]ÙšË\˜[Y]\œÊHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ]™YRÚ[™‘Y‘YŠYš[š][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆYˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™JYš[š][Û‹›˜[YK˜\×Û˜[YJ
+K^
+
+JBˆOH˜[YBˆÂˆ™]\›ˆ›Û™NÂˆBˆ]Y]ÙH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJOÎÂˆYˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù
+K›İÛ™\ˆOHÛÛYJİÛ™\ŠHÂˆ™]\›ˆ›Û™NÂˆBˆ]šÈHYš[š][Û‹œšÏÎÂˆ]\˜[Y]\œÈHYš[š][Û‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ›X\
+\˜[Y]\Ÿ[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+œ\˜[Y]\ŠJBˆ˜ÛÛXİÜ[Û™XÏÏŠ
+OÎÂˆÛÛYJ
+Y]ÙšË\˜[Y]\œÊJBˆJBˆ[Ü˜\ÛÜ—Ù[ÙJ[šXÈJ›Z\ÜÚ[™ÈÛİ\˜ÙHY]ÙÛ˜[Y_HŠJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Y]Ù
+K[Ü˜\
+
+NÂˆ]ÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠY]Ù
+K[Ü˜\
+
+NÂˆ]›ÙHH\\‹\WÙ^™\ÜÚ[ÛŠšËÛÛ^
+K[Ü˜\
+
+NÂˆY]ÙËœ\Ú
+
+˜[YKY]Ù›ÙK\˜[Y]\œÊJNÂˆB‚ˆ]Y]ÙH˜[YNˆ	œİŸÂˆY]ÙÂˆš]\Š
+Bˆ™š[™
+
+Ø[™Y]KËËÊ_
+˜Ø[™Y]HOH˜[YJBˆ[Ü˜\
+
+BˆNÂˆ][—Ù›ÜˆHY]ÙˆŞ[X›ÛY›ÙK\˜[Y]\œÎˆ™XÏŞ[X›ÛY‹[›™YÙšY[ßÂˆ›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÈVÒ›SY]Ù[ˆÂˆY]Ùˆ\˜[Y]\œËˆØØ[Îˆ™XÎ›™]Ê
+Kˆ›ÙNˆÛÛYJ›ÙJKˆWKˆšY[Îˆ[›™YÙšY[Ëˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆWKˆBˆNÂˆ]İ\œ™[ÙšY[HšY[Âˆš]\Š
+Bˆ™š[™
+šY[Âˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[™šY[
+K›˜[YK^
+
+JBˆOH˜İ\œ™[‚ˆJBˆ[Ü˜\
+
+NÂˆ]İ\œ™[Ü[ˆH™XÈVÊ˜İ\œ™[ÙšY[NÂˆ]İ\œ™[ÚYHİ\œ™[ÙšY[™šY[Âˆ]›Y×ÙšY[HšY[Âˆš]\Š
+Bˆ™š[™
+šY[Âˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[™šY[
+K›˜[YK^
+
+JBˆOH™›YÈ‚ˆJBˆ[Ü˜\
+
+NÂ‚ˆ]
+ËÚYİ×ÛY]ÙÚYİ×Ø›ÙKÚYİ×Ü\˜[Y]\œÊHHY]Ù
+œÚYİÈŠNÂˆ]ÚYİÈH[—Ù›ÜŠˆ
+œÚYİ×ÛY]Ùˆ
+œÚYİ×Ø›ÙKˆÚYİ×Ü\˜[Y]\œË˜ÛÛ™J
+Kˆİ\œ™[Ü[‹˜ÛÛ™J
+Kˆ
+NÂˆ]ÚYİ×ØÛÙHHÚYİÂˆ›İÙ\—ÛY]ÙØ›ÙJÛ\ÜË
+œÚYİ×ÛY]ÙYš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ\ÜÙ\J›Ü›X]JÜÚYİ×ØÛÙNßHŠK˜ÛÛZ[œÊ’SØYŠJNÂˆ\ÜÙ\JY›Ü›X]JÜÚYİ×ØÛÙNßHŠK˜ÛÛZ[œÊ‘Ù]šY[ŠJNÂ‚ˆ]
+Ëœ˜[˜ÚÛY]Ùœ˜[˜ÚØ›ÙKœ˜[˜ÚÜ\˜[Y]\œÊHHY]Ù
+˜œ˜[˜ÚŠNÂˆ]œ˜[˜ÚH[—Ù›ÜŠˆ
+˜œ˜[˜ÚÛY]Ùˆ
+˜œ˜[˜ÚØ›ÙKˆœ˜[˜ÚÜ\˜[Y]\œË˜ÛÛ™J
+Kˆİ\œ™[Ü[‹˜ÛÛ™J
+Kˆ
+NÂˆ]œ˜[˜ÚØÛÙHHœ˜[˜Úˆ›İÙ\—ÛY]ÙØ›ÙJÛ\ÜË
+˜œ˜[˜ÚÛY]ÙYš[š][ÛœÊBˆ™^Xİ
+œ[›™Yİ\œ™[Z[œİ[˜ÙHšY[™XYÈ\™Hİ\ÜY[ˆœ˜[˜Ú\ÈŠNÂˆ\ÜÙ\J›Ü›X]JØœ˜[˜ÚØÛÙNßHŠK˜ÛÛZ[œÊ›Ü\˜][ÛˆÙ]ŠJNÂ‚ˆ]
+ËÚÜØÚ\˜İZ]ÛY]ÙÚÜØÚ\˜İZ]Ø›ÙKÊHHY]Ù
+œÚÜÚ\˜İZ]ŠNÂˆ]ÚÜØÚ\˜İZ]H[—Ù›ÜŠˆ
+œÚÜØÚ\˜İZ]ÛY]Ùˆ
+œÚÜØÚ\˜İZ]Ø›ÙKˆ™XÎ›™]Ê
+Kˆ™XÈVÊ˜İ\œ™[ÙšY[
+™›Y×ÙšY[Kˆ
+NÂˆ]ÚÜØÚ\˜İZ]ØÛÙHHÚÜØÚ\˜İZ]ˆ›İÙ\—ÛY]ÙØ›ÙJÛ\ÜË
+œÚÜØÚ\˜İZ]ÛY]ÙYš[š][ÛœÊBˆ™^Xİ
+œ[›™Y›ÛÛX[ˆšY[™XYÈ\™Hİ\ÜY[ˆÚÜXÚ\˜İZ]›İÈŠNÂˆ\ÜÙ\J›Ü›X]JÜÚÜØÚ\˜İZ]ØÛÙNßHŠK˜ÛÛZ[œÊ›Ü\˜][ÛˆÙ]ŠJNÂ‚ˆ]
+ËÛÛ\\™YÛY]ÙÛÛ\\™YØ›ÙKÊHHY]Ù
+˜ÛÛ\\™YŠNÂˆ]ÛÛ\\™YH[—Ù›ÜŠˆ
+˜ÛÛ\\™YÛY]Ùˆ
+˜ÛÛ\\™YØ›ÙKˆ™XÎ›™]Ê
+Kˆİ\œ™[Ü[‹˜ÛÛ™J
+Kˆ
+NÂˆ]ÛÛ\\™YÜ™\İ[HÛÛ\\™Y›İÙ\—ÛY]ÙØ›ÙJÛ\ÜË
+˜ÛÛ\\™YÛY]ÙYš[š][ÛœÊNÂˆ]ÛÛ\\™YØÛÙHHÛÛ\\™YÜ™\İ[ˆ™^Xİ
+œ[›™YšY[™XYÈ\™Hİ\ÜY[ˆ™[][Û˜[ÛÛ™][ÛœÈŠNÂˆ\ÜÙ\J›Ü›X]JØÛÛ\\™YØÛÙNßHŠK˜ÛÛZ[œÊ›Ü\˜][ÛˆÙ]ŠJNÂ‚ˆ]
+ËÙ]ÛY]ÙËÊHHY]Ù
+™Ù]ŠNÂˆ]
+ËËÙ[XİØ›ÙKÊHHY]Ù
+œÙ[XİŠNÂˆ]İ\—Ü™XÙZ]™\ˆBˆ[—Ù›ÜŠ
+™Ù]ÛY]Ù
+œÙ[XİØ›ÙK™XÎ›™]Ê
+Kİ\œ™[Ü[‹˜ÛÛ™J
+JNÂˆ\ÜÙ\JX]Ú\ÈJˆİ\—Ü™XÙZ]™\‹›İÙ\—ÛY]ÙØ›ÙJÛ\ÜË
+™Ù]ÛY]ÙYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›QšY[™XÙZ]™\ˆÂˆšY[ˆ‹‚ˆJHYˆšY[OHİ\œ™[ÚYˆ
+JNÂˆ]
+ËËY[—Ø›ÙKÊHHY]Ù
+œ™XYY[ˆŠNÂˆ]Y[ˆH[—Ù›ÜŠ
+™Ù]ÛY]Ù
+šY[—Ø›ÙK™XÎ›™]Ê
+Kİ\œ™[Ü[‹˜ÛÛ™J
+JNÂˆ]Y[—ÙšY[HšY[Âˆš]\Š
+Bˆ™š[™
+šY[Âˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[™šY[
+K›˜[YK^
+
+JBˆOHšY[ˆ‚ˆJBˆ[Ü˜\
+
+Bˆ™šY[Âˆ\ÜÙ\JX]Ú\ÈJˆY[‹›İÙ\—ÛY]ÙØ›ÙJÛ\ÜË
+™Ù]ÛY]ÙYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü‘šY[›İ[’›T[ˆÂˆÛ\ÜÎˆXİX[ØÛ\ÜËˆšY[ˆ‹‚ˆJHYˆXİX[ØÛ\ÜÈOHÛ\ÜÈ	‰ˆšY[OHY[—ÙšY[ˆ
+JNÂˆ]
+ËË›Ü™ZYÛ—Ø›ÙKÊHHY]Ù
+œ™XYŠNÂˆ]Ü›Û™×ÛİÛ™\ˆH[—Ù›ÜŠ
+™Ù]ÛY]Ù
+™›Ü™ZYÛ—Ø›ÙK™XÎ›™]Ê
+Kİ\œ™[Ü[ŠNÂˆ]›Ü™ZYÛ—ÙšY[HšY[Âˆš]\Š
+Bˆ™š[™
+šY[Âˆ\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™J\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[™šY[
+K›˜[YK^
+
+JBˆOH™›Ü™ZYÛˆ‚ˆJBˆ[Ü˜\
+
+Bˆ™šY[Âˆ\ÜÙ\JX]Ú\ÈJˆÜ›Û™×ÛİÛ™\‹›İÙ\—ÛY]ÙØ›ÙJÛ\ÜË
+™Ù]ÛY]ÙYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•Ü›Û™ÓİÛ™\ˆÂˆŞ[X›Ûˆ^XİYˆXİX[ˆÛÛYJXİX[
+KˆJHYˆŞ[X›ÛOH›Ü™ZYÛ—ÙšY[	‰ˆ^XİYOHÛ\ÜÈ	‰ˆXİX[OHİ\—ØÛ\ÜÂˆ
+JNÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆšY[ÛY]Y]WÙ˜Z[×ØÛÜÙYÙ›Ü—Ú[˜[YØš[™[™Ü×İ\\×Ø[™Û[ÙYšY\œÊ
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈšY[ÈÈš]˜]H˜[ÙYYˆ[HÈš]˜]H˜\ˆ[˜X›Yˆ›ÛÛX[ˆHYNÈ˜[š\ÚX›Nˆ[HNÈš]˜]H^H˜[[^YYˆ[HˆW˜Û\ÜÈİ\ˆÈš]˜]H˜[›Ü™ZYÛˆ[HÈH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹‘šY[ÈŠNÂˆ]İ\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹“İ\ˆŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+İ\ŠK[Ü˜\
+
+NÂ‚ˆ]\YÙšY[H\\ˆ	›]]Ûİ\˜ÙU\\	×Ï‹˜[YNˆ	œİŸÂˆ]
+šY[ËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹˜[YJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ
+šY[[š]X[^™\ŠBˆNÂˆ]
+ÙYYÙYYÜšÊHH\YÙšY[
+\\‹œÙYYŠNÂˆ]
+Ù[˜X›Y[˜X›YÜšÊHH\YÙšY[
+\\‹™[˜X›YŠNÂˆ]
+š\ÚX›Kš\ÚX›WÜšÊHH\YÙšY[
+\\‹š\ÚX›HŠNÂˆ]
+[^YY[^YYÜšÊHH\YÙšY[
+\\‹™[^YYŠNÂˆ]
+›Ü™ZYÛ‹›Ü™ZYÛ—ÜšÊHH\YÙšY[
+\\‹™›Ü™ZYÛˆŠNÂˆ][ˆHšY[ß›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Ëˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆNÂˆ]Y]Y]HH[ˆ	’›PÛ\ÜÔ[ŸÂˆ[‹›Y]Y]WİÚ]İ\YØ\İ
+\\‹œİÜ™J
+K\\‹\YØ\İ
+
+KYš[š][ÛœÊBˆNÂ‚ˆ\ÜÙ\JX]Ú\ÈJˆY]Y]J	œ[Š™XÈVÒ›QšY[[ˆÂˆšY[ˆ›Ü™ZYÛ‹ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ›Ü™ZYÛ—ÜšÊKˆWJJKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•Ü›Û™ÓİÛ™\ˆÂˆŞ[X›Ûˆ^XİYˆXİX[ˆÛÛYJXİX[
+KˆJHYˆŞ[X›ÛOH›Ü™ZYÛˆ	‰ˆ^XİYOHÛ\ÜÈ	‰ˆXİX[OHİ\‚ˆ
+JNÂˆ\ÜÙ\Ù\HJˆY]Y]J	œ[Š™XÈVÂˆ›QšY[[ˆÂˆšY[ˆÙYYˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJÙYYÜšÊKˆNÂˆ‚ˆJJKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü‘\XØ]QšY[[ˆÈšY[ˆÙYYJBˆ
+NÂˆ\ÜÙ\Ù\HJˆY]Y]J	œ[Š™XÈVÒ›QšY[[ˆÂˆšY[ˆÙYYˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆ›Û™KˆWJJKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü“Z\ÜÚ[™ÑšY[[š]X[^™\ˆÈšY[ˆÙYYJBˆ
+NÂˆ\ÜÙ\Ù\HJˆY]Y]J	œ[Š™XÈVÒ›QšY[[ˆÂˆšY[ˆÙYYˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ[˜X›YÜšÊKˆWJJKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü‘šY[[š]X[^™\•\SZ\ÛX]ÚÂˆšY[ˆÙYYˆ[š]X[^™\ˆ[˜X›YÜšËˆ^XİYˆİWÚ›N’›U\N’[ˆ›İ[™ˆÛÛYJİWÚ›N’›U\N›ÛÛX[ŠKˆJBˆ
+NÂˆ\ÜÙ\Ù\HJˆY]Y]J	œ[Š™XÈVÒ›QšY[[ˆÂˆšY[ˆš\ÚX›KˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJš\ÚX›WÜšÊKˆWJJKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›Uš\ÚXš[]HÂˆŞ[X›Ûˆš\ÚX›Kˆš\ÚXš[]Nˆš\ÚXš[]N”X›XËˆJBˆ
+NÂˆ\ÜÙ\Ù\HJˆY]Y]J	œ[Š™XÈVÒ›QšY[[ˆÂˆšY[ˆ[^YYˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ[^YYÜšÊKˆWJJKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›QšY[›YÈÂˆšY[ˆ[^YYˆ›YÎˆİWÚ›N•[œİ\ÜY›QšY[›YÎ“^KˆJBˆ
+NÂˆKˆ
+NÂ‚ˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈZ\ÜÚ[™ÈÈš]˜]H˜[˜[YNˆ[HHH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹“Z\ÜÚ[™ÈŠNÂˆ]šY[HšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹˜[YHŠKŒÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆ›Û™KˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆWKˆNÂˆ\ÜÙ\Ù\HJˆ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü“Z\ÜÚ[™ÔÙ[X[XÒ[™›ÈÈŞ[X›ÛˆšY[JBˆ
+NÂˆKˆ
+NÂ‚ˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈ\XØ]HÈš]˜]H˜[˜[YNˆ[HNÈš]˜]H˜[˜[YNˆ›ÛÛX[ˆHYHH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹‘\XØ]HŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]]]šY[ÈH™XÎ›™]Ê
+NÂˆ›Üˆ™YH[ˆ\İˆš]\Š
+Bˆ™š[\—ÛX\
+
+™YK›ÙJ_X]Ú\ÈJ›ÙKšÚ[™™YRÚ[™•˜[YŠÊJK[—ÜÛÛYJ™YJJBˆÂˆ]ÛÛYJšY[
+HH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJH[ÙHÂˆÛÛ[YNÂˆNÂˆYˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+K›İÛ™\ˆOHÛÛYJÛ\ÜÊHÂˆÛÛ[YNÂˆBˆ]™YRÚ[™•˜[YŠYš[š][ÛŠHH	˜\İ™Ù]
+™YJKšÚ[™[ÙHÂˆ[œ™XXÚX›HJ
+NÂˆNÂˆ]šÈHYš[š][Û‹œšË[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆšY[Ëœ\Ú
+›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ[š]X[^™\ŠKˆJNÂˆBˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Ëˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆWKˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü‘\XØ]R›QšY[˜[YHÂˆÛ\ÜÎˆXİX[ØÛ\ÜËˆ˜[YKˆ‹‚ˆJHYˆXİX[ØÛ\ÜÈOHÛ\ÜÈ	‰ˆ˜[YHOH˜[YH‚ˆ
+JNÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆšY[ÛY]Y]WÛ™]™\—Ü™\ÛÛ™\×ØWÜÚYİÚ[™×ÛØØ[ØWÛ˜[YJ
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈÚYİÈÈš]˜]H˜[ÙYYˆ[HÈš]˜]HYˆ™XY
+
+Nˆ[HÈ˜[ÙYYHÎÈÙYYHH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹”ÚYİÈŠNÂˆ]šY[HšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹œÙYYŠKŒÂˆ]Y]ÙHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹œ™XYŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]
+šY[šY[ÜšÊHHÂˆ]
+ËËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹œÙYYŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ]\YH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ
+šY[\Y
+BˆNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Y]Ù
+K[Ü˜\
+
+NÂˆ]Y]ÙÜšÈH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ]™YRÚ[™‘Y‘YŠYš[š][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ
+[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJY]Ù
+JBˆ[—ÜÛÛYJYš[š][Û‹œšÊBˆ™›][Š
+BˆJBˆ[Ü˜\
+
+NÂˆ]ÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠY]Ù
+K[Ü˜\
+
+NÂˆ\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+Y]ÙÜšËÛÛ^Yš[š][ÛœËš[
+Bˆ[Ü˜\
+
+NÂˆ]ØØ[İ™YHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ]™YRÚ[™•˜[YŠYš[š][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ
+\\‚ˆœİÜ™J
+Bˆ›˜[Y\Âˆœ™\ÛÛ™JYš[š][Û‹›˜[YK˜\×Û˜[YJ
+K^
+
+JBˆOHœÙYY‚ˆ	‰ˆ[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJšY[
+JBˆ[—ÜÛÛYJ™YJBˆJBˆ[Ü˜\
+
+NÂˆ]ØØ[H\\‚ˆ\YÛØØ[Øš[™[™×Ø]
+Ûİ\˜ÙKØØ[İ™YJBˆ™^Xİ
+HÚYİÚ[™ÈØØ[Úİ[]™HH\Yš[™[™ÈŠNÂ‚ˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆØØ[œŞ[X›Û
+
+KˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJšY[ÜšÊKˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆWKˆNÂˆ\ÜÙ\Ù\HJˆ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜYŞ[X›ÛÚ[™ÂˆŞ[X›ÛˆØØ[œŞ[X›Û
+
+Kˆ^XİYˆİWÚ›N”Ş[X›Û›ÛN‘šY[ˆ›İ[™ˆŞ[X›ÛÚ[™“ØØ[ˆJBˆ
+NÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆšY[ÛY]Y]WÜ›Ú™Xİ×Üš]˜]WÜ™Y™\™[˜ÙWÙšY[×Ùœ›ÛWİWÙ[İ[š]
+
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈÛİ[\ˆßW˜Û\ÜÈÛ\Š[š]X[ˆÛİ[\ŠHÈš]˜]H˜[ÜšYÚ[˜[ˆÛİ[\ˆH[š]X[Èš]˜]H˜\ˆİ\œ™[ˆÛİ[\ˆH[š]X[È˜[^ÜÙYˆÛİ[\ˆH[š]X[H‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Ûİ[\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹Ûİ[\ˆŠNÂˆ]Û\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹’Û\ˆŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Ûİ[\ŠK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ŠK[Ü˜\
+
+NÂ‚ˆ]]]šY[ÈH™XÎ›™]Ê
+NÂˆ›Üˆ˜[YH[ˆÈ›ÜšYÚ[˜[‹˜İ\œ™[—HÂˆ]
+šY[ËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹˜[YJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆšY[Ëœ\Ú
+›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ[š]X[^™\ŠKˆJNÂˆBˆ]
+šY[XÛ\˜][Û‹šÊHBˆšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹™^ÜÙYŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™^ÜÙYšY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ]›ÛÙˆH›TX›XĞ›ÙQšY[Ûİ\˜ÙT›ÛÙ™œ›ÛWÜÛİ\˜ÙJˆÛ\‹ˆšY[ˆÛİ\˜ÙKˆXÛ\˜][Û‹ˆ[š]X[^™\‹ˆ\İˆ[™^ˆ\\‹œÛİ\˜ÙWİ\YÚ[™^
+
+Kˆ\\‹\YØ\İ
+
+Kˆ\\‹œİÜ™J
+Kˆ
+Bˆ[Ü˜\
+
+NÂˆšY[Ëœ\Ú
+›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”X›XÊ›ÛÙŠKˆ[š]X[^™\ˆÛÛYJ[š]X[^™\ŠKˆJNÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÂˆ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛİ[\‹ˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆKˆ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛ\‹ˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Ëˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆKˆKˆNÂˆ]Y]Y]HH[š]›Y]Y]JYš[š][ÛœÊK[Ü˜\
+
+NÂˆ]šY[ÈHY]Y]VÌWK™šY[Ê
+NÂˆ]Ûİ[\—Ù\ØÜš\ÜˆH›Ü›X]J“ßNÈ‹Y]Y]VÌKšY[]J
+Kš[\›˜[Û˜[YJ
+JNÂˆ\ÜÙ\Ù\HJšY[Ë›[Š
+KŠNÂˆ\ÜÙ\Ù\HJšY[ÖÌK›˜[YJ
+K›ÜšYÚ[˜[ŠNÂˆ\ÜÙ\Ù\HJšY[ÖÌK™\ØÜš\ÜŠ
+KÛİ[\—Ù\ØÜš\ÜŠNÂˆ\ÜÙ\Ù\HJˆšY[ÖÌK˜[YWİ\J
+KˆİWÚ›N’›U\N”™Y™\™[˜ÙJÛİ[\ŠBˆ
+NÂˆ\ÜÙ\JšY[ÖÌK˜XØÙ\Ü×Ù›YÜÊ
+Kš\×Üš]˜]J
+JNÂˆ\ÜÙ\JšY[ÖÌK˜XØÙ\Ü×Ù›YÜÊ
+Kš\×Ùš[˜[
+
+JNÂˆ\ÜÙ\Ù\HJšY[ÖÌWK›˜[YJ
+K˜İ\œ™[ŠNÂˆ\ÜÙ\Ù\HJšY[ÖÌWK™\ØÜš\ÜŠ
+KÛİ[\—Ù\ØÜš\ÜŠNÂˆ\ÜÙ\Ù\HJˆšY[ÖÌWK˜[YWİ\J
+KˆİWÚ›N’›U\N”™Y™\™[˜ÙJÛİ[\ŠBˆ
+NÂˆ\ÜÙ\JšY[ÖÌWK˜XØÙ\Ü×Ù›YÜÊ
+Kš\×Üš]˜]J
+JNÂˆ\ÜÙ\JYšY[ÖÌWK˜XØÙ\Ü×Ù›YÜÊ
+Kš\×Ùš[˜[
+
+JNÂˆ\ÜÙ\Ù\HJY]Y]VÌWK™šY[Ê
+K›[Š
+KŠNÂˆ]Ù^ÜÙYHHY]Y]VÌWK˜XØÙ\ÜÛÜœÊ
+H[ÙHÂˆ[šXÈJœX›XÈ™Y™\™[˜ÙHšY[Úİ[\ÙHXØÙ\ÜÛÜˆY]Y]HŠNÂˆNÂˆ\ÜÙ\Ù\HJ^ÜÙYœÛİ\˜ÙWÙšY[
+
+KšY[
+NÂˆ\ÜÙ\Ù\HJ^ÜÙY™šY[Ù\ØÜš\ÜŠ
+KÛİ[\—Ù\ØÜš\ÜŠNÂˆ\ÜÙ\Ù\HJ^ÜÙY˜[YWİ\J
+KİWÚ›N’›U\N”™Y™\™[˜ÙJÛİ[\ŠJNÂˆ\ÜÙ\JX]Ú\ÈJˆ^ÜÙY›ÜšYÚ[Š
+KˆİWÚ›N’›PXØÙ\ÜÛÜ“ÜšYÚ[Û\ÜĞ›ÙQšY[
+›ÛÙŠBˆYˆ›ÛÙ‹š[š]X[^™\Š
+HOH[š]X[^™\‚ˆ
+JNÂ‚ˆ]İ[™[Û™HBˆ[š]˜Û\ÜÙ\ÖÌWK›Y]Y]WİÚ]İ\YØ\İ
+[š]œİÜ™K[š]\YØ\İYš[š][ÛœÊNÂˆ\ÜÙ\JX]Ú\ÈJˆİ[™[Û™Kˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›U\HÂˆÚ[™ˆİWÚ›N•[œİ\ÜY›U\RÚ[™”™Y™\™[˜ÙPÛ\ÜËˆ‹‚ˆJBˆ
+JNÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆšY[ÛY]Y]WÜ™Z™Xİ×ØWÜ™Y™\™[˜ÙWÚY[YšY\—İÚ]İ]ØWÜ\˜[Y]\—İ\›WÜ™YŠ
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈÛİ[\ˆßW˜Û\ÜÈÛ\Š[š]X[ˆÛİ[\ŠHÈš]˜]H˜[][NˆÛİ[\ˆH[š]X[H‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Ûİ[\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹Ûİ[\ˆŠNÂˆ]Û\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹’Û\ˆŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Ûİ[\ŠK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ŠK[Ü˜\
+
+NÂˆ]
+šY[ËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹š][HŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂ‚ˆ]]]X[›Ü›YYØ\İHİWØÛÜ™N˜\İ•\Y\İ›™]Ê
+NÂˆ]]]X[›Ü›YYÚ[š]X[^™\—İ™YHH\\‹\YØ\İ
+
+K™Ù]
+[š]X[^™\ŠK˜ÛÛ™J
+NÂˆX[›Ü›YYÚ[š]X[^™\—İ™YKHHšY[İ\NÂˆ]X[›Ü›YYÚ[š]X[^™\ˆHX[›Ü›YYØ\İ˜[ØÊX[›Ü›YYÚ[š]X[^™\—İ™YJNÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ	›X[›Ü›YYØ\İˆÛ\ÜÙ\Îˆ™XÈVÂˆ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛİ[\‹ˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆKˆ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛ\‹ˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJX[›Ü›YYÚ[š]X[^™\ŠKˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆKˆKˆNÂˆ\ÜÙ\Ù\HJˆ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠˆİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›T™Y™\™[˜ÙQšY[[š]X[^™\ˆÂˆšY[ˆ[š]X[^™\ˆX[›Ü›YYÚ[š]X[^™\‹ˆŞ[X›Ûˆ›Û™KˆBˆ
+Bˆ
+NÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆšY[ÛY]Y]WÜ™Z™Xİ×Ü™Y™\™[˜ÙWÙšY[×Ûİ]ÚYWİWİ[š]Ø[™ÜÙ[—Ú[š]X[^˜][ÛŠ
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈİ]ÚYHßW˜Û\ÜÈÛ\Š[š]X[ˆİ]ÚYJHÈš]˜]H˜[][Nˆİ]ÚYHH[š]X[H‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]İ]ÚYHHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹“İ]ÚYHŠNÂˆ]Û\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹’Û\ˆŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+İ]ÚYJK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ŠK[Ü˜\
+
+NÂˆ]
+šY[ËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹š][HŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛ\‹ˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ[š]X[^™\ŠKˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆWKˆNÂˆ\ÜÙ\Ù\HJˆ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü”™Y™\™[˜ÙPÛ\ÜÓ›İ[’›T[ˆÈÛ\ÜÎˆİ]ÚYHJBˆ
+NÂˆKˆ
+NÂ‚ˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈ™Y™\™[˜Ù\ÈÈš]˜]H˜[Ù[ˆ™Y™\™[˜Ù\ÈH\ÈH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹”™Y™\™[˜Ù\ÈŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ]
+šY[ËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹œÙ[ˆŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJ[š]X[^™\ŠKˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆWKˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›T™Y™\™[˜ÙU\HÂˆÚ[™ˆİWÚ›N•[œİ\ÜY›T™Y™\™[˜ÙU\RÚ[™“›İØ[›ÛšXØ[\T™Y‹ˆ‹‚ˆJBˆ
+JNÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆšY[ÛY]Y]WÜ™Z™Xİ×ØWÜ™Y™\™[˜ÙWÚ[š]X[^™\—İÚ]Ø[›İ\—ØÛ\Ü×ÚY[]J
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈÛİ[\ˆßW˜Û\ÜÈİ\ˆßW˜Û\ÜÈÛ\ŠÛİ[\ˆÛİ[\‹İ\ˆİ\ŠHÈš]˜]H˜[š\œİˆÛİ[\ˆHÛİ[\Èš]˜]H˜[ÙXÛÛ™ˆİ\ˆHİ\ˆH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Ûİ[\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹Ûİ[\ˆŠNÂˆ]İ\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹“İ\ˆŠNÂˆ]Û\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹’Û\ˆŠNÂˆ›ÜˆÛ\ÜÈ[ˆØÛİ[\‹İ\‹Û\—HÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆBˆ]
+Ûİ[\—ÙšY[ËÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹™š\œİŠNÂˆ]
+İ\—ÙšY[Ëİ\—ÜšÊHBˆšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹œÙXÛÛ™ŠNÂˆ›ÜˆšY[[ˆØÛİ[\—ÙšY[İ\—ÙšY[HÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆBˆ]Ş[X›Û[™›ÎÛÛ\]Jİ\—İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+İ\—ÙšY[
+Kš[™›Âˆ[ÙHÂˆ[šXÈJ“İ\ˆšY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]İ\—ØÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠİ\—ÙšY[
+K[Ü˜\
+
+NÂˆ]İ\—Ú[š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+İ\—ÜšËİ\—ØÛÛ^İ\—İ\JBˆ[Ü˜\
+
+NÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\ÎˆØÛİ[\‹İ\‹Û\—Bˆš[×Ú]\Š
+Bˆ›X\
+Û\Üß›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[ÎˆYˆÛ\ÜÈOHÛ\ˆÂˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ[\—ÙšY[ˆÛİ\˜ÙWİš\ÚXš[]N‚ˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”Z[”š]˜]Kˆ[š]X[^™\ˆÛÛYJİ\—Ú[š]X[^™\ŠKˆWBˆH[ÙHÂˆ™XÎ›™]Ê
+BˆKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆJBˆ˜ÛÛXİ
+
+KˆNÂˆ\ÜÙ\Ù\HJˆ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü‘šY[[š]X[^™\•\SZ\ÛX]ÚÂˆšY[ˆÛİ[\—ÙšY[ˆ[š]X[^™\ˆİ\—Ú[š]X[^™\‹ˆ^XİYˆİWÚ›N’›U\N”™Y™\™[˜ÙJÛİ[\ŠKˆ›İ[™ˆÛÛYJİWÚ›N’›U\N”™Y™\™[˜ÙJİ\ŠJKˆJBˆ
+NÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆšY[ÛY]Y]WÙ\İ[™İZ\Ú\×Üš]˜]Wİ\×Ùœ›ÛWÜZ[—Üš]˜]J
+HÂˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈØš™Xİš]˜]HÈš]˜]Vİ\×H˜[˜[YNˆ[HHH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹“Øš™Xİš]˜]HŠNÂˆ]
+šY[ËšÊHHšY[İ™YWØ[™ÜšÊ\İ[™^Ûİ\˜ÙK\\‹˜[YHŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+šY[
+K[Ü˜\
+
+NÂˆ]Ş[X›Û[™›ÎÛÛ\]JšY[İ\JHH\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš[™›È[ÙHÂˆ[šXÈJ™šY[\HÚİ[™HÛÛ\]HŠNÂˆNÂˆ]ÛÛ^H\\‹™šY[Ú[š]X[^™\—ØÛÛ^Ù›ÜŠšY[
+K[Ü˜\
+
+NÂˆ][š]X[^™\ˆH\\‚ˆ\WÙ^™\ÜÚ[Û—Ù^XİY
+šËÛÛ^šY[İ\JBˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+šY[
+Kš\ÚXš[]Kˆš\ÚXš[]N”š]˜]Bˆ
+NÂ‚ˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÒ›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÈVÒ›QšY[[ˆÂˆšY[ˆÛİ\˜ÙWİš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”š]˜]U\Ëˆ[š]X[^™\ˆÛÛYJ[š]X[^™\ŠKˆWKˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆWKˆNÂˆ\ÜÙ\Ù\HJˆ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠˆİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›QšY[Ûİ\˜ÙUš\ÚXš[]HÂˆšY[ˆš\ÚXš[]NˆİWÚ›N’›QšY[Ûİ\˜ÙUš\ÚXš[]N”š]˜]U\ËˆBˆ
+Bˆ
+NÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆš[X\WØÛÛœİXİÜ—ÛY]Y]WÜ›Ú™Xİ×Ù^Xİİ[š]Ü™Y™\™[˜Ù\×Ø[™ÛZ^YÜÛİÊ
+HÂˆÚ]ÜÛİ\˜ÙJˆœXÚØYÙHØ[\W˜Û\ÜÈÛİ[\ˆßW˜Û\ÜÈÛ\Š[š]X[ˆÛİ[\ŠHßW˜Û\ÜÈ[Ê˜[YNˆ[Ûİ[\ˆÛİ[\‹[˜X›Yˆ›ÛÛX[ŠHßW˜Û\ÜÈÛY[ÈYˆXZÙJÛİ[\ˆÛİ[\ŠNˆ[š]HÈ™]ÈÛ\ŠÛİ[\ŠNÈ
+
+HHH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Ûİ[\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹Ûİ[\ˆŠNÂˆ]Û\ˆHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹’Û\ˆŠNÂˆ][ÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹‘[ÈŠNÂˆ]ÛY[HŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹ÛY[ŠNÂˆ›ÜˆÛ\ÜÈ[ˆØÛİ[\‹Û\‹[ËÛY[HÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆB‚ˆ]Ûİ\˜ÙWØÛÛœİXİÜˆHÛ\ÜßÂˆ]
+ÛÛœİXİÜ‹\˜[Y]\—İ™Y\ÊHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_ÂˆYˆ[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJHOHÛÛYJÛ\ÜÊHÂˆ™]\›ˆ›Û™NÂˆBˆ]™YRÚ[™•\QYŠYš[š][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ]™YRÚ[™•[\]J[\]JHH	˜\İ™Ù]
+Yš[š][Û‹œšÊKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ]™YRÚ[™‘Y‘YŠÛÛœİXİÜŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™ˆ[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆÛÛYJ
+ˆ[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠOËˆÛÛœİXİÜ‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ˜ÛÜYY
+
+Bˆ˜ÛÛXİ™XÏÏŠ
+Kˆ
+JBˆJBˆ™^Xİ
+˜Û\ÜÈ\ÈÛİ\˜ÙHš[X\HÛÛœİXİÜˆŠNÂˆ]\˜[Y]\œÈH\˜[Y]\—İ™Y\Âˆš]\Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ]›ÛÙˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ\˜[Y]\œËˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂˆ
+ÛÛœİXİÜ‹\˜[Y]\—İ™Y\Ë›ÛÙŠBˆNÂˆ]
+Û\—ØÛÛœİXİÜ‹Û\—Ü\˜[Y]\—İ™Y\ËÛ\—Ü›ÛÙŠHBˆÛİ\˜ÙWØÛÛœİXİÜŠÛ\ŠNÂˆ]
+[×ØÛÛœİXİÜ‹[×Ü\˜[Y]\—İ™Y\Ë[×Ü›ÛÙŠHHÛİ\˜ÙWØÛÛœİXİÜŠ[ÊNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\—ØÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+[×ØÛÛœİXİÜŠK[Ü˜\
+
+NÂ‚ˆ]
+ÛY[ÛY]ÙÛY[Ü\˜[Y]\œËÛY[ÜšÊHH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ]™YRÚ[™‘Y‘YŠYš[š][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ]Y]ÙH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK™YJOÎÂˆYˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+Y]Ù
+K›İÛ™\ˆOHÛÛYJÛY[
+HÂˆ™]\›ˆ›Û™NÂˆBˆ]\˜[Y]\—İ™Y\ÈHYš[š][Û‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ˜ÛÜYY
+
+Bˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ]\˜[Y]\œÈH\˜[Y]\—İ™Y\Âˆš]\Š
+Bˆ›X\
+™Y_[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆÛÛYJ
+Y]Ù\˜[Y]\œËYš[š][Û‹œšÏÊJBˆJBˆ™^Xİ
+ÛY[›XZÙHÛİ\˜ÙHY]ÙŠNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛY[ÛY]Ù
+K[Ü˜\
+
+NÂˆ]ÛÛ^H\\‹™^™\ÜÚ[Û—ØÛÛ^Ù›ÜŠÛY[ÛY]Ù
+K[Ü˜\
+
+NÂˆ]ÛY[Ø›ÙHH\\‹\WÙ^™\ÜÚ[ÛŠÛY[ÜšËÛÛ^
+K[Ü˜\
+
+NÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÂˆ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛİ[\‹ˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆKˆ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛ\‹ˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠˆÛ\—Ü›ÛÙ‹ˆ
+KˆKˆ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆ[ËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠ[×Ü›ÛÙŠKˆKˆ›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛY[ˆY]ÙÎˆ™XÈVÒ›SY]Ù[ˆÂˆY]ÙˆÛY[ÛY]Ùˆ\˜[Y]\œÎˆÛY[Ü\˜[Y]\œË˜ÛÛ™J
+KˆØØ[Îˆ™XÎ›™]Ê
+Kˆ›ÙNˆÛÛYJÛY[Ø›ÙJKˆWKˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[•[œİ\ÜYˆKˆKˆNÂ‚ˆ]Y]Y]HH[š]›Y]Y]JYš[š][ÛœÊK[Ü˜\
+
+NÂˆ]Û\—ÛY]Y]HHY]Y]Bˆš]\Š
+Bˆ™š[™
+Y]Y]_Y]Y]KšY[]J
+KœŞ[X›Û
+
+HOHÛ\ŠBˆ[Ü˜\
+
+Bˆ˜ÛÛœİXİÜŠ
+Bˆ[Ü˜\
+
+NÂˆ]Û\—Ü\˜[Y]\ˆH	šÛ\—ÛY]Y]Kœ\˜[Y]\œÊ
+VÌNÂˆ\ÜÙ\Ù\HJÛ\—ÛY]Y]K™\ØÜš\ÜŠ
+K˜\×ÜİŠ
+KŠØ[\KĞÛİ[\ÊUˆŠNÂˆ\ÜÙ\Ù\HJÛ\—ÛY]Y]K›İÛ™\—Ú[\›˜[Û˜[YJ
+KœØ[\KÒÛ\ˆŠNÂˆ\ÜÙ\Ù\HJÛ\—ÛY]Y]KœŞ[X›Û
+
+KÛ\—ØÛÛœİXİÜŠNÂˆ\ÜÙ\Ù\HJˆÛ\—Ü\˜[Y]\‹œŞ[X›Û
+
+Kˆ[™^ˆ™\š]™YÜŞ[X›ÛØ]
+Û\—ØÛÛœİXİÜ‹Ûİ\˜ÙKÛ\—Ü\˜[Y]\—İ™Y\ÖÌJBˆ[Ü˜\
+
+Bˆ
+NÂˆ\ÜÙ\Ù\HJˆÛ\—Ü\˜[Y]\‹J
+KˆİWÚ›N’›U\N”™Y™\™[˜ÙJÛİ[\ŠBˆ
+NÂˆ\ÜÙ\Ù\HJÛ\—Ü\˜[Y]\‹œÛİ
+
+KJNÂˆ\ÜÙ\Ù\HJÛ\—Ü\˜[Y]\‹ÚY
+
+KJNÂ‚ˆ][×ÛY]Y]HHY]Y]Bˆš]\Š
+Bˆ™š[™
+Y]Y]_Y]Y]KšY[]J
+KœŞ[X›Û
+
+HOH[ÊBˆ[Ü˜\
+
+Bˆ˜ÛÛœİXİÜŠ
+Bˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJ[×ÛY]Y]K™\ØÜš\ÜŠ
+K˜\×ÜİŠ
+KŠSØ[\KĞÛİ[\ÖŠUˆŠNÂˆ\ÜÙ\Ù\HJ[×ÛY]Y]KœŞ[X›Û
+
+K[×ØÛÛœİXİÜŠNÂˆ\ÜÙ\Ù\HJˆ[×ÛY]Y]Bˆœ\˜[Y]\œÊ
+Bˆš]\Š
+Bˆ›X\
+\˜[Y]\Ÿ
+\˜[Y]\‹J
+K\˜[Y]\‹œÛİ
+
+K\˜[Y]\‹ÚY
+
+JJBˆ˜ÛÛXİ™XÏÏŠ
+KˆÂˆ
+İWÚ›N’›U\N’[KJKˆ
+İWÚ›N’›U\N”™Y™\™[˜ÙJÛİ[\ŠK‹JKˆ
+İWÚ›N’›U\N›ÛÛX[‹ËJKˆBˆ
+NÂˆ›Üˆ
+\˜[Y]\‹™YJH[ˆ[×ÛY]Y]Kœ\˜[Y]\œÊ
+Kš]\Š
+Kš\
+[×Ü\˜[Y]\—İ™Y\ÊHÂˆ\ÜÙ\Ù\HJˆ\˜[Y]\‹œŞ[X›Û
+
+Kˆ[™^ˆ™\š]™YÜŞ[X›ÛØ]
+[×ØÛÛœİXİÜ‹Ûİ\˜ÙK™YJBˆ[Ü˜\
+
+Bˆ
+NÂˆ\ÜÙ\Ù\HJˆ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+\˜[Y]\‹œŞ[X›Û
+
+JK›İÛ™\‹ˆÛÛYJ[×ØÛÛœİXİÜŠBˆ
+NÂˆB‚ˆ\ÜÙ\JX]Ú\ÈJˆ[š]˜Û\ÜÙ\ÖÌWK›Y]Y]WİÚ]İ\YØ\İ
+[š]œİÜ™K[š]\YØ\İYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›U\HÂˆÚ[™ˆİWÚ›N•[œİ\ÜY›U\RÚ[™”™Y™\™[˜ÙPÛ\ÜËˆ‹‚ˆJBˆ
+JNÂ‚ˆ][œ[›™Yİ[š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ[š]œİÜ™Kˆ\YØ\İˆ[š]\YØ\İˆÛ\ÜÙ\Îˆ[š]˜Û\ÜÙ\Ëš]\Š
+KœÚÚ\
+JK˜ÛÛ™Y
+
+K˜ÛÛXİ
+
+KˆNÂˆ\ÜÙ\Ù\HJˆ[œ[›™Yİ[š]›Y]Y]JYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü”™Y™\™[˜ÙPÛ\ÜÓ›İ[’›T[ˆÈÛ\ÜÎˆÛİ[\ˆJBˆ
+NÂ‚ˆ]›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠÛ\—Ü›ÛÙŠHBˆ	[š]˜Û\ÜÙ\ÖÌWKš[š]X[^˜][Û‚ˆ[ÙHÂˆ[œ™XXÚX›HJ
+BˆNÂˆ]Ü›Û™×ÛİÛ™\—Ü[ˆH›PÛ\ÜÔ[ˆÂˆÛ\ÜÎˆÛİ[\‹ˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠˆÛ\—Ü›ÛÙ‹˜ÛÛ™J
+Kˆ
+KˆNÂˆ\ÜÙ\Ù\HJˆÜ›Û™×ÛİÛ™\—Ü[‹›Y]Y]J[š]œİÜ™KYš[š][ÛœÊKˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü’[˜[Yš[X\PÛÛœİXİÜˆÂˆÛÛœİXİÜˆÛ\—ØÛÛœİXİÜ‹ˆ\ÜİYNˆİWÚ›N’›PÛÛœİXİÜ’\ÜİYN”Ûİ\˜ÙRY[]KˆJBˆ
+NÂ‚ˆ]\XØ][ÛˆH[š]ˆ\YØ\İˆš]\Š
+Bˆ™š[™ÛX\
+
+™YK›ÙJ_Âˆ]™YRÚ[™\J\XØ][ÛŠHH	››ÙKšÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ][˜İ[ÛˆH[š]\YØ\İWÙÙ]
+\XØ][Û‹™[˜İ[ÛŠOÎÂˆ]™YRÚ[™”Ù[Xİ
+Ù[Xİ
+HH	™[˜İ[Û‹šÚ[™[ÙHÂˆ™]\›ˆ›Û™NÂˆNÂˆ]]X[YšY\ˆH[š]\YØ\İWÙÙ]
+Ù[Xİœ]X[YšY\ŠOÎÂˆ
+[š]œİÜ™K›˜[Y\Ëœ™\ÛÛ™JÙ[Xİ›˜[YK^
+
+JHOH[š]ˆ‚ˆ	‰ˆX]Ú\ÈJ]X[YšY\‹šÚ[™™YRÚ[™“™]ÊÊJJBˆ[—ÜÛÛYJ™YJBˆJBˆ™^Xİ
+\Y™]ÈÛ\ŠÛİ[\ŠH\XØ][ÛˆŠNÂˆ]\™Ù]H[š]ˆœ™\ÛÛ™WØÛÛœİXİÜ—ØØ[
+ÛY[ÛY[ÛY]Ù\XØ][Û‹Yš[š][ÛœÊBˆ[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJ\™Ù]™\ØÜš\ÜŠ
+K˜\×ÜİŠ
+KŠØ[\KĞÛİ[\ÊUˆŠNÂˆ\ÜÙ\Ù\HJˆ\™Ù]˜\™İ[Y[İ\\Ê
+Kˆ	–ÙİWÚ›N’›U\N”™Y™\™[˜ÙJÛİ[\ŠWBˆ
+NÂˆ\ÜÙ\Ù\HJ\™Ù]›İÛ™\—ØÛ\ÜÊ
+KÛ\ŠNÂˆ[š]›İÙ\—ÛY]ÙØ›ÙJÛY[ÛY[ÛY]ÙYš[š][ÛœÊBˆ™^Xİ
+œ[›™Y™Y™\™[˜ÙH\˜[Y]\ˆ\ÈHİ\ÜYÛÛœİXİÜˆ\™İ[Y[ŠNÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆÜ™[˜\WÜš[X\WØÛÛœİXİÜ—ÛY]Y]Wİ\Ù\×Ù\š]™YÜ\˜[Y]\œ×Ø[™İ›ÚYÜ™\İ[
+
+HÂˆ›Üˆ
+^\ØÜš\ÜŠH[ˆÂˆ
+˜Û\ÜÈÊ
+H‹Š
+UˆŠKˆ
+˜Û\ÜÈÈ‹Š
+UˆŠKˆ
+˜Û\ÜÈÊˆ[
+H‹ŠJUˆŠKˆ
+˜Û\ÜÈÊ›YÎˆ›ÛÛX[‹ˆ[
+H‹Š’JUˆŠKˆ
+˜Û\ÜÈÈš]˜]H
+ˆ[
+H‹ŠJUˆŠKˆHÂˆÚ]ÜÛİ\˜ÙJ^\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹ÈŠNÂˆ][\]HH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+Ë›ÙJ_X]Ú	››ÙKšÚ[™Âˆ™YRÚ[™•[\]J[\]JHOˆÛÛYJ[\]JKˆÈOˆ›Û™KˆJBˆ[Ü˜\
+
+NÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠYŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™[ÙHÂˆ[šXÈJ
+BˆNÂˆ]\˜[Y]\œÈHY‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ]›ÛÙˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ\˜[Y]\œË˜ÛÛ™J
+Kˆ\İˆ[™^ˆ
+Bˆ[Ü˜\ÛÜ—Ù[ÙJ_Âˆ[šXÈJˆİ^NˆÙNßKÙYßK\˜[\ÎˆÎßH‹ˆY‹˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ›X\
+Y\İ™Ù]
+
+šY
+JBˆ˜ÛÛXİ™XÏÏŠ
+Bˆ
+BˆJNÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ][ˆH›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠ›ÛÙŠKˆNÂˆ]Y]Y]HH[‹›Y]Y]J\\‹œİÜ™J
+KYš[š][ÛœÊK[Ü˜\
+
+NÂˆ][š]H›PÛÛ\[][Û•[š]ÂˆİÜ™Nˆ\\‹œİÜ™J
+Kˆ\YØ\İˆ\\‹\YØ\İ
+
+KˆÛ\ÜÙ\Îˆ™XÈVÜ[—KˆNÂˆ]Ù[™\˜]YH[Z]ØÛ\ÜÊ	[š]Û\ÜËYš[š][ÛœÊK[Ü˜\
+
+NÂˆ]]]™XY\ˆH™XY\›™]ÊÙ[™\˜]Y˜]\Ê
+JNÂˆ]Û\Ü×Ùš[HHİWØÛ\ÜÙš[N˜Û\Ü×Ùš[NÛ\ÜÑš[N™XÛÙJ	›]]™XY\ŠK[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJÛ\Ü×Ùš[K›Y]ÙË›[Š
+KJNÂˆ][Z]YØÛÛœİXİÜˆH	˜Û\Ü×Ùš[K›Y]ÙÖÌNÂˆ\ÜÙ\Ù\HJˆÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ]
+[Z]YØÛÛœİXİÜ‹™\ØÜš\Ü—Ú[™^
+Bˆ[Ü˜\
+
+Kˆ\ØÜš\Ü‚ˆ
+NÂˆ\ÜÙ\Ù\HJˆÛ\Ü×Ùš[Bˆ˜ÛÛœİ[ÜÛÛˆ]
+[Z]YØÛÛœİXİÜ‹›˜[YWÚ[™^
+Bˆ[Ü˜\
+
+Kˆ[š]ˆ‚ˆ
+NÂˆ]ÛÛœİXİÜ—ÛY]Y]HHY]Y]K˜ÛÛœİXİÜŠ
+K[Ü˜\
+
+NÂˆ\ÜÙ\Ù\HJÛÛœİXİÜ—ÛY]Y]K™\ØÜš\ÜŠ
+K˜\×ÜİŠ
+K\ØÜš\ÜŠNÂˆ\ÜÙ\Ù\HJÛÛœİXİÜ—ÛY]Y]K›İÛ™\—Ú[\›˜[Û˜[YJ
+KÈŠNÂˆ\ÜÙ\Ù\HJÛÛœİXİÜ—ÛY]Y]KœŞ[X›Û
+
+KÛÛœİXİÜŠNÂˆ\ÜÙ\Ù\HJˆÛÛœİXİÜ—ÛY]Y]K˜XØÙ\Ü×Ù›YÜÊ
+Kš\×Üš]˜]J
+Kˆ^˜ÛÛZ[œÊœš]˜]HŠBˆ
+NÂˆ\ÜÙ\Ù\HJˆÛÛœİXİÜ—ÛY]Y]K˜XØÙ\Ü×Ù›YÜÊ
+Kš\×ÜX›XÊ
+Kˆ]^˜ÛÛZ[œÊœš]˜]HŠBˆ
+NÂˆ›Üˆ
+K
+XİX[^XİY
+JH[ˆÛÛœİXİÜ—ÛY]Y]Bˆœ\˜[Y]\œÊ
+Bˆš]\Š
+Bˆš\
+\˜[Y]\œÊBˆ™[[Y\˜]J
+BˆÂˆ\ÜÙ\Ù\HJXİX[œŞ[X›Û
+
+K^XİY
+NÂˆ\ÜÙ\Ù\HJXİX[œÛİ
+
+K
+H
+ÈJH\ÈLMŠNÂˆ\ÜÙ\Ù\HJ\\‹œİÜ™J
+KœŞ[X›ÛË™Ù]
+^XİY
+K›İÛ™\‹ÛÛYJÛÛœİXİÜŠJNÂˆBˆJNÂˆBŸB‚ˆÖİ\İB™›ˆš[X\WØÛÛœİXİÜ—ÜÛİ\˜ÙWÜ›ÛÙ—Ü™Z™Xİ×İÜ›Û™×ÚY[]Y\×Ø[™İ[œİ\ÜYÙ›Ü›\Ê
+HÂˆ\ÙHİWÚ›NÒ›PÛÙYÙ[‘\œ›Ü‹›PÛÛœİXİÜ’\ÜİYK›Tš[X\PÛÛœİXİÜ”[ŸNÂˆ›Üˆ^[ˆÂˆ˜Û\ÜÈÊˆ[HJH‹ˆ˜Û\ÜÈÊ\Ú[™Èˆ[
+H‹ˆ˜Û\ÜÈÖĞWJˆ[
+H‹ˆ˜Û\ÜÈÊˆ[
+JNˆ›ÛÛX[ŠH‹ˆHÂˆÚ]ÜÛİ\˜ÙJ^\İÛİ\˜ÙK[™^Ë\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹ÈŠNÂˆ][\]HH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+Ë›ÙJ_X]Ú	››ÙKšÚ[™Âˆ™YRÚ[™•[\]J
+HOˆÛÛYJ
+KˆÈOˆ›Û™KˆJBˆ[Ü˜\
+
+NÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠYŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™[ÙHÂˆ[šXÈJ
+BˆNÂˆ]\˜[Y]\œÈHY‚ˆ˜[YWÜ\˜[WØÛ]\Ù\Âˆš]\Š
+Bˆ™›][Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ\ÜÙ\JˆX]Ú\ÈJˆ›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ\˜[Y]\œËˆ\İˆ[™^ˆ
+Kˆ\œŠ›PÛÙYÙ[‘\œ›Ü’[˜[Yš[X\PÛÛœİXİÜˆÂˆ\ÜİYNˆ›PÛÛœİXİÜ’\ÜİYN”Ûİ\˜ÙTÚ\Kˆ‹‚ˆJBˆ
+Kˆİ^H‚ˆ
+NÂˆJNÂˆBˆÚ]ÜÛİ\˜ÙJˆ˜Û\ÜÈÊNˆ[ˆ[
+HÈYˆ\Ê
+HH\Ê
+HH‹ˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹ÈŠNÂˆ][\]HH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+Ë›ÙJ_X]Ú	››ÙKšÚ[™Âˆ™YRÚ[™•[\]J
+HOˆÛÛYJ
+KˆÈOˆ›Û™KˆJBˆ[Ü˜\
+
+NÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠYŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™[ÙHÂˆ[šXÈJ
+BˆNÂˆ]\˜[Y]\œÈHY‹˜[YWÜ\˜[WØÛ]\Ù\ÖÌBˆš]\Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ™XÏÏŠ
+NÂˆ›ÜˆÜ›Û™È[ˆÂˆ™XÎ›™]Ê
+Kˆ™XÈVÜ\˜[Y]\œÖÌK\˜[Y]\œÖÌWKˆ™XÈVÜ\˜[Y]\œÖÌWK\˜[Y]\œÖÌWKˆ™XÈVÂˆ[™^ˆœŞ[X›ÛØ]
+Ûİ\˜ÙKY‹˜[YWÜ\˜[WØÛ]\Ù\ÖÌVÌJBˆ[Ü˜\
+
+Kˆ\˜[Y]\œÖÌWKˆKˆHÂˆ\ÜÙ\JX]Ú\ÈJˆ›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJÛ\ÜËÛÛœİXİÜ‹Ü›Û™Ë\İ[™^
+Kˆ\œŠ›PÛÙYÙ[‘\œ›Ü’[˜[Yš[X\PÛÛœİXİÜˆÂˆ\ÜİYNˆ›PÛÛœİXİÜ’\ÜİYN”\˜[Y]\’Y[]Kˆ‹‚ˆJBˆ
+JNÂˆBˆ\ÜÙ\JX]Ú\ÈJˆ›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛ\ÜËˆ\˜[Y]\œË˜ÛÛ™J
+Kˆ\İˆ[™^ˆ
+Kˆ\œŠ›PÛÙYÙ[‘\œ›Ü’[˜[Yš[X\PÛÛœİXİÜˆÂˆ\ÜİYNˆ›PÛÛœİXİÜ’\ÜİYN”Ûİ\˜ÙRY[]Kˆ‹‚ˆJBˆ
+JNÂˆ]›ÛÙˆBˆ›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJÛ\ÜËÛÛœİXİÜ‹\˜[Y]\œË\İ[™^
+Bˆ[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ][ˆH›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠ›ÛÙŠKˆNÂˆ\ÜÙ\JX]Ú\ÈJˆ[‹›Y]Y]J\\‹œİÜ™J
+KYš[š][ÛœÊKˆ\œŠ›PÛÙYÙ[‘\œ›Ü’[˜[Yš[X\PÛÛœİXİÜˆÂˆ\ÜİYNˆ›PÛÛœİXİÜ’\ÜİYN”ÙXÛÛ™\PÛÛœİXİÜ‹ˆ‹‚ˆJBˆ
+JNÂˆKˆ
+NÂŸB‚ˆÖİ\İB™›ˆš[X\WØÛÛœİXİÜ—ÜÚYÛ˜]\™WÜ™Z™Xİ×Ü™Y™\™[˜ÙWØ[™ÜÜXÚX[Ü\˜[Y]\—İ\\Ê
+HÂˆ›Üˆ^[ˆÂˆ˜Û\ÜÈÊˆÊH‹ˆ˜Û\ÜÈÊˆOˆ[
+H‹ˆ˜Û\ÜÈÊÎˆ[
+ŠH‹ˆ˜Û\ÜÈÊˆJH‹ˆHÂˆÚ]ÜÛİ\˜ÙJ^\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹ÈŠNÂˆ][\]HH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+Ë›ÙJ_X]Ú	››ÙKšÚ[™Âˆ™YRÚ[™•[\]J
+HOˆÛÛYJ
+KˆÈOˆ›Û™KˆJBˆ[Ü˜\
+
+NÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠYŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™[ÙHÂˆ[šXÈJ
+BˆNÂˆ]\˜[Y]\œÈHY‹˜[YWÜ\˜[WØÛ]\Ù\ÖÌBˆš]\Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ
+
+NÂˆ]›ÛÙˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ\˜[Y]\œËˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ][ˆH›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠ›ÛÙŠKˆNÂˆ]\œ›ÜˆH[‹›Y]Y]J\\‹œİÜ™J
+KYš[š][ÛœÊK[Ü˜\Ù\œŠ
+NÂˆX]Ú^Âˆ˜Û\ÜÈÊˆÊHˆOˆ\ÜÙ\JX]Ú\ÈJˆ\œ›Ü‹ˆİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›U\HÂˆÚ[™ˆİWÚ›N•[œİ\ÜY›U\RÚ[™”™Y™\™[˜ÙPÛ\ÜËˆ‹‚ˆBˆ
+JKˆ˜Û\ÜÈÊˆOˆ[
+HˆOˆ\ÜÙ\JX]Ú\ÈJˆ\œ›Ü‹ˆİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜY›U\HÂˆÚ[™ˆİWÚ›N•[œİ\ÜY›U\RÚ[™S˜[YKˆ‹‚ˆBˆ
+JKˆ˜Û\ÜÈÊÎˆ[
+ŠHˆOˆ\ÜÙ\JX]Ú\ÈJˆ\œ›Ü‹ˆİWÚ›N’›PÛÙYÙ[‘\œ›Ü•[œİ\ÜYY]Ù\˜[Y]\ˆÂˆÚ[™ˆİWÚ›N•[œİ\ÜYY]Ù\˜[Y]\’Ú[™•˜\˜\™ÜËˆ‹‚ˆBˆ
+JKˆÈOˆ\ÜÙ\JX]Ú\ÈJˆ\œ›Ü‹ˆİWÚ›N’›PÛÙYÙ[‘\œ›Ü’[˜[Yš[X\PÛÛœİXİÜˆÂˆ\ÜİYNˆİWÚ›N’›PÛÛœİXİÜ’\ÜİYN”\˜[Y]\”ÚYÛ˜]\™Kˆ‹‚ˆBˆ
+JKˆBˆJNÂˆBŸB‚ˆÖİ\İB™›ˆš[X\WØÛÛœİXİÜ—Ù[™›Ü˜Ù\×İWÚ[œİ[˜ÙWÜ\˜[Y]\—ÜÛİÛ[Z]
+
+HÂˆ›ÜˆÛİ[[ˆÌMMWHÂˆ]\˜[\ÈH
+‹˜Ûİ[
+Bˆ›X\
+_›Ü›X]JœÚ_Nˆ[ŠJBˆ˜ÛÛXİ™XÏÏŠ
+Bˆš›Ú[Š‹ŠNÂˆÚ]ÜÛİ\˜ÙJˆ	™›Ü›X]J˜Û\ÜÈÊÜ\˜[\ßJHŠKˆ\İÛİ\˜ÙK[™^Yš[š][ÛœË\\ŸÂˆ]Û\ÜÈHŞ[X›ÛÛ˜[YY
+\İ[™^Ûİ\˜ÙK\\‹ÈŠNÂˆ][\]HH\İˆš]\Š
+Bˆ™š[™ÛX\
+
+Ë›ÙJ_X]Ú	››ÙKšÚ[™Âˆ™YRÚ[™•[\]J
+HOˆÛÛYJ
+KˆÈOˆ›Û™KˆJBˆ[Ü˜\
+
+NÂˆ]ÛÛœİXİÜˆH[™^œŞ[X›ÛØ]
+Ûİ\˜ÙK[\]K˜ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ]™YRÚ[™‘Y‘YŠYŠHH	˜\İ™Ù]
+[\]K˜ÛÛœİXİÜŠKšÚ[™[ÙHÂˆ[šXÈJ
+BˆNÂˆ]\˜[Y]\œÈHY‹˜[YWÜ\˜[WØÛ]\Ù\ÖÌBˆš]\Š
+Bˆ›X\
+™Y_[™^™\š]™YÜŞ[X›ÛØ]
+ÛÛœİXİÜ‹Ûİ\˜ÙK
+™YJK[Ü˜\
+
+JBˆ˜ÛÛXİ
+
+NÂˆ]›ÛÙˆHİWÚ›N’›Tš[X\PÛÛœİXİÜ”[™œ›ÛWÜÛİ\˜ÙJˆÛ\ÜËˆÛÛœİXİÜ‹ˆ\˜[Y]\œËˆ\İˆ[™^ˆ
+Bˆ[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+Û\ÜÊK[Ü˜\
+
+NÂˆ\\‹˜ÛÛ\]WÜŞ[X›Û
+ÛÛœİXİÜŠK[Ü˜\
+
+NÂˆ][ˆH›PÛ\ÜÔ[ˆÂˆÛ\ÜËˆY]ÙÎˆ™XÎ›™]Ê
+KˆšY[Îˆ™XÎ›™]Ê
+Kˆ[š]X[^˜][Ûˆ›PÛ\ÜÒ[š]X[^˜][Û”[”š[X\PÛÛœİXİÜŠ›ÛÙŠKˆNÂˆ]™\İ[H[‹›Y]Y]J\\‹œİÜ™J
+KYš[š][ÛœÊNÂˆYˆÛİ[OHMÂˆ\ÜÙ\Ù\HJˆ™\İ[ˆ[Ü˜\
+
+Bˆ˜ÛÛœİXİÜŠ
+Bˆ[Ü˜\
+
+Bˆœ\˜[Y]\œÊ
+Bˆ›\İ
+
+Bˆ[Ü˜\
+
+BˆœÛİ
+
+KˆMˆ
+NÂˆH[ÙHÂˆ\ÜÙ\JX]Ú\ÈJˆ™\İ[ˆ\œŠİWÚ›N’›PÛÙYÙ[‘\œ›Ü•ÛÓX[T\˜[Y]\”ÛİÈÈÛİÎˆM‹‹ˆJBˆ
+JNÂˆBˆKˆ
+NÂˆBŸB
