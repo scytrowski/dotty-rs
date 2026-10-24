@@ -132,10 +132,17 @@ class EqualityReference {
   def ==(value: Int): Boolean = true
   def !=(value: Int): Boolean = false
 }
+class EqualityAliasParameter {
+  type IntAlias = Int
+  def ==(value: IntAlias): Boolean = true
+}
 class IncompatibleReference {}
 class EqualityUse {
+  type IntAlias = Int
   def narrowEqualInt(b: Int): Boolean = (new EqualityReference) == b
   def narrowEqualReference(): Boolean = (new EqualityReference) == (new EqualityReference)
+  def narrowEqualAliasArgument(b: IntAlias): Boolean = (new EqualityReference) == b
+  def narrowEqualAliasParameter(b: Int): Boolean = (new EqualityAliasParameter) == b
   def narrowNotEqualInt(b: Int): Boolean = (new EqualityReference) != b
   def narrowNotEqualReference(): Boolean = (new EqualityReference) != (new EqualityReference)
 }
@@ -393,6 +400,26 @@ fn universal_equality_checks_scala_39_operand_compatibility() {
             .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
         assert_eq!(typer.typed_ast().get(typed).ty, boolean, "{method_name}");
         assert_selected_boolean_operator(&typer, typed, expected_symbol, true);
+    }
+
+    for method_name in ["narrowEqualAliasArgument", "narrowEqualAliasParameter"] {
+        let (method, rhs) = fixture.method(method_name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
+        let TreeKind::Apply(application) = &typer.typed_ast().get(typed).kind else {
+            panic!("{method_name} should type as an application");
+        };
+        assert!(
+            matches!(
+                typer.store().types.get(typer.typed_ast().get(application.function).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol != equality.equal
+            ),
+            "{method_name} should select a source equality overload"
+        );
     }
 }
 

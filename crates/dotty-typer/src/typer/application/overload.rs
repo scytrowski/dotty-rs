@@ -200,6 +200,11 @@ impl SourceTyper<'_> {
             } else {
                 widened_type
             };
+        let widened_type = if self.any_equality_operator_name(operator) {
+            self.dealias_source_aliases(widened_type, info_journal)?
+        } else {
+            widened_type
+        };
         let arguments = [TypedArgument {
             typed,
             own_type,
@@ -218,6 +223,9 @@ impl SourceTyper<'_> {
                         &mut completed_relation_types,
                         0,
                     )?;
+                    if self.any_equality_operator_name(operator) {
+                        self.dealias_source_aliases(parameter_type, info_journal)?;
+                    }
                 }
             }
         }
