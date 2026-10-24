@@ -2260,6 +2260,14 @@ fn unsupported_float_double_fields_and_constructors_fail_without_artifacts() {
             "FloatFieldsAndConstructor",
             "class NumericBox(initialF: Float, initialD: Double):\n  private var f: Float = initialF\n  private var d: Double = initialD\n  def getF(): Float = f\n  def getD(): Double = d\n  def setD(value: Double): Unit = d = value\n",
         ),
+        (
+            "FloatBranch",
+            "class Runner:\n  def choose(flag: Boolean, a: Float, b: Float): Float =\n    if flag then a else b\n",
+        ),
+        (
+            "DoubleLoop",
+            "class Runner:\n  def repeat(n: Int, first: Double, second: Double): Double =\n    var current: Double = first\n    var i = 0\n    while i < n do\n      current = second\n      i = i + 1\n    current\n",
+        ),
     ] {
         let output = TestOutputDirectory::new(label);
         let error = compile_source(source, &format!("{label}.scala"), output.path())
@@ -2268,6 +2276,18 @@ fn unsupported_float_double_fields_and_constructors_fail_without_artifacts() {
             matches!(&error, PipelineFailure::Codegen(_)),
             "{label} must be rejected at the backend without partial artifacts: {error:?}"
         );
+        if matches!(label, "FloatBranch" | "DoubleLoop") {
+            assert!(
+                matches!(
+                    &error,
+                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
+                        node: "floating-point control-flow lowering is deferred",
+                        ..
+                    })
+                ),
+                "{label} is rejected with the deferred-control-flow error: {error:?}"
+            );
+        }
         assert!(
             output.class_files().is_empty(),
             "{label} failure publishes no class files"

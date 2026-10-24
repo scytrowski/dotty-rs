@@ -155,6 +155,7 @@ struct JvmLoweringContext<'a> {
     local_layout: Option<&'a JvmLocalLayout>,
     initialized_locals: HashSet<SymbolId>,
     reference_assignment_restricted_region_depth: usize,
+    floating_control_flow_depth: usize,
     call_context: Option<(
         &'a JvmCompilationUnit<'a>,
         &'a JvmClassMetadata,
@@ -179,6 +180,7 @@ impl<'a> JvmLoweringContext<'a> {
             local_layout: None,
             initialized_locals: HashSet::new(),
             reference_assignment_restricted_region_depth: 0,
+            floating_control_flow_depth: 0,
             call_context: None,
             expected_expression_type: None,
             node_visits: 0,
@@ -888,7 +890,7 @@ fn emit_expression_with_identity_context(
             kind => ExpressionShape::Unsupported(tree_kind_name(kind)),
         }
     };
-    match shape {
+    let flow = match shape {
         ExpressionShape::Leaf => {
             if matches!(
                 &context.tree(tree_id)?.kind,
@@ -939,7 +941,16 @@ fn emit_expression_with_identity_context(
             tree: tree_id,
             node,
         }),
+    }?;
+    if context.floating_control_flow_depth > 0
+        && matches!(flow, Flow::Value(JvmType::Float | JvmType::Double))
+    {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree: tree_id,
+            node: "floating-point control-flow lowering is deferred",
+        });
     }
+    Ok(flow)
 }
 
 fn emit_null_literal(
@@ -3357,14 +3368,17 @@ fn emit_if(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    emit_if_body(
+    context.floating_control_flow_depth += 1;
+    let result = emit_if_body(
         context,
         tree_id,
         expected_type,
         identity_reference_context,
         code,
         depth,
-    )
+    );
+    context.floating_control_flow_depth -= 1;
+    result
 }
 
 fn emit_if_body(
@@ -3491,7 +3505,10 @@ fn emit_while(
     code: &mut CodeBuilder,
     depth: usize,
 ) -> Result<Flow, JvmCodegenError> {
-    emit_while_body(context, tree_id, code, depth)
+    context.floating_control_flow_depth += 1;
+    let result = emit_while_body(context, tree_id, code, depth);
+    context.floating_control_flow_depth -= 1;
+    result
 }
 
 fn emit_while_body(
