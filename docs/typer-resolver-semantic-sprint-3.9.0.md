@@ -92,6 +92,9 @@ post-#1526 snapshot for the intended #1529 reason: `tpd$.ClassDef` at
 Per-root method and selector identities, first blockers, delegated times,
 retry counts, and the most repeated stable request shapes are in
 [`typer-resolver-semantic-sprint-profile-roots-3.9.0.tsv`](typer-resolver-semantic-sprint-profile-roots-3.9.0.tsv).
+Its `first_sample_member_inner_us` values are from the first profile run; the
+three-run means are summarized in the table above and retained in the timing
+TSV.
 
 The separate match pass made 2,719 member and 566 package requests per sample;
 it observed 86 successful, 2,632 unresolved, and one failed member lookup,
