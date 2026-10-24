@@ -40,9 +40,6 @@ jobs:
       RUST_TEST_THREADS: 1
       SCALA39_JDK_RELEASE: 21
       SCALA39_ROOT: ${{ github.workspace }}/scala39-source
-      COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
-      DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}/typer-focused-intermediates
-      DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
 
     steps:
       - name: Check out dotty-rs
@@ -63,7 +60,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21.0.8+9'
+          java-version: '21.0.8+9.0.LTS'
           check-latest: false
 
       - name: Install pinned Rust toolchain
@@ -83,6 +80,9 @@ jobs:
 
       - name: Verify pinned inputs and record environment
         shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
         run: |
           set -euo pipefail
           test "$(git -C "$SCALA39_ROOT" rev-parse HEAD)" = "777528f19a58e794c9954a42f433373472ec57f8"
@@ -101,6 +101,9 @@ jobs:
 
       - name: Download and verify pinned Scala runtime artifacts
         shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
         run: |
           set -euo pipefail
           while IFS=' ' read -r relative_path sha256; do
@@ -126,6 +129,10 @@ jobs:
 
       - name: Run deterministic focused audit and compare baseline
         shell: bash
+        env:
+          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
+          DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}/typer-focused-intermediates
+          DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
         run: |
           set -euo pipefail
           /usr/bin/time -v \
