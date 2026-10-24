@@ -30,6 +30,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Lint GitHub Actions workflows
+        run: tools/check-workflows.sh
+
       - name: Cache Cargo registry and build artifacts
         uses: actions/cache@v4
         with:
