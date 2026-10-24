@@ -73,7 +73,7 @@ To reconstruct the measured baseline from a checkout of this PR, apply it to
 that base revision before running the baseline command:
 
 ```sh
-git show 4ffa7d0a384bb4b2ad6d1744d38efa2c5cad92f5:docs/typer-resolver-optimization-profile-3.9.0/baseline/instrumented-no-cache.patch > /tmp/issue-1526-instrumented-no-cache.patch
+git show 8b85f6c26892bdf2b9eb1602101b35a0d6d2a917:docs/typer-resolver-optimization-profile-3.9.0/baseline/instrumented-no-cache.patch > /tmp/issue-1526-instrumented-no-cache.patch
 git switch --detach 8c72ec83222aeb75ef597b2d396ef4db20bab123
 git apply /tmp/issue-1526-instrumented-no-cache.patch
 ```
