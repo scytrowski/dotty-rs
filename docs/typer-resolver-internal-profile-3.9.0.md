@@ -10,12 +10,13 @@ The committed machine-readable evidence is in
 [`typer-resolver-profile-3.9.0/`](typer-resolver-profile-3.9.0/): per-run timings,
 per-root requests and stages, cache/completion counts, selected identities and
 outcomes, match probes, classloader timings, and the instrumentation comparison.
-The complete logs remain under ignored `target/issue-1525-committed-*` paths.
+The complete corrected runs remain under ignored
+`target/issue-1525-corrected-{profile,semantic,cheap}/` paths.
 
 ## Reproduction inputs
 
 - Repository base: `a3c0131f0faa976dd91db58bbb8b3d9fca28aaec`.
-- Measured implementation: `317ea0e029e83bed0033de3d32a79dd0e194b975`.
+- Measured implementation: `47d6f4b26c1a8d57273bae6d0d005e035781e894`.
 - Scala checkout: revision `777528f19a58e794c9954a42f433373472ec57f8` (Scala
   3.9.0).
 - JDK: Temurin `21.0.8+9`, Linux x64; bundle SHA-256
@@ -49,13 +50,13 @@ python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
   --output-dir target/issue-1525-committed-full
 ```
 
-The baseline, semantic-only, cheap-counter, and full-profile runs selected the
-same method identities, method outcomes/blockers, match-probe identities, and
-match outcomes. This is evidence for this bounded cohort only. Three warm
-Cargo wall samples were 12,082, 11,981, and 12,083 ms in full mode; comparison
-means were 12,048.7 ms full, 12,113.0 ms semantic-only, and 11,915.7 ms
-cheap-counters. Those differences are within run-to-run drift and show no
-measurable profiler overhead or speedup. See
+The semantic-only, cheap-counter, and full-profile runs selected the same
+method identities, method outcomes/blockers, match-probe identities, and match
+outcomes. This is evidence for this bounded cohort only. Three warm Cargo wall
+samples were 12,287, 12,286, and 12,285 ms in full mode; comparison means were
+12,286 ms full, 12,083.7 ms semantic-only, and 12,084 ms cheap-counters. The
+small differences are within run-to-run drift and show no measurable profiler
+overhead or speedup. See
 [`variant-comparison.tsv`](typer-resolver-profile-3.9.0/variant-comparison.tsv)
 and [`run-timings.tsv`](typer-resolver-profile-3.9.0/run-timings.tsv).
 
@@ -68,22 +69,22 @@ exclusive columns for attribution, not as additive totals.
 
 | Phase | Source calls | Source inclusive / exclusive | Match calls | Match inclusive / exclusive |
 | --- | ---: | ---: | ---: | ---: |
-| Member lookup | 3,813 | 5,837 ms / 5,837 ms | 2,717 | 5,740 ms / 5,740 ms |
-| Module-cache validation | 3,813 | 411 ms / 3.2 ms | 2,717 | 310 ms / 2.5 ms |
-| Target resolution | 603 | 5,338 ms / 0.31 ms | 319 | 5,378 ms / 0.30 ms |
-| Module completion | 43 | 5,338 ms / 1,562 ms | 41 | 5,377 ms / 1,616 ms |
-| Module snapshot validation | 3,253 | 408 ms / 0.14 ms | 2,439 | 308 ms / 0.11 ms |
-| Classpath resource lookup | 11,531 | 698 ms / 698 ms | 9,563 | 594 ms / 594 ms |
-| TASTy decode | 47 | 3,825 ms / 3,825 ms | 46 | 3,808 ms / 3,808 ms |
+| Member lookup | 3,813 | 5,955 ms / 5,955 ms | 2,717 | 5,838 ms / 5,838 ms |
+| Module-cache validation | 3,813 | 410 ms / 3.1 ms | 2,717 | 307 ms / 2.3 ms |
+| Target resolution | 603 | 5,457 ms / 0.30 ms | 319 | 5,478 ms / 0.29 ms |
+| Module completion | 43 | 5,457 ms / 1,609 ms | 41 | 5,478 ms / 1,655 ms |
+| Module snapshot validation | 3,253 | 407 ms / 4.6 ms | 2,439 | 305 ms / 3.4 ms |
+| Classpath resource lookup | 11,531 | 693 ms / 693 ms | 9,563 | 586 ms / 586 ms |
+| TASTy decode | 47 | 3,905 ms / 3,905 ms | 46 | 3,884 ms / 3,884 ms |
 | Class-file decode | 845 | 45 ms / 45 ms | 813 | 44 ms / 44 ms |
-| Transaction bookkeeping | 4,625 | 5,837 ms / 0.38 ms | 3,298 | 5,740 ms / 0.29 ms |
-| Rollback | 4,340 | 0.54 ms / 0.54 ms | 3,042 | 0.52 ms / 0.52 ms |
-| Package-term key selection | 3,813 | 0.32 ms / 0.32 ms | 2,717 | 0.19 ms / 0.19 ms |
+| Transaction bookkeeping | 4,625 | 5,955 ms / 0.38 ms | 3,298 | 5,837 ms / 0.27 ms |
+| Rollback | 4,340 | 0.52 ms / 0.52 ms | 3,042 | 0.47 ms / 0.47 ms |
+| Package-term key selection | 3,813 | 0.31 ms / 0.31 ms | 2,717 | 0.19 ms / 0.19 ms |
 
 The large target-resolution interval is almost entirely nested module
 completion. Its measured exclusive remainder is about 0.3 ms per run. Module
 completion itself includes TASTy decode, resource access, and other completion
-work; its 1.56–1.62 s residual is after subtracting the directly timed resource
+work; its 1.61–1.65 s residual is after subtracting the directly timed resource
 and decode intervals. Source and match cache profiles recorded 3,211 and
 2,398 positive module-cache validations per run, 602 and 343 negative member
 cache hits (included in those validation counts), and 42 and 41 module-cache
@@ -91,13 +92,18 @@ misses. Module completion returned 42
 successes and one error per source run; in the match pass it returned 40
 successes and one error.
 
+The snapshot timer now measures only time inside each `find_class` call;
+snapshot comparisons, decoded-root checks, and cache invalidation remain in
+snapshot validation's exclusive time. Failed module TASTy decoder attempts are
+also included in the decode call count and elapsed time.
+
 The three named hot method roots show where that delegated time lands:
 
 | Root method | Member calls/run | Successes | Misses | Errors | Exclusive target/run | Exclusive module-completion/run | TASTy decode/run |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `GenericSignatures$.mayNeedSignature` | 570 | 55 | 515 | 0 | 0.075 ms | 600 ms | 1,172 ms |
-| `tpd$.DefDef` | 470 | 13 | 457 | 0 | 0.103 ms | 732 ms | 1,237 ms |
-| `Types$.Type.derivesFrom` | 1,687 | 18 | 1,668 | 1 | 0.111 ms | 221 ms | 1,406 ms |
+| `GenericSignatures$.mayNeedSignature` | 570 | 55 | 515 | 0 | 0.077 ms | 637 ms | 1,214 ms |
+| `tpd$.DefDef` | 470 | 13 | 457 | 0 | 0.090 ms | 738 ms | 1,256 ms |
+| `Types$.Type.derivesFrom` | 1,687 | 18 | 1,668 | 1 | 0.114 ms | 225 ms | 1,425 ms |
 
 The source-level path explanations below are hypotheses from the pinned Scala
 3.9.0 implementations, not proof that any one expression accounts for the
@@ -141,7 +147,7 @@ No per-call log is required to inspect the repeated-key aggregates.
 ## Ranked follow-up candidates
 
 1. **Investigate repeated module completion and TASTy projection.** This is the
-   largest measured cost: up to about 3.8 s/run in TASTy decode intervals, plus
+   largest measured cost: up to about 3.9 s/run in TASTy decode intervals, plus
    completion residuals. Potential benefit is the largest of these candidates,
    but this profile does not show how much work can safely be removed.
    Complexity is high. Any reuse must validate exact resource identity and
