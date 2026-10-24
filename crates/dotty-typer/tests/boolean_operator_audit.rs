@@ -96,6 +96,7 @@ impl Fixture {
 
 const SOURCE_OPERATORS: &str = r#"
 class BooleanOperators {
+  type IntAlias = Int
   def notLiteral(): Boolean = !true
   def andLiteral(): Boolean = true && false
   def notParameter(a: Boolean): Boolean = !a
@@ -109,9 +110,11 @@ class BooleanOperators {
   def equalInt(a: Int): Boolean = a == 1
   def notEqualInt(a: Int): Boolean = a != 1
   def equalWidenedNumeric(a: Int, b: Long): Boolean = a == b
+  def equalAlias(a: IntAlias, b: Int): Boolean = a == b
+  def incompatibleAliasReference(a: IntAlias, b: IncompatibleReference): Boolean = a == b
   def equalAnyAndInt(a: Any, b: Int): Boolean = a == b
-  def incompatibleIntReference(a: Int, b: EqualityReference): Boolean = a == b
-  def incompatibleReferenceInt(a: EqualityReference, b: Int): Boolean = a != b
+  def incompatibleIntReference(a: Int, b: IncompatibleReference): Boolean = a == b
+  def incompatibleReferenceInt(a: IncompatibleReference, b: Int): Boolean = a != b
   def equalAny(a: Any, b: Any): Boolean = a == b
   def notEqualAny(a: Any, b: Any): Boolean = a != b
   def andLocal(): Boolean = { val a = false; val b = true; a && b }
@@ -122,7 +125,17 @@ class BooleanOperators {
   def eagerAndEffect(): Boolean = false & (1 / 0 > 0)
   def eagerOrEffect(): Boolean = true | (1 / 0 > 0)
 }
-class EqualityReference {}
+class EqualityReference {
+  def ==(value: Int): Boolean = true
+  def !=(value: Int): Boolean = false
+}
+class IncompatibleReference {}
+class EqualityUse {
+  def narrowEqualInt(b: Int): Boolean = (new EqualityReference) == b
+  def narrowEqualReference(): Boolean = (new EqualityReference) == (new EqualityReference)
+  def narrowNotEqualInt(b: Int): Boolean = (new EqualityReference) != b
+  def narrowNotEqualReference(): Boolean = (new EqualityReference) != (new EqualityReference)
+}
 "#;
 
 fn contextual_operator_sources() -> (String, Vec<String>, Vec<(String, String)>) {
@@ -203,10 +216,14 @@ fn assert_selected_boolean_operator(
     let TreeKind::Select(_) = &typer.typed_ast().get(function).kind else {
         panic!("Boolean operator should select its canonical member");
     };
-    assert!(matches!(
-        typer.store().types.get(typer.typed_ast().get(function).ty),
-        Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected
-    ));
+    assert!(
+        matches!(
+            typer.store().types.get(typer.typed_ast().get(function).ty),
+            Type::TermRef { target: TermRefTarget::Symbol(symbol), .. } if *symbol == expected
+        ),
+        "actual function type {:?}, expected symbol {expected:?}",
+        typer.store().types.get(typer.typed_ast().get(function).ty)
+    );
 }
 
 #[test]
@@ -325,6 +342,7 @@ fn universal_equality_checks_scala_39_operand_compatibility() {
 
     for (method_name, expected_symbol) in [
         ("equalWidenedNumeric", equality.equal),
+        ("equalAlias", equality.equal),
         ("equalAnyAndInt", equality.equal),
     ] {
         let (method, rhs) = fixture.method(method_name);
@@ -335,7 +353,11 @@ fn universal_equality_checks_scala_39_operand_compatibility() {
         assert_selected_boolean_operator(&typer, typed, expected_symbol, true);
     }
 
-    for method_name in ["incompatibleIntReference", "incompatibleReferenceInt"] {
+    for method_name in [
+        "incompatibleIntReference",
+        "incompatibleReferenceInt",
+        "incompatibleAliasReference",
+    ] {
         let (method, rhs) = fixture.method(method_name);
         let mut typer = fixture.typer();
         let context = typer.expression_context_for(method).unwrap();
@@ -348,6 +370,24 @@ fn universal_equality_checks_scala_39_operand_compatibility() {
             typer.typed_ast().iter().next().is_none(),
             "{method_name} failure must roll back typed operands"
         );
+    }
+
+    let narrow_equal = fixture.method_named_symbol("==");
+    let narrow_not_equal = fixture.method_named_symbol("!=");
+    for (method_name, expected_symbol) in [
+        ("narrowEqualInt", narrow_equal),
+        ("narrowEqualReference", equality.equal),
+        ("narrowNotEqualInt", narrow_not_equal),
+        ("narrowNotEqualReference", equality.not_equal),
+    ] {
+        let (method, rhs) = fixture.method(method_name);
+        let mut typer = fixture.typer();
+        let context = typer.expression_context_for(method).unwrap();
+        let typed = typer
+            .type_expression(rhs, context)
+            .unwrap_or_else(|error| panic!("{method_name}: {error:?}"));
+        assert_eq!(typer.typed_ast().get(typed).ty, boolean, "{method_name}");
+        assert_selected_boolean_operator(&typer, typed, expected_symbol, true);
     }
 }
 

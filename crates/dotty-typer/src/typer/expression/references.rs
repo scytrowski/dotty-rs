@@ -1116,10 +1116,16 @@ impl SourceTyper<'_> {
     }
 
     pub(in crate::typer) fn universal_equality_operands_compatible(
-        &self,
+        &mut self,
         left: TypeId,
         right: TypeId,
-    ) -> bool {
+    ) -> Result<bool, TyperError> {
+        let left = crate::types::TypeNormalizer::new(self.store)
+            .dealias_top(left)
+            .map_err(TyperError::TypeNormalization)?;
+        let right = crate::types::TypeNormalizer::new(self.store)
+            .dealias_top(right)
+            .map_err(TyperError::TypeNormalization)?;
         #[derive(Clone, Copy, PartialEq, Eq)]
         enum PrimitiveEqualityGroup {
             Numeric,
@@ -1179,13 +1185,15 @@ impl SourceTyper<'_> {
             )
         };
         if is_any_or_nothing(left) || is_any_or_nothing(right) {
-            return true;
+            return Ok(true);
         }
-        match (primitive_group(self, left), primitive_group(self, right)) {
-            (Some(left), Some(right)) => left == right,
-            (None, None) => true,
-            _ => false,
-        }
+        Ok(
+            match (primitive_group(self, left), primitive_group(self, right)) {
+                (Some(left), Some(right)) => left == right,
+                (None, None) => true,
+                _ => false,
+            },
+        )
     }
 
     /// Produces the nominal view used only for checking a `this` value against

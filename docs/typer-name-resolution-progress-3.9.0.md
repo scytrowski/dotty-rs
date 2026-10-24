@@ -8,15 +8,18 @@ This increment starts from `main` at
 `ed3325e57395a315b5e8b78cd9a9c0ca0bbc379d`, after #1593. The pinned Scala
 3.9.0 compiler synthesizes final `Any.==` and `Any.!=` methods. The source typer
 now registers these canonical builtin symbols, resolves universal equality
-when ordinary member lookup cannot find it, and rejects statically incompatible
-primitive/reference operand pairs. The implementation keeps normal source
-members authoritative and preserves their symbol identity.
+alongside narrower source overloads, and rejects statically incompatible
+primitive/reference operand pairs after bounded alias normalization. An
+applicable source overload keeps its symbol identity; otherwise compatible
+operands use the canonical universal method.
 
 The Scala 3.9 oracle accepts equality on `Any`, Boolean, numerics within the
 numeric group, and references, and rejects `Int == String` with “Values of
 types Int and String cannot be compared with == or !=”. Focused tests cover
-both operators, literal and widened numeric operands, `Any` with `Int`, and
-incompatible primitive/reference pairs. Oracle fixture details are recorded in
+both operators, literal and widened numeric operands, `Any` with `Int`,
+compatible aliases, inherited universal equality alongside narrower class
+overloads, and incompatible primitive/reference pairs. Oracle fixture details
+are recorded in
 [`UniversalEquality.oracle.md`](../crates/dotty-typer/tests/fixtures/universal-equality/UniversalEquality.oracle.md).
 
 The deterministic `package-term` comparison uses the same 60 files and 369
@@ -197,3 +200,14 @@ universal-equality increment used `target/issue-1566-equality-final.md` and
 sidecars matched across runs. The equality audit was run after removing
 temporary diagnostics. Its result shows the same first-blocker counts while
 the three noted expressions advance from `version == 1` to `flags & 1`.
+
+The CI focused smoke manifest was also rerun twice after the equality
+increment. Its normalized output is deterministic and is recorded in
+[`typer-focused-smoke-baseline-3.9.0.txt`](typer-focused-smoke-baseline-3.9.0.txt).
+In the selected 31 methods, no method becomes fully typed. Three
+`StringParsers.scala` rows move from `MemberNotFound` to `MemberLookup`,
+`ApplicationCalleeNotMethod`, and `MemberLookup`; `scala.Some` is now
+materialized while resolving the affected branch. The aggregate selected
+blockers move from 11 to 12 `ApplicationCalleeNotMethod`, from 3 to 0
+`MemberNotFound`, and add 2 `MemberLookup` rows. This is audit progress, not a
+claim that the surrounding methods now type completely.
