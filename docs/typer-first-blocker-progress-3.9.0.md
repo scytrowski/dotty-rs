@@ -29,6 +29,24 @@ compatibility claim.
   `SymbolResolution`, and `ObjectModuleClassUnavailable`) primarily exercise
   qualified classpath and package/module loading. They remain separate work.
 
+## Current focused result
+
+At the implementation under review, the same 60-file cohort still has 369
+first-blocker rows and zero fully typed methods. `TypeNameNotFound` rows fell
+from 63 to 30; 13 of the 27 frozen root methods now have a different first
+blocker. These methods advanced to later typing failures, so this is progress
+on the selected family rather than a count of completed methods. The TSV
+records each exact before/after method blocker. The focused profile and its
+normalized sidecar matched byte-for-byte across two runs.
+
+The 27 source method rows and exact type-name spans are frozen in
+[`typer-first-blocker-progress-3.9.0.tsv`](typer-first-blocker-progress-3.9.0.tsv).
+The full ignored before-profile is reproducible with
+`tools/typer-classpath-corpus-audit/run --focused-cohort package-term` at the
+baseline commit. Oracle controls are in
+`tools/typer-classpath-corpus-audit/scala39_import_oracle.py` and compile with
+the pinned Scala 3.9.0 artifacts.
+
 ## Scope and evidence
 
 The implementation consults `scala.*` and then `java.lang.*` only after local
@@ -45,4 +63,5 @@ unknown type that must still fail. The focused typer regression checks that the
 resolved type points to the exact package-owned symbol returned by the
 resolver. The before/after cohort table records whether each frozen method
 became typed or advanced to a later blocker; advancing a blocker does not count
-as a fully typed method.
+as a fully typed method. Source builtin names such as `Int` keep their
+session-canonical projection instead of being requalified through `scala`.

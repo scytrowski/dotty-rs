@@ -1433,9 +1433,9 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                             reason: "package prefix has an invalid owner chain".to_owned(),
                         }
                     })?;
-                let simple_name = store.names.resolve(request.name.text());
+                let simple_name = store.names.resolve(request.name.text()).to_owned();
                 let binary_name = if package_path.is_empty() {
-                    simple_name.to_owned()
+                    simple_name.clone()
                 } else {
                     format!("{}/{simple_name}", package_path.join("/"))
                 };
@@ -1445,6 +1445,27 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 }
                 match self.load_class(store, &binary_name) {
                     Ok(symbol) => Ok(Some(symbol)),
+                    Err(ClassLoadError::NotFound(_)) if package_path.as_slice() == ["scala"] => {
+                        let package_object = BinaryName::from_internal("scala/package");
+                        let alias_target = crate::loader::resolve_tasty_alias(
+                            self.class_path
+                                .as_ref()
+                                .expect("resolver operation is exclusive"),
+                            &package_object,
+                            &simple_name,
+                        )
+                        .map_err(|error| ResolutionError::Malformed {
+                            reason: format!("cannot resolve scala package type alias: {error:?}"),
+                        })?;
+                        let Some(alias_target) = alias_target else {
+                            return Ok(None);
+                        };
+                        self.load_class(store, &alias_target)
+                            .map(Some)
+                            .map_err(|error| ResolutionError::Malformed {
+                                reason: error.to_string(),
+                            })
+                    }
                     Err(ClassLoadError::NotFound(_)) => Ok(None),
                     Err(error) => Err(ResolutionError::Malformed {
                         reason: error.to_string(),
@@ -6677,6 +6698,93 @@ mod tests {
             .expect("DayOfWeek member lookup should succeed")
             .expect("the real JDK class declares getValue");
         assert_eq!(store.symbols.get(method).owner, Some(class));
+    }
+
+    #[test]
+    fn scala_package_type_alias_resolves_to_its_validated_target() {
+        struct ScalaPackageAliasPath;
+
+        impl ClassPathEntry for ScalaPackageAliasPath {
+            fn find_class(
+                &self,
+                name: &BinaryName,
+            ) -> Result<Option<ClassResource>, ClassPathError> {
+                let resource = match name.as_internal() {
+                    "java/lang/Object" => Some(ClassResource::new(
+                        test_class_stub("java/lang/Object", 0x0021),
+                        ClassFormat::Class,
+                        ClassOrigin::Directory(PathBuf::from("<alias-test>")),
+                    )),
+                    "scala/package" => Some(ClassResource::new(
+                        std::fs::read(fixture_path(
+                            "../dotty-tasty/tests/fixtures/scala3-library/scala/package.tasty",
+                        ))
+                        .expect("Scala package TASTy fixture should exist"),
+                        ClassFormat::Tasty,
+                        ClassOrigin::Directory(PathBuf::from("<alias-test>")),
+                    )),
+                    "scala/collection/Iterator" => Some(ClassResource::new(
+                        test_class_stub("scala/collection/Iterator", 0x0601),
+                        ClassFormat::Class,
+                        ClassOrigin::Directory(PathBuf::from("<alias-test>")),
+                    )),
+                    _ => None,
+                };
+                Ok(resource)
+            }
+
+            fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+                Ok(package == ["scala"] || package == ["scala", "collection"])
+            }
+
+            fn contains_package_prefix(&self, package: &[&str]) -> Result<bool, ClassPathError> {
+                Ok([&["scala"][..], &["scala", "collection"][..]]
+                    .iter()
+                    .any(|candidate| candidate.starts_with(package)))
+            }
+        }
+
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(ScalaPackageAliasPath, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["scala"])
+            .unwrap()
+            .expect("the fixture contains scala");
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let name = Name::new(store.names.intern("Iterator"), Namespace::Type);
+
+        let resolved = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .expect("scala.Iterator resolves through the package-object alias");
+
+        assert_eq!(store.symbols.get(resolved).kind, SymbolKind::Trait);
+        assert_eq!(
+            store.names.resolve(store.symbols.get(resolved).name.text()),
+            "Iterator"
+        );
+        assert_eq!(
+            store.names.resolve(
+                store
+                    .symbols
+                    .get(store.symbols.get(resolved).owner.unwrap())
+                    .name
+                    .text()
+            ),
+            "collection"
+        );
     }
 
     #[test]

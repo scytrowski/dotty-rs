@@ -125,7 +125,109 @@ impl SourceTyper<'_> {
                 return Ok(Some(symbol));
             }
         }
-        self.unique_type_candidate(&package_candidates, name, tree_index, position)
+        if let Some(symbol) =
+            self.unique_type_candidate(&package_candidates, name, tree_index, position)?
+        {
+            return Ok(Some(symbol));
+        }
+        self.lookup_default_type_import(name, tree_index, position)
+    }
+
+    fn lookup_default_type_import(
+        &mut self,
+        name: dotty_core::Name,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        // Builtin source spellings have session-canonical types and symbols;
+        // keep their existing projection path instead of prefixing them with
+        // the package from which the classpath resolver found the name.
+        if self
+            .definitions
+            .source_builtin_type(self.store, name)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        // Scala 3.9 nests `scala.*` inside `java.lang.*`; therefore a matching
+        // Scala member has higher priority. Predef's term import is separate.
+        for path in [vec!["scala"], vec!["java", "lang"]] {
+            let package = match self.packages.symbol(&path) {
+                Some(package) => Some(package),
+                None => {
+                    let owned_path = path
+                        .iter()
+                        .map(|part| (*part).to_owned())
+                        .collect::<Vec<_>>();
+                    self.resolve_external_package(&owned_path, tree_index)?
+                }
+            };
+            let Some(package) = package else {
+                continue;
+            };
+            let candidates = self
+                .scopes_of(package)
+                .into_iter()
+                .flat_map(|scope| {
+                    self.store
+                        .scopes
+                        .get(scope)
+                        .lookup_all(&name)
+                        .iter()
+                        .copied()
+                })
+                .filter(|symbol| is_type_symbol(self.store.symbols.get(*symbol).kind))
+                .collect::<Vec<_>>();
+            if let Some(symbol) =
+                self.unique_type_candidate(&candidates, name, tree_index, position)?
+            {
+                return Ok(Some(symbol));
+            }
+
+            let request = MemberRequest {
+                prefix: self.package_type_prefix(package),
+                name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            };
+            let Some(symbol) =
+                self.resolver
+                    .resolve_member(self.store, &request)
+                    .map_err(|error| TyperError::SymbolResolution {
+                        source: self.source,
+                        tree_index,
+                        error,
+                    })?
+            else {
+                continue;
+            };
+            if !self.store.symbols.contains(symbol) {
+                return Err(TyperError::UnknownSymbol { symbol });
+            }
+            let entry = self.store.symbols.get(symbol);
+            if entry.name != name {
+                return Err(TyperError::SymbolResolution {
+                    source: self.source,
+                    tree_index,
+                    error: ResolutionError::Malformed {
+                        reason: "default type import resolved a symbol with a different name"
+                            .to_owned(),
+                    },
+                });
+            }
+            if !is_type_symbol(entry.kind) {
+                return Err(TyperError::WrongTypeNameKind {
+                    source: self.source,
+                    tree_index,
+                    name,
+                    symbol,
+                    kind: entry.kind,
+                    position,
+                });
+            }
+            return Ok(Some(symbol));
+        }
+        Ok(None)
     }
 
     pub(in crate::typer) fn lookup_term_candidate_for_type_name(
