@@ -258,24 +258,26 @@ semantic index, typed index, and caller-owned store. It records mutability and
 template order; `JvmCompilationUnit` checks both against the canonical public
 `Field` plans and rejects reordered public body fields. Metadata projects
 private backing-field flags and origin-aware getter/setter signatures for
-proven body fields. The class emitter now emits only their public getters;
-body-field setter bytecode remains deferred.
+proven body fields. Issues #1582 and #1583 emit one public getter per body
+accessor and one public setter per mutable body accessor through the shared
+accessor bytecode path. Immutable fields have no setter.
 The proof also checks the typed RHS node's source position against the exact
 untyped RHS, so a caller-created source-to-typed map cannot substitute another
 initializer. The source adapter collects fields for both
 body-only/no-argument and parameterized primary-constructor shapes. Issue
 #1581 lowers these exact typed initializers after the direct-super call; issue
-#1582 emits one getter per checked body accessor through the same bytecode path
-used by constructor accessors. A body `var` retains setter metadata for
-collision checking, but this increment does not emit its setter.
+#1582 emits one getter per checked body accessor and #1583 emits one setter per
+checked mutable body accessor through the same bytecode path used by
+constructor accessors. Setter signatures are collision-checked before class
+file emission.
 
 Body-bearing zero-argument classes retain the `ImplicitNoArg` source shape and
 carry their checked field plans through metadata validation and emission. Their
-backing fields initialize after the direct-super call, and approved public
-body accessors receive public getters. Public body setters and Scala source
-call-site lowering remain later increments. Generated getter and setter
-signatures are checked against each other and planned source methods before
-class-file emission.
+backing fields initialize after the direct-super call; approved public body
+accessors receive public getters and mutable body accessors receive public
+setters. Scala source call-site lowering remains a later increment. Generated
+getter and setter signatures are checked against each other and planned source
+methods before class-file emission.
 
 The frontend preserves the `private[this]` qualifier in the source AST, but
 the shared symbol visibility is `Private`, just as it is for plain `private`;
@@ -288,8 +290,10 @@ stateful contract test.
 ## Scope and follow-up
 
 This audit covers ordinary initialized class-body primitive fields, exact
-planned reference fields, and the listed accessor/visibility forms. It does
+planned reference fields, their getter/setter ABI, and the listed
+accessor/visibility forms. It does
 not establish behavior for lazy or abstract members, overrides/bridges,
 traits, generic fields, broader inheritance, or combined Scala ABI/TASTy
-emission. Public class-body getters have JDK verification/execution coverage;
-setter emission and source call-site lowering remain separate work.
+emission. Public class-body getters and setters have JDK
+verification/execution coverage; source call-site lowering remains separate
+work.
