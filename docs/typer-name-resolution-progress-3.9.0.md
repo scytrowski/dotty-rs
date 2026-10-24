@@ -2,109 +2,82 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
-## Baseline and change
+## Baseline and selected increment
 
-The fresh baseline used `main` at `0f8b4a7aafdeb24dd618b4fecee8abdb193d999d`, the
-pinned Scala revision `777528f19a58e794c9954a42f433373472ec57f8`, and JDK 21.0.8.
-The frozen `package-term` cohort covered 60 files and 369 methods: 0 methods
-typed, 369 first-blocker rows, and 17 `TermNameNotFound` blockers.
+The fresh baseline is `main` at
+`e06c4eeea02471f674c6b4c0263eaf69f3bc1f60`. It includes the merged #1571 and
+#1574 increments. The pinned inputs are Scala revision
+`777528f19a58e794c9954a42f433373472ec57f8`, Scala 3.9.0 artifacts, and JDK
+21.0.8.
 
-The implementation resolves a public value alias declared directly in the
-`scala.package` object through `scala/package.tasty`, validates that its target
-exists, verifies that the declared type names that same singleton target, then
-returns the target's canonical module identity from the classpath resolver.
-Nested, inaccessible, mutable, widened, and constructed values are excluded;
-it does not infer a term from its spelling. The Scala 3.9 oracle compiles `Nil`
-and `None`, checks a local `Nil` shadow, and rejects an unknown default term.
+This increment handles an imported Java class used as a qualifier for static
+members. The Typer preserves the class's canonical symbol and type identity,
+allows only members marked `STATIC`, and applies the same rule in ordinary
+selection and overloaded method application. The class remains invalid as a
+standalone value. It does not synthesize a Java companion or infer staticness
+from spelling.
+
+The Scala 3.9 oracle accepts `Paths.get("input.txt")` after importing
+`java.nio.file.Paths` and rejects both `Paths` as a value and an instance-method
+selection through the class. Typer regression tests cover successful selection
+of a static method and rejection of an instance method.
 
 ## Frozen-cohort result
 
-The same 60-file, 369-method cohort was run twice after the change; normalized
-reports matched byte-for-byte. Fifteen first blockers advanced across two
-files. `TermNameNotFound` fell from 17 rows to 2. No cohort method became fully
-typed: `methods_typed=0`. This issue's goal of fully typing a previously blocked
-real method remains unmet and is recorded as such; the next blocker must be
-addressed before claiming that milestone.
+The pinned `package-term` cohort covers 60 files and 369 real methods. The
+baseline and final run each attempted all 369 methods; both typed zero methods.
+One method row advanced, with no first-blocker regressions. The normalized
+cohort reports and detailed resolver sidecars matched byte-for-byte across two
+final runs. The 3-file focused smoke (31 methods) and the 77-file `object-module`
+cohort (576 methods) also completed twice with byte-identical normalized output;
+neither audit had parser or namer failures.
 
-The audit records only the first blocker for each method. The after-change
-first-blocker distribution is:
-
-| First blocker | Method rows | Files |
+| First blocker | Baseline rows | Final rows |
 | --- | ---: | ---: |
-| `ImportQualifierNotFound` | 144 | 11 |
-| `SymbolResolution` | 97 | 29 |
-| `TypeNameNotFound` | 30 | 12 |
-| `WrongTypeNameKind` | 20 | 2 |
-| `ObjectModuleClassUnavailable` | 18 | 1 |
-| `LocalValueConformanceUnsupported` | 13 | 1 |
-| `UnstableSelectionPrefix` | 11 | 3 |
-| `MemberLookup` | 9 | 4 |
-| `MemberNotFound` | 5 | 3 |
-| `ApplicationCalleeNotMethod` | 5 | 2 |
-| `PatternTypeMismatch` | 4 | 1 |
-| `StringLiteralTypingDeferred` | 4 | 2 |
-| `ExplicitTypeApplicationCalleeNotPoly` | 3 | 2 |
-| `TermNameNotFound` | 2 | 2 |
-| `ApplicationArgumentConformanceUnsupported` | 1 | 1 |
-| `IfConditionConformanceUnsupported` | 1 | 1 |
-| `InfixPatternDeferred` | 1 | 1 |
-| `OverloadedSelectionDeferred` | 1 | 1 |
+| `TermNameNotFound` | 2 | 1 |
+| `MemberNotFound` | 5 | 6 |
+| All other first blockers | 362 | 362 |
+| Fully typed methods | 0 | 0 |
 
-The change removes an early name-resolution failure but exposes later
-unsupported steps. Thirteen method rows in `CommandLineParser.scala` now stop at
-`LocalValueConformanceUnsupported` for inferred local `accum`; two rows in
-`InlinerHeuristics.scala` stop at `ExplicitTypeApplicationCalleeNotPoly`. These
-are next blockers, not a complete trace of every error later in each method.
+The changed row is `compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=467`
+(`stripComment`), attempted at `#tree=498` (`expandArg`). The baseline stopped
+at `TermNameNotFound(Paths)`. The final audit resolves `Paths.get` to the two
+static Java overloads and moves the first blocker to
+`MemberNotFound(String.stripPrefix)`. This is verified semantic progress, but
+the method is still not typed. The issue's stretch goal of fully typing one
+previously blocked real method remains unmet.
 
-The exact method identities and next blockers are in
+The complete per-method before/after reconciliation is in
+[`typer-name-resolution-1566-cohort-3.9.0.tsv`](typer-name-resolution-1566-cohort-3.9.0.tsv).
+The earlier default Scala package-term increment remains recorded in
 [`typer-name-resolution-progress-3.9.0.tsv`](typer-name-resolution-progress-3.9.0.tsv).
-At attempt root `CommandLineParser.scala#tree=397` (`tokenize`), 13 method rows
-now stop at `LocalValueConformanceUnsupported` for inferred local `accum`. One
-remaining method is `CommandLineParser.scala#tree=467` (`stripComment`); its
-attempt at outer root `tree=498` (`expandArg`) still reports
-`TermNameNotFound` for `paths`. The other remaining name blocker belongs to
-`BTypeLoader.scala#tree=1019` (`dropModule`) and occurs at attempt root
-`tree=1079`.
 
-In the separate three-file focused smoke audit, local method
-`StringParsers.scala#tree=123` (`rec`) now resolves `scala.None` at attempt root
-`tree=129`. The method advances from `TermNameNotFound` to `MemberNotFound`, so
-it also remains untyped.
+## Next bounded blocker
 
-## Oracle and audit commands
+The next failure in `expandArg` is Scala's `String.stripPrefix` extension
+method. Resolving this correctly requires the Scala string extension/member
+view; this increment does not manufacture it. Other cohort blockers are
+unchanged, including 144 `ImportQualifierNotFound`, 97 `SymbolResolution`, 30
+`TypeNameNotFound`, and 13 `LocalValueConformanceUnsupported` rows. No full
+corpus result is claimed.
 
-The pinned Scala source controls are `library/src/scala/package.scala:76`
-(`Nil`) and `library/src/scala/collection/immutable/List.scala:663` (the target
-object). The import oracle fixtures are in
-`tools/typer-classpath-corpus-audit/scala39_import_oracle.py`:
-`ImportDefaultScalaTerms.scala` and `MissingDefaultTerm.scala`.
+## Reproduction
 
-Run the Scala oracle and focused regressions with:
+Run the Scala oracle with the pinned artifacts by setting `JAVA_HOME` and
+`SCALA39_CLASSPATH`, then:
 
 ```sh
-tools/typer-classpath-corpus-audit/run --import-prefix-profile --source-file compiler/src/dotty/tools/dotc/config/CommandLineParser.scala
-cargo test -p dotty-classloader scala_default_package_term_resolves_through_its_tasty_alias --locked
-cargo test -p dotty-classloader term_alias --locked
-cargo test -p dotty-typer --lib default_term_import_resolves_a_scala_package_term --locked
+python3 tools/typer-classpath-corpus-audit/scala39_import_oracle.py
+cargo test -p dotty-typer --test refactor_contract java_class_import_qualifier --locked
 ```
 
-The fresh baseline and after-change cohort runs used the same command with
-different output and temporary paths:
+The deterministic cohort audit used:
 
 ```sh
-PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-baseline-runs" \
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-final4-runs" \
 SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
 SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
 tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
-  --verify-determinism target/issue-1566-baseline.md
-
-PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-after-runs-final" \
-SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
-SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" \
-tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
-  --verify-determinism target/issue-1566-after-final.md
+  --verify-determinism target/issue-1566-final4.md
 ```
-
-The fresh baseline command and report are recorded in the issue work log; the
-baseline cohort sidecar is `target/issue-1566-baseline-cohort.tsv`. These
-generated files live under `target/` and are not source-of-truth fixtures.
