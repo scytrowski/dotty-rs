@@ -34,6 +34,9 @@ LOAD_ROOT_RE = re.compile(
     r"::completed_cache_hits=(\d+)"
 )
 LOAD_EDGE_RE = re.compile(r"::dependency_edges=\[(.*?)\]$")
+LOAD_MODULE_COMPLETION_RE = re.compile(
+    r"::module_completion_calls=(\d+)::module_completion_successes=(\d+)::module_completion_errors=(\d+)"
+)
 LOAD_IDENTITY_SETS_RE = re.compile(
     r"::identity_shells=\[(.*?)\]::completed_classes=\[(.*?)\]::classes=\[(.*?)\]::dependency_edges="
 )
@@ -270,12 +273,16 @@ def parse_run(log: str) -> dict:
             if root_match:
                 root, file, method, request, *counts = root_match.groups()
                 identity_sets = LOAD_IDENTITY_SETS_RE.search(line)
+                module_completion = LOAD_MODULE_COMPLETION_RE.search(line)
                 result["load_roots"].append({
                     "root": root, "file": file, "method": method, "request": request,
                     "depth": int(counts[0]), "distinct_classes": int(counts[1]),
                     "full_completions": int(counts[2]), "shells_created": int(counts[3]),
                     "shells_reused": int(counts[4]), "member_type_references": int(counts[5]),
                     "hierarchy_loads": int(counts[6]), "completed_cache_hits": int(counts[7]),
+                    "module_completion_calls": int(module_completion.group(1)) if module_completion else 0,
+                    "module_completion_successes": int(module_completion.group(2)) if module_completion else 0,
+                    "module_completion_errors": int(module_completion.group(3)) if module_completion else 0,
                     "identity_shells": identity_sets.group(1).split(",") if identity_sets and identity_sets.group(1) else [],
                     "completed_classes": identity_sets.group(2).split(",") if identity_sets and identity_sets.group(2) else [],
                     "classes": identity_sets.group(3).split(",") if identity_sets and identity_sets.group(3) else [],
@@ -947,8 +954,8 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
             for index, result in enumerate(runs, 1) for name in sorted(load_totals)
         ), encoding="utf-8")
     (out_dir / "request-roots.tsv").write_text(
-        "run\troot\tfile\tmethod\trequest\tdepth\tdistinct_classes\tfull_completions\tshells_created\tshells_reused\tmember_type_references\thierarchy_loads\tcompleted_cache_hits\n" + "".join(
-            "\t".join(str(value) for value in [run, root["root"], root["file"], root["method"], root["request"], root["depth"], root["distinct_classes"], root["full_completions"], root["shells_created"], root["shells_reused"], root["member_type_references"], root["hierarchy_loads"], root["completed_cache_hits"]]) + "\n"
+        "run\troot\tfile\tmethod\trequest\tdepth\tdistinct_classes\tfull_completions\tshells_created\tshells_reused\tmember_type_references\thierarchy_loads\tcompleted_cache_hits\tmodule_completion_calls\tmodule_completion_successes\tmodule_completion_errors\n" + "".join(
+            "\t".join(str(value) for value in [run, root["root"], root["file"], root["method"], root["request"], root["depth"], root["distinct_classes"], root["full_completions"], root["shells_created"], root["shells_reused"], root["member_type_references"], root["hierarchy_loads"], root["completed_cache_hits"], root["module_completion_calls"], root["module_completion_successes"], root["module_completion_errors"]]) + "\n"
             for run, root in sorted_roots
         ), encoding="utf-8")
     (out_dir / "dependency-edges.tsv").write_text(

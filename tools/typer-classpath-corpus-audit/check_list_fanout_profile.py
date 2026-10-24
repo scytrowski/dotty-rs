@@ -24,6 +24,9 @@ EXPECTED_METRICS = {
     "member_type_references": "300",
     "hierarchy_loads": "81",
     "completed_cache_hits": "53",
+    "module_completion_calls": "0",
+    "module_completion_successes": "0",
+    "module_completion_errors": "0",
 }
 
 

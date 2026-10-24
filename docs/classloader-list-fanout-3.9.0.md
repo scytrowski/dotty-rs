@@ -35,14 +35,14 @@ identity sets are checked in as
 and
 [`classloader-list-fanout-3.9.0-classes.tsv`](classloader-list-fanout-3.9.0-classes.tsv).
 
-| Scala source root | Binary request | Runs | Completed | Visited | Depth | Hierarchy edges | Member identity attempts / successes | Cache hits |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `ListMap.scala#tree=146::scala.collection.mutable.ListMap.addOne` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 |
-| `ListBuffer.scala#tree=1088::scala.collection.mutable.ListBuffer.removeAfter` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 |
-| `TrieMap.scala#tree=2721::scala.collection.concurrent.LNode.inserted` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 |
-| `TrieMap.scala#tree=2780::scala.collection.concurrent.LNode.removed` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 |
+| Scala source root | Binary request | Runs | Completed | Visited | Depth | Hierarchy edges | Member identity attempts / successes | Cache hits | Module completions |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `ListMap.scala#tree=146::scala.collection.mutable.ListMap.addOne` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 | 0 |
+| `ListBuffer.scala#tree=1088::scala.collection.mutable.ListBuffer.removeAfter` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 | 0 |
+| `TrieMap.scala#tree=2721::scala.collection.concurrent.LNode.inserted` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 | 0 |
+| `TrieMap.scala#tree=2780::scala.collection.concurrent.LNode.removed` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 | 0 |
 
-The three complete profile runs took 882, 885, and 915 ms for the selected
+The three complete profile runs took 875, 895, and 884 ms for the selected
 three-file audit. Across the same samples, the four exact methods averaged
 108.3 ms (`ListMap.addOne`), 109.7 ms (`ListBuffer.removeAfter`), 110.3 ms
 (`LNode.inserted`), and 107.0 ms (`LNode.removed`). These are bounded audit

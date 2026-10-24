@@ -1493,7 +1493,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             })?;
 
         let semantic_owner = semantic_owner
-            .map(|owner| self.ensure_class_identity_inner(&owner, ancestry))
+            .map(|owner| {
+                self.record_dependency_edge(
+                    name,
+                    &owner,
+                    ClassLoadDependencyReason::EnclosingOwnerIdentity,
+                );
+                self.ensure_class_identity_inner(&owner, ancestry)
+            })
             .transpose()?;
         let package = self.session.packages.resolve(self.store, name);
         let text = self.store.names.intern(name.simple_name());
@@ -9613,6 +9620,43 @@ mod tests {
             synthetic_class("java/lang/Comparable", None),
         );
         classes
+    }
+
+    #[test]
+    fn profiles_enclosing_owner_identity_reached_from_a_member_type() {
+        let mut classes = nested_sample_classpath();
+        classes.insert(
+            BinaryName::from_internal("UsesInner"),
+            signature_class(
+                "UsesInner",
+                Some("java/lang/Object"),
+                &[],
+                None,
+                &[("inner", "LNestedSample$Inner;", None)],
+                &[],
+            ),
+        );
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        loader.set_load_profile_collection(true);
+
+        loader
+            .load_class(&BinaryName::from_internal("UsesInner"))
+            .expect("UsesInner should load through its nested member type");
+
+        let profile = loader.take_load_profiles().pop().unwrap();
+        assert!(profile.dependency_edges.iter().any(|edge| {
+            edge.owner == "UsesInner"
+                && edge.dependency == "NestedSample$Inner"
+                && edge.reason == ClassLoadDependencyReason::MemberTypeIdentity
+        }));
+        assert!(profile.dependency_edges.iter().any(|edge| {
+            edge.owner == "NestedSample$Inner"
+                && edge.dependency == "NestedSample"
+                && edge.reason == ClassLoadDependencyReason::EnclosingOwnerIdentity
+        }));
+        assert!(profile.classes.contains("NestedSample$Inner"));
+        assert!(profile.classes.contains("NestedSample"));
     }
 
     /// `NestedSample.max`'s real declaration is
