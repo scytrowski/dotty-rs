@@ -10925,6 +10925,26 @@ fn multi_class_source_backend_failure_publishes_no_classes() {
 }
 
 #[test]
+fn body_field_initializer_failure_keeps_a_multi_class_batch_unpublished() {
+    let output = TestOutputDirectory::new("body-field-initializer-batch-failure");
+    let result = compile_source_classes(
+        "class Ready { val value: Int = 10 }\nclass Broken { val first: Int = later; val later: Int = 2 }",
+        "BodyFieldBatch.scala",
+        output.path(),
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::FieldInitializerReadsUninitializedField { .. }
+        ))
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "a later body initialization error must not publish the earlier valid class"
+    );
+}
+
+#[test]
 fn real_counter_objects_source_emits_two_deterministic_verified_classes() {
     let first_output = TestOutputDirectory::new("counter-objects-first");
     let second_output = TestOutputDirectory::new("counter-objects-second");
@@ -17389,6 +17409,58 @@ fn unsupported_real_field_and_constructor_sources_fail_without_artifacts() {
         "class ImmutableAssignment { private val seed: Int = 1; def update(): Unit = seed = 2 }",
         |failure| matches!(failure, PipelineFailure::Typer(_)),
     );
+    assert_source_failure(
+        "implicit-noarg-forward-field-read",
+        "class ForwardRead { val first: Int = later; val later: Int = 2 }",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::FieldInitializerReadsUninitializedField { .. }
+                )
+            )
+        },
+    );
+    assert_source_failure(
+        "implicit-noarg-this-escape",
+        "class ThisEscape { val next: ThisEscape = this }",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(
+                    JvmCodegenError::UnsupportedJvmReferenceType { .. }
+                        | JvmCodegenError::UnsupportedConstructorFieldInitializer { .. }
+                )
+            )
+        },
+    );
+    let private_noarg_output = TestOutputDirectory::new("private-explicit-noarg-constructor");
+    let private_noarg = compile_source(
+        "class Hidden private () { val value: Int = 1 }",
+        "PrivateNoArg.scala",
+        private_noarg_output.path(),
+    )
+    .expect("an explicit private no-arg constructor keeps its declared access");
+    let mut private_noarg_reader = Reader::new(private_noarg.class.bytes());
+    let private_noarg_class = ClassFile::decode(&mut private_noarg_reader)
+        .expect("decode class with explicit private constructor");
+    let constructors = private_noarg_class
+        .methods
+        .iter()
+        .filter(|method| private_noarg_class.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        constructors.len(),
+        1,
+        "no duplicate public no-arg constructor"
+    );
+    assert_eq!(
+        private_noarg_class
+            .constant_pool
+            .utf8(constructors[0].descriptor_index),
+        Ok("()V")
+    );
+    assert!(constructors[0].access_flags.is_private());
     for (label, source) in [
         (
             "defaulted-constructor-parameter",
@@ -18398,9 +18470,9 @@ fn verify_private_fields_with_jdk(output_directory: &Path) {
 }
 
 #[test]
-fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
-    let source_text = "class PublicFields:\n  var enabled: Boolean = true\n  val marker: Boolean = false\n  val ratio: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L";
-    let output = TestOutputDirectory::new("public-body-field-plans");
+fn public_body_fields_lower_to_source_ordered_constructor_stores() {
+    let source_text = "class BodyOnly:\n  val seed: Int = 10\n  var enabled: Boolean = true\n  val ratio: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  private val copied: Int = initial";
+    let output = TestOutputDirectory::new("public-body-field-initialization");
     let mut observed = false;
     let mut observe = |ast: &AstArena<Untyped>,
                        index: &SourceSemanticIndex,
@@ -18413,9 +18485,27 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
             .metadata(definitions)
             .expect("the public fields project to checked private backing metadata");
 
-        for (class_name, expected_fields, expected_constructor_accessors) in [
-            ("PublicFields", &["enabled", "marker", "ratio"][..], 0),
-            ("Counter", &["initial", "current"][..], 1),
+        for (
+            class_name,
+            expected_body_fields,
+            expected_source_fields,
+            expected_private_fields,
+            expected_constructor_accessors,
+        ) in [
+            (
+                "BodyOnly",
+                &["seed", "enabled", "ratio"][..],
+                &["seed", "enabled", "ratio"][..],
+                0,
+                0,
+            ),
+            (
+                "Counter",
+                &["initial", "current"][..],
+                &["initial", "current", "copied"][..],
+                1,
+                1,
+            ),
         ] {
             let class = audit_class_named(unit, class_name);
             let plan = unit
@@ -18423,7 +18513,7 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                 .iter()
                 .find(|plan| plan.class == class)
                 .expect("source class has a plan");
-            if class_name == "PublicFields" {
+            if class_name == "BodyOnly" {
                 assert!(matches!(
                     plan.initialization,
                     JvmClassInitializationPlan::ImplicitNoArg
@@ -18434,11 +18524,33 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                     JvmClassInitializationPlan::PrimaryConstructor(_)
                 ));
             }
-            assert_eq!(plan.fields.len(), expected_fields.len());
+            assert_eq!(plan.fields.len(), expected_source_fields.len());
             assert_eq!(
                 plan.fields
                     .iter()
+                    .map(|field| unit
+                        .store
+                        .names
+                        .resolve(unit.store.symbols.get(field.field).name.text())
+                        .to_owned())
+                    .collect::<Vec<_>>(),
+                expected_source_fields
+            );
+            let body_field_plans = plan
+                .fields
+                .iter()
+                .filter(|field| {
+                    matches!(
+                        field.source_visibility,
+                        JvmFieldSourceVisibility::PlainPublic(_)
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                body_field_plans
+                    .iter()
                     .map(|field| {
+                        let field = *field;
                         let JvmFieldSourceVisibility::PlainPublic(proof) = field.source_visibility
                         else {
                             panic!("ordinary public body field carries its checked source proof");
@@ -18481,7 +18593,7 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                         assert_eq!(proof.declaration(), tree);
                         assert_eq!(
                             proof.template_position(),
-                            expected_fields
+                            expected_body_fields
                                 .iter()
                                 .position(
                                     |name| *name == unit.store.names.resolve(symbol.name.text())
@@ -18493,17 +18605,17 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                         unit.store.names.resolve(symbol.name.text()).to_owned()
                     })
                     .collect::<Vec<_>>(),
-                expected_fields
+                expected_body_fields
             );
 
             let class_metadata = metadata
                 .iter()
                 .find(|metadata| metadata.identity().symbol() == class)
                 .expect("class has validated metadata");
-            assert!(class_metadata.fields().is_empty());
+            assert_eq!(class_metadata.fields().len(), expected_private_fields);
             assert_eq!(
                 class_metadata.accessors().len(),
-                expected_fields.len() + expected_constructor_accessors
+                expected_body_fields.len() + expected_constructor_accessors
             );
             if expected_constructor_accessors == 1 {
                 assert!(class_metadata.accessors().iter().any(|accessor| {
@@ -18513,7 +18625,8 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                     )
                 }));
             }
-            for field_plan in &plan.fields {
+            for field_plan in &body_field_plans {
+                let field_plan = *field_plan;
                 let accessor = class_metadata
                     .accessors()
                     .iter()
@@ -18524,8 +18637,8 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                     .names
                     .resolve(unit.store.symbols.get(field_plan.field).name.text())
                 {
+                    "seed" => "I",
                     "enabled" => "Z",
-                    "marker" => "Z",
                     "ratio" => "D",
                     "initial" => "I",
                     "current" => "J",
@@ -18572,13 +18685,53 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                         .contains(SymbolFlags::MUTABLE)
                 );
             }
-            assert!(matches!(
-                unit.lower_constructor_field_initializers(class, definitions),
-                Err(JvmCodegenError::FieldEmissionUnsupported { field, .. })
-                    if plan.fields.iter().any(|candidate| candidate.field == field)
-            ));
+            let initializers = unit
+                .lower_constructor_field_initializers(class, definitions)
+                .expect("public body fields lower through their checked typed RHS proofs");
+            assert_eq!(initializers.fields().len(), expected_source_fields.len());
+            assert_eq!(
+                initializers
+                    .fields()
+                    .iter()
+                    .map(|initializer| initializer.field())
+                    .collect::<Vec<_>>(),
+                plan.fields
+                    .iter()
+                    .map(|field| field.field)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                initializers
+                    .fields()
+                    .iter()
+                    .map(|initializer| {
+                        let origin = match plan
+                            .fields
+                            .iter()
+                            .find(|field| field.field == initializer.field())
+                            .expect("initializer has its source field plan")
+                            .source_visibility
+                        {
+                            JvmFieldSourceVisibility::PlainPublic(_) => {
+                                dotty_jvm::JvmConstructorFieldInitializerOrigin::ClassBodyAccessor
+                            }
+                            JvmFieldSourceVisibility::PlainPrivate => {
+                                dotty_jvm::JvmConstructorFieldInitializerOrigin::PrivateField
+                            }
+                            JvmFieldSourceVisibility::PrivateThis => {
+                                panic!("private[this] fields are outside initialization scope")
+                            }
+                        };
+                        assert_eq!(initializer.origin(), origin);
+                        unit.store
+                            .names
+                            .resolve(unit.store.symbols.get(initializer.field()).name.text())
+                    })
+                    .collect::<Vec<_>>(),
+                expected_source_fields
+            );
 
-            if expected_fields.len() > 1 {
+            if expected_body_fields.len() > 1 {
                 let class_index = unit
                     .classes
                     .iter()
@@ -18597,7 +18750,36 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                     .expect("restoring source order restores the validated plan");
             }
 
-            if class_name == "PublicFields" {
+            if class_name == "Counter" {
+                let class_index = unit
+                    .classes
+                    .iter()
+                    .position(|candidate| candidate.class == class)
+                    .expect("Counter has a mutable class plan");
+                let private_index = unit.classes[class_index]
+                    .fields
+                    .iter()
+                    .position(|field| {
+                        matches!(
+                            field.source_visibility,
+                            JvmFieldSourceVisibility::PlainPrivate
+                        )
+                    })
+                    .expect("Counter includes a private body field");
+                unit.classes[class_index].fields.swap(0, private_index);
+                assert!(matches!(
+                    unit.validate(),
+                    Err(JvmCodegenError::OutOfOrderFieldPlan {
+                        class: found_class,
+                        ..
+                    }) if found_class == class
+                ));
+                unit.classes[class_index].fields.swap(0, private_index);
+                unit.validate()
+                    .expect("restoring mixed visibility field order restores the plan");
+            }
+
+            if class_name == "BodyOnly" {
                 let current_plan = unit
                     .classes
                     .iter()
@@ -18659,24 +18841,205 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
         }
     };
 
-    let error = compile_source_batch_with_source_observer(
+    let first_artifacts = compile_source_batch_with_source_observer(
         source_text,
-        "PublicBodyFields.scala",
+        "BodyFields.scala",
         output.path(),
         SourceId::from_index(1479),
         SourceUnitCardinality::AtLeastTwo,
         &mut observe,
     )
-    .expect_err("public class-body backing fields remain outside emission in this increment");
-    assert!(matches!(
-        error,
-        PipelineFailure::Codegen(JvmCodegenError::FieldEmissionUnsupported { .. })
-    ));
+    .expect("public class-body backing fields initialize in both constructor shapes");
     assert!(
         observed,
         "plan validation runs before the emission boundary"
     );
-    assert!(output.class_files().is_empty());
+    assert_eq!(output.class_files().len(), 2);
+    let second_output = TestOutputDirectory::new("public-body-field-initialization-second");
+    let second_artifacts = compile_source_batch(
+        source_text,
+        "BodyFields.scala",
+        second_output.path(),
+        SourceId::from_index(1479),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh frontend session emits the same body-field classes");
+    assert_eq!(first_artifacts.len(), second_artifacts.len());
+    assert!(
+        first_artifacts
+            .iter()
+            .zip(&second_artifacts)
+            .all(|(first, second)| {
+                first.class.internal_name() == second.class.internal_name()
+                    && first.class.bytes() == second.class.bytes()
+            })
+    );
+
+    let output_path = output.path().to_str().expect("UTF-8 output path");
+    let body_only_bytes =
+        fs::read(output.path().join("BodyOnly.class")).expect("read emitted BodyOnly class file");
+    let mut body_only_reader = Reader::new(&body_only_bytes);
+    let body_only = ClassFile::decode(&mut body_only_reader).expect("decode BodyOnly class file");
+    assert!(body_only_reader.is_at_end());
+    body_only
+        .validate_references()
+        .expect("valid BodyOnly references");
+    assert_field_reference_sequence(
+        &body_only,
+        emitted_method_code(&body_only, "<init>"),
+        &[
+            (0xb5, "BodyOnly", "seed", "I"),
+            (0xb5, "BodyOnly", "enabled", "Z"),
+            (0xb5, "BodyOnly", "ratio", "D"),
+        ],
+    );
+    let body_only_constructor = emitted_method_code(&body_only, "<init>");
+    assert_eq!(
+        decode_subset_instructions(body_only_constructor)[..2],
+        [(0, 0x2a), (1, 0xb7)]
+    );
+    assert_method_reference(
+        &body_only,
+        body_only_constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    let counter_bytes =
+        fs::read(output.path().join("Counter.class")).expect("read emitted Counter class file");
+    let mut counter_reader = Reader::new(&counter_bytes);
+    let counter = ClassFile::decode(&mut counter_reader).expect("decode Counter class file");
+    assert!(counter_reader.is_at_end());
+    counter
+        .validate_references()
+        .expect("valid Counter references");
+    assert_field_reference_sequence(
+        &counter,
+        emitted_method_code(&counter, "<init>"),
+        &[
+            (0xb5, "Counter", "id", "I"),
+            (0xb5, "Counter", "initial", "I"),
+            (0xb5, "Counter", "current", "J"),
+            (0xb4, "Counter", "initial", "I"),
+            (0xb5, "Counter", "copied", "I"),
+        ],
+    );
+    let counter_constructor = emitted_method_code(&counter, "<init>");
+    assert_eq!(
+        decode_subset_instructions(counter_constructor)[..2],
+        [(0, 0x2a), (1, 0xb7)]
+    );
+    assert_method_reference(
+        &counter,
+        counter_constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_eq!(
+        body_only
+            .methods
+            .iter()
+            .filter_map(|method| body_only.constant_pool.utf8(method.name_index).ok())
+            .collect::<Vec<_>>(),
+        ["<init>"]
+    );
+    let [body_only_method] = body_only.methods.as_slice() else {
+        panic!("BodyOnly has exactly one generated constructor");
+    };
+    assert!(body_only_method.access_flags.is_public());
+    assert_eq!(
+        body_only
+            .constant_pool
+            .utf8(body_only_method.descriptor_index),
+        Ok("()V")
+    );
+    let counter_constructors = counter
+        .methods
+        .iter()
+        .filter(|method| counter.constant_pool.utf8(method.name_index) == Ok("<init>"))
+        .collect::<Vec<_>>();
+    assert_eq!(counter_constructors.len(), 1);
+    assert!(counter_constructors[0].access_flags.is_public());
+    assert_eq!(
+        counter
+            .constant_pool
+            .utf8(counter_constructors[0].descriptor_index),
+        Ok("(I)V")
+    );
+    assert!(!counter.methods.iter().any(|method| {
+        matches!(
+            counter.constant_pool.utf8(method.name_index),
+            Ok("initial" | "current" | "enabled" | "ratio" | "seed")
+        )
+    }));
+
+    if require_jdk_or_skip() {
+        let harness_path = output.path().join("BodyFieldsHarness.java");
+        fs::write(
+            &harness_path,
+            "import java.lang.reflect.Field;\npublic final class BodyFieldsHarness {\n  private static Object read(Object instance, String name) throws Exception { Field field = instance.getClass().getDeclaredField(name); field.setAccessible(true); return field.get(instance); }\n  public static void main(String[] args) throws Exception {\n    BodyOnly body = new BodyOnly();\n    if (!Boolean.TRUE.equals(read(body, \"enabled\"))) throw new AssertionError(\"enabled\");\n    if (((Integer) read(body, \"seed\")) != 10) throw new AssertionError(\"seed\");\n    if (Double.doubleToRawLongBits((Double) read(body, \"ratio\")) != Double.doubleToRawLongBits(1.5d)) throw new AssertionError(\"ratio bits\");\n    Counter first = new Counter(7); Counter second = new Counter(13);\n    if (((Integer) read(first, \"id\")) != 7 || ((Integer) read(first, \"initial\")) != 10 || ((Long) read(first, \"current\")) != 0L || ((Integer) read(first, \"copied\")) != 10) throw new AssertionError(\"first counter values\");\n    if (((Integer) read(second, \"id\")) != 13 || ((Integer) read(second, \"copied\")) != 10) throw new AssertionError(\"independent instances\");\n  }\n}\n",
+        )
+        .expect("write body-field harness");
+        let javac = Command::new("javac")
+            .args(["-classpath", output_path, "-d", output_path])
+            .arg(&harness_path)
+            .output()
+            .expect("start javac for body-field harness");
+        assert!(javac.status.success(), "javac failed: {javac:?}");
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                output_path,
+                "BodyFieldsHarness",
+            ])
+            .output()
+            .expect("start java verifier for body-field harness");
+        assert!(java.status.success(), "java failed: {java:?}");
+    }
+}
+
+#[test]
+fn mixed_visibility_plan_permutation_cannot_hide_a_forward_field_read() {
+    let source_text = "class Mixed:\n  val first: Int = later\n  private val later: Int = 2";
+    let output = TestOutputDirectory::new("mixed-field-order-permutation");
+    let mut observed = false;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, _definitions: &Definitions| {
+        let class = audit_class_named(unit, "Mixed");
+        let class_plan = unit
+            .classes
+            .iter_mut()
+            .find(|plan| plan.class == class)
+            .expect("Mixed has a class plan");
+        assert_eq!(class_plan.fields.len(), 2);
+        class_plan.fields.swap(0, 1);
+        observed = true;
+    };
+    let result = compile_source_batch_observed(
+        source_text,
+        "Mixed.scala",
+        output.path(),
+        SourceId::from_index(1481),
+        SourceUnitCardinality::ExactlyOne,
+        Some(&mut observe),
+    );
+    assert!(
+        observed,
+        "the test permutes the validated frontend field plan"
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::OutOfOrderFieldPlan { .. }
+        ))
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "an out-of-source-order mixed field plan must publish no class file"
+    );
 }
 
 #[test]

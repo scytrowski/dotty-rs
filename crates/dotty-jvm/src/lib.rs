@@ -31,7 +31,8 @@ pub use constructor::{
 };
 pub use constructor_initializers::{
     JvmConstructorAccessorInitializer, JvmConstructorFieldInitializer,
-    JvmConstructorFieldInitializerPlan, JvmConstructorInitializerInstruction,
+    JvmConstructorFieldInitializerOrigin, JvmConstructorFieldInitializerPlan,
+    JvmConstructorInitializerInstruction,
 };
 mod emission;
 mod expression;
@@ -602,12 +603,13 @@ pub struct JvmAccessorMethodMetadata {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum JvmClassInitializationPlan {
     /// Validated source constructor proof used to emit its exact primary
-    /// constructor and the planned primitive fields.
+    /// constructor and source-ordered checked field initializers.
     PrimaryConstructor(JvmPrimaryConstructorPlan),
-    /// The frontend proved that an empty no-argument constructor is
-    /// equivalent to the source class: no constructor parameters or body,
-    /// parent arguments, fields, or template initializers are present. The
-    /// unit hierarchy supplies the validated direct-parent constructor call.
+    /// The frontend proved that a synthesized public no-argument constructor
+    /// is equivalent to the source class: no constructor parameters/body,
+    /// parent arguments, or non-field template initializers are present.
+    /// Planned field initializers remain separately source-ordered, and the
+    /// unit hierarchy supplies the validated direct-parent call.
     ImplicitNoArg,
     /// Constructor or class initialization is explicit or cannot be proven
     /// safe by the supplied compilation plan.
@@ -873,6 +875,12 @@ pub enum JvmCodegenError {
     InvalidPublicBodyFieldSourceProof { field: SymbolId },
     /// Public-body field plans do not retain source template order.
     OutOfOrderPublicBodyFieldPlan { class: SymbolId, field: SymbolId },
+    /// Field plans do not retain initializer source order across visibility forms.
+    OutOfOrderFieldPlan { class: SymbolId, field: SymbolId },
+    /// A planned field initializer has no source position for order validation.
+    FieldInitializerSourcePositionUnavailable { field: SymbolId },
+    /// Planned field initializers come from different source files.
+    FieldInitializersFromDifferentSources { class: SymbolId, field: SymbolId },
     /// The parameter ID is outside the supplied symbol table.
     UnknownParameter { parameter: SymbolId },
     /// A local symbol ID is outside the supplied symbol table.
@@ -2396,8 +2404,8 @@ pub fn lower_method_body(
 /// The class must have an explicit [`JvmClassPlan`] in `unit`. Its
 /// initialization plan must prove an implicit no-argument constructor is
 /// equivalent to the source class. The output is pinned to class-file version
-/// 65 and contains only the planned public instance methods, a minimal public
-/// constructor, and no TASTy or other Scala ABI metadata.
+/// 65 and contains only the planned public instance methods, the validated
+/// constructor, checked backing fields, and no TASTy or other Scala ABI metadata.
 pub fn emit_class(
     unit: &JvmCompilationUnit<'_>,
     class_symbol: SymbolId,
@@ -2655,16 +2663,17 @@ impl JvmCompilationUnit<'_> {
         expression::lower_planned_method_body(self, metadata, definitions, method_metadata, body)
     }
 
-    /// Lowers planned primitive field initializers into source-ordered
-    /// constructor fragments using the validated primary-constructor slots.
+    /// Lowers checked private and public-body field initializers into
+    /// source-ordered constructor fragments. Primary-constructor parameter
+    /// reads use the validated constructor slots; an implicit no-arg plan has
+    /// no fabricated constructor metadata.
     ///
     /// The returned plan excludes the superclass constructor call and final
     /// `return`; callers must place its instructions after the validated
     /// direct-parent `<init>()V` call.
-    /// It supports primitive literals, canonical constructor parameters,
-    /// approved `Int` addition and Boolean negation, and reads of fields that
-    /// were initialized earlier in this plan. Unsupported expressions and
-    /// self/forward field reads return typed errors without modifying the unit.
+    /// It supports the bounded literal, parameter, intrinsic, planned-reference
+    /// and prior-field-read subset. Unsupported expressions and self/forward
+    /// field reads return typed errors without modifying the unit.
     pub fn lower_constructor_field_initializers(
         &self,
         class: SymbolId,
@@ -2851,6 +2860,18 @@ impl JvmCompilationUnit<'_> {
 
             let mut class_field_symbols = HashSet::new();
             let mut last_public_body_position = None;
+            let mut last_field_source_position: Option<(SourceId, u32)> = None;
+            let mixed_visibility_fields = class_plan.fields.iter().any(|field| {
+                matches!(
+                    field.source_visibility,
+                    JvmFieldSourceVisibility::PlainPublic(_)
+                )
+            }) && class_plan.fields.iter().any(|field| {
+                matches!(
+                    field.source_visibility,
+                    JvmFieldSourceVisibility::PlainPrivate
+                )
+            });
             for field_plan in &class_plan.fields {
                 if !class_field_symbols.insert(field_plan.field)
                     || !seen_fields.insert(field_plan.field)
@@ -2957,6 +2978,29 @@ impl JvmCompilationUnit<'_> {
                         initializer,
                     },
                 )?;
+                if mixed_visibility_fields {
+                    let source_position = initializer_tree
+                        .position
+                        .map(|position| (position.source(), position.span().range().start()))
+                        .ok_or(JvmCodegenError::FieldInitializerSourcePositionUnavailable {
+                            field: field_plan.field,
+                        })?;
+                    if let Some((previous_source, previous_start)) = last_field_source_position {
+                        if previous_source != source_position.0 {
+                            return Err(JvmCodegenError::FieldInitializersFromDifferentSources {
+                                class: class_plan.class,
+                                field: field_plan.field,
+                            });
+                        }
+                        if previous_start >= source_position.1 {
+                            return Err(JvmCodegenError::OutOfOrderFieldPlan {
+                                class: class_plan.class,
+                                field: field_plan.field,
+                            });
+                        }
+                    }
+                    last_field_source_position = Some(source_position);
+                }
                 validate_tree_type(self.store, initializer, initializer_tree)?;
             }
 

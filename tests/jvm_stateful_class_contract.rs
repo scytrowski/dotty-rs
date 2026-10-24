@@ -777,7 +777,13 @@ fn real_typed_primitive_field_initializers_lower_in_constructor_source_order() {
                 .lower_constructor_field_initializers(class, definitions)
                 .unwrap();
             assert_eq!(initializer_plan.class(), class);
-            assert_eq!(initializer_plan.constructor().symbol(), constructor);
+            assert_eq!(
+                initializer_plan
+                    .constructor()
+                    .expect("primary-constructor initializer plan retains constructor metadata")
+                    .symbol(),
+                constructor
+            );
             assert_eq!(
                 initializer_plan
                     .fields()
@@ -2484,6 +2490,7 @@ fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
             );
             let expected_locals = initializer_plan
                 .constructor()
+                .expect("primary-constructor initializer plan retains constructor metadata")
                 .parameters()
                 .last()
                 .map(|parameter| parameter.slot() + u16::from(parameter.width()))
@@ -4473,14 +4480,25 @@ fn public_body_fields_project_to_origin_aware_accessor_metadata() {
                 .iter()
                 .map(|accessor| accessor.source_field())
                 .collect::<Vec<_>>();
-            assert!(matches!(
-                emit_class(&unit, class, definitions),
-                Err(dotty_jvm::JvmCodegenError::FieldEmissionUnsupported {
-                    class: failed_class,
-                    field: failed_field,
-                }) if failed_class == class
-                    && body_fields.contains(&failed_field)
-            ));
+            assert_eq!(body_fields.len(), 4);
+            let initializer_plan = unit
+                .lower_constructor_field_initializers(class, definitions)
+                .expect("public body fields lower from exact source proofs");
+            assert_eq!(initializer_plan.fields().len(), 3);
+            assert_eq!(
+                initializer_plan
+                    .fields()
+                    .iter()
+                    .map(|initializer| initializer.field())
+                    .collect::<Vec<_>>(),
+                body_fields[1..]
+            );
+            assert!(
+                !emit_class(&unit, class, definitions)
+                    .expect("validated public body initializers emit")
+                    .bytes()
+                    .is_empty()
+            );
             let accessors = class_metadata.accessors();
             assert_eq!(accessors.len(), 4);
             assert_eq!(accessors[0].source_field(), field);
@@ -4780,13 +4798,32 @@ fn real_source_private_primitive_fields_project_in_frontend_order() {
                     typed_ast: unit.typed_ast,
                     classes: vec![emission_plan],
                 };
-                assert!(matches!(
-                    emit_class(&emission_unit, class, definitions),
-                    Err(dotty_jvm::JvmCodegenError::FieldEmissionUnsupported {
-                        class: actual_class,
-                        field: actual_field,
-                    }) if actual_class == class && actual_field == projected[0].symbol()
-                ));
+                let initializer_plan = emission_unit
+                    .lower_constructor_field_initializers(class, definitions)
+                    .expect("implicit no-arg constructor lowers private source fields");
+                assert_eq!(initializer_plan.fields().len(), 5);
+                assert_eq!(
+                    initializer_plan
+                        .fields()
+                        .iter()
+                        .map(|initializer| {
+                            unit.store
+                                .names
+                                .resolve(unit.store.symbols.get(initializer.field()).name.text())
+                        })
+                        .collect::<Vec<_>>(),
+                    ["seed", "enabled", "large", "small", "precise"]
+                );
+                assert!(initializer_plan.fields().iter().all(|initializer| {
+                    initializer.origin()
+                        == dotty_jvm::JvmConstructorFieldInitializerOrigin::PrivateField
+                }));
+                assert!(
+                    !emit_class(&emission_unit, class, definitions)
+                        .expect("valid implicit no-arg field initializers emit")
+                        .bytes()
+                        .is_empty()
+                );
                 snapshot
             },
         )

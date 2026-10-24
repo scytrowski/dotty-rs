@@ -54,8 +54,8 @@ pub(super) fn emit_class(
     )?;
 
     let constructor_initializers = match &plan.initialization {
-        JvmClassInitializationPlan::ImplicitNoArg => None,
-        JvmClassInitializationPlan::PrimaryConstructor(_) => {
+        JvmClassInitializationPlan::ImplicitNoArg
+        | JvmClassInitializationPlan::PrimaryConstructor(_) => {
             Some(unit.lower_constructor_field_initializers(class_symbol, definitions)?)
         }
         JvmClassInitializationPlan::Unsupported => {
@@ -123,26 +123,29 @@ pub(super) fn emit_class(
     }
 
     match constructor_initializers {
-        None => {
-            let mut constructor =
-                constructor_prefix(class_symbol, superclass.parent_internal_name())?;
-            constructor
-                .return_void()
-                .map_err(|error| JvmCodegenError::ConstructorCodeBuilder {
-                    class: class_symbol,
-                    error,
-                })?;
-            builder
-                .add_prebuilt_code_method(
-                    "<init>",
-                    "()V",
-                    MethodAccessFlags(ACC_PUBLIC),
-                    constructor,
-                )
-                .map_err(|error| class_file_error(class_symbol, None, error))?;
-        }
         Some(initializers) => {
-            let constructor_metadata = initializers.constructor();
+            let (descriptor, access_flags, constructor_symbol) = match &plan.initialization {
+                JvmClassInitializationPlan::ImplicitNoArg => {
+                    ("()V".to_owned(), MethodAccessFlags(ACC_PUBLIC), None)
+                }
+                JvmClassInitializationPlan::PrimaryConstructor(_) => {
+                    let constructor_metadata = initializers.constructor().ok_or(
+                        JvmCodegenError::ConstructorInitializerContextUnavailable {
+                            class: class_symbol,
+                        },
+                    )?;
+                    (
+                        constructor_metadata.descriptor().as_str().to_owned(),
+                        constructor_metadata.access_flags(),
+                        Some(constructor_metadata.symbol()),
+                    )
+                }
+                JvmClassInitializationPlan::Unsupported => {
+                    return Err(JvmCodegenError::UnsupportedConstructor {
+                        class: class_symbol,
+                    });
+                }
+            };
             let mut constructor = CodeBuilder::new();
             if !crate::constructor_initializers::append_direct_super_constructor_call(
                 unit,
@@ -160,19 +163,23 @@ pub(super) fn emit_class(
                     error,
                 })?;
             builder
-                .add_prebuilt_code_method(
-                    "<init>",
-                    constructor_metadata.descriptor().as_str(),
-                    constructor_metadata.access_flags(),
-                    constructor,
-                )
-                .map_err(|error| {
-                    class_file_error(class_symbol, Some(constructor_metadata.symbol()), error)
-                })?;
+                .add_prebuilt_code_method("<init>", descriptor, access_flags, constructor)
+                .map_err(|error| class_file_error(class_symbol, constructor_symbol, error))?;
+        }
+        None => {
+            return Err(JvmCodegenError::UnsupportedConstructor {
+                class: class_symbol,
+            });
         }
     }
 
     for accessor in metadata.accessors() {
+        if matches!(
+            accessor.origin(),
+            crate::JvmAccessorOrigin::ClassBodyField(_)
+        ) {
+            continue;
+        }
         let getter = accessor.getter();
         let mut code = CodeBuilder::new();
         code.aload(0)
@@ -310,18 +317,6 @@ pub(super) fn validate_emittable_class(
     class_info: &dotty_core::types::ClassInfo,
     superclass: &crate::JvmSuperclassPlan,
 ) -> Result<(), JvmCodegenError> {
-    if let Some(field) = plan.fields.iter().find(|field| {
-        matches!(
-            field.source_visibility,
-            crate::JvmFieldSourceVisibility::PlainPublic(_)
-        )
-    }) {
-        return Err(JvmCodegenError::FieldEmissionUnsupported {
-            class: plan.class,
-            field: field.field,
-        });
-    }
-
     if let Some(self_type) = class_info.self_type {
         return Err(JvmCodegenError::UnsupportedJvmSelfType {
             class: plan.class,
@@ -402,17 +397,26 @@ pub(super) fn validate_emittable_class(
         }
     }
     for accessor in metadata.accessors() {
-        if accessor.binding().is_none() {
-            return Err(JvmCodegenError::FieldEmissionUnsupported {
-                class: plan.class,
-                field: accessor.source_field(),
-            });
-        }
         if !declared.contains(&accessor.source_field()) || accessor.owner() != plan.class {
             return Err(JvmCodegenError::FieldEmissionUnsupported {
                 class: plan.class,
                 field: accessor.source_field(),
             });
+        }
+        match accessor.origin() {
+            crate::JvmAccessorOrigin::ConstructorParameter(_) => {}
+            crate::JvmAccessorOrigin::ClassBodyField(proof) => {
+                if !plan.fields.iter().any(|field| {
+                    field.field == accessor.source_field()
+                        && field.initializer == Some(proof.initializer())
+                        && matches!(field.source_visibility,
+                            crate::JvmFieldSourceVisibility::PlainPublic(found) if found == proof)
+                }) {
+                    return Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof {
+                        field: accessor.source_field(),
+                    });
+                }
+            }
         }
     }
 
@@ -461,6 +465,10 @@ pub(super) fn validate_emittable_class(
         (JvmClassInitializationPlan::ImplicitNoArg, None, []) => {}
         (JvmClassInitializationPlan::ImplicitNoArg, None, [constructor]) => {
             validate_primary_constructor(store, plan.class, *constructor)?;
+            if store.symbols.get(*constructor).visibility != dotty_core::symbols::Visibility::Public
+            {
+                return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class });
+            }
         }
         (JvmClassInitializationPlan::PrimaryConstructor(_), Some(metadata), [constructor])
             if metadata.symbol() == *constructor => {}
@@ -468,25 +476,6 @@ pub(super) fn validate_emittable_class(
             return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class });
         }
         _ => return Err(JvmCodegenError::UnsupportedConstructor { class: plan.class }),
-    }
-    if matches!(
-        &plan.initialization,
-        JvmClassInitializationPlan::ImplicitNoArg
-    ) && let Some(field) = metadata
-        .fields()
-        .first()
-        .map(|field| field.symbol())
-        .or_else(|| {
-            metadata
-                .accessors()
-                .first()
-                .map(|accessor| accessor.source_field())
-        })
-    {
-        return Err(JvmCodegenError::FieldEmissionUnsupported {
-            class: plan.class,
-            field,
-        });
     }
     Ok(())
 }
