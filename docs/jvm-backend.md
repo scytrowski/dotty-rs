@@ -1009,6 +1009,16 @@ mutability before exposing `JvmClassMetadata::accessor_bindings()`. This is
 planning evidence only: it does not add field storage, generated methods, or
 bytecode.
 
+`JvmClassMetadata::accessors()` separately exposes the checked JVM projection
+for each binding: private backing-field name, descriptor and flags, public
+getter signature, and a public `$eq` setter signature for `var` only. This
+projection uses the exact Scala 3.9.0 oracle evidence recorded in
+[`jvm-scala-accessors.md`](jvm-scala-accessors.md), preserves source order and
+canonical source IDs, and rejects field or binary method-signature collisions
+against planned fields and methods. It does not add semantic symbols, ordinary
+field initializers, or class-file members; accessor and constructor emission
+remain later increments.
+
 `JvmClassMetadata::constructor()` exposes the explicit constructor's canonical
 symbol, owner internal name, descriptor, access flags, and ordered
 `JvmParameterLocal` values. Semantic constructor results are class types; JVM
