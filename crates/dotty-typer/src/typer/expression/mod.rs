@@ -108,7 +108,7 @@ impl SourceTyper<'_> {
         info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
         new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
     ) -> Result<TreeId<Typed>, TyperError> {
-        let operator_text = self.store.names.resolve(infix.op.text());
+        let operator_text = self.store.names.resolve(infix.op.text()).to_owned();
         if operator_text.ends_with(':') {
             return Err(TyperError::RightAssociativeInfixDeferred {
                 source: self.source,
@@ -120,7 +120,7 @@ impl SourceTyper<'_> {
         let left =
             self.type_value_expression_inner(infix.left, context, info_journal, new_mappings)?;
         let receiver_type = self.typed_arena.get(left).ty;
-        let resolved = self.resolve_infix_application_function(
+        let resolved = match self.resolve_infix_application_function(
             InfixApplicationRequest {
                 operator: infix.op,
                 qualifier: left,
@@ -132,7 +132,25 @@ impl SourceTyper<'_> {
             },
             info_journal,
             new_mappings,
-        )?;
+        ) {
+            Ok(resolved) => resolved,
+            Err(error @ TyperError::MemberNotFound { .. }) if operator_text == "+=" => {
+                if let Some(assignment) = self.type_mutable_local_plus_assign_fallback(
+                    tree,
+                    infix,
+                    position,
+                    left,
+                    receiver_type,
+                    context,
+                    info_journal,
+                    new_mappings,
+                )? {
+                    return Ok(assignment);
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         self.type_resolved_application(
             ResolvedApplication {
                 tree_index: tree.index(),
@@ -148,6 +166,99 @@ impl SourceTyper<'_> {
             info_journal,
             new_mappings,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn type_mutable_local_plus_assign_fallback(
+        &mut self,
+        tree: TreeId<Untyped>,
+        infix: dotty_core::ast::InfixOp,
+        position: Option<SourceSpan>,
+        left: TreeId<Typed>,
+        receiver_type: TypeId,
+        context: ExpressionContext,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+        new_mappings: &mut Vec<(SourceId, TreeId<Untyped>)>,
+    ) -> Result<Option<TreeId<Typed>>, TyperError> {
+        if !matches!(
+            self.arena.try_get(infix.left).map(|node| &node.kind),
+            Some(TreeKind::Ident(_))
+        ) || !self.is_mutable_local_selection_receiver(left, receiver_type)
+        {
+            return Ok(None);
+        }
+        let widened_receiver_type =
+            self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
+        if !matches!(
+            self.conforms(widened_receiver_type, self.definitions.int),
+            Ok(true)
+        ) {
+            return Ok(None);
+        }
+
+        // A lexical extension named `+=` has precedence over the assignment
+        // rewrite. Infix extension resolution is still unsupported, so leave
+        // that case visible instead of silently rewriting around it.
+        let name_candidates =
+            match self.expression_term_candidates(infix.op, context, tree.index(), position) {
+                Ok(candidates) => candidates,
+                Err(TyperError::TermNameNotFound { .. }) => Vec::new(),
+                Err(_) => return Ok(None),
+            };
+        if name_candidates.iter().any(|symbol| {
+            self.store
+                .symbols
+                .get(*symbol)
+                .flags
+                .contains(SymbolFlags::EXTENSION)
+        }) {
+            return Ok(None);
+        }
+
+        let plus = dotty_core::Name::new(self.store.names.intern("+"), dotty_core::Namespace::Term);
+        let sum_function = self.resolve_infix_application_function(
+            InfixApplicationRequest {
+                operator: plus,
+                qualifier: left,
+                receiver_type,
+                argument_tree: infix.right,
+                context,
+                tree_index: tree.index(),
+                position,
+            },
+            info_journal,
+            new_mappings,
+        )?;
+        let sum = self.type_resolved_application(
+            ResolvedApplication {
+                tree_index: tree.index(),
+                application_kind: ApplyKind::Regular,
+                argument_trees: vec![infix.right],
+                position,
+                context,
+                function: sum_function.typed,
+                callable: sum_function.callable,
+                typed_arguments: Some(sum_function.arguments),
+                is_constructor_application: false,
+            },
+            info_journal,
+            new_mappings,
+        )?;
+        if !matches!(
+            self.conforms(self.typed_arena.get(sum).ty, widened_receiver_type),
+            Ok(true)
+        ) {
+            return Ok(None);
+        }
+
+        Ok(Some(
+            TypedAstBuilder::new(&mut self.typed_arena, &self.store.types).assign(
+                left,
+                sum,
+                self.definitions.unit,
+                position,
+            ),
+        ))
     }
 
     pub(super) fn type_parenthesized_expression(
