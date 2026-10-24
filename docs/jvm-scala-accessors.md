@@ -51,18 +51,17 @@ match Scala's constructor instruction order byte for byte. The oracle class
 files use major version 61 by default; this does not change the backend's
 independent Java 21 class-file target (major 65).
 
-## Source identities, Typer readiness, and call-site boundary
+## Source identities, Typer readiness, and supported accessor lowering
 
 `tests/jvm_stateful_class_contract.rs` exercises the real scanner, parser,
-namer, and Typer on a `Counter(val id: Int, var count: Long)` plus a separate
-`Reader`. It records the typed tree mapping for every source expression and
-checks that selections remain `TermRefTarget::Symbol` references to the
-original class-owned `Field`. Receiver expressions retain their own source
-mapping and span; receiver references remain the original `this`, parameter,
-or local expression. No getter or setter `Method` symbol is added to source
-lookup. Successful `c.count = next` remains a source `Assign` whose lvalue is
-the canonical field, whose RHS widens to `Long`, and whose result type is
-canonical `Unit`.
+namer, and Typer on constructor accessors and ordinary class-body public
+`val`/`var` fields, plus a separate `Reader`. It records typed-tree mappings
+and checks that selections remain `TermRefTarget::Symbol` references to the
+original class-owned `Field`. Receiver expressions retain their source
+mapping and span; no getter or setter `Method` symbol is added to source
+lookup. Successful body-field assignments remain source `Assign` nodes whose
+lvalue is the canonical field, whose RHS has its original typed mapping, and
+whose result type is canonical `Unit`.
 
 The source matrix was also compiled with the pinned Scala 3.9.0 compiler built
 from revision
@@ -78,28 +77,32 @@ for the corresponding invalid sources.
 
 | Source form | Pinned Scala 3.9.0 | Current Typer | Identity / first failure | Backend status |
 | --- | --- | --- | --- | --- |
-| `this.id`, `this.count` | Accepted; getter calls | Accepted | Canonical `Counter.id` / `Counter.count` fields | Accessor metadata exists; call-site dispatch is not integrated. |
-| `c.id`, `c.count` | Accepted; getter calls | Accepted | Canonical `Counter` fields, with typed parameter receiver | #1562 must lower through the getter metadata. |
-| `this.count = next`, `c.count = next` | Accepted; setter call | Accepted | Canonical mutable `Counter.count`; typed assignment is `Unit`, RHS is `Long` | #1562 must dispatch through the setter metadata. |
-| Unqualified `count` in `Counter` | Accepted | Accepted | `Ident` resolves to the same canonical `count` field | No source accessor method is synthesized. |
-| `val c = new Counter(...); c.id` | Accepted | Accepted | Selection keeps the local receiver and canonical `Counter.id` field | Requires the same getter dispatch as parameter receivers. |
-| `val c = new Counter(...); c.count` | Accepted; getter call | Accepted | Selection retains the exact mapped local receiver and canonical mutable `Counter.count` field | Requires getter dispatch through #1555 metadata. |
-| `val c = new Counter(...); c.count = next` | Accepted; setter call | Accepted | Typed `Assign` keeps the local receiver and canonical `count` field; result is `Unit`, RHS is `Long` | Requires setter dispatch through #1555 metadata. |
+| `this.id`, `this.count` | Accepted; getter calls | Accepted | Canonical constructor-accessor fields | #1562 lowers through the checked getter metadata. |
+| `c.id`, `c.count` | Accepted; getter calls | Accepted | Canonical `Counter` fields, with typed parameter receiver | #1562 lowers through the checked getter metadata. |
+| `this.count = next`, `c.count = next` | Accepted; setter call | Accepted | Canonical mutable constructor-accessor field; assignment is `Unit` | #1562 dispatches through the checked setter metadata. |
+| `this.current`, unqualified `current`, `c.current` | Accepted; getter calls | Accepted | Canonical ordinary class-body `Field`; exact source/typed-RHS proof belongs to `Counter` | #1584 lowers through the body-field getter metadata. |
+| `this.current = next`, `c.current = next` | Accepted; setter call | Accepted | Canonical mutable body `Field`; RHS remains mapped and assignment is `Unit` | #1584 dispatches through the checked setter metadata. |
+| `c.initial` | Accepted; getter call | Accepted | Canonical immutable body `Field` | #1584 emits `invokevirtual Counter.initial()I`; no setter is generated. |
+| Unqualified `count` in `Counter` | Accepted | Accepted | `Ident` resolves to the same canonical constructor field | #1562 lowers through its getter metadata; source symbols are unchanged. |
+| `val c = new Counter(...); c.id` | Accepted | Accepted | Selection keeps the local receiver and canonical `Counter.id` field | #1562 uses the same checked getter path as parameter receivers. |
+| `val c = new Counter(...); c.count` | Accepted; getter call | Accepted | Selection retains its mapped local receiver and canonical mutable constructor field | #1562 lowers through accessor metadata. |
+| `val c = new Counter(...); c.count = next` | Accepted; setter call | Accepted | Typed `Assign` keeps the local receiver; result is `Unit`, RHS is `Long` | #1562 lowers through accessor metadata. |
 | `var c = new Counter(...); c.id` | Accepted | Rejected | `UnstableSelectionPrefix` at `c.id`; nested mappings roll back | Do not include until a Typer-owned change supports it. |
 | `this.id = 2`, `c.id = 2` | Rejected: `Reassignment to val id` | Rejected: `AssignmentTargetImmutable` for canonical `id` | Error points to the assignment; no typed mappings survive | No setter exists for `val`. |
 | `c.count = true` | Rejected: Boolean required to be Long | Rejected: `ExpectedExpressionTypeMismatch` (Boolean / Long) | Error points to RHS; nested mappings roll back | Invalid typed shape never reaches the backend. |
 | `other.count` where `other: Other` | Rejected: member is absent | Rejected: `MemberNotFound` on `Other` | Error points to the selection; nested mappings roll back | No same-spelled field guess is allowed. |
 
-The call-site boundary is confirmed by code inspection: `dotty-jvm` currently
-routes typed field selections and assignments through its planned field
-read/write paths. Those paths require the field to be owned by the current
-class and emit `getfield`/`putfield`; they do not resolve
-`JvmAccessorMetadata` and emit the generated `invokevirtual` methods. The
-metadata is sufficient input for that future lowering, but does not currently
-make external or local source accessor calls compile. #1560 therefore proves
-the stable source forms ready for the optional backend work in #1562; it does
-not implement that lowering. The mutable-local selection remains a separate
-Typer-owned follow-up if that source form is brought into scope.
+`dotty-jvm` lowers typed constructor and public class-body accessor reads and
+writes through checked `invokevirtual` calls. Constructor accessors require
+their validated `JvmConstructorAccessorBinding`; body-field accessors require
+the exact canonical `JvmPublicBodyFieldSourceProof` from the matching class
+plan, including its field identity, source, mutability, and typed initializer.
+The source selection still must target that canonical field and have a
+receiver assignable to its declaring class. Assignment lowering evaluates the
+receiver once before the RHS once, stores both safely (including category-two
+values), then invokes the setter and leaves the source `Unit` result. Ordinary
+private fields keep their existing same-class `getfield`/`putfield` path.
+Mutable-local receiver selection remains a Typer-owned limitation.
 
 Oracle reproduction, from the pinned checkout, uses
 `dist/target/universal/stage/bin/scalac -version`, then compiles the issue's
@@ -112,9 +115,10 @@ canonical `SourceTypedIndex` edges and rollback on those same invalid shapes.
 
 `JvmPrimaryConstructorPlan::from_source` accepts the audited parameter roles
 and produces an immutable source binding. The backend emits private backing
-field_info entries, checked constructor stores, public getters, and public
-setters for mutable accessors from those exact bindings. Source call-site
-integration remains deferred.
+field entries, checked constructor stores, public getters, and public setters
+for mutable constructor accessors from those exact bindings. Ordinary body
+field accessors use their separate source/RHS proof; #1584 lowers both origins
+without synthesizing source methods or constructor formals.
 The plan accepts a plain
 parameter only with `ParamAccessor` plus `PrivateLocal`, an immutable public
 accessor only with `ParamAccessor`, and a mutable public accessor only with
@@ -130,7 +134,7 @@ private, or otherwise modified parameters remain rejected.
 | Getter/setter JVM names, descriptors, flags, backing storage, and slot layout | JVM-only ABI projection in `dotty-jvm` | Derive from the pinned compiler oracle and canonical source metadata. Keep JVM names out of frontend contracts. `JvmAccessorMetadata` records checked backing-field and getter / optional setter signatures with `JvmAccessorOrigin::ConstructorParameter` or `JvmAccessorOrigin::ClassBodyField`; it never fabricates a constructor formal for a body field or a source `Method`. |
 | Constructor accessor stores | `dotty-jvm` constructor initializer and class emitter | Copy the exact constructor-owned formal into private storage after direct-super initialization and before ordinary class-body field initializers. Keep accessor stores separate from typed source RHS plans. |
 | Encoding and verification of fields and bytecode | `dotty-classfile` | Receive validated field and instruction plans; keep byte-level encoding separate from source semantics. |
-| Source call-site support where current Typer behavior changes | Separate backend/frontend issue | #1584 should validate constructor accessors through `accessor_bindings()` and body-field accessors through their canonical field plus source/typed-RHS proof. It must not invent a derived formal for body fields. This metadata increment does not enable call lowering or authorize Typer changes. |
+| Supported accessor source call sites | `dotty-jvm` | Preserve canonical field identity and exact receiver/RHS trees; validate constructor binding or body-field proof before emitting the checked getter/setter call. Keep source `Method` symbols and Typer semantics unchanged. |
 
 Before publishing any future class bytes, the projection must validate the
 owner, source-to-derived parameter binding, field/parameter type agreement,
@@ -143,9 +147,8 @@ uses constructor accessor metadata for checked backing fields, stores,
 getters, and setters. #1581 also installs and initializes ordinary public
 class-body backing fields in source order, including through a validated
 implicit no-argument constructor. Issue #1582 emits one public getter per
-validated ordinary body accessor, and #1583 emits one public setter per
-validated mutable body accessor through the shared accessor bytecode path.
-Source call lowering remains a later increment.
+validated ordinary body accessor, #1583 emits its mutable setter, and #1584
+lowers accepted typed body-field reads/writes through those checked methods.
 
 ## Scope matrix
 
@@ -156,13 +159,13 @@ Source call lowering remains a later increment.
 | `Ref(val item: Measurement)` | Emits private-final planned reference storage, copies the exact reference formal after direct-super initialization, and emits `item()LMeasurement;`. |
 | Plain constructor parameter | Existing distinct class-owned and constructor-owned parameter identities remain; it does not gain an accessor by implication. |
 | Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
-| Ordinary class-body public `val`/`var` | Metadata projection is covered by #1580 using the #1578 Scala 3.9.0 ABI audit and #1579 exact source/RHS proof. Backing fields are private (final for `val`); #1581 stores the exact typed RHS after the direct-super call, #1582 emits a public getter, and #1583 emits a public `_$eq` setter for each mutable body field. Source call lowering remains deferred. |
+| Ordinary class-body public `val`/`var` | Metadata projection is covered by #1580 using the #1578 Scala 3.9.0 ABI audit and #1579 exact source/RHS proof. Backing fields are private (final for `val`); #1581 stores the exact typed RHS after the direct-super call, #1582/#1583 emit the getter and mutable setter, and #1584 lowers accepted typed selections and assignments through them. |
 | `private[this]`, `lazy`, other visibility variants | Deferred; no ABI claim is made by this audit. |
 | Secondary, defaulted, multiple-clause, or `using` constructors | Deferred. |
 | Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. Accessor metadata is rejected on non-Object subclasses and across planned accessor-inheritance edges until generated signatures participate in override/bridge validation. |
 | Accessor-bearing class with a planned non-Object parent | Rejected with `UnsupportedJvmAccessorInheritance`, before accessor metadata is returned. This prevents generated getter/setter signatures from bypassing inherited final-method and override checks. |
 | Malformed owner/derived IDs, stale typed IDs, generated signature collisions | Metadata validation rejects invalid bindings and binary collisions before bytes are published; bytecode-builder and classfile errors remain typed and publish no generated class artifact. |
-| Unsupported source calls or assignments | Keep the actual Typer/backend error observable; do not guess or bypass it. |
+| Mutable-local receiver selection, private cross-class access, unsupported source forms | Keep the actual Typer/backend error observable; do not guess or bypass it. |
 
 ## Backend acceptance coverage
 
@@ -171,10 +174,12 @@ Getter and setter emission is covered for `Int`, `Boolean`, `Long`, `Float`,
 descriptors, flags, field references, typed return/load opcodes, deterministic
 output, and accessor order. Setters load the exact JVM parameter category,
 write the validated private field once, and return `void`; immutable `val`s and
-plain constructor parameters have no setter. A Java harness invokes getters
-and mutates `var`s under `java -Xverify:all`. These JVM-only tests do not depend
-on Scala source call-site lowering. Rust-produced output passing the JVM
-verifier alone is not evidence of Scala ABI compatibility.
+plain constructor parameters have no setter. Java harnesses invoke getters
+and mutate `var`s under `java -Xverify:all`; the source integration regression
+also verifies body-field `invokevirtual` calls, private-field isolation,
+deterministic fresh-session output, and receiver/RHS order. Rust-produced output
+passing the JVM verifier alone is not evidence of full Scala ABI
+compatibility.
 
 The source-to-JVM acceptance regression
 `constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends`
