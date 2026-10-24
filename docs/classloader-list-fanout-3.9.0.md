@@ -12,7 +12,9 @@ Temurin JDK 21.0.8. It selects only the three library source files in
 [`typer-list-fanout-manifest-3.9.0.tsv`](typer-list-fanout-manifest-3.9.0.tsv)
 and takes three warm runs. It does not run the full source corpus.
 The measurements below used dotty-rs source revision
-`59f5d14622c219ac175da370b7c0c1dac2c57e2a`.
+`616633b7e3e4b103dbaffd6a2e576bd92e82f41d` with the local audit telemetry
+patches present: recursive enclosing-owner edge accounting and direct module
+completion counters.
 
 ```sh
 SCALA39_ROOT=/path/to/scala-3.9.0 \
@@ -44,8 +46,8 @@ and
 
 The three complete profile runs took 875, 895, and 884 ms for the selected
 three-file audit. Across the same samples, the four exact methods averaged
-108.3 ms (`ListMap.addOne`), 109.7 ms (`ListBuffer.removeAfter`), 110.3 ms
-(`LNode.inserted`), and 107.0 ms (`LNode.removed`). These are bounded audit
+108.7 ms (`ListMap.addOne`), 109.0 ms (`ListBuffer.removeAfter`), 111.3 ms
+(`LNode.inserted`), and 107.3 ms (`LNode.removed`). These are bounded audit
 timings, not a full-corpus performance estimate. The source method outcome
 sidecar was byte-for-byte identical before and after adding opt-in edge
 telemetry.
