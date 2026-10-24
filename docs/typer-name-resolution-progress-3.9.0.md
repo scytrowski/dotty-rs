@@ -26,12 +26,49 @@ typed: `methods_typed=0`. This issue's goal of fully typing a previously blocked
 real method remains unmet and is recorded as such; the next blocker must be
 addressed before claiming that milestone.
 
+The audit records only the first blocker for each method. The after-change
+first-blocker distribution is:
+
+| First blocker | Method rows | Files |
+| --- | ---: | ---: |
+| `ImportQualifierNotFound` | 144 | 11 |
+| `SymbolResolution` | 97 | 29 |
+| `TypeNameNotFound` | 30 | 12 |
+| `WrongTypeNameKind` | 20 | 2 |
+| `ObjectModuleClassUnavailable` | 18 | 1 |
+| `LocalValueConformanceUnsupported` | 13 | 1 |
+| `UnstableSelectionPrefix` | 11 | 3 |
+| `MemberLookup` | 9 | 4 |
+| `MemberNotFound` | 5 | 3 |
+| `ApplicationCalleeNotMethod` | 5 | 2 |
+| `PatternTypeMismatch` | 4 | 1 |
+| `StringLiteralTypingDeferred` | 4 | 2 |
+| `ExplicitTypeApplicationCalleeNotPoly` | 3 | 2 |
+| `TermNameNotFound` | 2 | 2 |
+| `ApplicationArgumentConformanceUnsupported` | 1 | 1 |
+| `IfConditionConformanceUnsupported` | 1 | 1 |
+| `InfixPatternDeferred` | 1 | 1 |
+| `OverloadedSelectionDeferred` | 1 | 1 |
+
+The change removes an early name-resolution failure but exposes later
+unsupported steps. Thirteen method rows in `CommandLineParser.scala` now stop at
+`LocalValueConformanceUnsupported` for inferred local `accum`; two rows in
+`InlinerHeuristics.scala` stop at `ExplicitTypeApplicationCalleeNotPoly`.
+`CommandLineParser.scala#tree=498` (`expandArg`) still cannot resolve `paths`,
+and `BTypeLoader.scala#tree=1079` (`dropModule`) is the other remaining
+`TermNameNotFound` row. These are next blockers, not a complete trace of every
+error later in each method.
+
 The exact method identities and next blockers are in
 [`typer-name-resolution-progress-3.9.0.tsv`](typer-name-resolution-progress-3.9.0.tsv).
 For `CommandLineParser.scala#tree=397` (`tokenize`), the next blocker is
 `LocalValueConformanceUnsupported` at the inferred local `accum`. The other
 remaining `CommandLineParser.scala#tree=498` (`expandArg`) blocker is still
 `TermNameNotFound` at `paths`.
+
+In the separate three-file focused smoke audit, `StringParsers.scala#tree=129`
+now resolves `scala.None`. That method advances from `TermNameNotFound` to
+`MemberNotFound`, so it also remains untyped.
 
 ## Oracle and audit commands
 
