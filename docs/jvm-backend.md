@@ -37,9 +37,10 @@ verifier boundaries are audited in [`jvm-floating-point.md`](jvm-floating-point.
 Canonical Float/Double types and literal constants project to JVM metadata,
 descriptors, field signatures, and parameter slots. Body lowering remains
 unsupported: expressions, loads/stores, returns, field writes, calls, and
-constructor arguments fail with typed errors before class artifacts are
-published. The audit records the pinned Scala 3.9.0 oracle limitation and the
-remaining follow-up issues without claiming Float/Double code generation.
+field reads fail with typed errors before instructions are emitted; calls and
+constructor arguments also fail before class artifacts are published. The
+audit records the pinned Scala 3.9.0 oracle limitation and the remaining
+follow-up issues without claiming Float/Double code generation.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,

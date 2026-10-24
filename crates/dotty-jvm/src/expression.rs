@@ -1156,6 +1156,20 @@ fn emit_field_read(
         });
     }
 
+    let field_type = match context.store.symbols.info(field) {
+        SymbolInfo::Complete(_) => field_metadata.value_type(),
+        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
+            return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
+        }
+        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
+    };
+    if matches!(field_type, JvmType::Float | JvmType::Double) {
+        return Err(JvmCodegenError::UnsupportedTypedExpression {
+            tree: tree_id,
+            node: "floating-point field read",
+        });
+    }
+
     if let Some(receiver) = receiver {
         context.visit(receiver, depth + 1)?;
         let receiver_tree = context.tree(receiver)?;
@@ -1187,13 +1201,6 @@ fn emit_field_read(
         });
     }
 
-    let field_type = match context.store.symbols.info(field) {
-        SymbolInfo::Complete(_) => field_metadata.value_type(),
-        SymbolInfo::Missing | SymbolInfo::Deferred(_) => {
-            return Err(JvmCodegenError::MissingSemanticInfo { symbol: field });
-        }
-        SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
-    };
     code.aload(0)
         .and_then(|code| {
             code.getfield(

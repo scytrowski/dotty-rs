@@ -1905,6 +1905,12 @@ fn source_typed_float_double_metadata_projects_descriptors_and_parameter_slots()
 class NumericMetadata(initialF: Float, initialD: Double):
   private var fieldF: Float = 0.0f
   private var fieldD: Double = 0.0
+  def readF(): Int =
+    fieldF
+    1
+  def readD(): Int =
+    fieldD
+    1
   def floatValue(): Float = 1.5f
   def doubleValue(): Double = 3.5
   def mixed(i: Int, f: Float, d: Double, j: Long): Double = 3.5
@@ -1957,6 +1963,8 @@ class NumericMetadata(initialF: Float, initialD: Double):
                 .unwrap_or_else(|| panic!("source method {name} has metadata"))
         };
         for (name, descriptor) in [
+            ("readF", "()I"),
+            ("readD", "()I"),
             ("floatValue", "()F"),
             ("doubleValue", "()D"),
             ("mixed", "(IFDJ)D"),
@@ -1964,6 +1972,25 @@ class NumericMetadata(initialF: Float, initialD: Double):
             ("pair", "(FDD)F"),
         ] {
             assert_eq!(method(name).descriptor().as_str(), descriptor, "{name}");
+        }
+        for name in ["readF", "readD"] {
+            let error = unit
+                .lower_method_body(
+                    class.identity().symbol(),
+                    method(name).symbol(),
+                    definitions,
+                )
+                .expect_err("floating-point field reads remain outside metadata projection");
+            assert!(
+                matches!(
+                    error,
+                    JvmCodegenError::UnsupportedTypedExpression {
+                        node: "floating-point field read",
+                        ..
+                    }
+                ),
+                "{name} fails before emitting a getfield: {error:?}"
+            );
         }
         assert_eq!(
             method("mixed")
