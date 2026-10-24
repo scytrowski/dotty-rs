@@ -97,6 +97,7 @@ impl Fixture {
 const SOURCE_OPERATORS: &str = r#"
 class BooleanOperators {
   type IntAlias = Int
+  type AnyAlias = Any
   def notLiteral(): Boolean = !true
   def andLiteral(): Boolean = true && false
   def notParameter(a: Boolean): Boolean = !a
@@ -111,6 +112,8 @@ class BooleanOperators {
   def notEqualInt(a: Int): Boolean = a != 1
   def equalWidenedNumeric(a: Int, b: Long): Boolean = a == b
   def equalAlias(a: IntAlias, b: Int): Boolean = a == b
+  def equalAliasSecond(a: Int, b: IntAlias): Boolean = a == b
+  def equalAnyAliasReceiver(a: AnyAlias, b: Int): Boolean = a == b
   def incompatibleAliasReference(a: IntAlias, b: IncompatibleReference): Boolean = a == b
   def equalAnyAndInt(a: Any, b: Int): Boolean = a == b
   def incompatibleIntReference(a: Int, b: IncompatibleReference): Boolean = a == b
@@ -343,6 +346,8 @@ fn universal_equality_checks_scala_39_operand_compatibility() {
     for (method_name, expected_symbol) in [
         ("equalWidenedNumeric", equality.equal),
         ("equalAlias", equality.equal),
+        ("equalAliasSecond", equality.equal),
+        ("equalAnyAliasReceiver", equality.equal),
         ("equalAnyAndInt", equality.equal),
     ] {
         let (method, rhs) = fixture.method(method_name);

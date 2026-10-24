@@ -1119,13 +1119,10 @@ impl SourceTyper<'_> {
         &mut self,
         left: TypeId,
         right: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<bool, TyperError> {
-        let left = crate::types::TypeNormalizer::new(self.store)
-            .dealias_top(left)
-            .map_err(TyperError::TypeNormalization)?;
-        let right = crate::types::TypeNormalizer::new(self.store)
-            .dealias_top(right)
-            .map_err(TyperError::TypeNormalization)?;
+        let left = self.dealias_source_aliases(left, info_journal)?;
+        let right = self.dealias_source_aliases(right, info_journal)?;
         #[derive(Clone, Copy, PartialEq, Eq)]
         enum PrimitiveEqualityGroup {
             Numeric,
@@ -1194,6 +1191,28 @@ impl SourceTyper<'_> {
                 _ => false,
             },
         )
+    }
+
+    pub(in crate::typer) fn dealias_source_aliases(
+        &mut self,
+        ty: TypeId,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
+    ) -> Result<TypeId, TyperError> {
+        for _ in 0..crate::types::MAX_TYPE_NORMALIZATION_DEPTH {
+            match crate::types::TypeNormalizer::new(self.store).dealias_top(ty) {
+                Ok(dealiased) => return Ok(dealiased),
+                Err(crate::types::TypeNormalizeError::AliasInfoIncomplete {
+                    symbol,
+                    state: crate::types::SymbolInfoState::Missing,
+                }) if self.index.definition_of(symbol).is_some() => {
+                    self.complete_symbol_inner(symbol, info_journal)?;
+                }
+                Err(error) => return Err(TyperError::TypeNormalization(error)),
+            }
+        }
+        Err(TyperError::TypeNormalization(
+            crate::types::TypeNormalizeError::TooDeep,
+        ))
     }
 
     /// Produces the nominal view used only for checking a `this` value against

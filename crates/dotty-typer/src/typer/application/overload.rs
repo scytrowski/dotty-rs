@@ -46,6 +46,11 @@ impl SourceTyper<'_> {
             });
         }
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
+        let receiver = if self.any_equality_operator_name(operator) {
+            self.dealias_source_aliases(receiver, info_journal)?
+        } else {
+            receiver
+        };
         if let Err(error) = self.require_stable_selection_prefix(receiver_type, tree_index) {
             // A left-associated infix chain selects on the result of the
             // preceding application. Its widened nominal type is enough to
@@ -236,7 +241,12 @@ impl SourceTyper<'_> {
                 .map(|index| candidates.remove(index));
             if let Some(universal_candidate) = universal_candidate {
                 if candidates.is_empty() {
-                    self.require_compatible_universal_equality(receiver, widened_type, tree_index)?;
+                    self.require_compatible_universal_equality(
+                        receiver,
+                        widened_type,
+                        tree_index,
+                        info_journal,
+                    )?;
                     universal_candidate
                 } else {
                     match self.choose_method_overload_candidate(
@@ -252,6 +262,7 @@ impl SourceTyper<'_> {
                                 receiver,
                                 widened_type,
                                 tree_index,
+                                info_journal,
                             )?;
                             universal_candidate
                         }
@@ -309,8 +320,9 @@ impl SourceTyper<'_> {
         left: TypeId,
         right: TypeId,
         tree_index: u32,
+        info_journal: &mut Vec<(SymbolId, SymbolInfo)>,
     ) -> Result<(), TyperError> {
-        if self.universal_equality_operands_compatible(left, right)? {
+        if self.universal_equality_operands_compatible(left, right, info_journal)? {
             Ok(())
         } else {
             Err(TyperError::IncompatibleEqualityOperands {
