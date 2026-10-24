@@ -213,6 +213,54 @@ pub(super) fn emit_class(
             .map_err(|error| {
                 class_file_error(class_symbol, Some(accessor.source_field()), error)
             })?;
+
+        if let Some(setter) = accessor.setter() {
+            let mut code = CodeBuilder::new();
+            code.aload(0)
+                .map_err(|error| JvmCodegenError::AccessorMethodCodeBuilder {
+                    class: class_symbol,
+                    field: accessor.source_field(),
+                    error,
+                })?;
+            match accessor.value_type() {
+                crate::JvmType::Int | crate::JvmType::Boolean => code.iload(1),
+                crate::JvmType::Float => code.fload(1),
+                crate::JvmType::Long => code.lload(1),
+                crate::JvmType::Double => code.dload(1),
+                crate::JvmType::Reference(_) => code.aload(1),
+            }
+            .map_err(|error| JvmCodegenError::AccessorMethodCodeBuilder {
+                class: class_symbol,
+                field: accessor.source_field(),
+                error,
+            })?;
+            code.putfield(
+                metadata.identity().internal_name(),
+                accessor.field_name(),
+                accessor.field_descriptor(),
+            )
+            .map_err(|error| JvmCodegenError::AccessorMethodCodeBuilder {
+                class: class_symbol,
+                field: accessor.source_field(),
+                error,
+            })?;
+            code.return_void()
+                .map_err(|error| JvmCodegenError::AccessorMethodCodeBuilder {
+                    class: class_symbol,
+                    field: accessor.source_field(),
+                    error,
+                })?;
+            builder
+                .add_prebuilt_code_method(
+                    setter.name(),
+                    setter.descriptor().as_str(),
+                    setter.access_flags(),
+                    code,
+                )
+                .map_err(|error| {
+                    class_file_error(class_symbol, Some(accessor.source_field()), error)
+                })?;
+        }
     }
 
     for (method_plan, method_metadata) in plan.methods.iter().zip(metadata.methods()) {
