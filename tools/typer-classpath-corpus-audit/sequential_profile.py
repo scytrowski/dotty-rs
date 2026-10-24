@@ -151,6 +151,7 @@ def parse_run(log: str) -> dict:
         "classpath_resources": {}, "resolver_profile": {}, "match_resolver_profiles": [],
         "repeated_requests": [],
         "classload_timings": {}, "match_classload_timings": [],
+        "resolver_roots": [], "resolver_root_phases": [], "resolver_cache": {}, "match_resolver_cache": [],
     }
     for line in log.splitlines():
         if line.startswith("AUDIT_PROFILE_SUMMARY "):
@@ -201,6 +202,16 @@ def parse_run(log: str) -> dict:
             )
         elif line.startswith("AUDIT_CLASSLOAD_TIMINGS "):
             result["classload_timings"] = {key: int(value) for key, value in kvs(line).items()}
+        elif line.startswith("AUDIT_RESOLVER_ROOT_PHASE "):
+            result["resolver_root_phases"].append(kvs(line))
+        elif line.startswith("AUDIT_RESOLVER_ROOT "):
+            values = kvs(line)
+            values.setdefault("stable_key_observations", values.pop("request_observations", "not_captured"))
+            result["resolver_roots"].append(values)
+        elif line.startswith("AUDIT_RESOLVER_CACHE "):
+            result["resolver_cache"] = kvs(line)
+        elif line.startswith("AUDIT_MATCH_RESOLVER_CACHE "):
+            result["match_resolver_cache"].append(kvs(line))
         elif line.startswith("AUDIT_MATCH_CLASSLOAD_TIMINGS "):
             values = kvs(line)
             result["match_classload_timings"].append(
@@ -437,10 +448,17 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 stage = row["stage"]
                 calls = int(row["calls"])
                 elapsed_us = int(row["elapsed_us"])
-                resolver_stage_rows.append(f"{run_index}\t{scope}\t{stage}\t{calls}\t{elapsed_us}")
-                total = resolver_stage_totals.setdefault((scope, stage), {"calls": 0, "elapsed_us": 0})
+                elapsed_ns = int(row.get("elapsed_ns", elapsed_us * 1_000))
+                exclusive_ns = int(row.get("exclusive_ns", elapsed_ns))
+                resolver_stage_rows.append(
+                    f"{run_index}\t{scope}\t{stage}\t{calls}\t{elapsed_us}\t{elapsed_ns}\t{exclusive_ns}"
+                )
+                total = resolver_stage_totals.setdefault(
+                    (scope, stage), {"calls": 0, "elapsed_us": 0, "exclusive_ns": 0}
+                )
                 total["calls"] += calls
                 total["elapsed_us"] += elapsed_us
+                total["exclusive_ns"] += exclusive_ns
         for (scope, operation), values in result.get("cheap_resolver", {}).items():
             outcomes = result.get("cheap_resolver_outcomes", {}).get((scope, operation), {})
             row = {**values, **outcomes}
@@ -546,7 +564,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         encoding="utf-8",
     )
     (out_dir / "resolver-stages.tsv").write_text(
-        "run\tscope\tstage\tcalls\telapsed_us\n"
+        "run\tscope\tstage\tcalls\telapsed_us\telapsed_ns\texclusive_ns\n"
         + "\n".join(resolver_stage_rows) + ("\n" if resolver_stage_rows else ""),
         encoding="utf-8",
     )
@@ -567,6 +585,36 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
             for run_index, run in enumerate(runs, 1)
             for row in run.get("match_resolver_profiles", [])
         ), encoding="utf-8")
+    root_rows = ["run\tscope\troot\tresolver_calls\trequest_observations\tsuccesses\tmisses\terrors\trollbacks\tunique_keys\trepeated_keys\tretry_after_failed_lookup\ttop_repeated"]
+    root_phase_rows = ["run\tscope\troot\tstage\tcalls\telapsed_ns\texclusive_ns"]
+    cache_rows = ["run\t" + "\t".join(sorted({key for run in runs for key in run.get("resolver_cache", {})}))]
+    cache_keys = cache_rows[0].split("\t")[1:]
+    for run_index, run in enumerate(runs, 1):
+        for row in run.get("resolver_roots", []):
+            root_rows.append(f"{run_index}\t" + "\t".join(str(row.get(key, "not_captured")) for key in (
+                "scope", "root", "calls", "stable_key_observations", "successes", "misses", "errors", "rollbacks",
+                "unique_keys", "repeated_keys", "retry_after_failed_lookup", "top_repeated",
+            )))
+        for row in run.get("resolver_root_phases", []):
+            root_phase_rows.append(f"{run_index}\t" + "\t".join(str(row.get(key, "not_captured")) for key in (
+                "scope", "root", "stage", "calls", "elapsed_ns", "exclusive_ns",
+            )))
+    for run_index, run in enumerate(runs, 1):
+        cache_rows.append(str(run_index) + "\t" + "\t".join(run.get("resolver_cache", {}).get(key, "not_captured") for key in cache_keys))
+    (out_dir / "resolver-roots.tsv").write_text("\n".join(root_rows) + "\n", encoding="utf-8")
+    (out_dir / "resolver-root-phases.tsv").write_text("\n".join(root_phase_rows) + "\n", encoding="utf-8")
+    (out_dir / "resolver-cache.tsv").write_text("\n".join(cache_rows) + "\n", encoding="utf-8")
+    match_cache_keys = sorted({key for run in runs for row in run.get("match_resolver_cache", []) for key in row if key != "file"})
+    match_cache_rows = ["run\tfile\t" + "\t".join(match_cache_keys)]
+    for run_index, run in enumerate(runs, 1):
+        for row in run.get("match_resolver_cache", []):
+            match_cache_rows.append(
+                f"{run_index}\t{row.get('file', 'not_captured')}\t"
+                + "\t".join(row.get(key, "not_captured") for key in match_cache_keys)
+            )
+    (out_dir / "match-resolver-cache.tsv").write_text(
+        "\n".join(match_cache_rows) + "\n", encoding="utf-8"
+    )
     (out_dir / "repeated-requests.tsv").write_text(
         "run\tshape\trequests\tknown_requests\tdistinct_keys\tunknown_identity_requests\towners\tnames\tfiles\trepeated_hit_factor\n"
         + "".join(
@@ -970,6 +1018,7 @@ def main() -> int:
                 if not log_path.is_file():
                     fail(f"no saved profile log: {log_path}")
                 parsed = parse_run(log_path.read_text(encoding="utf-8"))
+                parsed["cargo_wall_ms"] = int(row["cargo_wall_ms"])
                 parsed["process_metrics"] = {
                     "child_cpu_user_s": float(row.get("child_cpu_user_s", "nan")),
                     "child_cpu_system_s": float(row.get("child_cpu_system_s", "nan")),

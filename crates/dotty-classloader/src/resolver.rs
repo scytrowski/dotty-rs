@@ -21,6 +21,9 @@ use std::time::Instant;
 pub struct ResolverPhaseProfile {
     pub calls: u64,
     pub elapsed_ns: u128,
+    /// Time attributed to this phase after subtracting explicitly timed child
+    /// intervals. Phases without a measured child have `exclusive_ns == elapsed_ns`.
+    pub exclusive_ns: u128,
 }
 
 /// Opt-in aggregate profile for bounded classpath member resolution.
@@ -39,8 +42,27 @@ pub struct ClasspathResolverProfile {
     pub module_cache_validation: ResolverPhaseProfile,
     pub target_resolution: ResolverPhaseProfile,
     pub declaration_selection: ResolverPhaseProfile,
+    pub package_term_selection: ResolverPhaseProfile,
     pub module_identity_resolution: ResolverPhaseProfile,
+    pub module_completion: ResolverPhaseProfile,
+    pub class_completion: ResolverPhaseProfile,
+    pub class_completion_nested_classload_ns: u128,
+    pub module_snapshot_validation: ResolverPhaseProfile,
+    pub classpath_resource_lookup: ResolverPhaseProfile,
+    pub classfile_decode: ResolverPhaseProfile,
+    pub tasty_decode: ResolverPhaseProfile,
+    pub transaction_bookkeeping: ResolverPhaseProfile,
+    pub rollback: ResolverPhaseProfile,
     pub class_loading_inclusive: ResolverPhaseProfile,
+    pub negative_member_cache_hits: u64,
+    pub positive_module_cache_hits: u64,
+    pub module_cache_misses: u64,
+    pub module_completion_attempts: u64,
+    pub module_completion_successes: u64,
+    pub module_completion_errors: u64,
+    pub class_completion_attempts: u64,
+    pub class_completion_successes: u64,
+    pub class_completion_errors: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -51,6 +73,15 @@ enum ResolverProfilePhase {
     TargetResolution,
     DeclarationSelection,
     ModuleIdentityResolution,
+    PackageTermSelection,
+    ModuleCompletion,
+    ClassCompletion,
+    ModuleSnapshotValidation,
+    ClasspathResourceLookup,
+    ClassfileDecode,
+    TastyDecode,
+    TransactionBookkeeping,
+    Rollback,
     ClassLoadingInclusive,
 }
 
@@ -70,10 +101,33 @@ impl ClasspathResolverProfile {
         self.target_resolution.merge(&other.target_resolution);
         self.declaration_selection
             .merge(&other.declaration_selection);
+        self.package_term_selection
+            .merge(&other.package_term_selection);
         self.module_identity_resolution
             .merge(&other.module_identity_resolution);
+        self.module_completion.merge(&other.module_completion);
+        self.class_completion.merge(&other.class_completion);
+        self.class_completion_nested_classload_ns += other.class_completion_nested_classload_ns;
+        self.module_snapshot_validation
+            .merge(&other.module_snapshot_validation);
+        self.classpath_resource_lookup
+            .merge(&other.classpath_resource_lookup);
+        self.classfile_decode.merge(&other.classfile_decode);
+        self.tasty_decode.merge(&other.tasty_decode);
+        self.transaction_bookkeeping
+            .merge(&other.transaction_bookkeeping);
+        self.rollback.merge(&other.rollback);
         self.class_loading_inclusive
             .merge(&other.class_loading_inclusive);
+        self.negative_member_cache_hits += other.negative_member_cache_hits;
+        self.positive_module_cache_hits += other.positive_module_cache_hits;
+        self.module_cache_misses += other.module_cache_misses;
+        self.module_completion_attempts += other.module_completion_attempts;
+        self.module_completion_successes += other.module_completion_successes;
+        self.module_completion_errors += other.module_completion_errors;
+        self.class_completion_attempts += other.class_completion_attempts;
+        self.class_completion_successes += other.class_completion_successes;
+        self.class_completion_errors += other.class_completion_errors;
     }
 
     fn record(&mut self, phase: ResolverProfilePhase, started: Instant) {
@@ -83,11 +137,52 @@ impl ClasspathResolverProfile {
             ResolverProfilePhase::ModuleCacheValidation => &mut self.module_cache_validation,
             ResolverProfilePhase::TargetResolution => &mut self.target_resolution,
             ResolverProfilePhase::DeclarationSelection => &mut self.declaration_selection,
+            ResolverProfilePhase::PackageTermSelection => &mut self.package_term_selection,
             ResolverProfilePhase::ModuleIdentityResolution => &mut self.module_identity_resolution,
+            ResolverProfilePhase::ModuleCompletion => &mut self.module_completion,
+            ResolverProfilePhase::ClassCompletion => &mut self.class_completion,
+            ResolverProfilePhase::ModuleSnapshotValidation => &mut self.module_snapshot_validation,
+            ResolverProfilePhase::ClasspathResourceLookup => &mut self.classpath_resource_lookup,
+            ResolverProfilePhase::ClassfileDecode => &mut self.classfile_decode,
+            ResolverProfilePhase::TastyDecode => &mut self.tasty_decode,
+            ResolverProfilePhase::TransactionBookkeeping => &mut self.transaction_bookkeeping,
+            ResolverProfilePhase::Rollback => &mut self.rollback,
             ResolverProfilePhase::ClassLoadingInclusive => &mut self.class_loading_inclusive,
         };
         profile.calls += 1;
-        profile.elapsed_ns += started.elapsed().as_nanos();
+        let elapsed_ns = started.elapsed().as_nanos();
+        profile.elapsed_ns += elapsed_ns;
+        profile.exclusive_ns += elapsed_ns;
+    }
+
+    fn record_elapsed(
+        &mut self,
+        phase: ResolverProfilePhase,
+        calls: u64,
+        elapsed_ns: u128,
+        exclusive_ns: u128,
+    ) {
+        let profile = match phase {
+            ResolverProfilePhase::MemberLookupInclusive => &mut self.member_lookup_inclusive,
+            ResolverProfilePhase::PrefixClassification => &mut self.prefix_classification,
+            ResolverProfilePhase::ModuleCacheValidation => &mut self.module_cache_validation,
+            ResolverProfilePhase::TargetResolution => &mut self.target_resolution,
+            ResolverProfilePhase::DeclarationSelection => &mut self.declaration_selection,
+            ResolverProfilePhase::PackageTermSelection => &mut self.package_term_selection,
+            ResolverProfilePhase::ModuleIdentityResolution => &mut self.module_identity_resolution,
+            ResolverProfilePhase::ModuleCompletion => &mut self.module_completion,
+            ResolverProfilePhase::ClassCompletion => &mut self.class_completion,
+            ResolverProfilePhase::ModuleSnapshotValidation => &mut self.module_snapshot_validation,
+            ResolverProfilePhase::ClasspathResourceLookup => &mut self.classpath_resource_lookup,
+            ResolverProfilePhase::ClassfileDecode => &mut self.classfile_decode,
+            ResolverProfilePhase::TastyDecode => &mut self.tasty_decode,
+            ResolverProfilePhase::TransactionBookkeeping => &mut self.transaction_bookkeeping,
+            ResolverProfilePhase::Rollback => &mut self.rollback,
+            ResolverProfilePhase::ClassLoadingInclusive => &mut self.class_loading_inclusive,
+        };
+        profile.calls += calls;
+        profile.elapsed_ns += elapsed_ns;
+        profile.exclusive_ns += exclusive_ns;
     }
 }
 
@@ -95,6 +190,7 @@ impl ResolverPhaseProfile {
     fn merge(&mut self, other: &Self) {
         self.calls += other.calls;
         self.elapsed_ns += other.elapsed_ns;
+        self.exclusive_ns += other.exclusive_ns;
     }
 }
 
@@ -248,6 +344,59 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         }
     }
 
+    fn record_resolver_phase_with_children(
+        &mut self,
+        phase: ResolverProfilePhase,
+        started: Option<Instant>,
+        child_ns: u128,
+    ) -> u128 {
+        let Some(started) = started else {
+            return 0;
+        };
+        let elapsed_ns = started.elapsed().as_nanos();
+        self.resolver_profile.record_elapsed(
+            phase,
+            1,
+            elapsed_ns,
+            elapsed_ns.saturating_sub(child_ns),
+        );
+        elapsed_ns
+    }
+
+    fn collect_class_load_profile(&mut self, profile: &ClassLoadProfile) {
+        if !self.collect_resolver_profile {
+            return;
+        }
+        self.resolver_profile.record_elapsed(
+            ResolverProfilePhase::ClasspathResourceLookup,
+            profile.resource_lookup_calls as u64,
+            profile.resource_lookup_ns,
+            profile.resource_lookup_ns,
+        );
+        self.resolver_profile.record_elapsed(
+            ResolverProfilePhase::ClassfileDecode,
+            profile.classfile_decode_calls as u64,
+            profile.classfile_decode_ns,
+            profile.classfile_decode_exclusive_ns,
+        );
+        self.resolver_profile.record_elapsed(
+            ResolverProfilePhase::TastyDecode,
+            profile.tasty_decode_calls as u64,
+            profile.tasty_decode_ns,
+            profile.tasty_decode_exclusive_ns,
+        );
+        self.resolver_profile.record_elapsed(
+            ResolverProfilePhase::ModuleCompletion,
+            profile.module_completion_calls as u64,
+            profile.module_completion_inclusive_ns,
+            profile.module_completion_residual_ns,
+        );
+        self.resolver_profile.module_completion_attempts += profile.module_completion_calls as u64;
+        self.resolver_profile.module_completion_successes +=
+            profile.module_completion_successes as u64;
+        self.resolver_profile.module_completion_errors += profile.module_completion_errors as u64;
+    }
+
     fn finish_member_profile(
         &mut self,
         started: Option<Instant>,
@@ -352,11 +501,17 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         store: &mut SemanticStore,
         operation: impl FnOnce(&mut Self, &mut SemanticStore) -> Result<Option<T>, ResolutionError>,
     ) -> Result<Option<T>, ResolutionError> {
+        let transaction_started = self.collect_resolver_profile.then(Instant::now);
         let store_checkpoint = store.checkpoint();
         let session_checkpoint = self.session.checkpoint();
         let object_class = store.symbols.get(self.definitions.object_class).clone();
+        let rollback_before = self.resolver_profile.rollback.elapsed_ns;
+        let operation_started = self.collect_resolver_profile.then(Instant::now);
 
-        match operation(self, store) {
+        let operation_result = operation(self, store);
+        let operation_elapsed_ns =
+            operation_started.map_or(0, |started| started.elapsed().as_nanos());
+        let result = match operation_result {
             Ok(Some(value)) => {
                 let changed = self.session.checkpoint() != session_checkpoint
                     || *store.symbols.get(self.definitions.object_class) != object_class;
@@ -376,7 +531,22 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 self.rollback_operation(store, store_checkpoint, session_checkpoint, object_class);
                 Err(error)
             }
+        };
+        if let Some(started) = transaction_started {
+            let elapsed_ns = started.elapsed().as_nanos();
+            let rollback_ns = self
+                .resolver_profile
+                .rollback
+                .elapsed_ns
+                .saturating_sub(rollback_before);
+            self.resolver_profile.record_elapsed(
+                ResolverProfilePhase::TransactionBookkeeping,
+                1,
+                elapsed_ns,
+                elapsed_ns.saturating_sub(operation_elapsed_ns + rollback_ns),
+            );
         }
+        result
     }
 
     fn rollback_operation(
@@ -386,9 +556,11 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         session_checkpoint: SessionCheckpoint,
         object_class: Symbol,
     ) {
+        let rollback_started = self.collect_resolver_profile.then(Instant::now);
         self.session.rollback_to(store, session_checkpoint);
         *store.symbols.get_mut(self.definitions.object_class) = object_class;
         store.rollback_to(store_checkpoint);
+        self.record_resolver_phase(ResolverProfilePhase::Rollback, rollback_started);
     }
 
     fn load_class(
@@ -404,9 +576,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
-        loader.set_load_profile_collection(self.collect_load_profiles);
+        loader.set_load_profile_collection(
+            self.collect_load_profiles || self.collect_resolver_profile,
+        );
         let result = loader.load_class(name);
-        self.load_profiles.extend(loader.take_load_profiles());
+        for profile in loader.take_load_profiles() {
+            self.collect_class_load_profile(&profile);
+            self.load_profiles.push(profile);
+        }
         let (class_path, session) = loader.into_parts();
         self.class_path = Some(class_path);
         self.session = session;
@@ -426,7 +603,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
+        loader.set_load_profile_collection(
+            self.collect_load_profiles || self.collect_resolver_profile,
+        );
         let result = loader.ensure_module_identity(name);
+        for profile in loader.take_load_profiles() {
+            self.collect_class_load_profile(&profile);
+            self.load_profiles.push(profile);
+        }
         let (class_path, session) = loader.into_parts();
         self.class_path = Some(class_path);
         self.session = session;
@@ -445,8 +629,16 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         let session = std::mem::replace(&mut self.session, LoadingSession::new());
         let mut loader =
             ClassLoader::with_definitions(class_path, store, self.definitions, session);
+        loader.set_load_profile_collection(
+            self.collect_load_profiles || self.collect_resolver_profile,
+        );
         let (result, decoded_cache_hit, resource_observations, resource_observations_complete) =
             loader.complete_module_with_tasty_cache(name, &mut self.decoded_module_cache);
+        let load_profiles = loader.take_load_profiles();
+        for profile in &load_profiles {
+            self.collect_class_load_profile(profile);
+        }
+        self.load_profiles.extend(load_profiles);
         if result.is_ok() && resource_observations_complete {
             self.validated_module_declarations.insert(name.clone());
             self.validated_module_resources
@@ -473,14 +665,20 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
         store: &mut SemanticStore,
         name: &BinaryName,
     ) -> Result<Option<crate::loader::ModuleIdentity>, ResolutionError> {
-        let resource = self
+        let lookup_started = self.collect_resolver_profile.then(Instant::now);
+        let resource_result = self
             .class_path
             .as_ref()
             .expect("resolver operation is exclusive")
             .find_class(name)
             .map_err(|error| ResolutionError::Malformed {
                 reason: format!("cannot inspect external module {name}: {error}"),
-            })?;
+            });
+        self.record_resolver_phase(
+            ResolverProfilePhase::ClasspathResourceLookup,
+            lookup_started,
+        );
+        let resource = resource_result?;
         let Some(resource) = resource else {
             return Ok(None);
         };
@@ -588,6 +786,38 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
     }
 
     fn complete_class_inner(
+        &mut self,
+        store: &mut SemanticStore,
+        symbol: SymbolId,
+    ) -> Result<Option<bool>, ResolutionError> {
+        let started = self.collect_resolver_profile.then(Instant::now);
+        let classload_before = self.resolver_profile.class_loading_inclusive.elapsed_ns;
+        let result = self.complete_class_inner_impl(store, symbol);
+        if let Some(started) = started {
+            let elapsed_ns = started.elapsed().as_nanos();
+            let classload_ns = self
+                .resolver_profile
+                .class_loading_inclusive
+                .elapsed_ns
+                .saturating_sub(classload_before);
+            self.resolver_profile.record_elapsed(
+                ResolverProfilePhase::ClassCompletion,
+                1,
+                elapsed_ns,
+                elapsed_ns.saturating_sub(classload_ns),
+            );
+            self.resolver_profile.class_completion_nested_classload_ns += classload_ns;
+            self.resolver_profile.class_completion_attempts += 1;
+            match &result {
+                Ok(Some(true)) => self.resolver_profile.class_completion_successes += 1,
+                Ok(Some(false) | None) => {}
+                Err(_) => self.resolver_profile.class_completion_errors += 1,
+            }
+        }
+        result
+    }
+
+    fn complete_class_inner_impl(
         &mut self,
         store: &mut SemanticStore,
         symbol: SymbolId,
@@ -703,6 +933,37 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
     }
 
     fn resolve_target(
+        &mut self,
+        store: &mut SemanticStore,
+        target: PrefixTarget,
+    ) -> Result<Option<(SymbolId, dotty_core::ScopeId)>, ResolutionError> {
+        let started = self.collect_resolver_profile.then(Instant::now);
+        let module_before = self.resolver_profile.module_completion.elapsed_ns;
+        let class_before = self.resolver_profile.class_completion.elapsed_ns;
+        let result = self.resolve_target_inner(store, target);
+        if let Some(started) = started {
+            let elapsed_ns = started.elapsed().as_nanos();
+            let nested_ns = self
+                .resolver_profile
+                .module_completion
+                .elapsed_ns
+                .saturating_sub(module_before)
+                + self
+                    .resolver_profile
+                    .class_completion
+                    .elapsed_ns
+                    .saturating_sub(class_before);
+            self.resolver_profile.record_elapsed(
+                ResolverProfilePhase::TargetResolution,
+                1,
+                elapsed_ns,
+                elapsed_ns.saturating_sub(nested_ns),
+            );
+        }
+        result
+    }
+
+    fn resolve_target_inner(
         &mut self,
         store: &mut SemanticStore,
         target: PrefixTarget,
@@ -960,6 +1221,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             .as_ref()
             .map(|identity| (identity.object_name.clone(), request.name));
         let cache_validation_started = self.collect_resolver_profile.then(Instant::now);
+        let mut snapshot_elapsed_ns = 0;
         if let (Some(cache_key), Some(identity), PrefixTarget::Class(class)) = (
             module_member_cache_key.as_ref(),
             module_identity_for_cache.as_ref(),
@@ -971,6 +1233,9 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 || self
                     .validated_module_declarations
                     .contains(&identity.object_name);
+            let snapshot_started = self.collect_resolver_profile.then(Instant::now);
+            let mut snapshot_lookup_calls = 0_u64;
+            let resource_lookup_started = self.collect_resolver_profile.then(Instant::now);
             let cache_is_current = if has_cached_evidence {
                 let class_path = self
                     .class_path
@@ -982,6 +1247,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     .is_some_and(|resources| {
                         !resources.is_empty()
                             && resources.iter().all(|(name, previous)| {
+                                snapshot_lookup_calls += 1;
                                 class_path
                                     .find_class(name)
                                     .is_ok_and(|current| current.as_ref() == Some(previous))
@@ -1012,6 +1278,31 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             } else {
                 false
             };
+            let snapshot_resource_ns = if let Some(started) = resource_lookup_started {
+                let elapsed_ns = started.elapsed().as_nanos();
+                self.resolver_profile.record_elapsed(
+                    ResolverProfilePhase::ClasspathResourceLookup,
+                    snapshot_lookup_calls,
+                    elapsed_ns,
+                    elapsed_ns,
+                );
+                elapsed_ns
+            } else {
+                0
+            };
+            snapshot_elapsed_ns = self.record_resolver_phase_with_children(
+                ResolverProfilePhase::ModuleSnapshotValidation,
+                snapshot_started,
+                snapshot_resource_ns,
+            );
+            if has_cached_evidence && cache_is_current {
+                self.resolver_profile.positive_module_cache_hits += 1;
+                if cached_miss {
+                    self.resolver_profile.negative_member_cache_hits += 1;
+                }
+            } else {
+                self.resolver_profile.module_cache_misses += 1;
+            }
             let cached_miss = cached_miss && cache_is_current;
             let declaration_miss = !cached_miss
                 && cache_is_current
@@ -1051,23 +1342,20 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 if !cached_miss && declaration_miss && self.collect_module_resolution_profile {
                     self.module_profile.module_declaration_miss_shortcuts += 1;
                 }
-                self.record_resolver_phase(
+                self.record_resolver_phase_with_children(
                     ResolverProfilePhase::ModuleCacheValidation,
                     cache_validation_started,
+                    snapshot_elapsed_ns,
                 );
                 return Ok(None);
             }
         }
-        self.record_resolver_phase(
+        self.record_resolver_phase_with_children(
             ResolverProfilePhase::ModuleCacheValidation,
             cache_validation_started,
+            snapshot_elapsed_ns,
         );
-        let target_resolution_started = self.collect_resolver_profile.then(Instant::now);
         let owner_result = self.resolve_target(store, target);
-        self.record_resolver_phase(
-            ResolverProfilePhase::TargetResolution,
-            target_resolution_started,
-        );
         let owner_result = owner_result?;
         let Some((resolved_owner, scope)) = owner_result else {
             return Ok(None);
@@ -1524,7 +1812,12 @@ impl<E: ClassPathEntry> SymbolResolver for ClasspathSymbolResolver<E> {
             self.finish_member_profile(profile_started, &result);
             return result;
         }
+        let package_selection_started = self.collect_resolver_profile.then(Instant::now);
         let package_target = self.package_term_target_key(store, request);
+        self.record_resolver_phase(
+            ResolverProfilePhase::PackageTermSelection,
+            package_selection_started,
+        );
         let package_target_preexisting = package_target.as_ref().is_some_and(|target| {
             let Some((package, name)) = target.split_once("::") else {
                 return false;
@@ -2005,6 +2298,12 @@ mod tests {
         assert_eq!(profile.target_resolution.calls, 1);
         assert_eq!(profile.declaration_selection.calls, 1);
         assert_eq!(profile.class_loading_inclusive.calls, 1);
+        assert_eq!(profile.transaction_bookkeeping.calls, 1);
+        assert!(profile.transaction_bookkeeping.elapsed_ns > 0);
+        assert!(
+            profile.transaction_bookkeeping.exclusive_ns
+                <= profile.transaction_bookkeeping.elapsed_ns
+        );
         assert!(profile.member_lookup_inclusive.elapsed_ns > 0);
         assert_eq!(
             profiled.take_resolver_profile(),
@@ -2030,6 +2329,8 @@ mod tests {
         assert_eq!(miss_profile.member_lookups, 1);
         assert_eq!(miss_profile.member_misses, 1);
         assert_eq!(miss_profile.rollbacks, 1);
+        assert_eq!(miss_profile.rollback.calls, 1);
+        assert!(miss_profile.rollback.elapsed_ns > 0);
 
         let mut unprofiled =
             ClasspathSymbolResolver::new(path, definitions, profiled.into_session());

@@ -148,6 +148,34 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=10 timing_mode=full
             "1\t350\t727\t0\t1444\t722\t1444\t722\t1444\t722\t1444\t0\n",
         )
 
+    def test_per_root_resolver_profiles_are_written_to_stable_sidecars(self):
+        log = """AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=10
+AUDIT_RESOLVER_ROOT scope=source root=compiler/A.scala#tree=7::A calls=3 stable_key_observations=3 successes=1 misses=2 errors=0 rollbacks=2 unique_keys=2 repeated_keys=1 retry_after_failed_lookup=1 top_repeated=pkg::x#2[unresolved:2]
+AUDIT_RESOLVER_ROOT_PHASE scope=source root=compiler/A.scala#tree=7::A stage=target calls=2 elapsed_ns=100 exclusive_ns=80
+AUDIT_RESOLVER_CACHE negative_member_hits=2 positive_module_hits=4 module_cache_misses=3
+AUDIT_MATCH_RESOLVER_CACHE file=compiler/A.scala negative_member_hits=1 positive_module_hits=2 module_cache_misses=4
+AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=10 timing_mode=full
+"""
+        run = sequential_profile.parse_run(log)
+        self.assertEqual(run["resolver_roots"][0]["repeated_keys"], "1")
+        self.assertEqual(run["resolver_root_phases"][0]["exclusive_ns"], "80")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            sequential_profile.write_report(
+                Path(temporary), [run], [10], ["warm"],
+                [{"mode": "warm-read-through", "before_bytes": 0}], [], "0" * 40,
+                Path(temporary), Path(temporary), "21.0.8", Path(temporary), 0,
+            )
+            roots = (Path(temporary) / "resolver-roots.tsv").read_text()
+            phases = (Path(temporary) / "resolver-root-phases.tsv").read_text()
+            cache = (Path(temporary) / "resolver-cache.tsv").read_text()
+            match_cache = (Path(temporary) / "match-resolver-cache.tsv").read_text()
+
+        self.assertIn("1\tsource\tcompiler/A.scala#tree=7::A\t3\t3\t1\t2", roots)
+        self.assertIn("source\tcompiler/A.scala#tree=7::A\ttarget\t2\t100\t80", phases)
+        self.assertEqual(cache.splitlines()[1], "1\t3\t2\t4")
+        self.assertIn("1\tcompiler/A.scala\t4\t1\t2", match_cache)
+
     def test_legacy_rollback_producer_marks_new_metrics_unavailable(self):
         log = """AUDIT_FILE_TIMING file=compiler/A.scala outcome=complete total_ms=10
 AUDIT_ROLLBACK count=350 operation_observations=1444 member_observations=722
