@@ -67,26 +67,22 @@ an executable pinned compiler oracle.
 | Linear bytecode analysis | Typed `fconst`/`dconst`, Float `ldc`, Double `ldc2_w`, F/D locals, and F/D returns are modeled and analyzed. Descriptor-derived parameter/local sizes, stack slots, exact kinds, Double heads/tails, overlapping stores, and typed wrong-return errors have focused regression tests. |
 | CFG analysis | CFG states now keep Float separate from Integer and Double separate from Long. Tests cover `(ZFF)F` and `(ZDD)D` branch joins, exact parameter slots, Double pair-aware locals and overlaps, Float/Int and Double/Long stack rejection, and an Int-controlled Double local loop backedge. |
 | StackMapTable projection | Branch frames emit `Float_variable_info` for Float and one `Double_variable_info` for each Double head/tail pair. Regression checks preserve real Top holes and omit the Double tail; a JDK 21 gate verifies and executes generated branch/loop methods, including mixed Long/Double and Float/Int locals. |
-| JVM source backend before #1536 | Canonical Float/Double types and bit-preserving literal constants project to `F`/`D` metadata, fields, method results, and parameter slots. The source integration test checks constructor `(FD)V`, methods `()F`, `()D`, `(IFDJ)D`, `(JDFZ)V`, and `(FDD)F`, including exact receiver-aware local slots. |
+| JVM source backend | Canonical Float/Double types and literals project to `F`/`D` metadata, fields, method results, and parameter slots. #1536 added straight-line expressions and locals; #1537 adds private instance field initialization, reads, and writes. |
 
-Before #1536, the source integration test covered these isolated shapes so the
-first failure was observable per shape rather than inferred from a partially
-emitted class:
+The current source backend boundary is:
 
 | Source shape | Current first failure |
 | --- | --- |
 | Float and Double primary-constructor parameters | Constructor descriptor metadata projects `(FD)V`; parameter slots include the receiver and Double width |
-| Float and Double mutable instance fields | Field metadata projects `F` and `D`; initializer bytecode remains unsupported |
-| Getter-shaped Float result/parameter and Double setter parameter | Method descriptors project `()F`, `(F)F`, and `(D)V`; body code generation remains unsupported |
-| Complete `NumericBox` fields, constructor, getters, and setter source batch | Metadata projects successfully; source emission stops with a typed unsupported-body error and no class artifact |
-| Float and Double literal return methods | Method signatures project; literal body lowering remains unsupported with no class artifact |
-| Double parameter/local round trip | Method signature projects; local load/return lowering remains unsupported with no class artifact |
-| Float `if` join | Method signature projects; Float CFG/source lowering remains unsupported with no class artifact |
-| Double mutable local across an Int-controlled loop | Method signature projects; Double local/loop lowering remains unsupported with no class artifact |
+| Private Float/Double mutable instance fields | `F` and `D` fields initialize from exact constructor parameters; reads and mutable writes use checked instance field plans |
+| Private Float/Double immutable literal fields | `FloatBits` and `DoubleBits` lower to exact raw constant-pool values before `putfield` |
+| Getter-shaped Float/Double methods and setters | Exact `()F`, `()D`, `(F)V`, and `(D)V` methods lower with `getfield`/`putfield`; no synthetic Scala accessors are generated |
+| Float `if` join | Unsupported with no class artifacts |
+| Double mutable local across an Int-controlled loop | Unsupported with no class artifacts |
 
-The fixture matrix above records the pre-#1536 boundary. Issue #1536 adds the
-bounded straight-line source lowering described below; it does not add fields,
-constructors, calls, arithmetic, conversions, or CFG expansion.
+The fixture matrix is covered by `FloatDoubleFields.scala` and
+`FloatDoubleValues.scala`; fresh frontend sessions must emit identical bytes,
+and the JDK 21 gate verifies and executes both classes.
 
 ## Bounded source lowering in #1536
 
@@ -104,6 +100,19 @@ class bytes across fresh sessions, and Java execution under `-Xverify:all` when
 the JDK 21 gate is available. Runtime checks cover signed zero through
 parameters/locals/assignments and NaN classification without promising that
 the JVM preserves a NaN payload through arbitrary execution.
+
+## Private field lowering in #1537
+
+Primary constructors emit the direct parent call once before source-ordered
+private Float/Double field initializers. Constructor-owned Float parameters use
+`fload`; Double parameters use `dload` with their exact category-two slots.
+Literal initializers preserve their raw bits through `fconst_bits` and
+`dconst_bits`. Field getters and setters validate the canonical current-class
+field identity and exact descriptor. Setters evaluate the RHS once and spill
+the receiver and value to correctly sized locals before `putfield`. The
+class-aware CFG verifier accepts exact Float/Double instance field transfers
+and rejects category mismatches. Static fields, control flow, arithmetic,
+conversions, and floating-point calls remain unsupported.
 
 ## JVMS 21 contract for follow-up implementation
 

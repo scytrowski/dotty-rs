@@ -46,6 +46,10 @@ pub enum JvmConstructorInitializerInstruction {
     Constant(i32),
     /// Push a signed category-two Long constant without narrowing it.
     LongConstant(i64),
+    /// Push an exact IEEE-754 Float bit pattern.
+    FloatBits(u32),
+    /// Push an exact IEEE-754 Double bit pattern.
+    DoubleBits(u64),
     /// Allocate one planned class for a reference-valued field initializer.
     NewObject {
         /// Checked JVM internal name of the allocated class.
@@ -121,6 +125,12 @@ impl JvmConstructorFieldInitializerPlan {
                     JvmConstructorInitializerInstruction::LongConstant(value) => {
                         code.lconst(*value)
                     }
+                    JvmConstructorInitializerInstruction::FloatBits(bits) => {
+                        code.fconst_bits(*bits)
+                    }
+                    JvmConstructorInitializerInstruction::DoubleBits(bits) => {
+                        code.dconst_bits(*bits)
+                    }
                     JvmConstructorInitializerInstruction::NewObject { owner } => {
                         code.new_object(owner.clone())
                     }
@@ -133,13 +143,8 @@ impl JvmConstructorFieldInitializerPlan {
                         JvmType::Int | JvmType::Boolean => code.iload(usize::from(*slot)),
                         JvmType::Reference(_) => code.aload(usize::from(*slot)),
                         JvmType::Long => code.lload(usize::from(*slot)),
-                        JvmType::Float | JvmType::Double => {
-                            return Err(JvmCodegenError::UnsupportedConstructorFieldInitializer {
-                                field: field.field,
-                                tree: field.initializer,
-                                node: "floating-point parameter load",
-                            });
-                        }
+                        JvmType::Float => code.fload(usize::from(*slot)),
+                        JvmType::Double => code.dload(usize::from(*slot)),
                     },
                     JvmConstructorInitializerInstruction::IntAdd => code.iadd(),
                     JvmConstructorInitializerInstruction::BooleanNot => {
@@ -266,11 +271,9 @@ pub(crate) fn append_direct_super_constructor_call(
     enum EncodedArgument {
         IntConstant(i32),
         LongConstant(i64),
-        Parameter {
-            slot: u16,
-            value_type: JvmType,
-            tree: TreeId<Typed>,
-        },
+        FloatBits(u32),
+        DoubleBits(u64),
+        Parameter { slot: u16, value_type: JvmType },
     }
     let mut encoded_arguments = Vec::with_capacity(proof.arguments().len());
     for (binding, formal) in proof
@@ -316,6 +319,14 @@ pub(crate) fn append_direct_super_constructor_call(
                 }
                 encoded_arguments.push(EncodedArgument::LongConstant(*value));
             }
+            [JvmConstructorInitializerInstruction::FloatBits(bits)] if found == JvmType::Float => {
+                encoded_arguments.push(EncodedArgument::FloatBits(*bits));
+            }
+            [JvmConstructorInitializerInstruction::DoubleBits(bits)]
+                if found == JvmType::Double =>
+            {
+                encoded_arguments.push(EncodedArgument::DoubleBits(*bits));
+            }
             [
                 JvmConstructorInitializerInstruction::LoadParameter {
                     slot, value_type, ..
@@ -332,7 +343,6 @@ pub(crate) fn append_direct_super_constructor_call(
                 encoded_arguments.push(EncodedArgument::Parameter {
                     slot: *slot,
                     value_type: *value_type,
-                    tree: binding.typed,
                 });
             }
             _ => {
@@ -350,20 +360,14 @@ pub(crate) fn append_direct_super_constructor_call(
         let result = match argument {
             EncodedArgument::IntConstant(value) => code.iconst(value),
             EncodedArgument::LongConstant(value) => code.lconst(value),
-            EncodedArgument::Parameter {
-                slot,
-                value_type,
-                tree,
-            } => match value_type {
+            EncodedArgument::FloatBits(bits) => code.fconst_bits(bits),
+            EncodedArgument::DoubleBits(bits) => code.dconst_bits(bits),
+            EncodedArgument::Parameter { slot, value_type } => match value_type {
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(slot)),
                 JvmType::Reference(_) => code.aload(usize::from(slot)),
                 JvmType::Long => code.lload(usize::from(slot)),
-                JvmType::Float | JvmType::Double => {
-                    return Err(JvmCodegenError::UnsupportedJvmConstructorArgument {
-                        tree: proof.typed_application(),
-                        argument: tree,
-                    });
-                }
+                JvmType::Float => code.fload(usize::from(slot)),
+                JvmType::Double => code.dload(usize::from(slot)),
             },
         };
         result.map_err(|error| JvmCodegenError::ConstructorCodeBuilder { class, error })?;
@@ -503,6 +507,38 @@ impl ConstructorInitializerContext<'_> {
 
         match &tree.kind {
             TreeKind::Literal(literal) => {
+                if let Constant::FloatBits(bits) = literal.value {
+                    let found = self.tree_value_type(tree_id, tree.ty)?;
+                    let constant_matches = match self.store.types.try_get(tree.ty) {
+                        Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                        _ => found == JvmType::Float,
+                    };
+                    if found != JvmType::Float || !constant_matches {
+                        return Err(JvmCodegenError::LiteralTypeMismatch {
+                            tree: tree_id,
+                            value: JvmType::Float,
+                            typed: Some(found),
+                        });
+                    }
+                    instructions.push(JvmConstructorInitializerInstruction::FloatBits(bits));
+                    return Ok(JvmType::Float);
+                }
+                if let Constant::DoubleBits(bits) = literal.value {
+                    let found = self.tree_value_type(tree_id, tree.ty)?;
+                    let constant_matches = match self.store.types.try_get(tree.ty) {
+                        Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                        _ => found == JvmType::Double,
+                    };
+                    if found != JvmType::Double || !constant_matches {
+                        return Err(JvmCodegenError::LiteralTypeMismatch {
+                            tree: tree_id,
+                            value: JvmType::Double,
+                            typed: Some(found),
+                        });
+                    }
+                    instructions.push(JvmConstructorInitializerInstruction::DoubleBits(bits));
+                    return Ok(JvmType::Double);
+                }
                 if let Constant::Long(value) = literal.value {
                     let found = self.tree_value_type(tree_id, tree.ty)?;
                     let constant_matches = match self.store.types.try_get(tree.ty) {

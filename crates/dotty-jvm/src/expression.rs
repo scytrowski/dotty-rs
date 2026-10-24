@@ -1204,13 +1204,6 @@ fn emit_field_read(
         }
         SymbolInfo::Error => return Err(JvmCodegenError::ErrorSemanticInfo { symbol: field }),
     };
-    if matches!(field_type, JvmType::Float | JvmType::Double) {
-        return Err(JvmCodegenError::UnsupportedTypedExpression {
-            tree: tree_id,
-            node: "floating-point field read",
-        });
-    }
-
     if let Some(receiver) = receiver {
         context.visit(receiver, depth + 1)?;
         let receiver_tree = context.tree(receiver)?;
@@ -1587,12 +1580,8 @@ fn emit_field_assignment(
                 JvmType::Reference(_) => code.astore(value_slot),
                 JvmType::Int | JvmType::Boolean => code.istore(value_slot),
                 JvmType::Long => code.lstore(value_slot),
-                JvmType::Float | JvmType::Double => {
-                    return Err(JvmCodegenError::UnsupportedTypedExpression {
-                        tree: tree_id,
-                        node: "floating-point field store",
-                    });
-                }
+                JvmType::Float => code.fstore(value_slot),
+                JvmType::Double => code.dstore(value_slot),
             };
             let code = store_value
                 .and_then(|code| code.aload(receiver_slot))
@@ -1604,12 +1593,8 @@ fn emit_field_assignment(
                 JvmType::Reference(_) => code.aload(value_slot),
                 JvmType::Int | JvmType::Boolean => code.iload(value_slot),
                 JvmType::Long => code.lload(value_slot),
-                JvmType::Float | JvmType::Double => {
-                    return Err(JvmCodegenError::UnsupportedTypedExpression {
-                        tree: tree_id,
-                        node: "floating-point field store",
-                    });
-                }
+                JvmType::Float => code.fload(value_slot),
+                JvmType::Double => code.dload(value_slot),
             }
             .map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
