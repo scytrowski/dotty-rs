@@ -1020,10 +1020,12 @@ rejected with `UnsupportedJvmAccessorInheritance` until generated signatures
 participate in override and final-method validation. The projection does not
 add semantic symbols or ordinary source field initializers. Whole-class
 emission writes the checked private backing fields and constructor stores,
-then emits public getters in constructor accessor order before explicitly
-planned source methods. Each getter reads its validated private field and
-returns its exact primitive or planned reference type. `var` setter emission
-remains a separate increment.
+then emits public getters and, for mutable accessors, public setters in
+constructor accessor order before explicitly planned source methods. Each
+getter reads its validated private field and returns its exact primitive or
+planned reference type. Each setter loads its exact typed argument, writes the
+validated private field once, and returns JVM `void`; no source `Method`
+symbols are synthesized for either generated method.
 
 `JvmClassMetadata::constructor()` exposes the explicit constructor's canonical
 symbol, owner internal name, descriptor, access flags, and ordered
