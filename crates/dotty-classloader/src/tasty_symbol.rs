@@ -3083,6 +3083,56 @@ pub(crate) fn resolve_type_alias_target(
     Ok(None)
 }
 
+/// Reads a package-object value alias and reduces its right-hand side to a
+/// classpath candidate. The caller validates that the candidate is a real
+/// module identity before exposing it as a term.
+pub(crate) fn resolve_term_alias_target(
+    file: &TastyFile<'_>,
+    alias_name: &str,
+    current_package: &str,
+) -> Result<Option<TypeAliasTarget>, TastyDecodeError> {
+    let index = file.ast_address_index()?;
+    for node in index.iter() {
+        if node.tag != VALDEF_TAG {
+            continue;
+        }
+        let StructuredNode::ValDef(DefinitionBody::ValDef {
+            name,
+            rhs: Some(rhs),
+            ..
+        }) = node.decode_structured()?
+        else {
+            continue;
+        };
+        if file.render_name(name).ok().as_deref() != Some(alias_name) {
+            continue;
+        }
+        if let Some((owner, name)) = unresolved_alias_reference(file, &rhs) {
+            let package_path = owner.package_path();
+            let owner_path = if !current_package.is_empty()
+                && package_path.starts_with(&format!("{current_package}/"))
+            {
+                owner
+                    .as_internal()
+                    .strip_prefix(&format!("{current_package}/"))
+                    .unwrap_or(owner.as_internal())
+                    .to_owned()
+            } else {
+                owner.as_internal().to_owned()
+            };
+            let candidate = BinaryName::from_internal(format!("{owner_path}/{name}"));
+            return Ok(Some(TypeAliasTarget::Candidate(
+                package_relative_candidate(candidate, current_package),
+            )));
+        }
+        let candidate =
+            resolve_parent_name_in_package(file, &rhs, current_package, Some(current_package))
+                .map(|candidate| package_relative_candidate(candidate, current_package));
+        return Ok(candidate.map(TypeAliasTarget::Candidate));
+    }
+    Ok(None)
+}
+
 fn package_relative_candidate(candidate: BinaryName, current_package: &str) -> BinaryName {
     let prefix = format!("{current_package}/");
     candidate
@@ -4295,6 +4345,19 @@ mod tests {
         assert_eq!(
             resolve_type_alias_candidate(&file, "Iterator", "scala"),
             Some(BinaryName::from_internal("collection/Iterator"))
+        );
+    }
+
+    #[test]
+    fn resolves_package_object_term_aliases_in_their_defining_package() {
+        let bytes = fixture_bytes("scala3-library/scala/package.tasty");
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+
+        assert_eq!(
+            resolve_term_alias_target(&file, "Nil", "scala").unwrap(),
+            Some(TypeAliasTarget::Candidate(BinaryName::from_internal(
+                "collection/immutable/Nil"
+            )))
         );
     }
 

@@ -1,0 +1,16 @@
+path#tree	before_first_blocker	after_first_blocker	fully_typed	oracle_or_source
+compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala#tree=1210	TermNameNotFound	ExplicitTypeApplicationCalleeNotPoly	false	Scala 3.9 default term import oracle
+compiler/src/dotty/tools/backend/jvm/opt/InlinerHeuristics.scala#tree=1215	TermNameNotFound	ExplicitTypeApplicationCalleeNotPoly	false	Scala 3.9 default term import oracle
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=71	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=76	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=82	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=117	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=126	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=138	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=205	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=209	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=294	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=335	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=352	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=360	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=393	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76

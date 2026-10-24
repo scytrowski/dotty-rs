@@ -158,12 +158,74 @@ impl SourceTyper<'_> {
                 }
             }
         }
+        if let Some(symbol) = self.lookup_default_term_import(name, tree_index, position)? {
+            return Ok(vec![symbol]);
+        }
         Err(TyperError::TermNameNotFound {
             source: self.source,
             tree_index,
             name,
             position,
         })
+    }
+
+    fn lookup_default_term_import(
+        &mut self,
+        name: dotty_core::Name,
+        tree_index: u32,
+        position: Option<SourceSpan>,
+    ) -> Result<Option<SymbolId>, TyperError> {
+        // Scala 3.9 exposes package-level terms through the Scala package
+        // object. The classpath resolver validates the alias target and
+        // returns its canonical module Object.
+        let path = ["scala".to_owned()];
+        let package = match self.packages.symbol(&path) {
+            Some(package) => Some(package),
+            None => self.resolve_external_package(&path, tree_index)?,
+        };
+        let Some(package) = package else {
+            return Ok(None);
+        };
+        let direct_source_candidates = self
+            .scopes_of(package)
+            .into_iter()
+            .flat_map(|scope| self.store.scopes.get(scope).lookup_all(&name))
+            .copied()
+            .filter(|symbol| {
+                let entry = self.store.symbols.get(*symbol);
+                entry.name.namespace() == dotty_core::Namespace::Term
+                    && entry.origin == SymbolOrigin::Source(self.source)
+            })
+            .collect::<Vec<_>>();
+        if let Some(symbol) =
+            self.unique_symbol_candidate(&direct_source_candidates, name, tree_index, position)?
+        {
+            return Ok(Some(symbol));
+        }
+        let request = MemberRequest {
+            prefix: self.package_type_prefix(package),
+            name,
+            selector: MemberSelector::Unique,
+            space: MemberSpace::Prefix,
+        };
+        let Some(symbol) = self
+            .resolver
+            .resolve_member(self.store, &request)
+            .map_err(|error| TyperError::SymbolResolution {
+                source: self.source,
+                tree_index,
+                error,
+            })?
+        else {
+            return Ok(None);
+        };
+        if !self.store.symbols.contains(symbol) {
+            return Err(TyperError::UnknownSymbol { symbol });
+        }
+        Ok(
+            (self.store.symbols.get(symbol).name.namespace() == dotty_core::Namespace::Term)
+                .then_some(symbol),
+        )
     }
 
     fn lexical_term_candidates(
@@ -312,5 +374,104 @@ impl SourceTyper<'_> {
             return Err(TyperError::ObjectModuleClassUnavailable { object });
         }
         Ok(module_class)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dotty_core::ast::TreeKind;
+    use dotty_core::{Definitions, Packages, SemanticStore, SourceId, SourceText};
+    use dotty_lexer::ContextualScanner;
+    use dotty_namer::name_compilation_unit;
+    use dotty_parser::parse_compilation_unit;
+
+    #[test]
+    fn default_term_import_resolves_a_scala_package_term() {
+        let source = SourceId::from_index(1566);
+        let text = "package scala { object Nil }; package app { object Use { def run = Nil } }";
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let scanner = ContextualScanner::new(text).unwrap();
+        let parsed = parse_compilation_unit(
+            SourceText::new(text).unwrap(),
+            source,
+            scanner,
+            &mut store.names,
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+        let mut packages = Packages::new();
+        let index = name_compilation_unit(
+            &parsed.ast,
+            parsed.root,
+            source,
+            "DefaultTermImport.scala",
+            &mut store,
+            &mut packages,
+        )
+        .unwrap();
+        let scala = packages.symbol(&["scala"]).unwrap();
+        let nil_name =
+            dotty_core::Name::new(store.names.intern("Nil"), dotty_core::Namespace::Term);
+        let nil = store
+            .scopes
+            .get(packages.scope_of(scala).unwrap())
+            .lookup_all(&nil_name)[0];
+        let (run, rhs) = parsed
+            .ast
+            .iter()
+            .find_map(|(tree, node)| match &node.kind {
+                TreeKind::DefDef(definition)
+                    if store.names.resolve(definition.name.as_name().text()) == "run" =>
+                {
+                    Some((
+                        index.symbol_at(source, tree).unwrap(),
+                        definition.rhs.unwrap(),
+                    ))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let lexical = index.declaration_context_of(run).unwrap();
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert_eq!(
+            typer.lookup_default_term_import(nil_name, 0, None).unwrap(),
+            Some(nil)
+        );
+        assert_eq!(
+            typer
+                .expression_term_candidates(
+                    nil_name,
+                    ExpressionContext {
+                        lexical,
+                        owner: run,
+                        local_scopes: None,
+                    },
+                    rhs.index(),
+                    None,
+                )
+                .unwrap(),
+            [nil]
+        );
+        let context = typer.expression_context_for(run).unwrap();
+        assert!(typer.type_expression(rhs, context).is_ok());
+        let missing = dotty_core::Name::new(
+            typer.store.names.intern("NotAStandardTerm"),
+            dotty_core::Namespace::Term,
+        );
+        assert_eq!(
+            typer
+                .lookup_default_term_import(missing, rhs.index(), None)
+                .unwrap(),
+            None
+        );
     }
 }

@@ -68,6 +68,7 @@ def main() -> int:
             "ImportDefaultJavaLangCharacter.scala": "package fixture1336\nobject ImportDefaultJavaLangCharacter { val value: Character = 'x' }\n",
             "ImportDefaultScalaCollection.scala": "package fixture1336\nobject ImportDefaultScalaCollection { val value: collection.concurrent.TrieMap[Int, Int] = collection.concurrent.TrieMap.empty }\n",
             "ImportDefaultScalaTypes.scala": "package fixture1336\nobject ImportDefaultScalaTypes { val list: List[Int] = Nil; val option: Option[String] = None; val qualified: scala.List[Int] = list }\nobject ImportDefaultTypeShadow { class List; val value: List = new List }\n",
+            "ImportDefaultScalaTerms.scala": "package fixture1566\nobject ImportDefaultScalaTerms { val empty: List[Int] = Nil; val absent: Option[String] = None }\nobject ImportDefaultScalaTermShadow { object Nil; val value: Nil.type = Nil }\n",
             "ImportPackageLevelQuotes.scala": "package fixture1336\nimport scala.quoted.{Quotes, quotes}\nobject ImportPackageLevelQuotes { def value(using q: Quotes): q.type = quotes }\n",
         }
         files = []
@@ -279,9 +280,31 @@ def main() -> int:
                 + missing_default_diagnostic
             )
 
+        missing_default_term = source / "MissingDefaultTerm.scala"
+        missing_default_term.write_text(
+            "package fixture1566\nobject MissingDefaultTerm { val value = NotAStandardTerm }\n",
+            encoding="utf-8",
+        )
+        missing_default_term_result = compile_sources(
+            java_home,
+            classpath + os.pathsep + str(output),
+            root / "missing-default-term",
+            [missing_default_term],
+        )
+        missing_default_term_diagnostic = re.sub(
+            r"\x1b\[[0-9;]*m",
+            "",
+            missing_default_term_result.stdout + missing_default_term_result.stderr,
+        )
+        if missing_default_term_result.returncode == 0 or "NotAStandardTerm" not in missing_default_term_diagnostic:
+            raise SystemExit(
+                "Scala 3.9 default imports unexpectedly resolved an unknown term:\n"
+                + missing_default_term_diagnostic
+            )
+
     print(
-        "scala=3.9.0 positive_imports=class,object,object_member_with_same_named_package_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate,imported_qualifier_shadows_package,pinned_compiler_Types_Contexts_Symbols_Tokens_ProtoTypes,default_java_lang_Character,default_scala_collection,default_scala_types_and_shadowing,package_level_scala_quoted_quotes "
-        "negative_imports=class_import_as_term,absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision,lexical_term_missing_member_no_root_fallback,unknown_default_type;root_fallback=success "
+        "scala=3.9.0 positive_imports=class,object,object_member_with_same_named_package_member,rename,_root_,root_package_from_nested_context,current_package_relative,stacked_package_parent_scope,descendant_only_intermediate,imported_qualifier_shadows_package,pinned_compiler_Types_Contexts_Symbols_Tokens_ProtoTypes,default_java_lang_Character,default_scala_collection,default_scala_types_and_shadowing,default_scala_terms_and_shadowing,package_level_scala_quoted_quotes "
+        "negative_imports=class_import_as_term,absent_root,missing_selected_member,source_relative_wins_collision,dotted_package_parent_scope_not_searched,object_package_name_collision,lexical_term_missing_member_no_root_fallback,unknown_default_type,unknown_default_term;root_fallback=success "
         "root_qualification=bypasses_relative_search;lexical_term_binding=normal_priority"
     )
     return 0

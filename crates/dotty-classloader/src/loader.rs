@@ -196,6 +196,48 @@ fn resolve_tasty_alias_target<E: ClassPathEntry>(
     })
 }
 
+pub(crate) fn resolve_tasty_term_alias<E: ClassPathEntry>(
+    class_path: &E,
+    owner: &BinaryName,
+    alias: &str,
+) -> Result<Option<BinaryName>, TastyAliasResolutionError> {
+    if !matches!(owner.simple_name(), "package" | "package$") {
+        return Ok(None);
+    }
+    let package_object = owner
+        .as_internal()
+        .strip_suffix('$')
+        .unwrap_or(owner.as_internal());
+    let package_name = BinaryName::from_internal(package_object);
+    let resource = class_path
+        .find_class(&package_name)
+        .map_err(|error| TastyAliasResolutionError::ClassPath(package_name.clone(), error))?;
+    let Some(resource) = resource.filter(|resource| resource.format() == ClassFormat::Tasty) else {
+        return Ok(None);
+    };
+    let file = tasty_symbol::parse_classloader_tasty(resource.bytes()).map_err(|error| {
+        TastyAliasResolutionError::InvalidTasty(
+            package_name.clone(),
+            error,
+            resource.origin().clone(),
+            resource.format(),
+        )
+    })?;
+    let target = tasty_symbol::resolve_term_alias_target(&file, alias, owner.package_path())
+        .map_err(|error| {
+            TastyAliasResolutionError::InvalidTasty(
+                package_name,
+                error,
+                resource.origin().clone(),
+                resource.format(),
+            )
+        })?;
+    let Some(tasty_symbol::TypeAliasTarget::Candidate(candidate)) = target else {
+        return Ok(None);
+    };
+    validate_alias_candidate(class_path, owner.package_path(), candidate)
+}
+
 fn validate_alias_candidate<E: ClassPathEntry>(
     class_path: &E,
     package: &str,
@@ -8957,6 +8999,33 @@ mod tests {
                 .get(&BinaryName::from_internal("scala/collection/Iterator")),
             Some(ClassEntry::Loaded(iterator)) if *iterator != source
         ));
+    }
+
+    #[test]
+    fn scala_package_term_alias_requires_a_present_classpath_target() {
+        let mut tasty = HashMap::new();
+        tasty.insert(
+            BinaryName::from_internal("scala/package"),
+            dotty_tasty_fixture_bytes("scala3-library/scala/package.tasty"),
+        );
+        let nil = BinaryName::from_internal("scala/collection/immutable/Nil");
+        let class_path = CompositeClassPath::new(vec![
+            Box::new(InMemoryTastyClassPath(tasty)),
+            Box::new(InMemoryClassPath(HashMap::from([(
+                nil.clone(),
+                synthetic_class(nil.as_internal(), Some("java/lang/Object")),
+            )]))),
+        ]);
+        let owner = BinaryName::from_internal("scala/package$");
+
+        assert_eq!(
+            resolve_tasty_term_alias(&class_path, &owner, "Nil").unwrap(),
+            Some(nil)
+        );
+        assert_eq!(
+            resolve_tasty_term_alias(&class_path, &owner, "NotAScalaTerm").unwrap(),
+            None
+        );
     }
 
     #[test]
