@@ -2442,12 +2442,11 @@ fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
                 .map(|method| class_file.constant_pool.utf8(method.name_index).unwrap())
                 .collect::<Vec<_>>();
             let expected_method_names = std::iter::once("<init>")
-                .chain(
-                    class_metadata
-                        .accessors()
-                        .iter()
-                        .map(|accessor| accessor.getter().name()),
-                )
+                .chain(class_metadata.accessors().iter().flat_map(|accessor| {
+                    std::iter::once(accessor.getter())
+                        .chain(accessor.setter())
+                        .map(|method| method.name())
+                }))
                 .collect::<Vec<_>>();
             assert_eq!(emitted_method_names, expected_method_names);
             let constructor = &class_file.methods[0];
@@ -2600,8 +2599,8 @@ fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
 }
 
 #[test]
-fn constructor_accessor_getters_emit_verified_abi_methods() {
-    let source_text = "class Measurement(val id: Int, var value: Double) { def marker(): Int = 9 }; class Mixed(val enabled: Boolean, val count: Long, val ratio: Float); class Ref(val item: Measurement); class Plain(start: Int)";
+fn constructor_accessor_getters_and_setters_emit_verified_abi_methods() {
+    let source_text = "class Measurement(val id: Int, var value: Double) { def marker(): Int = 9 }; class Mixed(var enabled: Boolean, var count: Long, var ratio: Float, var number: Int); class Ref(var item: Measurement); class Plain(start: Int)";
     with_source(source_text, |ast, source, index, definitions, typer| {
         let mut classes = Vec::new();
         let mut class_symbols = Vec::new();
@@ -2683,7 +2682,7 @@ fn constructor_accessor_getters_emit_verified_abi_methods() {
             (
                 "Measurement",
                 vec![("id", "()I", 0xac), ("value", "()D", 0xaf)],
-                vec!["<init>", "id", "value", "marker"],
+                vec!["<init>", "id", "value", "value_$eq", "marker"],
             ),
             (
                 "Mixed",
@@ -2691,13 +2690,24 @@ fn constructor_accessor_getters_emit_verified_abi_methods() {
                     ("enabled", "()Z", 0xac),
                     ("count", "()J", 0xad),
                     ("ratio", "()F", 0xae),
+                    ("number", "()I", 0xac),
                 ],
-                vec!["<init>", "enabled", "count", "ratio"],
+                vec![
+                    "<init>",
+                    "enabled",
+                    "enabled_$eq",
+                    "count",
+                    "count_$eq",
+                    "ratio",
+                    "ratio_$eq",
+                    "number",
+                    "number_$eq",
+                ],
             ),
             (
                 "Ref",
                 vec![("item", "()LMeasurement;", 0xb0)],
-                vec!["<init>", "item"],
+                vec!["<init>", "item", "item_$eq"],
             ),
             ("Plain", vec![], vec!["<init>"]),
         ];
@@ -2725,10 +2735,6 @@ fn constructor_accessor_getters_emit_verified_abi_methods() {
             assert_eq!(
                 method_names, expected_methods,
                 "method order for {class_name}"
-            );
-            assert!(
-                !method_names.iter().any(|name| name.ends_with("_$eq")),
-                "this increment emits getters only"
             );
             for (accessor, (name, descriptor, return_opcode)) in class_metadata
                 .accessors()
@@ -2803,6 +2809,88 @@ fn constructor_accessor_getters_emit_verified_abi_methods() {
                 assert_eq!(field_name, accessor.field_name());
                 assert_eq!(field_descriptor, accessor.field_descriptor());
             }
+            for accessor in class_metadata.accessors() {
+                let Some(setter) = accessor.setter() else {
+                    assert!(
+                        method_names
+                            .iter()
+                            .all(|name| *name != format!("{}_$eq", accessor.field_name())),
+                        "immutable/plain accessors do not gain their own setter"
+                    );
+                    continue;
+                };
+                assert_eq!(setter.name(), format!("{}_$eq", accessor.field_name()));
+                assert_eq!(
+                    setter.descriptor().as_str(),
+                    format!("({})V", accessor.field_descriptor())
+                );
+                assert!(setter.access_flags().contains(ACC_PUBLIC));
+                let method = class_file
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        class_file.constant_pool.utf8(method.name_index).unwrap() == setter.name()
+                            && class_file
+                                .constant_pool
+                                .utf8(method.descriptor_index)
+                                .unwrap()
+                                == setter.descriptor().as_str()
+                    })
+                    .unwrap_or_else(|| panic!("missing generated setter {}", setter.name()));
+                assert!(method.access_flags.is_public());
+                let code = method
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        dotty_classfile::attribute::Attribute::Code(code) => Some(code),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(code.code.len(), 6);
+                assert_eq!(code.code[0], 0x2a, "setter starts with aload_0");
+                assert_eq!(
+                    code.code[1],
+                    match accessor.value_type() {
+                        dotty_jvm::JvmType::Int | dotty_jvm::JvmType::Boolean => 0x1b,
+                        dotty_jvm::JvmType::Long => 0x1f,
+                        dotty_jvm::JvmType::Float => 0x23,
+                        dotty_jvm::JvmType::Double => 0x27,
+                        dotty_jvm::JvmType::Reference(_) => 0x2b,
+                    },
+                    "setter loads the exact category from local 1"
+                );
+                assert_eq!(code.code[2], 0xb5, "setter uses putfield");
+                assert_eq!(code.code[5], 0xb1, "setter returns void");
+                let width = usize::from(matches!(
+                    accessor.value_type(),
+                    dotty_jvm::JvmType::Long | dotty_jvm::JvmType::Double
+                )) + 1;
+                assert_eq!(code.max_stack, 1 + width as u16, "setter stack bound");
+                assert_eq!(code.max_locals, 1 + width as u16, "setter local bound");
+                let fieldref_index = u16::from_be_bytes([code.code[3], code.code[4]]);
+                let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                    class_index,
+                    name_and_type_index,
+                } = class_file
+                    .constant_pool
+                    .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+                        fieldref_index,
+                    ))
+                    .unwrap()
+                else {
+                    panic!("setter must write a Fieldref");
+                };
+                assert_eq!(
+                    class_file.constant_pool.class_name(*class_index).unwrap(),
+                    class_metadata.identity().internal_name()
+                );
+                let (field_name, field_descriptor) = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap();
+                assert_eq!(field_name, accessor.field_name());
+                assert_eq!(field_descriptor, accessor.field_descriptor());
+            }
             generated_classes.push((
                 generated.internal_name().to_owned(),
                 generated.bytes().to_vec(),
@@ -2825,7 +2913,7 @@ fn constructor_accessor_getters_emit_verified_abi_methods() {
             let harness = output.join("AccessorGetterHarness.java");
             fs::write(
                 &harness,
-                "public final class AccessorGetterHarness { public static void main(String[] args) { Measurement first = new Measurement(7, 1.5d); Measurement second = new Measurement(-4, -2.25d); if (first.id() != 7 || first.value() != 1.5d || second.id() != -4 || second.value() != -2.25d || first.marker() != 9) throw new AssertionError(\"Measurement getters\"); Mixed mixed = new Mixed(true, Long.MIN_VALUE + 17, 3.25f); if (!mixed.enabled() || mixed.count() != Long.MIN_VALUE + 17 || mixed.ratio() != 3.25f) throw new AssertionError(\"Mixed getters\"); Ref ref = new Ref(first); if (ref.item() != first) throw new AssertionError(\"reference getter\"); new Plain(99); } }\n",
+                "public final class AccessorGetterHarness { public static void main(String[] args) { Measurement first = new Measurement(7, 1.5d); Measurement second = new Measurement(-4, -2.25d); if (first.id() != 7 || first.value() != 1.5d || second.id() != -4 || second.value() != -2.25d || first.marker() != 9) throw new AssertionError(\"Measurement getters\"); first.value_$eq(4.75d); if (first.value() != 4.75d || second.value() != -2.25d) throw new AssertionError(\"Double setter\"); Mixed mixed = new Mixed(true, Long.MIN_VALUE + 17, 3.25f, 5); if (!mixed.enabled() || mixed.count() != Long.MIN_VALUE + 17 || mixed.ratio() != 3.25f || mixed.number() != 5) throw new AssertionError(\"Mixed getters\"); mixed.enabled_$eq(false); mixed.count_$eq(Long.MAX_VALUE - 9); mixed.ratio_$eq(-8.5f); mixed.number_$eq(-23); if (mixed.enabled() || mixed.count() != Long.MAX_VALUE - 9 || mixed.ratio() != -8.5f || mixed.number() != -23) throw new AssertionError(\"primitive setters\"); Ref ref = new Ref(first); if (ref.item() != first) throw new AssertionError(\"reference getter\"); ref.item_$eq(second); if (ref.item() != second) throw new AssertionError(\"reference setter\"); new Plain(99); } }\n",
             )
             .unwrap();
             let javac = Command::new("javac")

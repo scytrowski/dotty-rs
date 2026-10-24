@@ -4,7 +4,8 @@ This document records the bounded audit and implementation status for ordinary
 primary-constructor `val`/`var` parameters in Scala 3.9.0, tracked by
 [#1553](https://github.com/scytrowski/dotty-rs/issues/1553). Checked backing
 field metadata and constructor initialization are implemented, and the
-backend emits audited public getter methods. Setter emission remains deferred.
+backend emits audited public getter methods plus setters for mutable
+constructor accessors.
 The contract keeps source identity, source selection typing, and emitted JVM
 members separate.
 
@@ -79,9 +80,9 @@ this issue.
 
 `JvmPrimaryConstructorPlan::from_source` accepts the audited parameter roles
 and produces an immutable source binding. The backend emits private backing
-field_info entries, checked constructor stores, and public getter methods from
-those exact bindings; setter emission and source call-site integration remain
-deferred.
+field_info entries, checked constructor stores, public getters, and public
+setters for mutable accessors from those exact bindings. Source call-site
+integration remains deferred.
 The plan accepts a plain
 parameter only with `ParamAccessor` plus `PrivateLocal`, an immutable public
 accessor only with `ParamAccessor`, and a mutable public accessor only with
@@ -106,15 +107,15 @@ identity must be a typed rejection. Generated JVM signatures must be checked
 for collisions against user-declared and other generated members; the policy
 must reject ambiguity before artifact publication rather than silently
 shadowing either member. Accessor metadata performs these checks. Emitted
-classes contain the checked backing fields, constructor stores, and generated
-getter methods. Setter methods remain deferred.
+classes contain the checked backing fields, constructor stores, generated
+getters, and setters for mutable accessors.
 
 ## Scope matrix
 
 | Shape | Audit result / disposition |
 | --- | --- |
-| `Measurement(val id: Int, var value: Double)` | Emits private `id:I` and `value:D` storage, exactly one initialized store from slots 1 and 2–3 after `Object.<init>`, and public `id()I` / `value()D` getters. Setter remains deferred. |
-| `Mixed(val enabled: Boolean, var count: Long)` | Emits private `enabled:Z` and `count:J` storage, public `enabled()Z` / `count()J` getters, and uses two constructor local slots for `Long`. Setter remains deferred. |
+| `Measurement(val id: Int, var value: Double)` | Emits private `id:I` and `value:D` storage, exactly one initialized store from slots 1 and 2–3 after `Object.<init>`, public `id()I` / `value()D` getters, and public `value_$eq(D)V`; `val id` has no setter. |
+| `Mixed(val enabled: Boolean, var count: Long)` | Emits private `enabled:Z` and `count:J` storage, public `enabled()Z` / `count()J` getters and public `count_$eq(J)V`; the setter uses two local slots for its Long parameter. |
 | `Ref(val item: Measurement)` | Emits private-final planned reference storage, copies the exact reference formal after direct-super initialization, and emits `item()LMeasurement;`. |
 | Plain constructor parameter | Existing distinct class-owned and constructor-owned parameter identities remain; it does not gain an accessor by implication. |
 | Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
@@ -122,15 +123,17 @@ getter methods. Setter methods remain deferred.
 | Secondary, defaulted, multiple-clause, or `using` constructors | Deferred. |
 | Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. Accessor metadata is rejected on non-Object subclasses and across planned accessor-inheritance edges until generated signatures participate in override/bridge validation. |
 | Accessor-bearing class with a planned non-Object parent | Rejected with `UnsupportedJvmAccessorInheritance`, before accessor metadata is returned. This prevents generated getter/setter signatures from bypassing inherited final-method and override checks. |
-| Malformed owner/derived IDs, stale typed IDs, generated signature collisions | Metadata validation rejects invalid bindings and binary collisions before bytes are published; codegen is not implemented here. |
+| Malformed owner/derived IDs, stale typed IDs, generated signature collisions | Metadata validation rejects invalid bindings and binary collisions before bytes are published; bytecode-builder and classfile errors remain typed and publish no generated class artifact. |
 | Unsupported source calls or assignments | Keep the actual Typer/backend error observable; do not guess or bypass it. |
 
-## Future acceptance gate
+## Backend acceptance coverage
 
-Getter emission is covered for `Int`, `Boolean`, `Long`, `Float`, `Double`, and
-validated planned-class references. Tests assert getter names, descriptors,
-flags, field references, return opcodes, deterministic output, and accessor
-order; a Java harness invokes the getters under `java -Xverify:all`. Setter
-code remains deferred. These JVM-only tests do not depend on Scala source
-call-site lowering. Rust-produced output passing the JVM verifier alone is not
-evidence of Scala ABI compatibility.
+Getter and setter emission is covered for `Int`, `Boolean`, `Long`, `Float`,
+`Double`, and validated planned-class references. Tests assert accessor names,
+descriptors, flags, field references, typed return/load opcodes, deterministic
+output, and accessor order. Setters load the exact JVM parameter category,
+write the validated private field once, and return `void`; immutable `val`s and
+plain constructor parameters have no setter. A Java harness invokes getters
+and mutates `var`s under `java -Xverify:all`. These JVM-only tests do not depend
+on Scala source call-site lowering. Rust-produced output passing the JVM
+verifier alone is not evidence of Scala ABI compatibility.
