@@ -9929,12 +9929,19 @@ fn verify_with_jdk(output_directory: &Path) {
 fn real_source_accessor_calls_dispatch_through_validated_getters_and_setters() {
     let source = r#"
 class Counter(val id: Int, var count: Long) {
+  val initial: Int = 10
+  var current: Long = 0L
   def ownRead(): Long = this.count
   def ownReadId(): Int = this.id
   def ownUnqualifiedRead(): Long = count
   def ownWrite(next: Long): Unit = this.count = next
+  def ownBodyRead(): Long = this.current
+  def ownBodyUnqualifiedRead(): Long = current
+  def ownBodyWrite(next: Long): Unit = this.current = next
 }
-class OtherCounter(var count: Long)
+class OtherCounter(var count: Long) {
+  var current: Long = 31L
+}
 class CounterFactory(var events: Int) {
   def receiver(c: Counter): Counter = { events = events * 10 + 1; c }
   def value(next: Long): Long = { events = events * 10 + 2; next }
@@ -9945,6 +9952,13 @@ class PrivateCounter {
   def write(next: Long): Unit = this.count = next
 }
 class Reader {
+  def readInitial(c: Counter): Int = c.initial
+  def readCurrent(c: Counter): Long = c.current
+  def writeCurrent(c: Counter, next: Long): Unit = c.current = next
+  def localCurrent(c: Counter): Long = { val local = c; local.current }
+  def readOtherCurrent(c: OtherCounter): Long = c.current
+  def writeCurrentOnce(factory: CounterFactory, c: Counter, next: Long): Unit =
+    factory.receiver(c).current = factory.value(next)
   def readId(c: Counter): Int = c.id
   def readCount(c: Counter): Long = c.count
   def write(c: Counter, next: Long): Unit = c.count = next
@@ -10021,8 +10035,58 @@ class Reader {
             &[(0xb6, "Counter", "count", "()J")][..],
         ),
         ("ownWrite", &[(0xb6, "Counter", "count_$eq", "(J)V")][..]),
+        ("ownBodyRead", &[(0xb6, "Counter", "current", "()J")][..]),
+        (
+            "ownBodyUnqualifiedRead",
+            &[(0xb6, "Counter", "current", "()J")][..],
+        ),
+        (
+            "ownBodyWrite",
+            &[(0xb6, "Counter", "current_$eq", "(J)V")][..],
+        ),
     ] {
         assert_invocation_sequence(&counter, emitted_method_code(&counter, method), expected);
+    }
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readInitial"),
+        &[(0xb6, "Counter", "initial", "()I")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readCurrent"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "writeCurrent"),
+        &[(0xb6, "Counter", "current_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "localCurrent"),
+        &[(0xb6, "Counter", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readOtherCurrent"),
+        &[(0xb6, "OtherCounter", "current", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "writeCurrentOnce"),
+        &[
+            (0xb6, "CounterFactory", "receiver", "(LCounter;)LCounter;"),
+            (0xb6, "CounterFactory", "value", "(J)J"),
+            (0xb6, "Counter", "current_$eq", "(J)V"),
+        ],
+    );
+    for method in ["ownBodyRead", "ownBodyUnqualifiedRead", "ownBodyWrite"] {
+        assert_no_field_reference_to_owner(
+            &counter,
+            emitted_method_code(&counter, method),
+            "Counter",
+        );
     }
     assert_invocation_sequence(
         &reader,
@@ -10083,6 +10147,12 @@ class Reader {
         ],
     );
     for method in [
+        "readInitial",
+        "readCurrent",
+        "writeCurrent",
+        "localCurrent",
+        "readOtherCurrent",
+        "writeCurrentOnce",
         "readId",
         "readCount",
         "write",
@@ -10128,6 +10198,26 @@ class Reader {
             .any(|(name, _)| name == "id_$eq"),
         "a val has no generated setter"
     );
+    let counter_accessors = methods_with_descriptors(&counter)
+        .into_iter()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "id" | "count" | "initial" | "initial_$eq" | "current" | "current_$eq"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        counter_accessors,
+        [
+            ("id".to_owned(), "()I".to_owned()),
+            ("count".to_owned(), "()J".to_owned()),
+            ("initial".to_owned(), "()I".to_owned()),
+            ("current".to_owned(), "()J".to_owned()),
+            ("current_$eq".to_owned(), "(J)V".to_owned()),
+        ],
+        "constructor and body accessors keep their exact public ABI"
+    );
 
     if require_jdk_or_skip() {
         let harness = first_output.path().join("AccessorCallsHarness.java");
@@ -10141,6 +10231,15 @@ class Reader {
     Reader reader = new Reader();
     check(first.ownRead() == 10L && first.ownReadId() == 7 && first.ownUnqualifiedRead() == 10L, "this and unqualified getters");
     check(reader.readId(first) == 7 && reader.readCount(first) == 10L, "parameter getters");
+    check(first.initial() == 10 && first.ownBodyRead() == 0L && first.ownBodyUnqualifiedRead() == 0L, "body field getters");
+    check(reader.readInitial(first) == 10 && reader.readCurrent(first) == 0L && reader.localCurrent(first) == 0L, "body field call sites");
+    reader.writeCurrent(first, Long.MIN_VALUE);
+    check(first.current() == Long.MIN_VALUE, "body var setter");
+    reader.writeCurrent(first, Long.MAX_VALUE);
+    check(first.current() == Long.MAX_VALUE, "body var setter width");
+    first.ownBodyWrite(-11L);
+    check(first.current() == -11L, "same-class body var setter");
+    check(second.current() == 0L, "body var instance isolation");
     reader.write(first, Long.MIN_VALUE + 9);
     check(first.count() == Long.MIN_VALUE + 9 && second.count() == 20L, "parameter setter and instance isolation");
     Counter nestedA = new Counter(1, 10L);
@@ -10151,9 +10250,13 @@ class Reader {
     check(reader.localWrite(second, Long.MAX_VALUE - 4) == Long.MAX_VALUE - 4 && second.count() == Long.MAX_VALUE - 4, "stable local setter/getter and Long width");
     OtherCounter other = new OtherCounter(31L);
     check(reader.readOther(other) == 31L, "canonical same-named field owner");
+    check(reader.readOtherCurrent(other) == 31L, "same-spelled body field keeps its canonical owner");
     CounterFactory factory = new CounterFactory(0);
     reader.writeOnce(factory, first, 88L);
     check(factory.events() == 12 && first.count() == 88L, "receiver then RHS exactly once");
+    factory.events_$eq(0);
+    reader.writeCurrentOnce(factory, first, 99L);
+    check(factory.events() == 12 && first.current() == 99L, "body setter receiver then RHS exactly once");
     System.out.println("accessor calls ok");
   }
 }
