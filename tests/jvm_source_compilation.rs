@@ -2418,6 +2418,29 @@ fn float_double_fields_and_primary_constructor_initialization_verify_and_execute
     ));
 
     if require_jdk_or_skip() {
+        for (class_name, expected) in [
+            ("NumericBox", "descriptor: (FD)V"),
+            ("NumericConstants", "descriptor: ()F"),
+        ] {
+            let javap = Command::new("javap")
+                .args([
+                    "-v",
+                    "-c",
+                    "-classpath",
+                    first_output.path().to_str().unwrap(),
+                    class_name,
+                ])
+                .output()
+                .expect("start javap");
+            assert!(javap.status.success(), "javap failed: {javap:?}");
+            let text = String::from_utf8_lossy(&javap.stdout);
+            assert!(text.contains(expected), "{class_name}: {text}");
+            assert!(text.contains("putfield"), "{class_name}: {text}");
+            if class_name == "NumericBox" {
+                assert!(text.contains("fload_1"), "{class_name}: {text}");
+                assert!(text.contains("dload_2"), "{class_name}: {text}");
+            }
+        }
         let harness_path = first_output.path().join("FloatDoubleFieldsHarness.java");
         fs::write(
             &harness_path,
@@ -2430,10 +2453,12 @@ fn float_double_fields_and_primary_constructor_initialization_verify_and_execute
     first.setD(-0.0d);
     if (Float.floatToRawIntBits(first.getF()) != Float.floatToRawIntBits(-0.0f)) throw new AssertionError("float negative zero");
     if (Double.doubleToRawLongBits(first.getD()) != Double.doubleToRawLongBits(-0.0d)) throw new AssertionError("double negative zero");
+    second.setF(7.0f);
+    second.setD(8.0d);
+    if (Float.floatToRawIntBits(first.getF()) != Float.floatToRawIntBits(-0.0f) || Double.doubleToRawLongBits(first.getD()) != Double.doubleToRawLongBits(-0.0d) || second.getF() != 7.0f || second.getD() != 8.0d) throw new AssertionError("instance isolation");
     second.setF(Float.NaN);
     second.setD(Double.NaN);
     if (!Float.isNaN(second.getF()) || !Double.isNaN(second.getD())) throw new AssertionError("NaN fields");
-    if (second.getF() != second.getF() || second.getD() != second.getD()) throw new AssertionError("instance isolation");
     NumericConstants constants = new NumericConstants();
     if (constants.getF() != 1.5f || constants.getD() != 3.5d) throw new AssertionError("literal fields");
   }
