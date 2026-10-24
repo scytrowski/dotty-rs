@@ -6,8 +6,9 @@ contract for private primitive fields (`Int`, `Boolean`, `Long`, `Float`, and
 primary constructors. It targets the
 pinned Scala 3.9.0 reference at revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
-It covers the real-source `Counter` and `PrivateFields` integration fixtures;
-it does not claim full Scala ABI, generated accessor, or TASTy support.
+It covers the real-source `Counter`, `PrivateFields`, and bounded constructor
+accessor backing-field initialization fixtures; it does not claim full Scala
+ABI, generated getter/setter, or TASTy support.
 
 ## Reproducible source evidence
 
@@ -25,8 +26,8 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | `class LongConstant { private val number: Long = 9000000000L }` | `number` is a canonical private immutable Long field owned by `LongConstant`. | Its typed constant preserves the exact signed `i64` value and lowers to `lconst`/`ldc2_w` before `putfield number:J`. | `LongFields.scala` decodes the Long constant pool entry and executes the class with `java -Xverify:all`. |
 | `class NumericBox(initialF: Float, initialD: Double) { private var f: Float = initialF; private var d: Double = initialD }` | `f` and `d` are distinct canonical private mutable field symbols in source order. Constructor parameter references retain their exact constructor-owned identities. | Descriptor `(FD)V`; slots 1 and 2/3 load with `fload` and `dload`. The parent constructor runs once before the two `putfield` instructions. | `FloatDoubleFields.scala` checks source order, `(F)V`/`(D)V` setters, `()F`/`()D` getters, fresh-session deterministic bytes, and JDK execution. No Scala-generated accessors are emitted. |
 | `class NumericConstants { private val f: Float = 1.5f; private val d: Double = 3.5 }` | Both values remain canonical private immutable fields. | Typed literal roots preserve the Float/Double bit patterns and lower through `fconst_bits`/`dconst_bits` before exact `putfield` instructions. | The fixture verifies the `CONSTANT_Float` and `CONSTANT_Double` values and executes both getters under JDK 21. |
-| `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The source ordinal is preserved in a checked accessor binding. | `JvmAccessorMetadata` records a private-final `x:I` backing field and public `x()I` getter; no source method or bytecode is added. |
-| `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same source ordering as `val`; the binding records mutability. | `JvmAccessorMetadata` records private `x:I`, public `x()I`, and public `x_$eq(I)V`; no source method or bytecode is added. |
+| `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The source ordinal and exact JVM local slot are preserved in a checked accessor initializer. | Emission creates private-final `x:I` storage and copies the exact formal after the verified direct-super call; no source method or getter bytecode is added. |
+| `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same source ordering as `val`; the binding records mutability and local width. | Emission creates private `x:I` storage and initializes it from the exact formal; getter/setter methods remain deferred. |
 
 The combined `FloatingPointCategory2.scala` acceptance batch contains both
 stateful classes and the calling `Runner` in one source session. It checks the
@@ -62,9 +63,12 @@ the `TermRef` target identifies the parameter used by the initializer.
 
 ## Constructor order and initialization contract
 
-For the supported subset, constructor invocation must call
-`java/lang/Object.<init>()V` first, then run supported field initializers in
-`Template.body` source order, then return. The
+For the supported subset, constructor invocation calls the validated direct
+parent `<init>` first, then stores constructor accessor formals into their
+private backing fields in source parameter order, then runs supported ordinary
+field initializers in `Template.body` source order, and returns. Accessor
+stores use their own checked plan records; they have no source initializer
+tree and do not pass through the ordinary typed-RHS path. The
 `JvmCompilationUnit::lower_constructor_field_initializers` method now
 produces checked fragments for Int/Boolean/Long/Float/Double literals and
 constructor parameters, including category-two Long/Double loads,
@@ -80,8 +84,13 @@ instructions are returned. There is no JVM slot for a field initializer
 itself. Constructor parameters retain source clause and parameter order; in the
 one-clause `Counter(start)` case, instance receiver occupies local slot 0 and
 `start` occupies slot 1. That parameter layout is exposed by
-`JvmConstructorMetadata`. These fragments do not constitute a complete
-constructor or class emitter.
+`JvmConstructorMetadata`. The class emitter retains the exact declared
+constructor descriptor and emits the validated accessor and ordinary private
+field_info entries. Generated accessor methods remain outside this increment.
+The accessor assignment order intentionally follows the backend's strict
+initialized-`this` rule after direct-super construction; the pinned Scala 3.9.0
+oracle observed its simple constructor accessor stores before
+`Object.<init>`, so this is not a byte-for-byte constructor-order match.
 
 Earlier initialized fields can be read by the implemented initializer
 lowering. The integration characterization also confirms that explicitly
@@ -134,7 +143,7 @@ generic/reference-valued members, or secondary constructors.
 | Plain `private` visibility on an instance field | Namer records `Visibility::Private`; real-source integration projects this visibility to JVM `ACC_PRIVATE`. | Field metadata validates visibility from the canonical symbol. |
 | Public, `protected`, or `private[this]` instance field | Parser and Namer accept these source forms. The integration characterization observes `Visibility::Public`, `Visibility::Protected`, and `Visibility::Private` respectively; the shared visibility value does not preserve the `private[this]` qualifier. | Public and protected fail the canonical visibility check. The frontend must label object-private plans explicitly, and metadata rejects `PrivateThis` while accepting only plain `private`. |
 | Qualified-private, lazy, static, or synthetic field | Not covered by the current source integration characterization; acceptance and exact canonical representation remain unclaimed here. | Reject with a contextual plan error until an explicit ABI contract covers the form. |
-| `val`/`var` constructor parameter | Namer retains separate class field and constructor parameter identities. | Keep both canonical identities; metadata validates the JVM-only backing field and getter / optional setter; bytecode emission remains unsupported. |
+| `val`/`var` constructor parameter | Namer retains separate class field and constructor parameter identities. | Keep both canonical identities; emit private backing storage and one exact post-super store from the constructor-owned formal. Getter/setter bytecode remains unsupported. |
 | Duplicate same-named field declarations | Parser and Namer currently accept both declarations without diagnostics and create distinct class-owned `Field` IDs with the same name. This is a recorded frontend gap, not valid backend input. | Metadata rejects repeated field IDs and duplicate JVM field names with structured errors. |
 | Secondary constructor | Parser and Namer accept `class WithSecondary(value: Int) { def this() = this(0) }`; Typer completes the primary and secondary constructors as distinct plain method signatures with one and zero parameters respectively. | Return a typed contextual backend error until secondary constructor lowering is supported. |
 | `using` primary constructor | Parser and Namer accept `class WithUsing(using context: Int)`; Typer completes its signature as one `Contextual` clause with one Int parameter. | Return a typed contextual backend error until contextual constructor lowering is supported. |

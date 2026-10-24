@@ -2241,6 +2241,356 @@ fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols(
 }
 
 #[test]
+fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
+    let source_text = "class Measurement(val id: Int, var value: Double) { private val copied: Int = 42 }; class Mixed(start: Int, val total: Long, var enabled: Boolean, var ratio: Float); class Ref(val item: Measurement)";
+    with_source(source_text, |ast, source, index, definitions, typer| {
+        let mut classes = Vec::new();
+        let mut class_symbols = Vec::new();
+        for class_name in ["Measurement", "Mixed", "Ref"] {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            class_symbols.push(class);
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, _)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
+                panic!("{class_name} source declaration should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("{class_name} should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("{class_name} primary constructor should be a DefDef");
+            };
+            let parameter_trees = constructor_definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            let parameters = parameter_trees
+                .iter()
+                .map(|tree| {
+                    let field_or_parameter = index.symbol_at(source, *tree).unwrap();
+                    let parameter = index.derived_symbol_at(constructor, source, *tree).unwrap();
+                    typer.complete_symbol(field_or_parameter).unwrap();
+                    typer.complete_symbol(parameter).unwrap();
+                    parameter
+                })
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap();
+            let mut field_plans = Vec::new();
+            for tree in &template.body {
+                let TreeKind::ValDef(field_definition) = &ast.get(*tree).kind else {
+                    continue;
+                };
+                let Some(field) = index.symbol_at(source, *tree) else {
+                    continue;
+                };
+                let rhs = field_definition.rhs.expect("body field has an initializer");
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("body field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed_rhs = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                field_plans.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPrivate,
+                    initializer: Some(typed_rhs),
+                });
+            }
+            classes.push(JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: field_plans,
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            });
+        }
+
+        let unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes,
+        };
+        let metadata = unit.metadata(definitions).unwrap();
+        let expected = [
+            (
+                "Measurement",
+                vec![("id", "I", 1, 1), ("value", "D", 2, 2)],
+                "(ID)V",
+            ),
+            (
+                "Mixed",
+                vec![
+                    ("total", "J", 2, 2),
+                    ("enabled", "Z", 4, 1),
+                    ("ratio", "F", 5, 1),
+                ],
+                "(IJZF)V",
+            ),
+            (
+                "Ref",
+                vec![("item", "LMeasurement;", 1, 1)],
+                "(LMeasurement;)V",
+            ),
+        ];
+        for (class_name, fields, constructor_descriptor) in expected {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .unwrap();
+            let initializer_plan = unit
+                .lower_constructor_field_initializers(class, definitions)
+                .unwrap();
+            assert_eq!(initializer_plan.accessors().len(), fields.len());
+            assert_eq!(
+                initializer_plan.fields().len(),
+                usize::from(class_name == "Measurement"),
+                "ordinary private initializers remain in their existing plan"
+            );
+            for (initializer, (name, descriptor, slot, width)) in initializer_plan
+                .accessors()
+                .iter()
+                .zip(fields.iter().copied())
+            {
+                let accessor = class_metadata
+                    .accessors()
+                    .iter()
+                    .find(|accessor| accessor.source_field() == initializer.field())
+                    .unwrap();
+                assert_eq!(accessor.field_name(), name);
+                assert_eq!(accessor.field_descriptor(), descriptor);
+                assert_eq!(initializer.parameter(), accessor.constructor_parameter());
+                assert_eq!(initializer.source_ordinal(), accessor.source_ordinal());
+                assert_eq!(initializer.slot(), slot);
+                assert_eq!(initializer.width(), width);
+            }
+
+            let generated = emit_class(&unit, class, definitions).unwrap();
+            let repeated = emit_class(&unit, class, definitions).unwrap();
+            assert_eq!(
+                generated.bytes(),
+                repeated.bytes(),
+                "emission is deterministic"
+            );
+            let mut reader = Reader::new(generated.bytes());
+            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+            class_file.validate_references().unwrap();
+            let emitted_fields = class_file
+                .fields
+                .iter()
+                .map(|field| {
+                    (
+                        class_file.constant_pool.utf8(field.name_index).unwrap(),
+                        class_file
+                            .constant_pool
+                            .utf8(field.descriptor_index)
+                            .unwrap(),
+                        field.access_flags,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let accessor_fields = fields
+                .iter()
+                .map(|(name, descriptor, _, _)| (*name, *descriptor))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                emitted_fields
+                    .iter()
+                    .take(accessor_fields.len())
+                    .map(|(name, descriptor, _)| (*name, *descriptor))
+                    .collect::<Vec<_>>(),
+                accessor_fields
+            );
+            assert_eq!(
+                emitted_fields
+                    .iter()
+                    .skip(accessor_fields.len())
+                    .map(|(name, descriptor, _)| (*name, *descriptor))
+                    .collect::<Vec<_>>(),
+                class_metadata
+                    .fields()
+                    .iter()
+                    .map(|field| (field.name(), field.descriptor()))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                emitted_fields
+                    .iter()
+                    .all(|(_, _, flags)| flags.is_private())
+            );
+            assert_eq!(
+                class_file.methods.len(),
+                1,
+                "only the declared constructor is emitted"
+            );
+            let constructor = &class_file.methods[0];
+            assert_eq!(
+                class_file
+                    .constant_pool
+                    .utf8(constructor.name_index)
+                    .unwrap(),
+                "<init>"
+            );
+            assert_eq!(
+                class_file
+                    .constant_pool
+                    .utf8(constructor.descriptor_index)
+                    .unwrap(),
+                constructor_descriptor
+            );
+            let code = constructor
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    dotty_classfile::attribute::Attribute::Code(code) => Some(code),
+                    _ => None,
+                })
+                .unwrap();
+            let expected_stack = if fields.iter().any(|(_, _, _, width)| *width == 2) {
+                3
+            } else {
+                2
+            };
+            assert!(
+                code.max_stack >= expected_stack,
+                "accessor copies need {expected_stack} stack slots"
+            );
+            let expected_locals = initializer_plan
+                .constructor()
+                .parameters()
+                .last()
+                .map(|parameter| parameter.slot() + u16::from(parameter.width()))
+                .unwrap_or(1);
+            assert_eq!(code.max_locals, expected_locals);
+            let puts = code.code.iter().filter(|opcode| **opcode == 0xb5).count();
+            assert_eq!(
+                puts,
+                initializer_plan.accessors().len() + initializer_plan.fields().len(),
+                "each accessor and ordinary field is stored exactly once"
+            );
+            assert_eq!(code.code[0], 0x2a, "constructor starts by loading this");
+            assert_eq!(
+                code.code[1], 0xb7,
+                "direct-super initialization precedes stores"
+            );
+            let first_put = code.code.iter().position(|opcode| *opcode == 0xb5).unwrap();
+            assert!(
+                first_put > 1,
+                "no accessor store may use uninitialized this"
+            );
+            if class_name == "Measurement" {
+                let putfield_references = code
+                    .code
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, opcode)| **opcode == 0xb5)
+                    .map(|(offset, _)| {
+                        let index =
+                            u16::from_be_bytes([code.code[offset + 1], code.code[offset + 2]]);
+                        let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                            class_index,
+                            name_and_type_index,
+                        } = class_file
+                            .constant_pool
+                            .get(dotty_classfile::constant_pool::ConstantPoolIndex(index))
+                            .unwrap()
+                        else {
+                            panic!("putfield must use a Fieldref");
+                        };
+                        let owner = class_file.constant_pool.class_name(*class_index).unwrap();
+                        let (name, descriptor) = class_file
+                            .constant_pool
+                            .name_and_type(*name_and_type_index)
+                            .unwrap();
+                        (owner, name, descriptor)
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    putfield_references,
+                    [
+                        ("Measurement", "id", "I"),
+                        ("Measurement", "value", "D"),
+                        ("Measurement", "copied", "I"),
+                    ]
+                );
+            }
+        }
+
+        if require_jdk21_or_skip() {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let output = std::env::temp_dir().join(format!(
+                "dotty-jvm-accessor-initializers-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&output).unwrap();
+            for class in class_symbols {
+                let generated = emit_class(&unit, class, definitions).unwrap();
+                fs::write(
+                    output.join(format!("{}.class", generated.internal_name())),
+                    generated.bytes(),
+                )
+                .unwrap();
+            }
+            let harness = output.join("AccessorInitializerHarness.java");
+            fs::write(
+                &harness,
+                "public final class AccessorInitializerHarness { private static java.lang.reflect.Field field(Class<?> type, String name) throws Exception { java.lang.reflect.Field field = type.getDeclaredField(name); field.setAccessible(true); return field; } public static void main(String[] args) throws Exception { Measurement first = new Measurement(7, 1.5d); Measurement second = new Measurement(-4, -2.25d); if (field(Measurement.class, \"id\").getInt(first) != 7 || field(Measurement.class, \"value\").getDouble(first) != 1.5d || field(Measurement.class, \"copied\").getInt(first) != 42) throw new AssertionError(\"Measurement first\"); if (field(Measurement.class, \"id\").getInt(second) != -4 || field(Measurement.class, \"value\").getDouble(second) != -2.25d || field(Measurement.class, \"copied\").getInt(second) != 42) throw new AssertionError(\"Measurement second\"); Mixed mixed = new Mixed(99, Long.MIN_VALUE + 17, true, 3.25f); if (field(Mixed.class, \"total\").getLong(mixed) != Long.MIN_VALUE + 17 || !field(Mixed.class, \"enabled\").getBoolean(mixed) || field(Mixed.class, \"ratio\").getFloat(mixed) != 3.25f) throw new AssertionError(\"Mixed\"); try { field(Mixed.class, \"start\"); throw new AssertionError(\"plain parameter must not become a field\"); } catch (NoSuchFieldException expected) { } Ref ref = new Ref(first); if (field(Ref.class, \"item\").get(ref) != first) throw new AssertionError(\"Ref\"); } }\n",
+            )
+            .unwrap();
+            let javac = Command::new("javac")
+                .args(["-classpath", output.to_str().unwrap(), "-d"])
+                .arg(output.to_str().unwrap())
+                .arg(&harness)
+                .output()
+                .unwrap();
+            assert!(
+                javac.status.success(),
+                "javac rejected accessor initialization harness\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&javac.stdout),
+                String::from_utf8_lossy(&javac.stderr)
+            );
+            let java = Command::new("java")
+                .args([
+                    "-Xverify:all",
+                    "-classpath",
+                    output.to_str().unwrap(),
+                    "AccessorInitializerHarness",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                java.status.success(),
+                "java -Xverify:all rejected accessor initialization\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&java.stdout),
+                String::from_utf8_lossy(&java.stderr)
+            );
+            fs::remove_dir_all(output).unwrap();
+        }
+    });
+}
+
+#[test]
 fn constructor_accessor_source_selections_record_current_typer_boundary() {
     let source_text = "class Measurement(val id: Int, var value: Double) { def externalId(m: Measurement): Int = m.id; def externalValue(m: Measurement): Double = m.value; def externalSet(m: Measurement): Unit = m.value = 42.0; def ownId: Int = this.id; def ownValue: Double = this.value; def forwarded(m: Measurement): Int = accept(m.id); def accept(value: Int): Int = value }";
     with_source(source_text, |ast, source, index, _, typer| {

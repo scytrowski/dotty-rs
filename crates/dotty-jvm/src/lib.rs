@@ -30,8 +30,8 @@ pub use constructor::{
     JvmConstructorMetadata, JvmDirectSuperConstructorPlan, JvmPrimaryConstructorPlan,
 };
 pub use constructor_initializers::{
-    JvmConstructorFieldInitializer, JvmConstructorFieldInitializerPlan,
-    JvmConstructorInitializerInstruction,
+    JvmConstructorAccessorInitializer, JvmConstructorFieldInitializer,
+    JvmConstructorFieldInitializerPlan, JvmConstructorInitializerInstruction,
 };
 mod emission;
 mod expression;
@@ -882,6 +882,14 @@ pub enum JvmCodegenError {
     },
     /// Constructor initializer lowering requires a validated primary constructor plan.
     ConstructorInitializerContextUnavailable { class: SymbolId },
+    /// The checked accessor metadata no longer matches its exact constructor
+    /// formal layout while building executable constructor stores.
+    InvalidJvmAccessorInitializer {
+        class: SymbolId,
+        field: SymbolId,
+        parameter: SymbolId,
+        issue: JvmAccessorInitializerIssue,
+    },
     /// A field initializer reads a field before its source-ordered store.
     FieldInitializerReadsUninitializedField {
         field: SymbolId,
@@ -1387,6 +1395,21 @@ pub enum JvmCodegenError {
         class: SymbolId,
         error: dotty_classfile::bytecode::CodeBuilderError,
     },
+}
+
+/// Why a constructor accessor cannot be copied into its checked backing field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmAccessorInitializerIssue {
+    /// No constructor local has the exact derived formal identity.
+    MissingParameter,
+    /// The formal identity is not at the accessor's recorded source ordinal.
+    SourceOrdinalMismatch,
+    /// The formal's projected JVM type differs from the accessor field type.
+    ValueTypeMismatch,
+    /// The local width differs from the projected JVM category width.
+    SlotWidthMismatch,
+    /// The formal is duplicated or the source order is not strictly increasing.
+    DuplicateOrUnorderedBinding,
 }
 
 /// Reason a source method cannot form an exact inherited JVM override.

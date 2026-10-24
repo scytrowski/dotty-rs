@@ -1,10 +1,11 @@
 # Scala constructor accessor ABI audit
 
-This document records the bounded audit for ordinary primary-constructor
-`val`/`var` parameters in Scala 3.9.0, tracked by
-[#1553](https://github.com/scytrowski/dotty-rs/issues/1553). It does not enable
-accessor code generation. It keeps three questions separate: source identity,
-source selection typing, and the JVM members Scala emits.
+This document records the bounded audit and implementation status for ordinary
+primary-constructor `val`/`var` parameters in Scala 3.9.0, tracked by
+[#1553](https://github.com/scytrowski/dotty-rs/issues/1553). Checked backing
+field metadata and constructor initialization are implemented; generated
+getter/setter methods remain deferred. It keeps source identity, source
+selection typing, and emitted JVM members separate.
 
 ## Evidence and oracle status
 
@@ -39,10 +40,14 @@ Observed class-file members:
 
 No bridge methods were present in these shapes. A `val` has no setter; a `var`
 setter returns `void`. Scala source `value_=` encodes to JVM name `value_$eq`.
-Constructor store ordering is recorded as compiler evidence for follow-up work;
-this issue only plans metadata and does not lower constructors. The oracle
-class files use major version 61 by default; this observation does not change
-the backend's independent Java 21 class-file target (major 65).
+The oracle stores these constructor accessors before `Object.<init>()V`. The
+bounded backend implementation follows #1556's stricter initialized-`this`
+contract: it invokes the direct parent first, then stores accessor formals,
+then runs class-body field initializers. This preserves exact fields, values,
+and source order within the supported subset, but intentionally does not
+match Scala's constructor instruction order byte for byte. The oracle class
+files use major version 61 by default; this does not change the backend's
+independent Java 21 class-file target (major 65).
 
 ## Source identities and current Typer behavior
 
@@ -71,10 +76,11 @@ field symbol. These tests characterize source typing only; they do not prove
 that the current backend emits a compatible accessor ABI or can compile those
 classes.
 
-The first current backend rejection is constructor-plan source-shape
-validation for emission: `JvmPrimaryConstructorPlan::from_source` accepts the
-audited parameter roles and produces an immutable source binding, but the
-backend still has no accessor field/method emission. The plan accepts a plain
+`JvmPrimaryConstructorPlan::from_source` accepts the audited parameter roles
+and produces an immutable source binding. The backend emits private backing
+field_info entries and checked constructor stores from those exact bindings;
+generated accessor methods and source call-site integration remain deferred.
+The plan accepts a plain
 parameter only with `ParamAccessor` plus `PrivateLocal`, an immutable public
 accessor only with `ParamAccessor`, and a mutable public accessor only with
 `ParamAccessor` plus `Var`. Defaulted, contextual, annotated, qualified
@@ -86,8 +92,9 @@ private, or otherwise modified parameters remain rejected.
 | --- | --- | --- |
 | Constructor parameter, source field, and source selection identity | `dotty-core` / namer / typer | Preserve canonical IDs and source mappings. Never invent source methods for generated JVM accessors or reconstruct identity from spelling. |
 | Source field to derived constructor formal binding | `dotty-jvm` constructor plan | Preserve exact class/constructor IDs, source `TreeId`, class-owned `Field`, distinct constructor-owned `Parameter`, source ordinal, and mutability. Revalidate symbol kinds/owners/origins, class-scope membership, uniqueness, and completed type agreement before exposing the checked binding through `JvmClassMetadata`. |
-| Getter/setter JVM names, descriptors, flags, backing storage, and slot layout | JVM-only ABI projection in `dotty-jvm` | Derive from the pinned compiler oracle and canonical source metadata. Keep JVM names out of frontend contracts. `JvmAccessorMetadata` records checked backing-field and getter / optional setter signatures without source symbols or bytecode. |
-| Encoding and verification of generated members | `dotty-classfile` | Receive already validated field/method plans; keep byte-level encoding separate from source semantics. |
+| Getter/setter JVM names, descriptors, flags, backing storage, and slot layout | JVM-only ABI projection in `dotty-jvm` | Derive from the pinned compiler oracle and canonical source metadata. Keep JVM names out of frontend contracts. `JvmAccessorMetadata` records checked backing-field and getter / optional setter signatures without source symbols. |
+| Constructor accessor stores | `dotty-jvm` constructor initializer and class emitter | Copy the exact constructor-owned formal into private storage after direct-super initialization and before ordinary class-body field initializers. Keep accessor stores separate from typed source RHS plans. |
+| Encoding and verification of fields and bytecode | `dotty-classfile` | Receive validated field and instruction plans; keep byte-level encoding separate from source semantics. |
 | Source call-site support where current Typer behavior changes | Separate frontend/Typer issue | This audit records current successes and does not authorize Typer changes or accessor-specific call lowering. |
 
 Before publishing any future class bytes, the projection must validate the
@@ -96,16 +103,17 @@ mutability, visibility, and explicit source order. A malformed or stale
 identity must be a typed rejection. Generated JVM signatures must be checked
 for collisions against user-declared and other generated members; the policy
 must reject ambiguity before artifact publication rather than silently
-shadowing either member. Accessor metadata now performs these checks; no
-accessor classfile is an accepted backend output yet.
+shadowing either member. Accessor metadata performs these checks. Emitted
+classes now contain the checked backing fields and constructor stores, but no
+generated getter/setter methods.
 
 ## Scope matrix
 
 | Shape | Audit result / disposition |
 | --- | --- |
-| `Measurement(val id: Int, var value: Double)` | Exact backing field/getter/setter names, descriptors, flags, and `D` slot width recorded above and projected in metadata. No accessor bytecode. |
-| `Mixed(val enabled: Boolean, var count: Long)` | Exact `Z`/`J` field and accessor descriptors recorded above; `Long` uses two constructor local slots. No accessor bytecode. |
-| `Ref(val item: Measurement)` | Exact planned reference descriptor and private-final storage recorded above. No accessor bytecode. |
+| `Measurement(val id: Int, var value: Double)` | Emits private `id:I` and `value:D` storage and exactly one initialized store from slots 1 and 2–3 after `Object.<init>`. Getter/setter methods remain deferred. |
+| `Mixed(val enabled: Boolean, var count: Long)` | Emits private `enabled:Z` and `count:J` storage; `Long` uses two constructor local slots. Getter/setter methods remain deferred. |
+| `Ref(val item: Measurement)` | Emits private-final planned reference storage and copies the exact reference formal after direct-super initialization. Getter method remains deferred. |
 | Plain constructor parameter | Existing distinct class-owned and constructor-owned parameter identities remain; it does not gain an accessor by implication. |
 | Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
 | `private[this]`, class-body public fields, `lazy`, visibility variants | Deferred; no ABI claim is made by this audit. |
@@ -117,12 +125,13 @@ accessor classfile is an accepted backend output yet.
 
 ## Future acceptance gate
 
-Accessor code generation remains disabled until an implementation change adds
-focused tests for canonical source/derived bindings, exact descriptors and
-flags from the pinned Scala oracle, setter `void` return behavior, constructor
-parameter and category-two slot layout, source-order initialization, collision
-rejection, deterministic bytes, and rejection without partial artifacts. The
-generated public getter/setter entrypoints must be callable from Java, and
+Generated getter/setter code remains disabled until a later implementation
+adds focused tests for their exact descriptors and flags, setter `void` return
+behavior, verifier stack bounds, collision rejection, deterministic bytes, and
+rejection without partial artifacts. The backing-field initialization
+increment already tests canonical source/derived bindings, constructor
+parameter/category-two slots, source order, and Java 21 verification. Future
+public getter/setter entrypoints must be callable from Java, and
 generated classes must pass `java -Xverify:all` plus state/constructor behavior
 checks under the repository's mandatory JDK 21 gate. These JVM-only tests must
 not depend on Scala source call-site lowering. Rust-produced output passing the
