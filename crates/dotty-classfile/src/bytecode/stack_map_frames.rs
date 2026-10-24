@@ -525,6 +525,7 @@ fn frame_from_state(
         let local = match &state.locals[local_index] {
             FlowLocalState::Top => VerificationTypeInfo::Top,
             FlowLocalState::Integer => VerificationTypeInfo::Integer,
+            FlowLocalState::Float => VerificationTypeInfo::Float,
             FlowLocalState::Long => {
                 if state.locals.get(local_index + 1) != Some(&FlowLocalState::LongTail) {
                     return Err(StackMapFrameGenerationError::MalformedCategoryTwoLocal {
@@ -537,6 +538,23 @@ fn frame_from_state(
                 continue;
             }
             FlowLocalState::LongTail => {
+                return Err(StackMapFrameGenerationError::MalformedCategoryTwoLocal {
+                    block,
+                    index: local_index,
+                });
+            }
+            FlowLocalState::Double => {
+                if state.locals.get(local_index + 1) != Some(&FlowLocalState::DoubleTail) {
+                    return Err(StackMapFrameGenerationError::MalformedCategoryTwoLocal {
+                        block,
+                        index: local_index,
+                    });
+                }
+                locals.push(VerificationTypeInfo::Double);
+                local_index += 2;
+                continue;
+            }
+            FlowLocalState::DoubleTail => {
                 return Err(StackMapFrameGenerationError::MalformedCategoryTwoLocal {
                     block,
                     index: local_index,
@@ -580,7 +598,9 @@ fn frame_from_state(
         .iter()
         .map(|value| match value {
             FlowValue::Integer => Ok(VerificationTypeInfo::Integer),
+            FlowValue::Float => Ok(VerificationTypeInfo::Float),
             FlowValue::Long => Ok(VerificationTypeInfo::Long),
+            FlowValue::Double => Ok(VerificationTypeInfo::Double),
             FlowValue::Null => Ok(VerificationTypeInfo::Null),
             FlowValue::Object(class) => Ok(VerificationTypeInfo::Object(class_constant(
                 block,

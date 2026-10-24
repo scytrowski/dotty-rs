@@ -2853,3 +2853,185 @@ fn float_double_straight_line_instructions_verify_and_execute_with_jdk() {
             .contains("Float/Double straight-line verification passed")
     );
 }
+
+#[test]
+fn float_double_cfg_frames_verify_and_execute_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+
+    let mut builder = ClassFileBuilder::new(
+        "FloatingPointCfg",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("chooseFloat", "(ZFF)F", |code| {
+            let otherwise = code.new_label()?;
+            let done = code.new_label()?;
+            code.iload(0)?;
+            code.ifeq(otherwise.clone())?;
+            code.fload(1)?;
+            code.goto(done.clone())?;
+            code.mark(otherwise)?;
+            code.fload(2)?;
+            code.mark(done)?;
+            code.freturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("chooseDouble", "(ZDD)D", |code| {
+            let otherwise = code.new_label()?;
+            let done = code.new_label()?;
+            code.iload(0)?;
+            code.ifeq(otherwise.clone())?;
+            code.dload(1)?;
+            code.goto(done.clone())?;
+            code.mark(otherwise)?;
+            code.dload(3)?;
+            code.mark(done)?;
+            code.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("doubleLoop", "(ID)D", |code| {
+            let header = code.new_label()?;
+            let done = code.new_label()?;
+            code.dload(1)?;
+            code.dstore(3)?;
+            code.iconst(0)?;
+            code.istore(5)?;
+            code.mark(header.clone())?;
+            code.iload(5)?;
+            code.iload(0)?;
+            code.if_icmpge(done.clone())?;
+            code.iload(5)?;
+            code.iconst(1)?;
+            code.iadd()?;
+            code.istore(5)?;
+            code.goto(header)?;
+            code.mark(done)?;
+            code.dload(3)?;
+            code.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("mixedSlots", "(ZIFJD)D", |code| {
+            let otherwise = code.new_label()?;
+            let done = code.new_label()?;
+            code.iload(0)?;
+            code.ifeq(otherwise.clone())?;
+            code.dload(5)?;
+            code.goto(done.clone())?;
+            code.mark(otherwise)?;
+            code.dload(5)?;
+            code.mark(done)?;
+            code.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let class_bytes = builder.encode().unwrap();
+    let class_file = decode_and_validate(&class_bytes);
+    assert_eq!(class_file.version.major, 65);
+    assert_eq!(class_file.methods.len(), 4);
+    let output = TempDir::new();
+    let class_path = output.path().to_string_lossy().into_owned();
+    fs::write(output.path().join("FloatingPointCfg.class"), &class_bytes).unwrap();
+
+    let javap = run(
+        "javap",
+        &["-classpath", &class_path, "-c", "-v", "FloatingPointCfg"],
+    );
+    assert!(
+        javap.status.success(),
+        "javap rejected the Float/Double CFG class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "StackMapTable",
+        "fload_1",
+        "fload_2",
+        "dload_1",
+        "dload_3",
+        "dload_3",
+        "dload         5",
+        "float",
+        "double",
+        "long",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap output omitted {expected:?}:\n{javap_output}"
+        );
+    }
+
+    let harness_path = output.path().join("FloatingPointCfgHarness.java");
+    fs::write(
+        &harness_path,
+        r#"
+public final class FloatingPointCfgHarness {
+    public static void main(String[] args) {
+        int negativeFloatZero = 0x80000000;
+        if (Float.floatToRawIntBits(FloatingPointCfg.chooseFloat(true, 1.25f, Float.intBitsToFloat(negativeFloatZero))) != Float.floatToRawIntBits(1.25f)) throw new AssertionError("float true branch");
+        if (Float.floatToRawIntBits(FloatingPointCfg.chooseFloat(false, 1.25f, Float.intBitsToFloat(negativeFloatZero))) != negativeFloatZero) throw new AssertionError("float false branch");
+        long firstNan = 0x7ff8000000000001L;
+        long secondNan = 0x7ff8000000000002L;
+        if (Double.doubleToRawLongBits(FloatingPointCfg.chooseDouble(true, Double.longBitsToDouble(firstNan), Double.longBitsToDouble(secondNan))) != firstNan) throw new AssertionError("double true branch");
+        if (Double.doubleToRawLongBits(FloatingPointCfg.chooseDouble(false, Double.longBitsToDouble(firstNan), Double.longBitsToDouble(secondNan))) != secondNan) throw new AssertionError("double false branch");
+        if (Double.doubleToRawLongBits(FloatingPointCfg.doubleLoop(0, -0.0d)) != 0x8000000000000000L) throw new AssertionError("zero iteration loop");
+        if (Double.doubleToRawLongBits(FloatingPointCfg.doubleLoop(1, Double.longBitsToDouble(firstNan))) != firstNan) throw new AssertionError("one iteration loop");
+        if (Double.doubleToRawLongBits(FloatingPointCfg.doubleLoop(4, Double.longBitsToDouble(secondNan))) != secondNan) throw new AssertionError("multiple iteration loop");
+        if (Double.doubleToRawLongBits(FloatingPointCfg.mixedSlots(true, 3, 1.5f, 11L, -0.0d)) != 0x8000000000000000L) throw new AssertionError("mixed Float/Int/Long/Double slots");
+        System.out.println("Float/Double CFG verification passed");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let harness_path = harness_path.to_string_lossy().into_owned();
+    let javac = run(
+        "javac",
+        &[
+            "--release",
+            "21",
+            "-classpath",
+            &class_path,
+            "-d",
+            &class_path,
+            &harness_path,
+        ],
+    );
+    assert!(
+        javac.status.success(),
+        "javac rejected the Float/Double CFG harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let execution = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            &class_path,
+            "FloatingPointCfgHarness",
+        ],
+    );
+    assert!(
+        execution.status.success(),
+        "java -Xverify:all rejected or failed to execute Float/Double CFG class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&execution.stdout).contains("Float/Double CFG verification passed")
+    );
+}

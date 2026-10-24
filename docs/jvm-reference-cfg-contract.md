@@ -45,12 +45,14 @@ edges. The CFG path is required whenever control flow or allocation-site
 initialization matters; a category-only result is not evidence of verifier
 safety.
 
-`CfgCodeAnalyzer` tracks `Top`, integer, initialized class references,
-allocation-site-specific uninitialized references, and a bounded explicit
-class hierarchy for assignability checks and reference joins. Stack values and
-initialized object locals may widen to the nearest shared, checked non-`Object`
-superclass. A local with an incoming `Top`, incompatible category, receiver,
-or unsupported state remains unusable. Ordinary
+`CfgCodeAnalyzer` tracks `Top`, int-like, Float, Long, Double, initialized
+class references, allocation-site-specific uninitialized references, and a
+bounded explicit class hierarchy for assignability checks and reference
+joins. Float is a category-one value; Long and Double are distinct
+category-two values. Stack values and initialized object locals may widen to
+the nearest shared, checked non-`Object` superclass. A local with an incoming
+`Top`, incompatible category, receiver, or unsupported state remains
+unusable. Ordinary
 instance methods seed local 0 with the exact emitting class,
 while branched constructors remain unsupported. The
 `StackMapFrameGenerator` maps every initialized class through a validated
@@ -88,7 +90,9 @@ distinguishes:
 | --- | --- | --- |
 | `Top` | Unusable local after no assignment or a local join | `Top` |
 | `Integer` | JVM int-like primitive | `Integer` |
-| `Long` / `LongTail` | One category-two local value occupying a head slot and an inaccessible tail slot | One `Long` entry; the tail has no separate entry |
+| `Float` | JVM category-one floating-point primitive | `Float_variable_info` (tag 2) |
+| `Long` / `LongTail` | One category-two long occupying a head slot and inaccessible tail slot | One `Long` entry; the tail has no separate entry |
+| `Double` / `DoubleTail` | One category-two double occupying a head slot and inaccessible tail slot | One `Double_variable_info` (tag 3); the tail has no separate entry |
 | `Null` | The JVM null verification type, with no class identity | `Null_variable_info` (tag 5) |
 | `Initialized(class)` | Initialized reference with exact validated JVM internal class name | `Object(cp_index)` |
 | `Uninitialized(allocation_site)` | Fresh instance at one specific `new` instruction | `Uninitialized(new_pc)`; prohibited at CFG joins in this increment |
@@ -99,16 +103,20 @@ JVM internal name or validated `CONSTANT_Class`, never `SymbolId`. The JVM
 adapter may map its canonical source class identity to that internal name
 before invoking class-file analysis.
 
-CFG analysis also supports the bounded category-two transfer for Long
-constants, descriptor parameters, local loads/stores, returns, branch joins,
-and loop backedges. It stores one logical `Long` on the operand stack while
-counting two physical stack slots. Locals track `Long` and `LongTail`
-separately, invalidate overlapping pairs on stores, and merge an uncertain
-pair to `Top`. Frame projection emits one Long verification entry and skips
-the tail while preserving genuine Top holes. Class-aware instance Long field
+CFG analysis supports Float and Double constants, exact constant-pool loads,
+descriptor parameters, local loads/stores, returns, branch joins, and loop
+backedges. It stores one logical value on the operand stack while counting
+Float as one physical slot and Double as two. Locals distinguish Float from
+Integer and Double from Long, track each category-two tail separately, and
+invalidate overlapping pairs on stores. A join retains a Double only when
+both the head and matching tail agree on every reachable predecessor; an
+uncertain pair becomes `Top`. Frame projection emits one Float entry or one
+Double entry and skips Double's tail while preserving genuine Top holes.
+Class-aware instance Long field
 transfer and exact virtual/approved constructor transfer are supported for
 descriptor `J`. Long arithmetic, `lcmp`, `dup2`/`pop2`, conversions, static
-Long calls, and branched constructors remain unsupported.
+Long calls, Float/Double field or call transfers, floating-point arithmetic,
+`dup2`/`pop2`, conversions, and branched constructors remain unsupported.
 
 For an ordinary non-static, non-constructor method, the initial local 0 is
 `Initialized(emitting_class)`. Static methods start with descriptor-derived
@@ -125,7 +133,10 @@ remainder as initialized `this`. Branched constructor flow remains unsupported.
 
 At each reachable block:
 
-1. Operand-stack heights must match. `Integer` joins only with `Integer`.
+1. Operand-stack heights must match. `Integer` joins only with `Integer`,
+   `Float` only with `Float`, `Long` only with `Long`, and `Double` only with
+   `Double`. A Float/Integer or Double/Long mismatch is a typed stack-join
+   error.
    `Null` joins `Null` as `Null`, and `Null` with `Initialized(C)` as
    `Initialized(C)`; null contributes no class identity to retained join
    evidence. `Null` cannot join an uninitialized value.
@@ -142,10 +153,13 @@ At each reachable block:
    decided from the complete converged input evidence, independent of
    predecessor processing order.
    Initialized/uninitialized mismatches,
-   different allocation sites, primitive/reference mismatches, and different
+   different allocation sites, primitive-kind/reference mismatches, and different
    stack heights return typed analysis errors. Never infer a shared ancestor
    such as `java/lang/Object` from missing edges.
-2. A local slot whose incoming states are identical keeps that state. Two
+2. A local slot whose incoming states are identical keeps that state. A
+   Double local remains a logical head plus its `DoubleTail`; mixing either
+   slot with a Long pair, Float, Integer, or `Top` makes the pair unusable.
+   Two
    initialized object states may widen to the nearest common non-`Object`
    superclass only when every original incoming class has an explicit path in
    the checked hierarchy. Keep those original classes as evidence through
@@ -192,7 +206,8 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | `invokespecial <init>` | The top active uninitialized receiver's site and class must match the constructor owner; constructor arguments use explicit hierarchy assignability and must be initialized. Initialize in last-in, first-out order and rewrite only aliases of that site to `Initialized(owner)`. |
 | `invokespecial DirectParent.method` | Require the `Methodref` owner to equal the validated direct parent and the receiver to be exactly the initialized emitting class. Validate the supported descriptor arguments, then push its exact reference or int-like result. The class-file builder requires `ACC_SUPER`; constructors keep their separate allocation transfer. |
 | Conditional branches | `ifeq`/`ifne` pop one integer; `if_icmp*` pop two integers; `if_acmpeq`/`if_acmpne` pop two initialized references or nulls; `ifnull`/`ifnonnull` pop one initialized reference or null. Branches do not push a result. Uninitialized allocations are rejected as ordinary branch operands. |
-| Returns | Preserve primitive/void checks; `areturn` requires an initialized reference assignable to the planned result class using the explicit hierarchy. |
+| Float/Double | Accept `fconst`/`dconst`, tag-checked `ldc`/`ldc2_w`, exact `fload`/`dload` and `fstore`/`dstore`, and matching `freturn`/`dreturn`. Arithmetic, conversion, fields, and method-call transfers remain unsupported. |
+| Returns | Preserve primitive/void checks; `freturn` and `dreturn` require their exact descriptor kinds; `areturn` requires an initialized reference assignable to the planned result class using the explicit hierarchy. |
 
 Field and method constant-pool operands must be resolved to validated entry
 families, nested owner/class names, and parsed descriptors before transfer.

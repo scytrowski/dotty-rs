@@ -65,7 +65,8 @@ an executable pinned compiler oracle.
 | Class-file constant pool | Tags 4 (`CONSTANT_Float`) and 6 (`CONSTANT_Double`) preserve raw bits. Double reserves its following constant-pool slot. Builder deduplication uses bits, so positive/negative zero and distinct NaN payloads remain distinct. |
 | Descriptors and frames | The descriptor parser recognizes `F` and `D`. Stack-map verification tags are Float=2 and Double=3; one Double entry occupies two JVM slots. Tests cover F/D descriptors, verification tags, entry counts, and slot counts. |
 | Linear bytecode analysis | Typed `fconst`/`dconst`, Float `ldc`, Double `ldc2_w`, F/D locals, and F/D returns are modeled and analyzed. Descriptor-derived parameter/local sizes, stack slots, exact kinds, Double heads/tails, overlapping stores, and typed wrong-return errors have focused regression tests. |
-| CFG analysis | Float/Double flow remains explicitly unsupported. The CFG validator rejects F/D instructions with `UnsupportedFlowInstruction`; it does not infer CFG Float/Double parameter or local states. |
+| CFG analysis | CFG states now keep Float separate from Integer and Double separate from Long. Tests cover `(ZFF)F` and `(ZDD)D` branch joins, exact parameter slots, Double pair-aware locals and overlaps, Float/Int and Double/Long stack rejection, and an Int-controlled Double local loop backedge. |
+| StackMapTable projection | Branch frames emit `Float_variable_info` for Float and one `Double_variable_info` for each Double head/tail pair. Regression checks preserve real Top holes and omit the Double tail; a JDK 21 gate verifies and executes generated branch/loop methods, including mixed Long/Double and Float/Int locals. |
 | JVM source backend | `JvmType` contains Int, Boolean, Long, and planned references, but not Float or Double. The source integration test checks each fixture shape below: it first fails during backend projection with `UnsupportedJvmReferenceType(ExternalClass)` and publishes no class files. |
 
 The source integration test covers these isolated shapes so the current first
@@ -157,7 +158,10 @@ zero, noncanonical NaNs, infinities and other values are pooled with raw bits
 preserved. The assembler checks constant tags and all compact, narrow and wide
 local encodings. The linear analyzer checks category widths and exact types.
 JDK 21 verification and execution cover generated Float/Double constants,
-locals, parameters and returns, including signed zero and NaN payloads.
+locals, parameters and returns, including signed zero and NaN payloads. The
+#1534 CFG API also verifies branch joins and loop backedges and projects exact
+Float/Double verification entries into `StackMapTable`; it does not add
+arithmetic, conversions, fields, calls, or Scala source lowering.
 
 Verifier state must preserve Float as category one and Double as category two
 through parameters, locals, operand stacks, branches, joins, loops, fields,
@@ -180,15 +184,15 @@ and invocation transfers must check exact descriptor kinds. No fallback to
 | Boundary | Current/audit rejection to preserve |
 | --- | --- |
 | Source backend | Unsupported Float/Double type projection fails before artifact publication. |
-| CFG | Float/Double method parameters fail with typed `UnsupportedFlowParameter`; no speculative `FlowValue` is created. |
-| Instruction encoding/analysis | Arithmetic, conversions, comparisons, branches and generated frame projection for Float/Double remain unsupported. Wrong return kinds, wrong constant tags, and category mismatches fail with typed errors. |
+| CFG | Float/Int and Double/Long stack joins fail with typed errors. Local category mismatches and maybe-initialized Double pairs become unusable `Top`; wrong Double tails and loads fail before frame publication. |
+| Instruction encoding/analysis | Arithmetic, conversions and comparisons remain unsupported. Wrong return kinds, wrong constant tags, and category mismatches fail with typed errors. |
 | Class-file pool | A category-one load rejects Double; `ldc2_w` rejects Float, Long and the reserved second slot. Float bits and Double bits (including NaN payloads) remain exact. |
-| Verifier shape | The linear analyzer rejects category-one operations on Double, category-two operations on Float, Double tail reads, and overlapping stores that invalidate the whole Double local. CFG joins, branches and loops await FP flow state support. |
+| Verifier shape | Linear and CFG analyzers reject category-one operations on Double, category-two operations on Float, Double tail reads, and overlapping stores that invalidate the whole Double local. CFG joins and backedges retain only exact Float values or complete Double pairs. |
 
 Planned follow-ups remain ordered: #1533 adds class-file FP opcodes, pool
-operand validation, and linear analysis (implemented by this issue); #1534
-adds FP CFG states and StackMapTable projection after #1533; #1535 adds JVM metadata and slot
-projection after this audit and can proceed alongside #1533/#1534; #1536 adds
+operand validation, and linear analysis; #1534 adds FP CFG states and
+StackMapTable projection (implemented by this issue); #1535 adds JVM metadata
+and slot projection after this audit and may proceed independently; #1536 adds
 literal/local/return lowering after #1533–#1535; #1537 adds fields and
 constructors after #1536; #1538 adds calls and control flow after #1536 (its
 end-to-end fixture also needs #1537); #1539 provides the final verified source

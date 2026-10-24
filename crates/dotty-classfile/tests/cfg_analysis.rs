@@ -1,8 +1,9 @@
 use dotty_classfile::bytecode::{
     AnalysisError, BranchInstruction, CfgCodeAnalyzer, ClassHierarchy, ClassHierarchyError,
     CodeSequence, ControlFlowGraph, ControlFlowGraphError, FlowLocalState, FlowValue, Instruction,
-    Ldc2Constant, LocalIndex, SmallIntConstant, SmallLongConstant, UnsupportedFlowInstructionKind,
-    ValueKind, VerificationTypeInfo, assemble_labeled, generate_stack_map_frames,
+    Ldc2Constant, LdcConstant, LocalIndex, SmallDoubleConstant, SmallFloatConstant,
+    SmallIntConstant, SmallLongConstant, UnsupportedFlowInstructionKind, ValueKind,
+    VerificationTypeInfo, assemble_labeled, generate_stack_map_frames,
 };
 use dotty_classfile::classfile::ConstantPool;
 use dotty_classfile::constant_pool_builder::ConstantPoolBuilder;
@@ -1970,36 +1971,127 @@ fn unsupported_parameters_are_rejected_without_changing_linear_analysis() {
     sequence.instruction(Instruction::Return);
     let graph = ControlFlowGraph::build(&sequence).unwrap();
     assert!(matches!(
-        CfgCodeAnalyzer::analyze(&graph, "(F)V", true, &ConstantPool::default()),
+        CfgCodeAnalyzer::analyze(
+            &graph,
+            "(Ljava/lang/String;)V",
+            true,
+            &ConstantPool::default()
+        ),
         Err(AnalysisError::UnsupportedFlowParameter {
             parameter: 0,
-            actual: ValueKind::Float
+            actual: ValueKind::Reference
         })
     ));
 }
 
 #[test]
-fn float_and_double_parameters_are_rejected_at_cfg_entry() {
+fn float_and_double_parameters_seed_exact_cfg_entries_and_slots() {
     let mut sequence = CodeSequence::new();
     sequence.instruction(Instruction::Return);
     let graph = ControlFlowGraph::build(&sequence).unwrap();
 
-    for (descriptor, parameter, actual) in [
-        ("(F)V", 0, ValueKind::Float),
-        ("(D)V", 0, ValueKind::Double),
-        ("(ID)V", 1, ValueKind::Double),
-    ] {
-        assert!(
-            matches!(
-                CfgCodeAnalyzer::analyze(&graph, descriptor, true, &ConstantPool::default()),
-                Err(AnalysisError::UnsupportedFlowParameter {
-                    parameter: actual_parameter,
-                    actual: actual_kind,
-                }) if actual_parameter == parameter && actual_kind == actual
-            ),
-            "{descriptor} must report the first unsupported FP parameter"
-        );
+    let flow = CfgCodeAnalyzer::analyze(&graph, "(IFDJ)V", false, &ConstantPool::default())
+        .expect("mixed primitive instance parameters have exact CFG states");
+    assert_eq!(flow.max_locals, 7);
+    assert_eq!(
+        flow.entry_state(graph.entry_block()).unwrap().locals,
+        [
+            FlowLocalState::Receiver,
+            FlowLocalState::Integer,
+            FlowLocalState::Float,
+            FlowLocalState::Double,
+            FlowLocalState::DoubleTail,
+            FlowLocalState::Long,
+            FlowLocalState::LongTail,
+        ]
+    );
+}
+
+#[test]
+fn double_locals_remain_exact_across_an_integer_controlled_loop_backedge() {
+    let mut sequence = CodeSequence::new();
+    let header = sequence.new_label().unwrap();
+    let done = sequence.new_label().unwrap();
+    sequence
+        .instruction(Instruction::DLoad(local(1)))
+        .instruction(Instruction::DStore(local(3)))
+        .instruction(Instruction::IConst(SmallIntConstant::Zero))
+        .instruction(Instruction::IStore(local(5)))
+        .bind(header.clone())
+        .unwrap()
+        .instruction(Instruction::ILoad(local(5)))
+        .instruction(Instruction::ILoad(local(0)))
+        .branch(BranchInstruction::IfICmpGe(done.clone()))
+        .instruction(Instruction::ILoad(local(5)))
+        .instruction(Instruction::IConst(SmallIntConstant::One))
+        .instruction(Instruction::IAdd)
+        .instruction(Instruction::IStore(local(5)))
+        .branch(BranchInstruction::Goto(header.clone()))
+        .bind(done.clone())
+        .unwrap()
+        .instruction(Instruction::DLoad(local(3)))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let pool = ConstantPool::default();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "(ID)D", true, &pool).unwrap();
+    assert_eq!(flow.max_stack, 2);
+    assert_eq!(flow.max_locals, 6);
+    assert_eq!(
+        flow.entry_state(graph.block_for_label(&header).unwrap())
+            .unwrap()
+            .locals,
+        [
+            FlowLocalState::Integer,
+            FlowLocalState::Double,
+            FlowLocalState::DoubleTail,
+            FlowLocalState::Double,
+            FlowLocalState::DoubleTail,
+            FlowLocalState::Integer,
+        ]
+    );
+    let assembled = assemble_labeled(&sequence, &pool).unwrap();
+    let frames = generate_stack_map_frames(&flow, &graph, &assembled).unwrap();
+    let header_pc = assembled.layout.label_offset(&header).unwrap() as u32;
+    let done_pc = assembled.layout.label_offset(&done).unwrap() as u32;
+    for pc in [header_pc, done_pc] {
+        assert!(frames.frames.iter().any(|frame| {
+            frame.pc == pc
+                && frame.locals
+                    == [
+                        VerificationTypeInfo::Integer,
+                        VerificationTypeInfo::Double,
+                        VerificationTypeInfo::Double,
+                        VerificationTypeInfo::Integer,
+                    ]
+        }));
     }
+}
+
+#[test]
+fn double_local_width_obeys_the_u2_max_locals_boundary() {
+    let mut last_valid = CodeSequence::new();
+    last_valid
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(65_533)))
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&last_valid).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "()V", true, &ConstantPool::default()).unwrap();
+    assert_eq!(flow.max_locals, u16::MAX);
+
+    let mut overflow = CodeSequence::new();
+    overflow
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(65_534)))
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&overflow).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()V", true, &ConstantPool::default()),
+        Err(AnalysisError::LocalLimitExceeded {
+            instruction: 1,
+            index: 65_534,
+            width: 2,
+        })
+    ));
 }
 
 #[test]
@@ -2079,6 +2171,96 @@ fn long_parameter_branch_join_uses_physical_slots_and_one_frame_entry() {
 }
 
 #[test]
+fn float_and_double_branch_joins_keep_exact_values_and_stack_map_entries() {
+    let mut float_sequence = CodeSequence::new();
+    let float_else = float_sequence.new_label().unwrap();
+    let float_done = float_sequence.new_label().unwrap();
+    float_sequence
+        .instruction(Instruction::ILoad(local(0)))
+        .branch(BranchInstruction::IfEq(float_else.clone()))
+        .instruction(Instruction::FLoad(local(1)))
+        .branch(BranchInstruction::Goto(float_done.clone()))
+        .bind(float_else)
+        .unwrap()
+        .instruction(Instruction::FLoad(local(2)))
+        .bind(float_done.clone())
+        .unwrap()
+        .instruction(Instruction::FReturn);
+    let graph = ControlFlowGraph::build(&float_sequence).unwrap();
+    let pool = ConstantPool::default();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "(ZFF)F", true, &pool).unwrap();
+    assert_eq!(flow.max_stack, 1);
+    assert_eq!(flow.max_locals, 3);
+    assert_eq!(
+        flow.entry_state(graph.block_for_label(&float_done).unwrap())
+            .unwrap()
+            .operand_stack,
+        [FlowValue::Float]
+    );
+    let assembled = assemble_labeled(&float_sequence, &pool).unwrap();
+    let frames = generate_stack_map_frames(&flow, &graph, &assembled).unwrap();
+    let float_done_pc = assembled.layout.label_offset(&float_done).unwrap() as u32;
+    assert!(frames.frames.iter().any(|frame| {
+        frame.pc == float_done_pc
+            && frame.locals
+                == [
+                    VerificationTypeInfo::Integer,
+                    VerificationTypeInfo::Float,
+                    VerificationTypeInfo::Float,
+                ]
+            && frame.stack == [VerificationTypeInfo::Float]
+    }));
+
+    let mut double_sequence = CodeSequence::new();
+    let double_else = double_sequence.new_label().unwrap();
+    let double_done = double_sequence.new_label().unwrap();
+    double_sequence
+        .instruction(Instruction::ILoad(local(0)))
+        .branch(BranchInstruction::IfEq(double_else.clone()))
+        .instruction(Instruction::DLoad(local(1)))
+        .branch(BranchInstruction::Goto(double_done.clone()))
+        .bind(double_else)
+        .unwrap()
+        .instruction(Instruction::DLoad(local(3)))
+        .bind(double_done.clone())
+        .unwrap()
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&double_sequence).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "(ZDD)D", true, &pool).unwrap();
+    assert_eq!(flow.max_stack, 2);
+    assert_eq!(flow.max_locals, 5);
+    assert_eq!(
+        flow.entry_state(graph.entry_block()).unwrap().locals,
+        [
+            FlowLocalState::Integer,
+            FlowLocalState::Double,
+            FlowLocalState::DoubleTail,
+            FlowLocalState::Double,
+            FlowLocalState::DoubleTail,
+        ]
+    );
+    assert_eq!(
+        flow.entry_state(graph.block_for_label(&double_done).unwrap())
+            .unwrap()
+            .operand_stack,
+        [FlowValue::Double]
+    );
+    let assembled = assemble_labeled(&double_sequence, &pool).unwrap();
+    let frames = generate_stack_map_frames(&flow, &graph, &assembled).unwrap();
+    let double_done_pc = assembled.layout.label_offset(&double_done).unwrap() as u32;
+    assert!(frames.frames.iter().any(|frame| {
+        frame.pc == double_done_pc
+            && frame.locals
+                == [
+                    VerificationTypeInfo::Integer,
+                    VerificationTypeInfo::Double,
+                    VerificationTypeInfo::Double,
+                ]
+            && frame.stack == [VerificationTypeInfo::Double]
+    }));
+}
+
+#[test]
 fn long_constants_returns_and_mixed_stack_depth_use_physical_slots() {
     let mut constant = CodeSequence::new();
     constant
@@ -2140,6 +2322,83 @@ fn long_constants_returns_and_mixed_stack_depth_use_physical_slots() {
             instruction: 1,
             expected: Some(ValueKind::Int),
             actual: Some(ValueKind::Long),
+        })
+    ));
+}
+
+#[test]
+fn cfg_float_double_constant_loads_validate_pool_tags_and_slot_widths() {
+    let mut pool_builder = ConstantPoolBuilder::new();
+    let float = pool_builder.float(1.5).unwrap();
+    let double = pool_builder.double(3.5).unwrap();
+    let integer = pool_builder.integer(9).unwrap();
+    let long = pool_builder.long(9_000_000_000).unwrap();
+    let pool = pool_builder.finish().unwrap();
+
+    let mut valid_float = CodeSequence::new();
+    valid_float
+        .instruction(Instruction::Ldc(LdcConstant::Float(
+            dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(float).unwrap(),
+        )))
+        .instruction(Instruction::FReturn);
+    let graph = ControlFlowGraph::build(&valid_float).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "()F", true, &pool).unwrap();
+    assert_eq!(flow.max_stack, 1);
+
+    let mut valid_double = CodeSequence::new();
+    valid_double
+        .instruction(Instruction::Ldc2(Ldc2Constant::Double(
+            dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(double).unwrap(),
+        )))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&valid_double).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "()D", true, &pool).unwrap();
+    assert_eq!(flow.max_stack, 2);
+
+    let mut wrong_float = CodeSequence::new();
+    wrong_float
+        .instruction(Instruction::Ldc(LdcConstant::Float(
+            dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(double).unwrap(),
+        )))
+        .instruction(Instruction::FReturn);
+    let graph = ControlFlowGraph::build(&wrong_float).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()F", true, &pool),
+        Err(AnalysisError::InvalidConstantPoolOperand {
+            instruction: 0,
+            expected: dotty_classfile::bytecode::ConstantPoolOperandKind::FloatConstant,
+            ..
+        })
+    ));
+
+    let mut wrong_double = CodeSequence::new();
+    wrong_double
+        .instruction(Instruction::Ldc2(Ldc2Constant::Double(
+            dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(long).unwrap(),
+        )))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&wrong_double).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()D", true, &pool),
+        Err(AnalysisError::InvalidConstantPoolOperand {
+            instruction: 0,
+            expected: dotty_classfile::bytecode::ConstantPoolOperandKind::DoubleConstant,
+            ..
+        })
+    ));
+
+    let mut wrong_float_width = CodeSequence::new();
+    wrong_float_width
+        .instruction(Instruction::Ldc(LdcConstant::Float(
+            dotty_classfile::bytecode::ConstantPoolIndexOperand::try_from(integer).unwrap(),
+        )))
+        .instruction(Instruction::FReturn);
+    let graph = ControlFlowGraph::build(&wrong_float_width).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()F", true, &pool),
+        Err(AnalysisError::InvalidConstantPoolOperand {
+            expected: dotty_classfile::bytecode::ConstantPoolOperandKind::FloatConstant,
+            ..
         })
     ));
 }
@@ -2239,6 +2498,291 @@ fn long_locals_are_pair_aware_at_joins_and_overlapping_stores() {
 }
 
 #[test]
+fn double_locals_are_pair_aware_at_joins_reads_and_overlapping_stores() {
+    let mut only_one_path = CodeSequence::new();
+    let skip = only_one_path.new_label().unwrap();
+    let join = only_one_path.new_label().unwrap();
+    only_one_path
+        .instruction(Instruction::ILoad(local(0)))
+        .branch(BranchInstruction::IfEq(skip.clone()))
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(1)))
+        .branch(BranchInstruction::Goto(join.clone()))
+        .bind(skip)
+        .unwrap()
+        .bind(join.clone())
+        .unwrap()
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&only_one_path).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "(I)V", true, &ConstantPool::default()).unwrap();
+    assert_eq!(
+        flow.entry_state(graph.block_for_label(&join).unwrap())
+            .unwrap()
+            .locals[1..],
+        [FlowLocalState::Top, FlowLocalState::Top]
+    );
+
+    let mut tail_read = CodeSequence::new();
+    tail_read
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(0)))
+        .instruction(Instruction::DLoad(local(1)))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&tail_read).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()D", true, &ConstantPool::default()),
+        Err(AnalysisError::LocalSlotOverlap {
+            instruction: 2,
+            index: 1,
+        })
+    ));
+
+    let mut float_overwrites_tail = CodeSequence::new();
+    float_overwrites_tail
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(0)))
+        .instruction(Instruction::FConst(SmallFloatConstant::One))
+        .instruction(Instruction::FStore(local(1)))
+        .instruction(Instruction::DLoad(local(0)))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&float_overwrites_tail).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()D", true, &ConstantPool::default()),
+        Err(AnalysisError::UninitializedLocal {
+            instruction: 4,
+            index: 0,
+        })
+    ));
+
+    let mut float_overwrites_head = CodeSequence::new();
+    float_overwrites_head
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(0)))
+        .instruction(Instruction::FConst(SmallFloatConstant::One))
+        .instruction(Instruction::FStore(local(0)))
+        .instruction(Instruction::DLoad(local(0)))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&float_overwrites_head).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()D", true, &ConstantPool::default()),
+        Err(AnalysisError::LocalTypeMismatch {
+            instruction: 4,
+            index: 0,
+            expected: ValueKind::Double,
+            actual: ValueKind::Float,
+        })
+    ));
+
+    let mut shifted_double = CodeSequence::new();
+    shifted_double
+        .instruction(Instruction::DConst(SmallDoubleConstant::Zero))
+        .instruction(Instruction::DStore(local(0)))
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(1)))
+        .instruction(Instruction::DLoad(local(1)))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&shifted_double).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "()D", true, &ConstantPool::default()).unwrap();
+    assert_eq!(flow.max_locals, 3);
+
+    let mut different_category = CodeSequence::new();
+    let long_path = different_category.new_label().unwrap();
+    let join = different_category.new_label().unwrap();
+    different_category
+        .instruction(Instruction::ILoad(local(0)))
+        .branch(BranchInstruction::IfEq(long_path.clone()))
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(1)))
+        .branch(BranchInstruction::Goto(join.clone()))
+        .bind(long_path)
+        .unwrap()
+        .instruction(Instruction::LConst(SmallLongConstant::One))
+        .instruction(Instruction::LStore(local(1)))
+        .bind(join.clone())
+        .unwrap()
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&different_category).unwrap();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "(I)V", true, &ConstantPool::default()).unwrap();
+    assert_eq!(
+        flow.entry_state(graph.block_for_label(&join).unwrap())
+            .unwrap()
+            .locals[1..],
+        [FlowLocalState::Top, FlowLocalState::Top]
+    );
+}
+
+#[test]
+fn float_and_double_stack_joins_reject_other_primitive_kinds() {
+    for float_first in [false, true] {
+        let mut float_join = CodeSequence::new();
+        let alternate = float_join.new_label().unwrap();
+        let join = float_join.new_label().unwrap();
+        float_join
+            .instruction(Instruction::ILoad(local(0)))
+            .branch(BranchInstruction::IfEq(alternate.clone()));
+        let push_float = |sequence: &mut CodeSequence| {
+            sequence.instruction(Instruction::FConst(SmallFloatConstant::One));
+        };
+        let push_integer = |sequence: &mut CodeSequence| {
+            sequence.instruction(Instruction::IConst(SmallIntConstant::One));
+        };
+        if float_first {
+            push_float(&mut float_join);
+        } else {
+            push_integer(&mut float_join);
+        }
+        float_join
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(alternate)
+            .unwrap();
+        if float_first {
+            push_integer(&mut float_join);
+        } else {
+            push_float(&mut float_join);
+        }
+        float_join
+            .bind(join)
+            .unwrap()
+            .instruction(Instruction::FReturn);
+        let graph = ControlFlowGraph::build(&float_join).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze(&graph, "(I)F", true, &ConstantPool::default()),
+            Err(AnalysisError::IncompatibleStackValue { .. })
+        ));
+
+        let mut double_join = CodeSequence::new();
+        let alternate = double_join.new_label().unwrap();
+        let join = double_join.new_label().unwrap();
+        double_join
+            .instruction(Instruction::ILoad(local(0)))
+            .branch(BranchInstruction::IfEq(alternate.clone()));
+        let push_double = |sequence: &mut CodeSequence| {
+            sequence.instruction(Instruction::DConst(SmallDoubleConstant::One));
+        };
+        let push_long = |sequence: &mut CodeSequence| {
+            sequence.instruction(Instruction::LConst(SmallLongConstant::One));
+        };
+        if float_first {
+            push_double(&mut double_join);
+        } else {
+            push_long(&mut double_join);
+        }
+        double_join
+            .branch(BranchInstruction::Goto(join.clone()))
+            .bind(alternate)
+            .unwrap();
+        if float_first {
+            push_long(&mut double_join);
+        } else {
+            push_double(&mut double_join);
+        }
+        double_join
+            .bind(join)
+            .unwrap()
+            .instruction(Instruction::DReturn);
+        let graph = ControlFlowGraph::build(&double_join).unwrap();
+        assert!(matches!(
+            CfgCodeAnalyzer::analyze(&graph, "(I)D", true, &ConstantPool::default()),
+            Err(AnalysisError::IncompatibleStackValue { .. })
+        ));
+    }
+}
+
+#[test]
+fn float_and_double_returns_and_local_opcodes_require_exact_kinds() {
+    let mut wrong_float_return = CodeSequence::new();
+    wrong_float_return
+        .instruction(Instruction::FConst(SmallFloatConstant::One))
+        .instruction(Instruction::FReturn);
+    let graph = ControlFlowGraph::build(&wrong_float_return).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()D", true, &ConstantPool::default()),
+        Err(AnalysisError::WrongReturnOpcode {
+            instruction: 1,
+            expected: Some(ValueKind::Double),
+            actual: Some(ValueKind::Float),
+        })
+    ));
+
+    let mut wrong_double_return = CodeSequence::new();
+    wrong_double_return
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&wrong_double_return).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()F", true, &ConstantPool::default()),
+        Err(AnalysisError::WrongReturnOpcode {
+            instruction: 1,
+            expected: Some(ValueKind::Float),
+            actual: Some(ValueKind::Double),
+        })
+    ));
+
+    let mut wrong_float_load = CodeSequence::new();
+    wrong_float_load
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(0)))
+        .instruction(Instruction::FLoad(local(0)))
+        .instruction(Instruction::FReturn);
+    let graph = ControlFlowGraph::build(&wrong_float_load).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()F", true, &ConstantPool::default()),
+        Err(AnalysisError::LocalTypeMismatch {
+            instruction: 2,
+            expected: ValueKind::Float,
+            actual: ValueKind::Double,
+            ..
+        })
+    ));
+
+    let mut wrong_double_load = CodeSequence::new();
+    wrong_double_load
+        .instruction(Instruction::FConst(SmallFloatConstant::One))
+        .instruction(Instruction::FStore(local(0)))
+        .instruction(Instruction::DLoad(local(0)))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&wrong_double_load).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()D", true, &ConstantPool::default()),
+        Err(AnalysisError::LocalTypeMismatch {
+            instruction: 2,
+            expected: ValueKind::Double,
+            actual: ValueKind::Float,
+            ..
+        })
+    ));
+
+    let mut duplicate_double = CodeSequence::new();
+    duplicate_double
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::Dup)
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&duplicate_double).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()D", true, &ConstantPool::default()),
+        Err(AnalysisError::DupCategoryTwo {
+            instruction: 1,
+            actual: ValueKind::Double,
+        })
+    ));
+
+    let mut discard_double = CodeSequence::new();
+    discard_double
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::Pop)
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DReturn);
+    let graph = ControlFlowGraph::build(&discard_double).unwrap();
+    assert!(matches!(
+        CfgCodeAnalyzer::analyze(&graph, "()D", true, &ConstantPool::default()),
+        Err(AnalysisError::PopCategoryTwo {
+            instruction: 1,
+            actual: ValueKind::Double,
+        })
+    ));
+}
+
+#[test]
 fn stack_map_long_projection_preserves_real_local_holes() {
     let mut sequence = CodeSequence::new();
     let target = sequence.new_label().unwrap();
@@ -2266,6 +2810,37 @@ fn stack_map_long_projection_preserves_real_local_holes() {
                     VerificationTypeInfo::Long,
                     VerificationTypeInfo::Top,
                     VerificationTypeInfo::Integer,
+                ]
+    }));
+}
+
+#[test]
+fn stack_map_double_projection_preserves_real_holes_and_omits_the_tail() {
+    let mut sequence = CodeSequence::new();
+    let target = sequence.new_label().unwrap();
+    sequence
+        .instruction(Instruction::DConst(SmallDoubleConstant::One))
+        .instruction(Instruction::DStore(local(3)))
+        .instruction(Instruction::IConst(SmallIntConstant::Zero))
+        .branch(BranchInstruction::IfEq(target.clone()))
+        .instruction(Instruction::Return)
+        .bind(target.clone())
+        .unwrap()
+        .instruction(Instruction::Return);
+    let graph = ControlFlowGraph::build(&sequence).unwrap();
+    let pool = ConstantPool::default();
+    let flow = CfgCodeAnalyzer::analyze(&graph, "()V", true, &pool).unwrap();
+    let assembled = assemble_labeled(&sequence, &pool).unwrap();
+    let frames = generate_stack_map_frames(&flow, &graph, &assembled).unwrap();
+    let pc = assembled.layout.label_offset(&target).unwrap() as u32;
+    assert!(frames.frames.iter().any(|frame| {
+        frame.pc == pc
+            && frame.locals
+                == [
+                    VerificationTypeInfo::Top,
+                    VerificationTypeInfo::Top,
+                    VerificationTypeInfo::Top,
+                    VerificationTypeInfo::Double,
                 ]
     }));
 }
