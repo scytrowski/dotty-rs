@@ -1900,16 +1900,115 @@ fn long_comparison_and_mixed_object_join_fail_closed_at_typer() {
 }
 
 #[test]
+fn source_typed_float_double_metadata_projects_descriptors_and_parameter_slots() {
+    let source = r#"
+class NumericMetadata(initialF: Float, initialD: Double):
+  private var fieldF: Float = 0.0f
+  private var fieldD: Double = 0.0
+  def floatValue(): Float = 1.5f
+  def doubleValue(): Double = 3.5
+  def mixed(i: Int, f: Float, d: Double, j: Long): Double = 3.5
+  def reverse(j: Long, d: Double, f: Float, flag: Boolean): Unit = ()
+  def pair(f: Float, first: Double, second: Double): Float = 1.5f
+"#;
+    let output = TestOutputDirectory::new("float-double-metadata-only");
+    let mut observed = false;
+    let mut observe = |_: &AstArena<Untyped>,
+                       _: &SourceSemanticIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        let metadata = unit
+            .metadata(definitions)
+            .expect("same-session typed Float/Double metadata projects");
+        let class = metadata
+            .iter()
+            .find(|metadata| metadata.identity().internal_name() == "NumericMetadata")
+            .expect("the source class is present in the metadata batch");
+        let constructor = class
+            .constructor()
+            .expect("the primary constructor has metadata");
+        assert_eq!(constructor.descriptor().as_str(), "(FD)V");
+        assert_eq!(
+            constructor
+                .parameters()
+                .iter()
+                .map(|parameter| (parameter.slot(), parameter.width()))
+                .collect::<Vec<_>>(),
+            [(1, 1), (2, 2)]
+        );
+        for (name, descriptor) in [("fieldF", "F"), ("fieldD", "D")] {
+            assert_eq!(
+                class
+                    .fields()
+                    .iter()
+                    .find(|field| field.name() == name)
+                    .expect("floating field has metadata")
+                    .descriptor(),
+                descriptor,
+                "{name}"
+            );
+        }
+        let method = |name: &str| {
+            class
+                .methods()
+                .iter()
+                .find(|method| method.name() == name)
+                .unwrap_or_else(|| panic!("source method {name} has metadata"))
+        };
+        for (name, descriptor) in [
+            ("floatValue", "()F"),
+            ("doubleValue", "()D"),
+            ("mixed", "(IFDJ)D"),
+            ("reverse", "(JDFZ)V"),
+            ("pair", "(FDD)F"),
+        ] {
+            assert_eq!(method(name).descriptor().as_str(), descriptor, "{name}");
+        }
+        assert_eq!(
+            method("mixed")
+                .parameters()
+                .iter()
+                .map(|parameter| (parameter.slot(), parameter.width()))
+                .collect::<Vec<_>>(),
+            [(1, 1), (2, 1), (3, 2), (5, 2)]
+        );
+        assert_eq!(
+            method("reverse")
+                .parameters()
+                .iter()
+                .map(|parameter| (parameter.slot(), parameter.width()))
+                .collect::<Vec<_>>(),
+            [(1, 2), (3, 2), (5, 1), (6, 1)]
+        );
+        assert_eq!(
+            method("pair")
+                .parameters()
+                .iter()
+                .map(|parameter| (parameter.slot(), parameter.width()))
+                .collect::<Vec<_>>(),
+            [(1, 1), (2, 2), (4, 2)]
+        );
+    };
+    let result = compile_source_batch_with_source_observer(
+        source,
+        "NumericMetadata.scala",
+        output.path(),
+        SourceId::from_index(1535),
+        SourceUnitCardinality::ExactlyOne,
+        &mut observe,
+    );
+    assert!(observed, "real source typing reached the metadata observer");
+    assert!(
+        matches!(result, Err(PipelineFailure::Codegen(_))),
+        "FP metadata is available while FP bytecode lowering remains unsupported: {result:?}"
+    );
+    assert!(output.class_files().is_empty());
+}
+
+#[test]
 fn float_and_double_source_matrix_fails_at_backend_without_artifacts() {
     for (label, source) in [
-        (
-            "FloatConstructorParameter",
-            "class FloatConstructorParameter(value: Float)\n",
-        ),
-        (
-            "DoubleConstructorParameter",
-            "class DoubleConstructorParameter(value: Double)\n",
-        ),
         (
             "FloatField",
             "class FloatField:\n  private var value: Float = 0.0f\n",
@@ -1921,10 +2020,6 @@ fn float_and_double_source_matrix_fails_at_backend_without_artifacts() {
         (
             "FloatGetterSignature",
             "class FloatGetterSignature:\n  def get(value: Float): Float = value\n",
-        ),
-        (
-            "DoubleSetterSignature",
-            "class DoubleSetterSignature:\n  def set(value: Double): Unit = ()\n",
         ),
         (
             "FloatFieldsAndConstructor",
@@ -1953,16 +2048,10 @@ fn float_and_double_source_matrix_fails_at_backend_without_artifacts() {
     ] {
         let output = TestOutputDirectory::new(label);
         let error = compile_source(source, &format!("{label}.scala"), output.path())
-            .expect_err("Float and Double remain outside the bounded JVM source subset");
+            .expect_err("Float and Double operations remain outside bounded JVM codegen");
         assert!(
-            matches!(
-                &error,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmReferenceType {
-                    kind: dotty_jvm::UnsupportedJvmReferenceTypeKind::ExternalClass,
-                    ..
-                })
-            ),
-            "{label} must be rejected as an unsupported external JVM reference: {error:?}"
+            matches!(&error, PipelineFailure::Codegen(_)),
+            "{label} must be rejected at the backend without partial artifacts: {error:?}"
         );
         assert!(
             output.class_files().is_empty(),
@@ -4942,7 +5031,9 @@ fn reference_method_signature_audit_characterizes_real_typed_source() {
                     .map(|parameter| {
                         let category = match parameter.ty().category() {
                             dotty_jvm::JvmValueCategory::IntLike => "intlike",
+                            dotty_jvm::JvmValueCategory::Float => "float",
                             dotty_jvm::JvmValueCategory::Long => "long",
+                            dotty_jvm::JvmValueCategory::Double => "double",
                             dotty_jvm::JvmValueCategory::Reference => "reference",
                         };
                         format!(
