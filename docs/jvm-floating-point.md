@@ -132,7 +132,7 @@ bytes. Opcode names and forms link to JVMS 21 §6.5.
 | Float return | [`freturn`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.freturn) `0xae`; 1 byte | None | Requires a Float result and one Float on the operand stack. |
 | Double return | [`dreturn`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dreturn) `0xaf`; 1 byte | None | Requires a Double result and one Double value (two slots) on the operand stack. |
 | Float constant-pool load | None | [`ldc`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc) `0x12`, `index:u1` (2 bytes); [`ldc_w`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc_w) `0x13`, `index:u2` (3 bytes) | Index must be 1–255 for `ldc`, 1–65534 for `ldc_w`, and resolve to tag 4 (`CONSTANT_Float`). Dynamic constants are outside this bounded contract. |
-| Double constant-pool load | None | [`ldc2_w`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc2_w) `0x14`, `index:u2` (3 bytes) | Index must be 1–65534 and resolve to tag 6 (`CONSTANT_Double`); the following reserved pool slot is not a valid index. There is no narrow `ldc2` form. Dynamic constants are outside this bounded contract. |
+| Double constant-pool load | None | [`ldc2_w`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc2_w) `0x14`, `index:u2` (3 bytes) | Index must be 1–65533 and resolve to tag 6 (`CONSTANT_Double`); the following reserved pool slot must also fit in the pool and is not a valid index. There is no narrow `ldc2` form. Dynamic constants are outside this bounded contract. |
 
 For `wide` local operands, the u2 encoding can name 0–65535, but validity is
 also bounded by the u2 `max_locals` field. With `max_locals = 65535`, a
@@ -140,8 +140,9 @@ category-one local can start at 65534; a Double head can start no later than
 65533 because its tail must occupy slot 65534. The Double tail is not an
 independent local. Constant-pool indexes are one-based and the largest
 representable valid entry index is 65534; `ldc` can address only indexes
-through 255, so index 256 requires `ldc_w` for Float. A Double uses only
-`ldc2_w` regardless of its index.
+through 255, so index 256 requires `ldc_w` for Float. A Double head can be at
+most 65533 because its reserved following slot must also fit below
+`constant_pool_count`; a Double uses only `ldc2_w` regardless of its index.
 
 These operands must preserve exact kind: `ldc`/`ldc_w` use a Float entry, and
 `ldc2_w` uses a Double entry. A Float entry cannot be loaded by `ldc2_w`, a
