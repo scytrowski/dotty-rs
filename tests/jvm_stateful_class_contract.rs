@@ -12,7 +12,7 @@ use dotty_core::{
 use dotty_jvm::{
     JvmClassInitializationPlan, JvmClassPlan, JvmCompilationUnit,
     JvmConstructorInitializerInstruction, JvmFieldPlan, JvmMethodPlan, JvmPrimaryConstructorPlan,
-    emit_class,
+    JvmPublicBodyFieldSourceProof, emit_class,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::{NamingOutcome, SourceParseStatus, name_compilation_unit_with_diagnostics};
@@ -2167,11 +2167,9 @@ fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols(
             for (ordinal, accessor) in class_metadata.accessors().iter().enumerate() {
                 assert_eq!(accessor.owner(), class);
                 assert_eq!(accessor.source_ordinal(), ordinal);
-                assert_eq!(accessor.source_field(), accessor.binding().field());
-                assert_eq!(
-                    accessor.constructor_parameter(),
-                    accessor.binding().parameter()
-                );
+                let binding = accessor.binding().expect("constructor accessor origin");
+                assert_eq!(accessor.source_field(), binding.field());
+                assert_eq!(accessor.constructor_parameter(), Some(binding.parameter()));
                 assert!(accessor.field_access_flags().contains(ACC_PRIVATE));
                 assert!(accessor.getter().access_flags().contains(ACC_PUBLIC));
             }
@@ -2377,7 +2375,10 @@ fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
                     .unwrap();
                 assert_eq!(accessor.field_name(), name);
                 assert_eq!(accessor.field_descriptor(), descriptor);
-                assert_eq!(initializer.parameter(), accessor.constructor_parameter());
+                assert_eq!(
+                    Some(initializer.parameter()),
+                    accessor.constructor_parameter()
+                );
                 assert_eq!(initializer.source_ordinal(), accessor.source_ordinal());
                 assert_eq!(initializer.slot(), slot);
                 assert_eq!(initializer.width(), width);
@@ -4382,6 +4383,230 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
 }
 
 #[test]
+fn public_body_fields_project_to_origin_aware_accessor_metadata() {
+    with_source(
+        "class Counter(val id: Int) { val initial: Int = 10; var current: Long = 0L; val precise: Double = 2.5 }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Counter");
+            typer.complete_symbol(class).unwrap();
+            let Some(dotty_namer::SourceDefinition::Canonical { tree, .. }) =
+                index.definition_of(class)
+            else {
+                panic!("Counter needs a canonical source definition");
+            };
+            let TreeKind::TypeDef(class_definition) = &ast.get(tree).kind else {
+                panic!("Counter source definition should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("Counter definition should contain a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("Counter constructor should be a DefDef");
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let field = index.symbol_at(source, parameter_tree).unwrap();
+            let parameter = index
+                .derived_symbol_at(constructor, source, parameter_tree)
+                .unwrap();
+            typer.complete_symbol(field).unwrap();
+            typer.complete_symbol(parameter).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let constructor_plan = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                vec![parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+            let mut plans = Vec::new();
+            let mut typed_roots = Vec::new();
+            for name in ["initial", "current", "precise"] {
+                let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                typer.complete_symbol(field).unwrap();
+                let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                    panic!("{name} field type should be complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let initializer = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                let proof = JvmPublicBodyFieldSourceProof::from_source(
+                    class,
+                    field,
+                    source,
+                    declaration,
+                    initializer,
+                    ast,
+                    index,
+                    typer.source_typed_index(),
+                    typer.typed_ast(),
+                    typer.store(),
+                )
+                .unwrap();
+                typed_roots.push(initializer);
+                plans.push(JvmFieldPlan {
+                    field,
+                    source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPublic(proof),
+                    initializer: Some(initializer),
+                });
+            }
+            let unit = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: plans,
+                    initialization: JvmClassInitializationPlan::PrimaryConstructor(
+                        constructor_plan,
+                    ),
+                }],
+            };
+            let metadata = unit.metadata(definitions).unwrap();
+            let class_metadata = &metadata[0];
+            assert!(class_metadata.fields().is_empty());
+            let body_fields = class_metadata
+                .accessors()
+                .iter()
+                .map(|accessor| accessor.source_field())
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                emit_class(&unit, class, definitions),
+                Err(dotty_jvm::JvmCodegenError::FieldEmissionUnsupported {
+                    class: failed_class,
+                    field: failed_field,
+                }) if failed_class == class
+                    && body_fields.contains(&failed_field)
+            ));
+            let accessors = class_metadata.accessors();
+            assert_eq!(accessors.len(), 4);
+            assert_eq!(accessors[0].source_field(), field);
+            assert_eq!(accessors[0].constructor_parameter(), Some(parameter));
+            assert!(matches!(
+                accessors[0].origin(),
+                dotty_jvm::JvmAccessorOrigin::ConstructorParameter(binding)
+                    if binding.field() == field && binding.parameter() == parameter
+            ));
+            for (accessor, expected) in accessors[1..].iter().zip([
+                ("initial", "I", false, 0),
+                ("current", "J", true, 1),
+                ("precise", "D", false, 2),
+            ]) {
+                let (name, descriptor, mutable, ordinal) = expected;
+                assert_eq!(accessor.field_name(), name);
+                assert_eq!(accessor.field_descriptor(), descriptor);
+                assert_eq!(accessor.source_ordinal(), ordinal);
+                assert_eq!(accessor.is_mutable(), mutable);
+                assert_eq!(accessor.owner(), class);
+                assert_eq!(accessor.constructor_parameter(), None);
+                assert!(accessor.binding().is_none());
+                assert!(accessor.field_access_flags().is_private());
+                assert_eq!(
+                    accessor.field_access_flags().is_final(),
+                    !mutable,
+                    "val storage is final; var storage is not"
+                );
+                assert_eq!(accessor.getter().name(), name);
+                assert_eq!(
+                    accessor.getter().descriptor().as_str(),
+                    &format!("(){descriptor}")
+                );
+                assert!(accessor.getter().access_flags().is_public());
+                if mutable {
+                    let setter = accessor.setter().expect("var has a setter");
+                    assert_eq!(setter.name(), "current_$eq");
+                    assert_eq!(setter.descriptor().as_str(), "(J)V");
+                    assert!(setter.access_flags().is_public());
+                } else {
+                    assert!(accessor.setter().is_none());
+                }
+                assert!(matches!(
+                    accessor.origin(),
+                    dotty_jvm::JvmAccessorOrigin::ClassBodyField(proof)
+                        if proof.field() == accessor.source_field()
+                            && proof.initializer() == typed_roots[ordinal]
+                ));
+            }
+        },
+    );
+}
+
+#[test]
+fn public_body_accessor_metadata_rejects_user_getter_collisions() {
+    with_source(
+        "class BodyCollision { val value: Int = 1; def value(): Int = 2 }",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "BodyCollision");
+            typer.complete_symbol(class).unwrap();
+            let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, "value");
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("field type should be complete");
+            };
+            let field_context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, field_context, field_type)
+                .unwrap();
+            let proof = JvmPublicBodyFieldSourceProof::from_source(
+                class,
+                field,
+                source,
+                declaration,
+                initializer,
+                ast,
+                index,
+                typer.source_typed_index(),
+                typer.typed_ast(),
+                typer.store(),
+            )
+            .unwrap();
+            let (method, _, method_rhs) =
+                method_tree_and_rhs(ast, index, source, typer, class, "value");
+            typer.complete_symbol(method).unwrap();
+            let method_context = typer.expression_context_for(method).unwrap();
+            let method_body = typer.type_expression(method_rhs, method_context).unwrap();
+            let result = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![JvmClassPlan {
+                    class,
+                    methods: vec![JvmMethodPlan {
+                        method,
+                        parameters: Vec::new(),
+                        locals: Vec::new(),
+                        body: Some(method_body),
+                    }],
+                    fields: vec![JvmFieldPlan {
+                        field,
+                        source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPublic(proof),
+                        initializer: Some(initializer),
+                    }],
+                    initialization: JvmClassInitializationPlan::Unsupported,
+                }],
+            }
+            .metadata(definitions);
+            assert!(matches!(
+                result,
+                Err(dotty_jvm::JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                    class: found_class,
+                    field: found_field,
+                    previous,
+                    ref name,
+                    ref descriptor,
+                }) if found_class == class
+                    && found_field == field
+                    && previous == method
+                    && name == "value"
+                    && descriptor == "()I"
+            ));
+        },
+    );
+}
+
+#[test]
 fn public_body_field_initializers_preserve_earlier_self_and_forward_targets() {
     with_source(
         "class InitReads:\n  val earlier: Int = 1\n  val copied: Int = earlier\n  val self: Int = this.self\n  val forward: Int = later\n  val later: Int = 2\n",
@@ -5706,7 +5931,7 @@ fn field_metadata_never_resolves_a_shadowing_local_by_name() {
 #[test]
 fn field_metadata_projects_private_reference_fields_from_the_full_unit() {
     with_source(
-        "class Counter {}\nclass Holder(initial: Counter) { private val original: Counter = initial; private var current: Counter = initial }",
+        "class Counter {}\nclass Holder(initial: Counter) { private val original: Counter = initial; private var current: Counter = initial; val exposed: Counter = initial }",
         |ast, source, index, definitions, typer| {
             let counter = symbol_named(ast, index, source, typer, "Counter");
             let holder = symbol_named(ast, index, source, typer, "Holder");
@@ -5730,6 +5955,34 @@ fn field_metadata_projects_private_reference_fields_from_the_full_unit() {
                     initializer: Some(initializer),
                 });
             }
+            let (field, declaration, rhs) =
+                field_tree_and_rhs(ast, index, source, typer, "exposed");
+            typer.complete_symbol(field).unwrap();
+            let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info else {
+                panic!("exposed field type should be complete");
+            };
+            let context = typer.field_initializer_context_for(field).unwrap();
+            let initializer = typer
+                .type_expression_expected(rhs, context, field_type)
+                .unwrap();
+            let proof = JvmPublicBodyFieldSourceProof::from_source(
+                holder,
+                field,
+                source,
+                declaration,
+                initializer,
+                ast,
+                index,
+                typer.source_typed_index(),
+                typer.typed_ast(),
+                typer.store(),
+            )
+            .unwrap();
+            fields.push(JvmFieldPlan {
+                field,
+                source_visibility: dotty_jvm::JvmFieldSourceVisibility::PlainPublic(proof),
+                initializer: Some(initializer),
+            });
             let unit = JvmCompilationUnit {
                 store: typer.store(),
                 typed_ast: typer.typed_ast(),
@@ -5768,6 +6021,18 @@ fn field_metadata_projects_private_reference_fields_from_the_full_unit() {
             );
             assert!(fields[1].access_flags().is_private());
             assert!(!fields[1].access_flags().is_final());
+            assert_eq!(metadata[1].fields().len(), 2);
+            let [exposed] = metadata[1].accessors() else {
+                panic!("public reference field should use accessor metadata");
+            };
+            assert_eq!(exposed.source_field(), field);
+            assert_eq!(exposed.field_descriptor(), counter_descriptor);
+            assert_eq!(exposed.value_type(), dotty_jvm::JvmType::Reference(counter));
+            assert!(matches!(
+                exposed.origin(),
+                dotty_jvm::JvmAccessorOrigin::ClassBodyField(proof)
+                    if proof.initializer() == initializer
+            ));
 
             let standalone =
                 unit.classes[1].metadata_with_typed_ast(unit.store, unit.typed_ast, definitions);

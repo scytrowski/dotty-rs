@@ -399,6 +399,18 @@ impl JvmPublicBodyFieldSourceProof {
         store: &SemanticStore,
     ) -> Result<Self, JvmCodegenError> {
         let invalid = || JvmCodegenError::InvalidPublicBodyFieldSourceProof { field };
+        let class_symbol = store
+            .symbols
+            .contains(class)
+            .then(|| store.symbols.get(class))
+            .ok_or(JvmCodegenError::UnknownClass { class })?;
+        if class_symbol.kind != SymbolKind::Class {
+            return Err(JvmCodegenError::UnsupportedSymbolKind {
+                symbol: class,
+                expected: SymbolRole::Class,
+                found: class_symbol.kind,
+            });
+        }
         let field_symbol = store
             .symbols
             .contains(field)
@@ -410,6 +422,9 @@ impl JvmPublicBodyFieldSourceProof {
                 expected: SymbolRole::Field,
                 found: field_symbol.kind,
             });
+        }
+        if field_symbol.origin != dotty_core::SymbolOrigin::Source(source) {
+            return Err(invalid());
         }
         if field_symbol.owner != Some(class) {
             return Err(JvmCodegenError::WrongOwner {
@@ -465,6 +480,9 @@ impl JvmPublicBodyFieldSourceProof {
         else {
             return Err(invalid());
         };
+        if class_symbol.origin != dotty_core::SymbolOrigin::Source(source) {
+            return Err(invalid());
+        }
         let TreeKind::TypeDef(class_definition) =
             &ast.try_get(class_tree).ok_or_else(invalid)?.kind
         else {
@@ -548,15 +566,22 @@ pub struct JvmFieldMetadata {
     initializer: TreeId<Typed>,
 }
 
-/// Checked JVM-only field and method signatures for one constructor accessor.
-///
-/// This projection is distinct from [`JvmFieldMetadata`]: accessor source
-/// fields have no typed initializer, and this metadata never treats a missing
-/// initializer as permission to plan an ordinary source field. It does not
-/// synthesize source symbols or emit class-file members.
+/// Audited source origin of one JVM accessor projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmAccessorOrigin {
+    /// A class-owned field derived from the exact primary-constructor formal.
+    ConstructorParameter(JvmConstructorAccessorBinding),
+    /// An ordinary class-body field with its exact source and typed RHS proof.
+    ClassBodyField(JvmPublicBodyFieldSourceProof),
+}
+
+/// Checked JVM-only backing-field and method signatures for one source
+/// accessor. The origin retains the distinct proof required by constructor
+/// parameters and class-body fields. This projection does not synthesize
+/// source symbols or emit class-file members.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmAccessorMetadata {
-    binding: JvmConstructorAccessorBinding,
+    origin: JvmAccessorOrigin,
     value_type: JvmType,
     field_name: String,
     field_descriptor: String,
@@ -2064,34 +2089,57 @@ impl JvmFieldMetadata {
 }
 
 impl JvmAccessorMetadata {
-    /// Canonical source-to-formal proof used to derive the JVM projection.
-    pub const fn binding(&self) -> JvmConstructorAccessorBinding {
-        self.binding
+    /// Audited provenance used to derive the JVM projection.
+    pub const fn origin(&self) -> JvmAccessorOrigin {
+        self.origin
+    }
+
+    /// Constructor binding, present only for a primary-constructor accessor.
+    pub const fn binding(&self) -> Option<JvmConstructorAccessorBinding> {
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => Some(binding),
+            JvmAccessorOrigin::ClassBodyField(_) => None,
+        }
     }
 
     /// Source field identity; no synthetic field symbol is introduced.
     pub const fn source_field(&self) -> SymbolId {
-        self.binding.field()
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => binding.field(),
+            JvmAccessorOrigin::ClassBodyField(proof) => proof.field(),
+        }
     }
 
-    /// Constructor-owned derived formal identity.
-    pub const fn constructor_parameter(&self) -> SymbolId {
-        self.binding.parameter()
+    /// Constructor-owned derived formal identity, absent for body fields.
+    pub const fn constructor_parameter(&self) -> Option<SymbolId> {
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => Some(binding.parameter()),
+            JvmAccessorOrigin::ClassBodyField(_) => None,
+        }
     }
 
     /// Canonical class that owns the source field and JVM backing storage.
     pub const fn owner(&self) -> SymbolId {
-        self.binding.class()
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => binding.class(),
+            JvmAccessorOrigin::ClassBodyField(proof) => proof.class(),
+        }
     }
 
-    /// Source parameter ordinal, preserved independently from JVM slot width.
+    /// Source ordinal: constructor parameter order or template-body position.
     pub const fn source_ordinal(&self) -> usize {
-        self.binding.source_ordinal()
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => binding.source_ordinal(),
+            JvmAccessorOrigin::ClassBodyField(proof) => proof.template_position(),
+        }
     }
 
     /// Whether the source accessor is a mutable `var`.
     pub const fn is_mutable(&self) -> bool {
-        self.binding.is_mutable()
+        match self.origin {
+            JvmAccessorOrigin::ConstructorParameter(binding) => binding.is_mutable(),
+            JvmAccessorOrigin::ClassBodyField(proof) => proof.mutable(),
+        }
     }
 
     /// Exact checked JVM value type shared by the field, getter and setter.

@@ -561,8 +561,11 @@ pub(super) fn lower(
     let mut accessor_parameters = HashSet::new();
     let mut previous_ordinal = None;
     for accessor in metadata.accessors() {
+        let Some(binding) = accessor.binding() else {
+            continue;
+        };
         let field = accessor.source_field();
-        let parameter = accessor.constructor_parameter();
+        let parameter = binding.parameter();
         let invalid = |issue| JvmCodegenError::InvalidJvmAccessorInitializer {
             class,
             field,
@@ -570,7 +573,7 @@ pub(super) fn lower(
             issue,
         };
         if accessor.owner() != class
-            || accessor.binding().constructor() != constructor.symbol()
+            || binding.constructor() != constructor.symbol()
             || !accessor_fields.insert(field)
             || !accessor_parameters.insert(parameter)
             || previous_ordinal.is_some_and(|ordinal| ordinal >= accessor.source_ordinal())

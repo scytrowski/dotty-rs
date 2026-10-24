@@ -1168,7 +1168,7 @@ fn resolve_accessor(
         for accessor in owner
             .accessors()
             .iter()
-            .filter(|candidate| candidate.source_field() == field)
+            .filter(|candidate| candidate.source_field() == field && candidate.binding().is_some())
         {
             if found.is_some() {
                 return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
@@ -1194,7 +1194,10 @@ fn resolve_accessor(
     if symbol.owner != Some(accessor.owner()) || owner.identity().symbol() != accessor.owner() {
         return Err(issue(crate::JvmAccessorCallMetadataIssue::OwnerMismatch));
     }
-    if !owner.accessor_bindings().contains(&accessor.binding()) {
+    let Some(binding) = accessor.binding() else {
+        return Ok(None);
+    };
+    if !owner.accessor_bindings().contains(&binding) {
         return Err(issue(crate::JvmAccessorCallMetadataIssue::BindingMissing));
     }
     let source_ty = match unit.store.symbols.info(field) {

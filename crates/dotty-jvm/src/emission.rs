@@ -402,6 +402,12 @@ pub(super) fn validate_emittable_class(
         }
     }
     for accessor in metadata.accessors() {
+        if accessor.binding().is_none() {
+            return Err(JvmCodegenError::FieldEmissionUnsupported {
+                class: plan.class,
+                field: accessor.source_field(),
+            });
+        }
         if !declared.contains(&accessor.source_field()) || accessor.owner() != plan.class {
             return Err(JvmCodegenError::FieldEmissionUnsupported {
                 class: plan.class,

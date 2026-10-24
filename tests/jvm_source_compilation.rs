@@ -10170,7 +10170,7 @@ fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends(
                     let accessor = class_metadata
                         .accessors()
                         .iter()
-                        .find(|accessor| accessor.constructor_parameter() == formal);
+                        .find(|accessor| accessor.constructor_parameter() == Some(formal));
                     if name == "first" {
                         assert!(
                             accessor.is_none(),
@@ -10190,7 +10190,7 @@ fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends(
                         )
                     );
                     assert_eq!(accessor.source_field(), source_field);
-                    assert_eq!(accessor.constructor_parameter(), formal);
+                    assert_eq!(accessor.constructor_parameter(), Some(formal));
                     assert_eq!(accessor.owner(), class);
                     assert_eq!(accessor.source_ordinal(), ordinal);
                     assert_eq!(accessor.is_mutable(), mutable);
@@ -18413,7 +18413,7 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
             .metadata(definitions)
             .expect("the public fields project to checked private backing metadata");
 
-        for (class_name, expected_fields, expected_accessors) in [
+        for (class_name, expected_fields, expected_constructor_accessors) in [
             ("PublicFields", &["enabled", "marker", "ratio"][..], 0),
             ("Counter", &["initial", "current"][..], 1),
         ] {
@@ -18500,14 +18500,25 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                 .iter()
                 .find(|metadata| metadata.identity().symbol() == class)
                 .expect("class has validated metadata");
-            assert_eq!(class_metadata.fields().len(), expected_fields.len());
-            assert_eq!(class_metadata.accessors().len(), expected_accessors);
+            assert!(class_metadata.fields().is_empty());
+            assert_eq!(
+                class_metadata.accessors().len(),
+                expected_fields.len() + expected_constructor_accessors
+            );
+            if expected_constructor_accessors == 1 {
+                assert!(class_metadata.accessors().iter().any(|accessor| {
+                    matches!(
+                        accessor.origin(),
+                        dotty_jvm::JvmAccessorOrigin::ConstructorParameter(_)
+                    )
+                }));
+            }
             for field_plan in &plan.fields {
-                let field = class_metadata
-                    .fields()
+                let accessor = class_metadata
+                    .accessors()
                     .iter()
-                    .find(|field| field.symbol() == field_plan.field)
-                    .expect("each source body field has a backing field projection");
+                    .find(|accessor| accessor.source_field() == field_plan.field)
+                    .expect("each source body field has an accessor projection");
                 let expected_descriptor = match unit
                     .store
                     .names
@@ -18520,16 +18531,20 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                     "current" => "J",
                     _ => panic!("source field has a covered primitive type"),
                 };
-                assert_eq!(field.descriptor(), expected_descriptor);
-                assert_eq!(field.initializer(), field_plan.initializer.unwrap());
+                assert_eq!(accessor.field_descriptor(), expected_descriptor);
+                assert!(matches!(
+                    accessor.origin(),
+                    dotty_jvm::JvmAccessorOrigin::ClassBodyField(proof)
+                        if proof.initializer() == field_plan.initializer.unwrap()
+                ));
                 assert!(
-                    field
-                        .access_flags()
+                    accessor
+                        .field_access_flags()
                         .contains(dotty_classfile::access_flags::ACC_PRIVATE)
                 );
                 assert_eq!(
-                    field
-                        .access_flags()
+                    accessor
+                        .field_access_flags()
                         .contains(dotty_classfile::access_flags::ACC_FINAL),
                     !unit
                         .store
@@ -18538,11 +18553,23 @@ fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
                         .flags
                         .contains(SymbolFlags::MUTABLE)
                 );
-                assert!(
-                    class_metadata
-                        .accessors()
-                        .iter()
-                        .all(|accessor| accessor.source_field() != field_plan.field)
+                assert_eq!(
+                    accessor.getter().name(),
+                    unit.store
+                        .names
+                        .resolve(unit.store.symbols.get(field_plan.field).name.text())
+                );
+                assert_eq!(
+                    accessor.getter().descriptor().as_str(),
+                    &format!("(){expected_descriptor}")
+                );
+                assert_eq!(
+                    accessor.setter().is_some(),
+                    unit.store
+                        .symbols
+                        .get(field_plan.field)
+                        .flags
+                        .contains(SymbolFlags::MUTABLE)
                 );
             }
             assert!(matches!(

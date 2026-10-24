@@ -127,10 +127,10 @@ private, or otherwise modified parameters remain rejected.
 | --- | --- | --- |
 | Constructor parameter, source field, and source selection identity | `dotty-core` / namer / typer | Preserve canonical IDs and source mappings. Never invent source methods for generated JVM accessors or reconstruct identity from spelling. |
 | Source field to derived constructor formal binding | `dotty-jvm` constructor plan | Preserve exact class/constructor IDs, source `TreeId`, class-owned `Field`, distinct constructor-owned `Parameter`, source ordinal, and mutability. Revalidate symbol kinds/owners/origins, class-scope membership, uniqueness, and completed type agreement before exposing the checked binding through `JvmClassMetadata`. |
-| Getter/setter JVM names, descriptors, flags, backing storage, and slot layout | JVM-only ABI projection in `dotty-jvm` | Derive from the pinned compiler oracle and canonical source metadata. Keep JVM names out of frontend contracts. `JvmAccessorMetadata` records checked backing-field and getter / optional setter signatures without source symbols. |
+| Getter/setter JVM names, descriptors, flags, backing storage, and slot layout | JVM-only ABI projection in `dotty-jvm` | Derive from the pinned compiler oracle and canonical source metadata. Keep JVM names out of frontend contracts. `JvmAccessorMetadata` records checked backing-field and getter / optional setter signatures with `JvmAccessorOrigin::ConstructorParameter` or `JvmAccessorOrigin::ClassBodyField`; it never fabricates a constructor formal for a body field or a source `Method`. |
 | Constructor accessor stores | `dotty-jvm` constructor initializer and class emitter | Copy the exact constructor-owned formal into private storage after direct-super initialization and before ordinary class-body field initializers. Keep accessor stores separate from typed source RHS plans. |
 | Encoding and verification of fields and bytecode | `dotty-classfile` | Receive validated field and instruction plans; keep byte-level encoding separate from source semantics. |
-| Source call-site support where current Typer behavior changes | Separate frontend/Typer issue | This audit records current successes and does not authorize Typer changes or accessor-specific call lowering. |
+| Source call-site support where current Typer behavior changes | Separate backend/frontend issue | #1584 should validate constructor accessors through `accessor_bindings()` and body-field accessors through their canonical field plus source/typed-RHS proof. It must not invent a derived formal for body fields. This metadata increment does not enable call lowering or authorize Typer changes. |
 
 Before publishing any future class bytes, the projection must validate the
 owner, source-to-derived parameter binding, field/parameter type agreement,
@@ -138,9 +138,10 @@ mutability, visibility, and explicit source order. A malformed or stale
 identity must be a typed rejection. Generated JVM signatures must be checked
 for collisions against user-declared and other generated members; the policy
 must reject ambiguity before artifact publication rather than silently
-shadowing either member. Accessor metadata performs these checks. Emitted
-classes contain the checked backing fields, constructor stores, generated
-getters, and setters for mutable accessors.
+shadowing either member. Accessor metadata performs these checks. The current
+emitter uses constructor accessor metadata for checked backing fields, stores,
+getters, and setters. Class-body accessor metadata is signature-only in #1580;
+body initialization and generated accessor code remain a later increment.
 
 ## Scope matrix
 
@@ -151,7 +152,8 @@ getters, and setters for mutable accessors.
 | `Ref(val item: Measurement)` | Emits private-final planned reference storage, copies the exact reference formal after direct-super initialization, and emits `item()LMeasurement;`. |
 | Plain constructor parameter | Existing distinct class-owned and constructor-owned parameter identities remain; it does not gain an accessor by implication. |
 | Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
-| `private[this]`, class-body public fields, `lazy`, visibility variants | Deferred; no ABI claim is made by this audit. |
+| Ordinary class-body public `val`/`var` | Metadata projection is covered by #1580 using the #1578 Scala 3.9.0 ABI audit and #1579 exact source/RHS proof. Backing fields are private (final for `val`); getters are public and vars also have public `_$eq` setters. This is signature metadata only: no body-field initialization or generated accessor code is emitted by this increment. |
+| `private[this]`, `lazy`, other visibility variants | Deferred; no ABI claim is made by this audit. |
 | Secondary, defaulted, multiple-clause, or `using` constructors | Deferred. |
 | Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. Accessor metadata is rejected on non-Object subclasses and across planned accessor-inheritance edges until generated signatures participate in override/bridge validation. |
 | Accessor-bearing class with a planned non-Object parent | Rejected with `UnsupportedJvmAccessorInheritance`, before accessor metadata is returned. This prevents generated getter/setter signatures from bypassing inherited final-method and override checks. |
