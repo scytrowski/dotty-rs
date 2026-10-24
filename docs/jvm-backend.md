@@ -1006,8 +1006,8 @@ source parameter tree, source ordinal, and mutability. Class metadata
 revalidates both symbols' owners and origins, class declaration-scope
 membership, unique field identity, matching completed field/formal types, and
 mutability before exposing `JvmClassMetadata::accessor_bindings()`. This is
-planning evidence only: it does not add field storage, generated methods, or
-bytecode.
+planning evidence; accessor field storage and constructor stores are added by
+the separate JVM-only projection and initializer plan below.
 
 `JvmClassMetadata::accessors()` separately exposes the checked JVM projection
 for each binding: private backing-field name, descriptor and flags, public
@@ -1018,8 +1018,9 @@ canonical source IDs, and rejects field or binary method-signature collisions
 against planned fields and methods. Accessor-bearing inheritance edges are
 rejected with `UnsupportedJvmAccessorInheritance` until generated signatures
 participate in override and final-method validation. The projection does not
-add semantic symbols, ordinary field initializers, or class-file members;
-accessor and constructor emission remain later increments.
+add semantic symbols or ordinary source field initializers. Whole-class
+emission writes the checked private backing fields and constructor stores;
+generated accessor methods remain a later increment.
 
 `JvmClassMetadata::constructor()` exposes the explicit constructor's canonical
 symbol, owner internal name, descriptor, access flags, and ordered
@@ -1045,8 +1046,8 @@ Store-only `JvmClassPlan::metadata` entry points remain primitive-only because
 they cannot prove a complete emission unit. Source proof rejection does not
 publish partial metadata or mutate semantic state. Emission creates only the
 proved constructor, with its exact descriptor and access flags; it does not add
-a fallback constructor, Scala accessors, field stores outside the approved
-initializer path, or `new` expressions.
+a fallback constructor, generated Scala getter/setter methods, field stores
+outside the approved initializer path, or `new` expressions.
 
 `JvmCompilationUnit::resolve_constructor_call` resolves the exact typed shape
 `Apply(Select(New(TypeTree(C)), <init>), args)` to a planned class and its
@@ -1062,7 +1063,8 @@ rejected.
 ### Constructor field initializer fragments
 
 `JvmCompilationUnit::lower_constructor_field_initializers` consumes the
-validated `PrimaryConstructor` metadata and the ordered `JvmFieldPlan` list.
+validated `PrimaryConstructor` metadata, accessor metadata, and ordered
+`JvmFieldPlan` list.
 The frontend obtains each field's source RHS from its canonical source
 declaration, calls `field_initializer_context_for(field)`, types that RHS once,
 and supplies the exact `TreeId<Typed>` retained in `SourceTypedIndex`. It
@@ -1083,11 +1085,20 @@ forward field reads, reference field reads, user method calls, `this` escape,
 control-flow expressions, and other unsupported typed nodes fail with
 contextual `JvmCodegenError`s.
 
-`JvmConstructorFieldInitializerPlan::append_to` appends only those field
-instructions. `emit_class` emits `aload_0; invokespecial
-<direct-parent>.<init>()V` before the plan and appends `return` afterward. It
-also installs the validated private field_info entries and uses the exact
-constructor descriptor and access flags from metadata.
+The plan stores constructor accessor copies separately as
+`JvmConstructorAccessorInitializer` records because they have no source RHS.
+Each record retains the canonical source field and constructor-owned parameter
+IDs, source ordinal, exact local slot/width, type, field name, and descriptor.
+Lowering matches the formal by identity and ordinal, then checks type and
+category width. `append_to` emits accessor stores in constructor parameter
+order before ordinary class-body field initializer fragments. `emit_class`
+emits `aload_0; invokespecial <direct-parent>.<init>()V` before the plan and
+appends `return` afterward. It installs both validated accessor backing
+field_info entries and ordinary private field entries and uses the exact
+constructor descriptor and access flags from metadata. The pinned Scala 3.9.0
+oracle stores simple constructor accessors before `Object.<init>`; this backend
+follows #1556's stricter initialized-`this` ordering, so constructor bytes are
+not identical to the oracle's instruction order.
 
 ### Combined super-call fixture
 
