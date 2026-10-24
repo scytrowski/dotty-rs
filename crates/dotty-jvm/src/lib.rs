@@ -512,6 +512,18 @@ pub enum InvalidJvmClassInfoKind {
     InvalidDeclaration,
 }
 
+/// Why accessor call-site metadata no longer agrees with its source field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmAccessorCallMetadataIssue {
+    DuplicateField,
+    OwnerMismatch,
+    BindingMissing,
+    ValueTypeMismatch,
+    BackingFieldFlagsMismatch,
+    GetterSignatureMismatch,
+    SetterSignatureMismatch,
+}
+
 /// Borrowed input for validating one or more class plans.
 ///
 /// The semantic store and typed AST remain owned by the caller. Plans retain
@@ -833,6 +845,13 @@ pub enum JvmCodegenError {
     UnsupportedJvmFieldReceiver {
         tree: TreeId<Typed>,
         field: SymbolId,
+    },
+    /// Validated constructor-accessor ABI metadata disagrees with the source field.
+    InvalidJvmAccessorCallMetadata {
+        tree: TreeId<Typed>,
+        field: SymbolId,
+        owner: SymbolId,
+        issue: JvmAccessorCallMetadataIssue,
     },
     /// A field read is outside the currently modeled CFG stack flow.
     JvmFieldReadInUnsupportedControlFlow {

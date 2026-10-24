@@ -9747,6 +9747,261 @@ fn verify_with_jdk(output_directory: &Path) {
 }
 
 #[test]
+fn real_source_accessor_calls_dispatch_through_validated_getters_and_setters() {
+    let source = r#"
+class Counter(val id: Int, var count: Long) {
+  def ownRead(): Long = this.count
+  def ownReadId(): Int = this.id
+  def ownUnqualifiedRead(): Long = count
+  def ownWrite(next: Long): Unit = this.count = next
+}
+class OtherCounter(var count: Long)
+class CounterFactory(var events: Int) {
+  def receiver(c: Counter): Counter = { events = events * 10 + 1; c }
+  def value(next: Long): Long = { events = events * 10 + 2; next }
+}
+class PrivateCounter {
+  private var count: Long = 0L
+  def read(): Long = this.count
+  def write(next: Long): Unit = this.count = next
+}
+class Reader {
+  def readId(c: Counter): Int = c.id
+  def readCount(c: Counter): Long = c.count
+  def write(c: Counter, next: Long): Unit = c.count = next
+  def readOther(c: OtherCounter): Long = c.count
+  def localRead(c: Counter): Long = { val local = c; local.count }
+  def localWrite(c: Counter, next: Long): Long = { val local = c; local.count = next; local.count }
+  def writeOnce(factory: CounterFactory, c: Counter, next: Long): Unit =
+    factory.receiver(c).count = factory.value(next)
+}
+"#;
+    let first_output = TestOutputDirectory::new("accessor-call-first");
+    let second_output = TestOutputDirectory::new("accessor-call-second");
+    let first = compile_source_batch(
+        source,
+        "AccessorCalls.scala",
+        first_output.path(),
+        SourceId::from_index(1562),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("real typed accessor selections and assignments lower through the call pipeline");
+    let second = compile_source_batch(
+        source,
+        "AccessorCalls.scala",
+        second_output.path(),
+        SourceId::from_index(1563),
+        SourceUnitCardinality::AtLeastTwo,
+    )
+    .expect("a fresh source session emits the same accessor call batch");
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| artifact.class.internal_name())
+            .collect::<Vec<_>>(),
+        [
+            "Counter",
+            "OtherCounter",
+            "CounterFactory",
+            "PrivateCounter",
+            "Reader"
+        ]
+    );
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.class.internal_name().to_owned(),
+                    artifact.class.bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+
+    let counter = decode_emitted_class_named(&first, "Counter");
+    let other_counter = decode_emitted_class_named(&first, "OtherCounter");
+    let private_counter = decode_emitted_class_named(&first, "PrivateCounter");
+    let reader = decode_emitted_class_named(&first, "Reader");
+
+    for (method, expected) in [
+        ("ownRead", &[(0xb6, "Counter", "count", "()J")][..]),
+        ("ownReadId", &[(0xb6, "Counter", "id", "()I")][..]),
+        (
+            "ownUnqualifiedRead",
+            &[(0xb6, "Counter", "count", "()J")][..],
+        ),
+        ("ownWrite", &[(0xb6, "Counter", "count_$eq", "(J)V")][..]),
+    ] {
+        assert_invocation_sequence(&counter, emitted_method_code(&counter, method), expected);
+    }
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readId"),
+        &[(0xb6, "Counter", "id", "()I")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readCount"),
+        &[(0xb6, "Counter", "count", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "write"),
+        &[(0xb6, "Counter", "count_$eq", "(J)V")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "readOther"),
+        &[(0xb6, "OtherCounter", "count", "()J")],
+    );
+    assert_field_reference(
+        &other_counter,
+        emitted_method_code(&other_counter, "count"),
+        0xb4,
+        "OtherCounter",
+        "count",
+        "J",
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "localRead"),
+        &[(0xb6, "Counter", "count", "()J")],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "localWrite"),
+        &[
+            (0xb6, "Counter", "count_$eq", "(J)V"),
+            (0xb6, "Counter", "count", "()J"),
+        ],
+    );
+    assert_invocation_sequence(
+        &reader,
+        emitted_method_code(&reader, "writeOnce"),
+        &[
+            (0xb6, "CounterFactory", "receiver", "(LCounter;)LCounter;"),
+            (0xb6, "CounterFactory", "value", "(J)J"),
+            (0xb6, "Counter", "count_$eq", "(J)V"),
+        ],
+    );
+    for method in [
+        "readId",
+        "readCount",
+        "write",
+        "readOther",
+        "localRead",
+        "localWrite",
+        "writeOnce",
+    ] {
+        assert_no_field_reference_to_owner(
+            &reader,
+            emitted_method_code(&reader, method),
+            "Counter",
+        );
+    }
+    assert_field_reference(
+        &private_counter,
+        emitted_method_code(&private_counter, "read"),
+        0xb4,
+        "PrivateCounter",
+        "count",
+        "J",
+    );
+    assert_field_reference(
+        &private_counter,
+        emitted_method_code(&private_counter, "write"),
+        0xb5,
+        "PrivateCounter",
+        "count",
+        "J",
+    );
+    assert_eq!(
+        methods_with_descriptors(&counter)
+            .iter()
+            .filter(|(name, _)| name.as_str() == "id" || name.as_str() == "count")
+            .map(|(name, descriptor)| (name.as_str(), descriptor.as_str()))
+            .collect::<Vec<_>>(),
+        [("id", "()I"), ("count", "()J")]
+    );
+    assert!(
+        !methods_with_descriptors(&counter)
+            .iter()
+            .any(|(name, _)| name == "id_$eq"),
+        "a val has no generated setter"
+    );
+
+    if require_jdk_or_skip() {
+        let harness = first_output.path().join("AccessorCallsHarness.java");
+        fs::write(
+            &harness,
+            r#"public final class AccessorCallsHarness {
+  private static void check(boolean condition, String label) { if (!condition) throw new AssertionError(label); }
+  public static void main(String[] args) {
+    Counter first = new Counter(7, 10L);
+    Counter second = new Counter(-3, 20L);
+    Reader reader = new Reader();
+    check(first.ownRead() == 10L && first.ownReadId() == 7 && first.ownUnqualifiedRead() == 10L, "this and unqualified getters");
+    check(reader.readId(first) == 7 && reader.readCount(first) == 10L, "parameter getters");
+    reader.write(first, Long.MIN_VALUE + 9);
+    check(first.count() == Long.MIN_VALUE + 9 && second.count() == 20L, "parameter setter and instance isolation");
+    check(reader.localRead(second) == 20L, "stable local getter");
+    check(reader.localWrite(second, Long.MAX_VALUE - 4) == Long.MAX_VALUE - 4 && second.count() == Long.MAX_VALUE - 4, "stable local setter/getter and Long width");
+    OtherCounter other = new OtherCounter(31L);
+    check(reader.readOther(other) == 31L, "canonical same-named field owner");
+    CounterFactory factory = new CounterFactory(0);
+    reader.writeOnce(factory, first, 88L);
+    check(factory.events() == 12 && first.count() == 88L, "receiver then RHS exactly once");
+    System.out.println("accessor calls ok");
+  }
+}
+"#,
+        )
+        .expect("write Java accessor call harness");
+        let classpath = first_output.path().to_str().expect("UTF-8 classpath");
+        let javac = Command::new("javac")
+            .args(["--release", "21", "-classpath", classpath, "-d", classpath])
+            .arg(&harness)
+            .output()
+            .expect("start javac for source accessor call harness");
+        assert!(
+            javac.status.success(),
+            "javac rejected AccessorCallsHarness.java\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&javac.stdout),
+            String::from_utf8_lossy(&javac.stderr)
+        );
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                classpath,
+                "AccessorCallsHarness",
+            ])
+            .output()
+            .expect("start Java 21 verifier for source accessor call harness");
+        assert!(
+            java.status.success(),
+            "java -Xverify:all rejected accessor call classes\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&java.stdout),
+            String::from_utf8_lossy(&java.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&java.stdout).trim(),
+            "accessor calls ok"
+        );
+    }
+}
+
+#[test]
 fn constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends() {
     let source = "class Measurement(val id: Int, var value: Double)\nclass Mixed(first: Int, val count: Long, var enabled: Boolean)\nclass LongBox(var count: Long)\n";
     let first_output = TestOutputDirectory::new("constructor-accessor-source-first");
@@ -17197,6 +17452,15 @@ fn decode_emitted_class(artifact: &EmittedArtifact) -> ClassFile<'_> {
     class
 }
 
+fn decode_emitted_class_named<'a>(artifacts: &'a [EmittedArtifact], name: &str) -> ClassFile<'a> {
+    decode_emitted_class(
+        artifacts
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("missing emitted class {name}")),
+    )
+}
+
 fn methods_with_descriptors(class: &ClassFile<'_>) -> Vec<(String, String)> {
     class
         .methods
@@ -17317,6 +17581,27 @@ fn assert_field_reference_sequence(
         actual, expected,
         "unexpected ordered field references in code"
     );
+}
+
+fn assert_no_field_reference_to_owner(class: &ClassFile<'_>, code: &[u8], owner: &str) {
+    for (offset, opcode) in decode_subset_instructions(code) {
+        if !matches!(opcode, 0xb4 | 0xb5) {
+            continue;
+        }
+        let index = u16::from_be_bytes([code[offset + 1], code[offset + 2]]);
+        let ConstantPoolEntry::Fieldref { class_index, .. } = class
+            .constant_pool
+            .get(ConstantPoolIndex(index))
+            .expect("field access references a constant-pool entry")
+        else {
+            panic!("field access must reference Fieldref");
+        };
+        assert_ne!(
+            class.constant_pool.class_name(*class_index),
+            Ok(owner),
+            "external accessor call must not access private backing storage"
+        );
+    }
 }
 
 fn assert_javap_instruction_sequence(output: &str, method_header: &str, expected: &[&str]) {
