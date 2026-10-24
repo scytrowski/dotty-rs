@@ -7697,11 +7697,16 @@ fn canonical_int_arithmetic_and_comparisons_lower_to_ordered_jvm_instructions() 
 }
 
 #[test]
-fn int_equality_remains_outside_the_relational_intrinsic_subset() {
+fn int_equality_types_but_remains_outside_the_relational_intrinsic_subset() {
     assert_source_failure(
         "int-equality-not-lowered",
         "class UnsupportedEquality { def equal(a: Int, b: Int): Boolean = a == b }\n",
-        |failure| matches!(failure, PipelineFailure::Typer(_)),
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::IntIntrinsicResolution { .. })
+            )
+        },
     );
 }
 

@@ -845,6 +845,13 @@ fn identity_operators_reject_foreign_primitive_trait_and_generic_members() {
     );
     for (name, method, rhs) in methods {
         let context = typer.expression_context_for(method).unwrap();
+        if name == "universal" {
+            let typed = typer
+                .type_expression(rhs, context)
+                .expect("universal equality should resolve through Any.==");
+            assert_eq!(typer.typed_ast().get(typed).ty, definitions.boolean);
+            continue;
+        }
         let error = typer.type_expression(rhs, context).unwrap_err();
         match (name.as_str(), error) {
             ("incompatible", TyperError::OverloadApplicationNoApplicable { .. }) => {}

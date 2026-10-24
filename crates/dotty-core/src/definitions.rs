@@ -97,6 +97,36 @@ impl AnyRefIdentityOperatorSymbols {
     }
 }
 
+/// The canonical source identities for Scala's universal equality operators.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnyEqualityOperatorSymbols {
+    pub equal: SymbolId,
+    pub not_equal: SymbolId,
+}
+
+impl AnyEqualityOperatorSymbols {
+    /// Returns the canonical methods in source spelling order.
+    pub const fn all(self) -> [SymbolId; 2] {
+        [self.equal, self.not_equal]
+    }
+}
+
+/// A malformed compiler-known universal equality member registry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnyEqualityOperatorRegistrationError {
+    /// The captured symbols, owner scope, flags, or signatures no longer match
+    /// the canonical compiler definitions.
+    MalformedCanonicalEntries,
+}
+
+impl std::fmt::Display for AnyEqualityOperatorRegistrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for AnyEqualityOperatorRegistrationError {}
+
 /// A malformed compiler-known AnyRef identity member registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnyRefIdentityOperatorRegistrationError {
@@ -302,6 +332,10 @@ pub struct Definitions {
     /// metadata because `object_class` currently represents both identities.
     any_ref_identity_operators: Option<AnyRefIdentityOperatorSymbols>,
     any_ref_identity_scope: Option<ScopeId>,
+    /// Compiler-synthesized `Any.==/!=` methods are tracked outside the class
+    /// info, matching Scala's intrinsic Any class definitions.
+    any_equality_operators: Option<AnyEqualityOperatorSymbols>,
+    any_equality_scope: Option<ScopeId>,
 }
 
 impl Definitions {
@@ -359,6 +393,8 @@ impl Definitions {
             boolean_primitive_operators: None,
             any_ref_identity_operators: None,
             any_ref_identity_scope: None,
+            any_equality_operators: None,
+            any_equality_scope: None,
         };
 
         // `Int` is a compiler-owned class shell rather than a classfile
@@ -376,6 +412,123 @@ impl Definitions {
             .ensure_any_ref_identity_operators(store)
             .expect("fresh builtin Object identity should accept AnyRef operators");
         definitions
+            .ensure_any_equality_operators(store)
+            .expect("fresh builtin Any class should accept universal equality operators");
+        definitions
+    }
+
+    /// Returns the canonical compiler-synthesized `Any.==/!=` identities.
+    pub const fn any_equality_operator_ids(&self) -> Option<AnyEqualityOperatorSymbols> {
+        self.any_equality_operators
+    }
+
+    /// Ensures the canonical source identities for Scala's universal
+    /// equality members are registered in their compiler-owned semantic
+    /// scope. Scala 3.9 synthesizes these methods on `Any` rather than loading
+    /// a classfile/TASTy declaration for `scala.Any`.
+    pub fn ensure_any_equality_operators(
+        &mut self,
+        store: &mut SemanticStore,
+    ) -> Result<AnyEqualityOperatorSymbols, AnyEqualityOperatorRegistrationError> {
+        if self.any_equality_operators.is_none() || self.any_equality_scope.is_none() {
+            let (operators, scope) = self.register_any_equality_operators(store);
+            self.any_equality_operators = Some(operators);
+            self.any_equality_scope = Some(scope);
+        }
+        self.any_equality_operator_symbols(store)
+            .ok_or(AnyEqualityOperatorRegistrationError::MalformedCanonicalEntries)
+    }
+
+    /// Validates the captured `Any.==/!=` identities. A malformed store is
+    /// rejected instead of repaired from operator spelling.
+    pub fn any_equality_operator_symbols(
+        &self,
+        store: &SemanticStore,
+    ) -> Option<AnyEqualityOperatorSymbols> {
+        let ids = self.any_equality_operators?;
+        let scope = self.any_equality_scope?;
+        if ids.equal == ids.not_equal || !store.scopes.contains(scope) {
+            return None;
+        }
+        let scope_data = store.scopes.get(scope);
+        if scope_data.owner != Some(self.any_class) || scope_data.entered_symbols().count() != 2 {
+            return None;
+        }
+        for (symbol, spelling) in [(ids.equal, "=="), (ids.not_equal, "!=")] {
+            if !store.symbols.contains(symbol) {
+                return None;
+            }
+            let member = store.symbols.get(symbol);
+            let name = Name::new(store.names.get(spelling)?, Namespace::Term);
+            if member.name != name
+                || member.owner != Some(self.any_class)
+                || member.kind != SymbolKind::Method
+                || member.origin != SymbolOrigin::Builtin
+                || member.visibility != Visibility::Public
+                || member.flags != SymbolFlags::FINAL
+                || scope_data.lookup_all(&name) != [symbol]
+            {
+                return None;
+            }
+            let SymbolInfo::Complete(info) = member.info else {
+                return None;
+            };
+            let Some(Type::Method(method)) = store.types.try_get(info) else {
+                return None;
+            };
+            if method.kind != MethodKind::Plain
+                || method.params.len() != 1
+                || method.params[0].ty != self.any_type
+                || method.params[0].erased
+                || method.params[0].varargs
+                || method.result != self.boolean
+            {
+                return None;
+            }
+        }
+        Some(ids)
+    }
+
+    fn register_any_equality_operators(
+        &self,
+        store: &mut SemanticStore,
+    ) -> (AnyEqualityOperatorSymbols, ScopeId) {
+        let scope = store.scopes.alloc(Scope::new(Some(self.any_class)));
+        let mut ids = [None; 2];
+        for (index, spelling) in ["==", "!="].into_iter().enumerate() {
+            let name = Name::new(store.names.intern(spelling), Namespace::Term);
+            let info = store.types.alloc(Type::Method(MethodType {
+                params: vec![MethodParam {
+                    name: TermName::new(store.names.intern("that")),
+                    ty: self.any_type,
+                    erased: false,
+                    varargs: false,
+                }],
+                result: self.boolean,
+                kind: MethodKind::Plain,
+            }));
+            let symbol = store.symbols.alloc(Symbol {
+                name,
+                owner: Some(self.any_class),
+                kind: SymbolKind::Method,
+                flags: SymbolFlags::FINAL,
+                visibility: Visibility::Public,
+                info: SymbolInfo::Complete(info),
+                origin: SymbolOrigin::Builtin,
+                annotations: Vec::new(),
+                position: None,
+                links: SymbolLinks::default(),
+            });
+            store.scopes.get_mut(scope).enter(name, symbol);
+            ids[index] = Some(symbol);
+        }
+        (
+            AnyEqualityOperatorSymbols {
+                equal: ids[0].expect("== symbol was just allocated"),
+                not_equal: ids[1].expect("!= symbol was just allocated"),
+            },
+            scope,
+        )
     }
 
     /// Returns the compiler-known `AnyRef.eq/ne` identities captured during
@@ -1530,6 +1683,52 @@ mod tests {
             assert!(!method.params[0].varargs);
             assert_eq!(method.result, definitions.boolean);
         }
+    }
+
+    #[test]
+    fn any_equality_operators_have_canonical_scoped_source_signatures() {
+        let mut store = SemanticStore::new();
+        let mut definitions = Definitions::bootstrap(&mut store);
+        let operators = definitions.any_equality_operator_symbols(&store).unwrap();
+        assert_eq!(definitions.any_equality_operator_ids(), Some(operators));
+        assert_eq!(
+            definitions.ensure_any_equality_operators(&mut store),
+            Ok(operators)
+        );
+        assert_ne!(operators.equal, operators.not_equal);
+
+        for (symbol, spelling) in [(operators.equal, "=="), (operators.not_equal, "!=")] {
+            let member = store.symbols.get(symbol);
+            assert_eq!(member.kind, SymbolKind::Method);
+            assert_eq!(member.owner, Some(definitions.any_class));
+            assert_eq!(member.origin, SymbolOrigin::Builtin);
+            assert_eq!(member.visibility, Visibility::Public);
+            assert_eq!(member.flags, SymbolFlags::FINAL);
+            assert_eq!(store.names.resolve(member.name.text()), spelling);
+            let SymbolInfo::Complete(info) = member.info else {
+                panic!("Any equality operator must have completed method info");
+            };
+            let Type::Method(method) = store.types.get(info) else {
+                panic!("Any equality operator must have a MethodType");
+            };
+            assert_eq!(method.kind, MethodKind::Plain);
+            assert_eq!(method.params.len(), 1);
+            assert_eq!(method.params[0].ty, definitions.any_type);
+            assert!(!method.params[0].erased);
+            assert!(!method.params[0].varargs);
+            assert_eq!(method.result, definitions.boolean);
+        }
+
+        store.symbols.get_mut(operators.equal).flags = SymbolFlags::FINAL | SymbolFlags::STATIC;
+        assert_eq!(
+            definitions.any_equality_operator_symbols(&store),
+            None,
+            "a static symbol must not pass as a universal equality method"
+        );
+        assert_eq!(
+            definitions.ensure_any_equality_operators(&mut store),
+            Err(AnyEqualityOperatorRegistrationError::MalformedCanonicalEntries)
+        );
     }
 
     #[test]

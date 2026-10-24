@@ -2,7 +2,34 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
-## Latest increment: Scala and JVM array conformance
+## Latest increment: universal equality
+
+This increment starts from `main` at
+`ed3325e57395a315b5e8b78cd9a9c0ca0bbc379d`, after #1593. The pinned Scala
+3.9.0 compiler synthesizes final `Any.==` and `Any.!=` methods. The source typer
+now registers these canonical builtin symbols, resolves universal equality
+when ordinary member lookup cannot find it, and rejects statically incompatible
+primitive/reference operand pairs. The implementation keeps normal source
+members authoritative and preserves their symbol identity.
+
+The Scala 3.9 oracle accepts equality on `Any`, Boolean, numerics within the
+numeric group, and references, and rejects `Int == String` with “Values of
+types Int and String cannot be compared with == or !=”. Focused tests cover
+both operators, literal and widened numeric operands, `Any` with `Int`, and
+incompatible primitive/reference pairs. Oracle fixture details are recorded in
+[`UniversalEquality.oracle.md`](../crates/dotty-typer/tests/fixtures/universal-equality/UniversalEquality.oracle.md).
+
+The deterministic `package-term` comparison uses the same 60 files and 369
+methods before and after the equality change. Both runs typed zero complete
+methods and had no parser or namer failures. Aggregate first-blocker counts
+were unchanged (`ApplicationArgumentConformanceUnsupported=1`,
+`MemberNotFound=6`, `SymbolResolution=91`, all other blockers=271). However,
+the three `InlineInfoAttribute.read` attempts progress past `version == 1` and
+now stop at `flags & 1`; the blocker remains `MemberNotFound`. No full method
+typing is claimed. Per-row movement is recorded in
+[`typer-name-resolution-1566-universal-equality-3.9.0.tsv`](typer-name-resolution-1566-universal-equality-3.9.0.tsv).
+
+## Previous increment: Scala and JVM array conformance
 
 This increment starts from `main` at `844c8f4965992504cfa21598309d6650c90d2b9d`,
 after #1591. It allows the canonical `scala.Array[T]` and `Type::JavaArray`
@@ -162,8 +189,11 @@ tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
   --verify-determinism target/issue-1566-latest-baseline.md
 ```
 
-The deterministic latest audit for the array-conformance increment used the
-same command with `target/issue-1566-array-audit-final.md` as the output and
-`target/issue-1566-array-audit-final-runs` as `DOTTY_AUDIT_TMP_ROOT`. It ran
-after removing temporary diagnostics and incorporating the reviewer fixes; the
-normalized reports and resolver sidecars matched across runs.
+The deterministic audit for the array-conformance increment used the same
+command with `target/issue-1566-array-audit-final.md` as the output and
+`target/issue-1566-array-audit-final-runs` as `DOTTY_AUDIT_TMP_ROOT`. The
+universal-equality increment used `target/issue-1566-equality-final.md` and
+`target/issue-1566-equality-final-runs`; both normalized reports and resolver
+sidecars matched across runs. The equality audit was run after removing
+temporary diagnostics. Its result shows the same first-blocker counts while
+the three noted expressions advance from `version == 1` to `flags & 1`.

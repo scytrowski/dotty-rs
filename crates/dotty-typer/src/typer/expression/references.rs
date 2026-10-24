@@ -1086,6 +1086,108 @@ impl SourceTyper<'_> {
         symbol == operators.eq || symbol == operators.ne
     }
 
+    pub(in crate::typer) fn any_equality_operator_name(&self, name: Name) -> bool {
+        matches!(self.store.names.resolve(name.text()), "==" | "!=")
+    }
+
+    pub(in crate::typer) fn any_equality_operator_symbol(&self, name: Name) -> Option<SymbolId> {
+        let operators = self.definitions.any_equality_operator_symbols(self.store)?;
+        match self.store.names.resolve(name.text()) {
+            "==" => Some(operators.equal),
+            "!=" => Some(operators.not_equal),
+            _ => None,
+        }
+    }
+
+    pub(in crate::typer) fn is_any_equality_symbol(&self, symbol: SymbolId) -> bool {
+        self.definitions
+            .any_equality_operator_symbols(self.store)
+            .is_some_and(|operators| symbol == operators.equal || symbol == operators.not_equal)
+    }
+
+    pub(in crate::typer) fn is_canonical_any_receiver(&self, receiver: TypeId) -> bool {
+        matches!(
+            self.store.types.try_get(receiver),
+            Some(Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(class),
+            }) if *prefix == self.definitions.no_prefix && *class == self.definitions.any_class
+        )
+    }
+
+    pub(in crate::typer) fn universal_equality_operands_compatible(
+        &self,
+        left: TypeId,
+        right: TypeId,
+    ) -> bool {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum PrimitiveEqualityGroup {
+            Numeric,
+            Boolean,
+            Unit,
+        }
+
+        fn primitive_group(typer: &SourceTyper<'_>, ty: TypeId) -> Option<PrimitiveEqualityGroup> {
+            let Type::TypeRef {
+                target: TypeRefTarget::Symbol(class),
+                ..
+            } = typer.store.types.try_get(ty)?
+            else {
+                return None;
+            };
+            if [
+                typer.definitions.byte,
+                typer.definitions.char,
+                typer.definitions.short,
+                typer.definitions.int,
+                typer.definitions.long,
+                typer.definitions.float,
+                typer.definitions.double,
+            ]
+            .iter()
+            .any(|primitive| typer.store.types.get(*primitive).reference_symbol() == Some(*class))
+            {
+                Some(PrimitiveEqualityGroup::Numeric)
+            } else if typer
+                .store
+                .types
+                .get(typer.definitions.boolean)
+                .reference_symbol()
+                == Some(*class)
+            {
+                Some(PrimitiveEqualityGroup::Boolean)
+            } else if typer
+                .store
+                .types
+                .get(typer.definitions.unit)
+                .reference_symbol()
+                == Some(*class)
+            {
+                Some(PrimitiveEqualityGroup::Unit)
+            } else {
+                None
+            }
+        }
+
+        let is_any_or_nothing = |ty| {
+            matches!(
+                self.store.types.try_get(ty),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                }) if *class == self.definitions.any_class || *class == self.definitions.nothing_class
+            )
+        };
+        if is_any_or_nothing(left) || is_any_or_nothing(right) {
+            return true;
+        }
+        match (primitive_group(self, left), primitive_group(self, right)) {
+            (Some(left), Some(right)) => left == right,
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     /// Produces the nominal view used only for checking a `this` value against
     /// the canonical AnyRef identity parameter. The typed tree keeps its
     /// original ThisType and source identity.

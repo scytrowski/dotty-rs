@@ -95,47 +95,110 @@ impl SourceTyper<'_> {
                 member: None,
                 rejection: None,
             }]
-        } else {
-            let members = self
-                .lookup_overload_members_journaled(receiver, operator, info_journal)
-                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
-            if members.is_empty() {
+        } else if self.any_equality_operator_name(operator)
+            && self.is_canonical_any_receiver(receiver)
+        {
+            let Some(symbol) = self.any_equality_operator_symbol(operator) else {
                 return Err(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,
                     receiver,
                     name: operator,
                 });
-            }
-            if members
-                .iter()
-                .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
-            {
-                return Err(TyperError::MixedApplicationCandidateKinds {
+            };
+            let SymbolInfo::Complete(callable) = self.store.symbols.get(symbol).info else {
+                return Err(TyperError::MemberNotFound {
                     source: self.source,
                     tree_index,
-                    candidates: members.iter().map(|member| member.symbol).collect(),
+                    receiver,
+                    name: operator,
                 });
-            }
-            members
-                .into_iter()
-                .map(|member| {
-                    let callable = self.member_type_on_journaled(&member, info_journal)?;
-                    self.validate_overload_callable(member.symbol, callable)?;
-                    Ok(ApplicationCandidate {
-                        symbol: member.symbol,
-                        callable,
-                        member: Some(member),
-                        rejection: None,
+            };
+            self.validate_overload_callable(symbol, callable)?;
+            vec![ApplicationCandidate {
+                symbol,
+                callable,
+                member: None,
+                rejection: None,
+            }]
+        } else {
+            let members = self
+                .lookup_overload_members_journaled(receiver, operator, info_journal)
+                .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+            if members.is_empty() && self.any_equality_operator_name(operator) {
+                let Some(symbol) = self.any_equality_operator_symbol(operator) else {
+                    return Err(TyperError::MemberNotFound {
+                        source: self.source,
+                        tree_index,
+                        receiver,
+                        name: operator,
+                    });
+                };
+                let SymbolInfo::Complete(callable) = self.store.symbols.get(symbol).info else {
+                    return Err(TyperError::MemberNotFound {
+                        source: self.source,
+                        tree_index,
+                        receiver,
+                        name: operator,
+                    });
+                };
+                self.validate_overload_callable(symbol, callable)?;
+                vec![ApplicationCandidate {
+                    symbol,
+                    callable,
+                    member: None,
+                    rejection: None,
+                }]
+            } else {
+                if members.is_empty() {
+                    return Err(TyperError::MemberNotFound {
+                        source: self.source,
+                        tree_index,
+                        receiver,
+                        name: operator,
+                    });
+                }
+                if members
+                    .iter()
+                    .any(|member| self.store.symbols.get(member.symbol).kind != SymbolKind::Method)
+                {
+                    return Err(TyperError::MixedApplicationCandidateKinds {
+                        source: self.source,
+                        tree_index,
+                        candidates: members.iter().map(|member| member.symbol).collect(),
+                    });
+                }
+                members
+                    .into_iter()
+                    .map(|member| {
+                        let callable = self.member_type_on_journaled(&member, info_journal)?;
+                        self.validate_overload_callable(member.symbol, callable)?;
+                        Ok(ApplicationCandidate {
+                            symbol: member.symbol,
+                            callable,
+                            member: Some(member),
+                            rejection: None,
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, TyperError>>()?
+                    .collect::<Result<Vec<_>, TyperError>>()?
+            }
         };
 
         let typed =
             self.type_value_expression_inner(argument_tree, context, info_journal, new_mappings)?;
         let own_type = self.typed_arena.get(typed).ty;
         let widened_type = self.widen_expression_type_journaled(own_type, info_journal, 0)?;
+        if candidates.len() == 1
+            && self.is_any_equality_symbol(candidates[0].symbol)
+            && !self.universal_equality_operands_compatible(receiver, widened_type)
+        {
+            return Err(TyperError::IncompatibleEqualityOperands {
+                source: self.source,
+                tree_index,
+                left: receiver,
+                right: widened_type,
+            });
+        }
         let widened_type =
             if candidates.len() == 1 && self.is_any_ref_identity_symbol(candidates[0].symbol) {
                 self.any_ref_identity_argument_view(widened_type)
