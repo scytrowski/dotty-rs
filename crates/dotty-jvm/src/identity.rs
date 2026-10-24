@@ -556,22 +556,24 @@ pub(super) fn class_metadata(
         methods.push(method);
     }
 
-    let constructor = match &plan.initialization {
+    let (constructor, accessor_bindings) = match &plan.initialization {
         crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) => {
             let class_identities = descriptor_context.map(|(_, identities)| identities);
-            Some(constructor.metadata_with_unit(
+            let metadata = constructor.metadata_with_unit(
                 store,
                 definitions,
                 plan.class,
                 class_identities,
                 superclass,
                 unit,
-            )?)
+            )?;
+            (Some(metadata), constructor.accessor_bindings().to_vec())
         }
-        _ => None,
+        _ => (None, Vec::new()),
     };
     Ok(JvmClassMetadata {
         constructor,
+        accessor_bindings,
         identity,
         superclass: superclass.cloned(),
         fields,

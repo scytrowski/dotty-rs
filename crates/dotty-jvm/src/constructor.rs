@@ -1,4 +1,6 @@
 //! Source identity proof and bounded primary-constructor metadata.
+use std::collections::HashSet;
+
 use crate::{JvmCodegenError, JvmMethodDescriptor, JvmMethodPlan, JvmParameterLocal};
 use dotty_classfile::access_flags::{ACC_PRIVATE, ACC_PUBLIC, MethodAccessFlags};
 use dotty_core::ast::{AstArena, Modifier, TreeKind, Typed, TypedAst, Untyped, VisibilitySyntax};
@@ -14,6 +16,68 @@ pub struct JvmConstructorArgumentBinding {
     pub source: TreeId<Untyped>,
     /// Typed replacement for `source` from the same frontend session.
     pub typed: TreeId<Typed>,
+}
+
+/// Canonical source field and derived constructor formal for one primary
+/// constructor `val`/`var` accessor.
+///
+/// This is source and semantic identity evidence only. It does not describe a
+/// JVM field or generated accessor method; consumers may use it to build a
+/// separate JVM-only projection after class metadata validation succeeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmConstructorAccessorBinding {
+    class: SymbolId,
+    constructor: SymbolId,
+    source: SourceId,
+    source_parameter: TreeId<Untyped>,
+    field: SymbolId,
+    parameter: SymbolId,
+    source_ordinal: usize,
+    mutable: bool,
+}
+
+impl JvmConstructorAccessorBinding {
+    /// Canonical class that owns the source field.
+    pub const fn class(&self) -> SymbolId {
+        self.class
+    }
+
+    /// Canonical primary constructor that owns the derived formal.
+    pub const fn constructor(&self) -> SymbolId {
+        self.constructor
+    }
+
+    /// Original source unit containing the parameter declaration.
+    pub const fn source_id(&self) -> SourceId {
+        self.source
+    }
+
+    /// Exact constructor parameter declaration tree that introduced the
+    /// accessor field.
+    pub const fn source_parameter(&self) -> TreeId<Untyped> {
+        self.source_parameter
+    }
+
+    /// Canonical class-owned source `Field` identity.
+    pub const fn field(&self) -> SymbolId {
+        self.field
+    }
+
+    /// Distinct constructor-owned formal `Parameter` identity.
+    pub const fn parameter(&self) -> SymbolId {
+        self.parameter
+    }
+
+    /// Zero-based position in the flattened primary-constructor parameter
+    /// sequence. This is source order, not an inferred JVM slot.
+    pub const fn source_ordinal(&self) -> usize {
+        self.source_ordinal
+    }
+
+    /// Whether the source declaration was `var`.
+    pub const fn is_mutable(&self) -> bool {
+        self.mutable
+    }
 }
 
 /// Source- and symbol-checked direct-super constructor invocation evidence.
@@ -124,6 +188,9 @@ pub enum JvmConstructorIssue {
     SourceShape,
     ParameterIdentity,
     ParameterSignature,
+    AccessorFieldIdentity,
+    AccessorFieldMetadata,
+    AccessorFieldSignature,
     DeclarationScope,
     SecondaryConstructor,
     ResultType,
@@ -143,6 +210,7 @@ pub struct JvmPrimaryConstructorPlan {
     class: SymbolId,
     constructor: SymbolId,
     parameters: Vec<SymbolId>,
+    accessor_bindings: Vec<JvmConstructorAccessorBinding>,
     visibility: Visibility,
     source: dotty_core::SourceId,
     direct_super_constructor: Option<JvmDirectSuperConstructorPlan>,
@@ -167,6 +235,15 @@ impl JvmPrimaryConstructorPlan {
     /// Constructor-owned parameter identities in authoritative source order.
     pub fn parameters(&self) -> &[SymbolId] {
         &self.parameters
+    }
+
+    /// Source-index-derived accessor bindings in constructor parameter order.
+    ///
+    /// These bindings preserve canonical IDs and source provenance. Their
+    /// semantic store invariants are revalidated before they are published in
+    /// [`crate::JvmClassMetadata::accessor_bindings`].
+    pub fn accessor_bindings(&self) -> &[JvmConstructorAccessorBinding] {
+        &self.accessor_bindings
     }
 
     /// Canonical source-proven direct-parent constructor call, if the source
@@ -392,7 +469,10 @@ impl JvmPrimaryConstructorPlan {
         if parameters.len() != source_parameters.len() {
             return Err(fail(JvmConstructorIssue::ParameterIdentity));
         }
-        for (tree, parameter) in source_parameters.iter().zip(&parameters) {
+        let mut accessor_bindings = Vec::new();
+        for (source_ordinal, (tree, parameter)) in
+            source_parameters.iter().zip(&parameters).enumerate()
+        {
             if index.derived_symbol_at(constructor, source, *tree) != Some(*parameter)
                 || index.definition_of(*parameter)
                     != Some(SourceDefinition::Derived {
@@ -408,17 +488,43 @@ impl JvmPrimaryConstructorPlan {
             if def.rhs.is_some()
                 || def.metadata.visibility.is_some()
                 || !def.metadata.annotations.is_empty()
-                || !(def.metadata.modifiers.len() == 2
-                    && def.metadata.modifiers.contains(&Modifier::ParamAccessor)
-                    && def.metadata.modifiers.contains(&Modifier::PrivateLocal))
             {
                 return Err(fail(JvmConstructorIssue::SourceShape));
             }
+            let mutable = match def.metadata.modifiers.as_slice() {
+                [Modifier::ParamAccessor, Modifier::PrivateLocal] => continue,
+                [Modifier::ParamAccessor] => false,
+                [Modifier::ParamAccessor, Modifier::Var] => true,
+                _ => return Err(fail(JvmConstructorIssue::SourceShape)),
+            };
+            let Some(field) = index.symbol_at(source, *tree) else {
+                return Err(fail(JvmConstructorIssue::AccessorFieldIdentity));
+            };
+            if field == *parameter
+                || index.definition_of(field)
+                    != Some(SourceDefinition::Canonical {
+                        source,
+                        tree: *tree,
+                    })
+            {
+                return Err(fail(JvmConstructorIssue::AccessorFieldIdentity));
+            }
+            accessor_bindings.push(JvmConstructorAccessorBinding {
+                class,
+                constructor,
+                source,
+                source_parameter: *tree,
+                field,
+                parameter: *parameter,
+                source_ordinal,
+                mutable,
+            });
         }
         Ok(Self {
             class,
             constructor,
             parameters,
+            accessor_bindings,
             visibility,
             source,
             direct_super_constructor: None,
@@ -466,6 +572,100 @@ impl JvmPrimaryConstructorPlan {
                 || parameter.origin != dotty_core::SymbolOrigin::Source(self.source)
             {
                 return Err(fail(JvmConstructorIssue::ParameterIdentity));
+            }
+        }
+        if self.accessor_bindings.is_empty() {
+            return Ok(());
+        }
+        let SymbolInfo::Complete(class_info_id) = store.symbols.get(owner).info else {
+            return Err(fail(JvmConstructorIssue::AccessorFieldIdentity));
+        };
+        let Some(Type::ClassInfo(class_info)) = store.types.try_get(class_info_id) else {
+            return Err(fail(JvmConstructorIssue::AccessorFieldIdentity));
+        };
+        if class_info.class != owner
+            || !store.scopes.contains(class_info.declarations)
+            || store.scopes.get(class_info.declarations).owner != Some(owner)
+        {
+            return Err(fail(JvmConstructorIssue::AccessorFieldIdentity));
+        }
+        let SymbolInfo::Complete(constructor_info) = constructor.info else {
+            return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
+        };
+        let Some(Type::Method(constructor_signature)) = store.types.try_get(constructor_info)
+        else {
+            return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
+        };
+        let mut fields = HashSet::with_capacity(self.accessor_bindings.len());
+        let mut formals = HashSet::with_capacity(self.accessor_bindings.len());
+        let mut ordinals = HashSet::with_capacity(self.accessor_bindings.len());
+        for binding in &self.accessor_bindings {
+            if binding.class != owner
+                || binding.constructor != self.constructor
+                || binding.source != self.source
+                || self.parameters.get(binding.source_ordinal) != Some(&binding.parameter)
+                || binding.field == binding.parameter
+                || !fields.insert(binding.field)
+                || !formals.insert(binding.parameter)
+                || !ordinals.insert(binding.source_ordinal)
+            {
+                return Err(fail(JvmConstructorIssue::AccessorFieldIdentity));
+            }
+            if !store.symbols.contains(binding.field) {
+                return Err(fail(JvmConstructorIssue::AccessorFieldIdentity));
+            }
+            let field = store.symbols.get(binding.field);
+            if field.kind != SymbolKind::Field
+                || field.owner != Some(owner)
+                || field.origin != dotty_core::SymbolOrigin::Source(self.source)
+                || field.visibility != Visibility::Public
+                || field.flags
+                    != if binding.mutable {
+                        dotty_core::SymbolFlags::MUTABLE
+                    } else {
+                        dotty_core::SymbolFlags::EMPTY
+                    }
+                || field.name != store.symbols.get(binding.parameter).name
+            {
+                return Err(fail(JvmConstructorIssue::AccessorFieldMetadata));
+            }
+            let declarations = store.scopes.get(class_info.declarations);
+            let same_name = declarations.lookup_all(&field.name);
+            if !same_name.contains(&binding.field)
+                || same_name
+                    .iter()
+                    .filter(|symbol| {
+                        store.symbols.contains(**symbol)
+                            && store.symbols.get(**symbol).kind == SymbolKind::Field
+                            && store.symbols.get(**symbol).owner == Some(owner)
+                    })
+                    .count()
+                    != 1
+            {
+                return Err(fail(JvmConstructorIssue::AccessorFieldIdentity));
+            }
+            let parameter = store.symbols.get(binding.parameter);
+            if !parameter.flags.is_empty() {
+                return Err(fail(JvmConstructorIssue::AccessorFieldMetadata));
+            }
+            let SymbolInfo::Complete(field_type) = field.info else {
+                return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
+            };
+            let SymbolInfo::Complete(parameter_type) = parameter.info else {
+                return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
+            };
+            let Some(signature_parameter) =
+                constructor_signature.params.get(binding.source_ordinal)
+            else {
+                return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
+            };
+            let Some(field_type) = store.types.try_get(field_type) else {
+                return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
+            };
+            if store.types.try_get(parameter_type) != Some(field_type)
+                || store.types.try_get(signature_parameter.ty) != Some(field_type)
+            {
+                return Err(fail(JvmConstructorIssue::AccessorFieldSignature));
             }
         }
         Ok(())
@@ -690,6 +890,7 @@ impl JvmConstructorMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dotty_core::ast::{AstArena, Tree, TypeTree};
     use dotty_core::{MethodType, Name, Namespace, Scope, Symbol, SymbolLinks, SymbolOrigin, Type};
 
     #[test]
@@ -812,11 +1013,170 @@ mod tests {
                 class,
                 constructor,
                 parameters: Vec::new(),
+                accessor_bindings: Vec::new(),
                 visibility: Visibility::Public,
                 source,
                 direct_super_constructor: None,
             },
         )
+    }
+
+    fn accessor_fixture() -> (SemanticStore, Definitions, JvmPrimaryConstructorPlan) {
+        let (mut store, definitions, mut plan) = fixture();
+        let class = plan.class;
+        let constructor = plan.constructor;
+        let source = plan.source;
+        let mut ast = AstArena::<Untyped>::new();
+        let source_parameter = ast.alloc(Tree {
+            kind: TreeKind::TypeTree(TypeTree),
+            position: None,
+            ty: (),
+        });
+        let name = Name::new(store.names.intern("x"), Namespace::Term);
+        let field = store.symbols.alloc(Symbol {
+            name,
+            owner: Some(class),
+            kind: SymbolKind::Field,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(definitions.int),
+            origin: SymbolOrigin::Source(source),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let parameter = store.symbols.alloc(Symbol {
+            name,
+            owner: Some(constructor),
+            kind: SymbolKind::Parameter,
+            flags: dotty_core::SymbolFlags::EMPTY,
+            visibility: Visibility::Public,
+            info: SymbolInfo::Complete(definitions.int),
+            origin: SymbolOrigin::Source(source),
+            annotations: Vec::new(),
+            position: None,
+            links: SymbolLinks::default(),
+        });
+        let SymbolInfo::Complete(constructor_type) = store.symbols.get(constructor).info else {
+            panic!("fixture constructor type is complete");
+        };
+        let Type::Method(mut signature) = store.types.get(constructor_type).clone() else {
+            panic!("fixture constructor has a method type");
+        };
+        signature.params.push(dotty_core::MethodParam {
+            name: dotty_core::TermName::new(name.text()),
+            ty: definitions.int,
+            erased: false,
+            varargs: false,
+        });
+        let constructor_type = store.types.alloc(Type::Method(signature));
+        store
+            .symbols
+            .set_info(constructor, SymbolInfo::Complete(constructor_type));
+        let SymbolInfo::Complete(class_type) = store.symbols.get(class).info else {
+            panic!("fixture class info is complete");
+        };
+        let Type::ClassInfo(class_info) = store.types.get(class_type) else {
+            panic!("fixture class info has a class scope");
+        };
+        store
+            .scopes
+            .get_mut(class_info.declarations)
+            .enter(name, field);
+        plan.parameters.push(parameter);
+        plan.accessor_bindings.push(JvmConstructorAccessorBinding {
+            class,
+            constructor,
+            source,
+            source_parameter,
+            field,
+            parameter,
+            source_ordinal: 0,
+            mutable: false,
+        });
+        (store, definitions, plan)
+    }
+
+    #[test]
+    fn accessor_binding_revalidation_rejects_stale_mismatched_and_duplicate_metadata() {
+        use JvmConstructorIssue as Issue;
+
+        enum Malformation {
+            WrongOwner,
+            WrongKind,
+            WrongMutability,
+            WrongType,
+            MissingScopeEntry,
+            DuplicateField,
+            WrongOrdinal,
+            WrongSource,
+        }
+
+        for (malformation, expected) in [
+            (Malformation::WrongOwner, Issue::AccessorFieldMetadata),
+            (Malformation::WrongKind, Issue::AccessorFieldMetadata),
+            (Malformation::WrongMutability, Issue::AccessorFieldMetadata),
+            (Malformation::WrongType, Issue::AccessorFieldSignature),
+            (
+                Malformation::MissingScopeEntry,
+                Issue::AccessorFieldIdentity,
+            ),
+            (Malformation::DuplicateField, Issue::AccessorFieldIdentity),
+            (Malformation::WrongOrdinal, Issue::AccessorFieldIdentity),
+            (Malformation::WrongSource, Issue::AccessorFieldIdentity),
+        ] {
+            let (mut store, definitions, mut plan) = accessor_fixture();
+            let binding = plan.accessor_bindings[0];
+            let class = plan.class;
+            let constructor = plan.constructor;
+            let field = binding.field;
+            let SymbolInfo::Complete(class_type) = store.symbols.get(class).info else {
+                panic!("fixture class info is complete");
+            };
+            let Type::ClassInfo(class_info) = store.types.get(class_type) else {
+                panic!("fixture class info has a class scope");
+            };
+            let scope = class_info.declarations;
+            match malformation {
+                Malformation::WrongOwner => {
+                    store.symbols.get_mut(field).owner = Some(constructor);
+                }
+                Malformation::WrongKind => {
+                    store.symbols.get_mut(field).kind = SymbolKind::Parameter;
+                }
+                Malformation::WrongMutability => {
+                    store.symbols.get_mut(field).flags = dotty_core::SymbolFlags::MUTABLE;
+                }
+                Malformation::WrongType => {
+                    store
+                        .symbols
+                        .set_info(field, SymbolInfo::Complete(definitions.boolean));
+                }
+                Malformation::MissingScopeEntry => {
+                    store.scopes.get_mut(scope).remove(field);
+                }
+                Malformation::DuplicateField => {
+                    let duplicate = store.symbols.alloc(store.symbols.get(field).clone());
+                    store
+                        .scopes
+                        .get_mut(scope)
+                        .enter(store.symbols.get(field).name, duplicate);
+                }
+                Malformation::WrongOrdinal => {
+                    plan.accessor_bindings[0].source_ordinal = 1;
+                }
+                Malformation::WrongSource => {
+                    plan.accessor_bindings[0].source = dotty_core::SourceId::from_index(2);
+                }
+            }
+            assert!(matches!(
+                plan.validate_binding(&store, class),
+                Err(JvmCodegenError::InvalidPrimaryConstructor {
+                    issue,
+                    ..
+                }) if issue == expected
+            ));
+        }
     }
 
     #[test]

@@ -996,6 +996,19 @@ accessor syntax cannot be recovered safely from the completed method type.
 The producer must supply the same frontend session's AST, index, and store;
 typed IDs themselves do not encode session identity.
 
+The plan preserves public primary-constructor accessor roles separately from
+ordinary parameters. An audited `val` has exact `ParamAccessor` source
+metadata; an audited `var` has `ParamAccessor` plus `Var`. Plain parameters
+(`ParamAccessor` plus `PrivateLocal`) remain constructor inputs and do not
+create accessor bindings. Each accessor binding retains the canonical
+class-owned `Field`, its distinct constructor-owned derived `Parameter`, the
+source parameter tree, source ordinal, and mutability. Class metadata
+revalidates both symbols' owners and origins, class declaration-scope
+membership, unique field identity, matching completed field/formal types, and
+mutability before exposing `JvmClassMetadata::accessor_bindings()`. This is
+planning evidence only: it does not add field storage, generated methods, or
+bytecode.
+
 `JvmClassMetadata::constructor()` exposes the explicit constructor's canonical
 symbol, owner internal name, descriptor, access flags, and ordered
 `JvmParameterLocal` values. Semantic constructor results are class types; JVM
@@ -1009,7 +1022,8 @@ category-one parameters are supported. Class-owned parameter copies and
 `val`/`var` accessor fields never substitute for constructor parameters.
 
 Projection checks the live constructor kind, source origin, owner, declaration
-scope, complete plain monomorphic signature, primitive or exact planned-class
+scope, complete monomorphic signature and supported source parameter roles,
+primitive or exact planned-class
 parameter types, and
 proven public/private visibility. Private constructors stay private. Generic,
 secondary, contextual, defaulted, by-name, erased and repeated parameters,

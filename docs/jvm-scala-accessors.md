@@ -73,17 +73,20 @@ that the current backend emits a compatible accessor ABI or can compile those
 classes.
 
 The first current backend rejection is constructor-plan source-shape
-validation. `JvmPrimaryConstructorPlan::from_source` only accepts the bounded
-plain-parameter shape (`ParamAccessor` plus `PrivateLocal` metadata); an
-ordinary public constructor `val`/`var` carries different source modifiers
-and is rejected as `InvalidPrimaryConstructor { issue: SourceShape }` before
-class emission. This audit does not relax that boundary.
+validation for emission: `JvmPrimaryConstructorPlan::from_source` accepts the
+audited parameter roles and produces an immutable source binding, but the
+backend still has no accessor field/method emission. The plan accepts a plain
+parameter only with `ParamAccessor` plus `PrivateLocal`, an immutable public
+accessor only with `ParamAccessor`, and a mutable public accessor only with
+`ParamAccessor` plus `Var`. Defaulted, contextual, annotated, qualified
+private, or otherwise modified parameters remain rejected.
 
 ## Frozen ownership and initial backend contract
 
 | Concern | Owning layer | Contract for a future implementation |
 | --- | --- | --- |
 | Constructor parameter, source field, and source selection identity | `dotty-core` / namer / typer | Preserve canonical IDs and source mappings. Never invent source methods for generated JVM accessors or reconstruct identity from spelling. |
+| Source field to derived constructor formal binding | `dotty-jvm` constructor plan | Preserve exact class/constructor IDs, source `TreeId`, class-owned `Field`, distinct constructor-owned `Parameter`, source ordinal, and mutability. Revalidate symbol kinds/owners/origins, class-scope membership, uniqueness, and completed type agreement before exposing the checked binding through `JvmClassMetadata`. |
 | Getter/setter JVM names, descriptors, flags, backing storage, and slot layout | JVM-only ABI projection in `dotty-jvm` | Derive from the pinned compiler oracle and canonical source metadata. Keep JVM names out of frontend contracts. The exact projection is pending the oracle output above. |
 | Encoding and verification of generated members | `dotty-classfile` | Receive already validated field/method plans; keep byte-level encoding separate from source semantics. |
 | Source call-site support where current Typer behavior changes | Separate frontend/Typer issue | This audit records current successes and does not authorize Typer changes or accessor-specific call lowering. |
