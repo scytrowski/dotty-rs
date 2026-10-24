@@ -49,7 +49,10 @@ pub mod classloader {
         JdkModuleOpen, JdkModuleProvide, JdkModuleRequire,
     };
     pub use crate::jmod_class_path::JmodClassPath;
-    pub use crate::loader::{ClassLoadProfile, ClassLoader, ModuleIdentity};
+    pub use crate::loader::{
+        ClassLoadDependencyEdge, ClassLoadDependencyReason, ClassLoadProfile, ClassLoader,
+        ModuleIdentity,
+    };
     pub use crate::method_symbol::MethodSymbol;
     pub use crate::nesting::{EnclosingMethodRef, InnerClassEntry};
     pub use crate::record_component::RecordComponentSymbol;

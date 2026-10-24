@@ -33,6 +33,10 @@ LOAD_ROOT_RE = re.compile(
     r"::shells_reused=(\d+)::member_type_references=(\d+)::hierarchy_loads=(\d+)"
     r"::completed_cache_hits=(\d+)"
 )
+LOAD_EDGE_RE = re.compile(r"::dependency_edges=\[(.*?)\]$")
+LOAD_IDENTITY_SETS_RE = re.compile(
+    r"::identity_shells=\[(.*?)\]::completed_classes=\[(.*?)\]::classes=\[(.*?)\]::dependency_edges="
+)
 
 
 def fail(message: str) -> "NoReturn":
@@ -146,7 +150,7 @@ def warm_input_pages(paths: list[Path]) -> int:
 def parse_run(log: str) -> dict:
     result: dict = {
         "files": {}, "methods": {}, "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {}, "resolver": {}, "match_phases": [], "match_resolver": [], "match_resolver_wrappers": [], "summary": {},
-        "loads": {}, "resolver_counts": {}, "load_roots": [], "wrappers": {}, "rollback": {},
+        "loads": {}, "resolver_counts": {}, "load_roots": [], "load_edges": [], "wrappers": {}, "rollback": {},
         "cheap_resolver": {}, "cheap_resolver_outcomes": {}, "resolver_stages": [], "match_resolver_stages": [],
         "classpath_resources": {}, "archive_resources": {}, "resolver_profile": {}, "match_resolver_profiles": [],
         "repeated_requests": [],
@@ -265,13 +269,32 @@ def parse_run(log: str) -> dict:
             root_match = LOAD_ROOT_RE.match(line)
             if root_match:
                 root, file, method, request, *counts = root_match.groups()
+                identity_sets = LOAD_IDENTITY_SETS_RE.search(line)
                 result["load_roots"].append({
                     "root": root, "file": file, "method": method, "request": request,
                     "depth": int(counts[0]), "distinct_classes": int(counts[1]),
                     "full_completions": int(counts[2]), "shells_created": int(counts[3]),
                     "shells_reused": int(counts[4]), "member_type_references": int(counts[5]),
                     "hierarchy_loads": int(counts[6]), "completed_cache_hits": int(counts[7]),
+                    "identity_shells": identity_sets.group(1).split(",") if identity_sets and identity_sets.group(1) else [],
+                    "completed_classes": identity_sets.group(2).split(",") if identity_sets and identity_sets.group(2) else [],
+                    "classes": identity_sets.group(3).split(",") if identity_sets and identity_sets.group(3) else [],
                 })
+                edge_match = LOAD_EDGE_RE.search(line)
+                if edge_match and edge_match.group(1):
+                    for raw_edge in edge_match.group(1).split(","):
+                        reason, edge = raw_edge.split(":", 1)
+                        owner, dependency_requests = edge.split(">", 1)
+                        dependency, requests = dependency_requests.rsplit(":", 1)
+                        result["load_edges"].append({
+                            "root": root,
+                            "file": file,
+                            "method": method,
+                            "reason": reason,
+                            "owner": owner,
+                            "dependency": dependency,
+                            "requests": int(requests),
+                        })
             values = kvs(line)
             for name in (
                 "top_level_class_loads", "on_demand_completions", "identity_shell_creations",
@@ -927,6 +950,18 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         "run\troot\tfile\tmethod\trequest\tdepth\tdistinct_classes\tfull_completions\tshells_created\tshells_reused\tmember_type_references\thierarchy_loads\tcompleted_cache_hits\n" + "".join(
             "\t".join(str(value) for value in [run, root["root"], root["file"], root["method"], root["request"], root["depth"], root["distinct_classes"], root["full_completions"], root["shells_created"], root["shells_reused"], root["member_type_references"], root["hierarchy_loads"], root["completed_cache_hits"]]) + "\n"
             for run, root in sorted_roots
+        ), encoding="utf-8")
+    (out_dir / "dependency-edges.tsv").write_text(
+        "run\troot\tfile\tmethod\treason\towner\tdependency\trequests\n" + "".join(
+            "\t".join(str(value) for value in [run, edge["root"], edge["file"], edge["method"], edge["reason"], edge["owner"], edge["dependency"], edge["requests"]]) + "\n"
+            for run, result in enumerate(runs, 1)
+            for edge in result.get("load_edges", [])
+        ), encoding="utf-8")
+    (out_dir / "request-classes.tsv").write_text(
+        "run\troot\tfile\tmethod\tclass\tidentity_shell_seen\tfully_completed\n" + "".join(
+            "\t".join(str(value) for value in [run, root["root"], root["file"], root["method"], class_name, int(class_name in root["identity_shells"]), int(class_name in root["completed_classes"])]) + "\n"
+            for run, root in sorted_roots
+            for class_name in root["classes"]
         ), encoding="utf-8")
     (out_dir / "resolver-counts.tsv").write_text(
         "request_family\tcount_across_runs\n" + "".join(

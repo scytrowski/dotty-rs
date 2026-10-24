@@ -83,7 +83,7 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
   full_completions=2
   completed_cache_hits=1
   resolver_member_requests=4
-    root=scala/Function1::file=compiler/A.scala::method=compiler/A.scala#tree=8::Foo::request=prefix=scala::name=Function1::depth=1::distinct_classes=7::full_completions=2::shells_created=4::shells_reused=9::member_type_references=15::hierarchy_loads=1::completed_cache_hits=0::completed_classes=[scala/Function1]
+    root=scala/Function1::file=compiler/A.scala::method=compiler/A.scala#tree=8::Foo::request=prefix=scala::name=Function1::depth=1::distinct_classes=7::full_completions=2::shells_created=4::shells_reused=9::member_type_references=15::hierarchy_loads=1::completed_cache_hits=0::identity_shells=[scala/Other]::completed_classes=[scala/Function1]::classes=[scala/Function1,scala/Other]::dependency_edges=[hierarchy:compiler/A>scala/Function1:1,member_type_identity:compiler/A>scala/Other:2]
 """
         parsed = sequential_profile.parse_run(log)
 
@@ -115,6 +115,13 @@ AUDIT_PROFILE_SUMMARY files=1 expected_files=1 wall_ms=75 classpath_setup_ms=10 
         self.assertEqual(parsed["resolver_counts"]["resolver_member_requests"], 4)
         self.assertEqual(parsed["load_roots"][0]["root"], "scala/Function1")
         self.assertEqual(parsed["load_roots"][0]["distinct_classes"], 7)
+        self.assertEqual(parsed["load_roots"][0]["identity_shells"], ["scala/Other"])
+        self.assertEqual(parsed["load_roots"][0]["completed_classes"], ["scala/Function1"])
+        self.assertEqual(parsed["load_roots"][0]["classes"], ["scala/Function1", "scala/Other"])
+        self.assertEqual(parsed["load_edges"], [
+            {"root": "scala/Function1", "file": "compiler/A.scala", "method": "compiler/A.scala#tree=8::Foo", "reason": "hierarchy", "owner": "compiler/A", "dependency": "scala/Function1", "requests": 1},
+            {"root": "scala/Function1", "file": "compiler/A.scala", "method": "compiler/A.scala#tree=8::Foo", "reason": "member_type_identity", "owner": "compiler/A", "dependency": "scala/Other", "requests": 2},
+        ])
         self.assertEqual(parsed["resolver_profile"]["member_lookups"], 7)
         self.assertEqual(parsed["resolver_profile"]["rollbacks"], 4)
         self.assertEqual(parsed["match_resolver_profiles"][0]["member_lookups"], 5)
