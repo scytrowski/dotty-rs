@@ -94,14 +94,16 @@ class PlainParam(x: Int):
 class Reader:
   def read(c: Counter): Long = c.current
   def write(c: Counter, n: Long): Unit = c.current = n
-  def rejectSeedWrite(c: BodyOnly, n: Int): Unit = c.seed = n
 ```
 
 In `Reader`, `read(Counter)J` invokes `Counter.current()J` and
 `write(Counter,long)V` invokes `Counter.current_$eq(J)V`; neither accesses the
-backing field directly. `rejectSeedWrite` is rejected by Typer as an
-immutable-field assignment. The immutable assignment is a negative case in the
-Rust Typer characterization below.
+backing field directly. This is the positive Scala oracle fixture compiled by
+the reproduction command above.
+
+The Rust Typer characterization separately checks the immutable assignment
+`c.seed = n` and reports `AssignmentTargetImmutable`. That negative case is not
+part of the Scala oracle fixture or its successful `scalac` invocation.
 
 A separate `FieldKinds` oracle covered every planned JVM value descriptor:
 
