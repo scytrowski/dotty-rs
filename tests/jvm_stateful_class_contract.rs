@@ -4034,11 +4034,11 @@ fn unsupported_constructor_forms_are_accepted_with_canonical_typer_signatures() 
 #[test]
 fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_roots() {
     with_source(
-        "class BodyOnly:\n  val seed: Int = 10\n  var active: Boolean = true\n  var reading: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  def snapshot(): Long = current\n\nclass Reader:\n  def read(c: Counter): Long = c.current\n  def write(c: Counter, n: Long): Unit = c.current = n\n",
+        "class BodyOnly:\n  val seed: Int = 10\n  var active: Boolean = true\n  var reading: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  val fromId: Int = id\n  def snapshot(): Long = current\n  def snapshotThis(): Long = this.current\n\nclass Reader:\n  def read(c: Counter): Long = c.current\n  def write(c: Counter, n: Long): Unit = c.current = n\n  def rejectSeedWrite(c: BodyOnly, n: Int): Unit = c.seed = n\n",
         |ast, source, index, definitions, typer| {
             for (class_name, expected_fields) in [
                 ("BodyOnly", &["seed", "active", "reading"][..]),
-                ("Counter", &["initial", "current"][..]),
+                ("Counter", &["initial", "current", "fromId"][..]),
             ] {
                 let class = symbol_named(ast, index, source, typer, class_name);
                 assert_eq!(typer.store().symbols.get(class).kind, SymbolKind::Class);
@@ -4087,6 +4087,13 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
                     assert_eq!(symbol.kind, SymbolKind::Field);
                     assert_eq!(symbol.owner, Some(class));
                     assert_eq!(symbol.visibility, Visibility::Public);
+                    assert_eq!(
+                        index.definition_of(field),
+                        Some(dotty_namer::SourceDefinition::Canonical {
+                            source,
+                            tree: declaration,
+                        })
+                    );
                     assert!(
                         typer
                             .store()
@@ -4108,16 +4115,34 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
                     else {
                         panic!("body field type should be complete");
                     };
+                    let expected_type = match *name {
+                        "seed" | "initial" | "fromId" => definitions.int,
+                        "active" => definitions.boolean,
+                        "reading" => definitions.double,
+                        "current" => definitions.long,
+                        _ => panic!("unexpected audit body field {name}"),
+                    };
+                    assert_eq!(field_type, expected_type, "completed type for {name}");
                     let context = typer.field_initializer_context_for(field).unwrap();
                     let typed_rhs = typer
                         .type_expression_expected(rhs, context, field_type)
                         .unwrap();
                     assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
                     assert!(typer.typed_ast().get(typed_rhs).position.is_some());
-                    assert!(matches!(
-                        typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
-                        Type::Constant(_)
-                    ));
+                    if *name == "fromId" {
+                        assert!(matches!(
+                            typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+                            Type::TermRef {
+                                target: TermRefTarget::Symbol(_),
+                                ..
+                            }
+                        ));
+                    } else {
+                        assert!(matches!(
+                            typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+                            Type::Constant(_)
+                        ));
+                    }
                 }
             }
 
@@ -4127,8 +4152,25 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
             let context = typer.expression_context_for(snapshot).unwrap();
             let typed_rhs = typer.type_expression(rhs, context).unwrap();
             let current = field_tree_and_rhs(ast, index, source, typer, "current").0;
+            assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
             assert!(matches!(
                 typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(target),
+                    ..
+                } if *target == current
+            ));
+
+            let (snapshot_this, _, rhs_this) =
+                method_tree_and_rhs(ast, index, source, typer, counter, "snapshotThis");
+            let context_this = typer.expression_context_for(snapshot_this).unwrap();
+            let typed_rhs_this = typer.type_expression(rhs_this, context_this).unwrap();
+            assert_eq!(
+                typer.source_typed_index().get(source, rhs_this),
+                Some(typed_rhs_this)
+            );
+            assert!(matches!(
+                typer.store().types.get(typer.typed_ast().get(typed_rhs_this).ty),
                 Type::TermRef {
                     target: TermRefTarget::Symbol(target),
                     ..
@@ -4140,6 +4182,23 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
                 method_tree_and_rhs(ast, index, source, typer, reader, "read");
             let read_context = typer.expression_context_for(read).unwrap();
             let typed_read = typer.type_expression(read_rhs, read_context).unwrap();
+            assert_eq!(
+                typer.source_typed_index().get(source, read_rhs),
+                Some(typed_read)
+            );
+            let TreeKind::Select(source_read) = &ast.get(read_rhs).kind else {
+                panic!("Reader.read RHS should be a source selection");
+            };
+            let TreeKind::Select(typed_read_selection) = &typer.typed_ast().get(typed_read).kind
+            else {
+                panic!("Reader.read RHS should remain a typed selection");
+            };
+            assert_eq!(
+                typer
+                    .source_typed_index()
+                    .get(source, source_read.qualifier),
+                Some(typed_read_selection.qualifier)
+            );
             assert!(matches!(
                 typer.store().types.get(typer.typed_ast().get(typed_read).ty),
                 Type::TermRef {
@@ -4152,9 +4211,32 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
                 method_tree_and_rhs(ast, index, source, typer, reader, "write");
             let write_context = typer.expression_context_for(write).unwrap();
             let typed_write = typer.type_expression(write_rhs, write_context).unwrap();
+            assert_eq!(
+                typer.source_typed_index().get(source, write_rhs),
+                Some(typed_write)
+            );
+            let TreeKind::Assign(source_assignment) = &ast.get(write_rhs).kind else {
+                panic!("Reader.write source RHS should be an assignment");
+            };
             let TreeKind::Assign(assignment) = &typer.typed_ast().get(typed_write).kind else {
                 panic!("Reader.write RHS should remain a typed assignment");
             };
+            assert_eq!(
+                typer
+                    .source_typed_index()
+                    .get(source, source_assignment.lhs),
+                Some(assignment.lhs)
+            );
+            let TreeKind::Select(source_lhs) = &ast.get(source_assignment.lhs).kind else {
+                panic!("Reader.write target should be a source selection");
+            };
+            let TreeKind::Select(typed_lhs) = &typer.typed_ast().get(assignment.lhs).kind else {
+                panic!("Reader.write target should remain a typed selection");
+            };
+            assert_eq!(
+                typer.source_typed_index().get(source, source_lhs.qualifier),
+                Some(typed_lhs.qualifier)
+            );
             assert!(matches!(
                 typer.store().types.get(typer.typed_ast().get(assignment.lhs).ty),
                 Type::TermRef {
@@ -4173,6 +4255,23 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
                 }
             ));
 
+            let (reject_write, _, reject_rhs) =
+                method_tree_and_rhs(ast, index, source, typer, reader, "rejectSeedWrite");
+            let reject_context = typer.expression_context_for(reject_write).unwrap();
+            let error = typer
+                .type_expression(reject_rhs, reject_context)
+                .expect_err("immutable class-body seed cannot be assigned through a receiver");
+            assert!(matches!(
+                error,
+                TyperError::AssignmentTargetImmutable {
+                    target,
+                    tree_index,
+                    ..
+                } if target == field_tree_and_rhs(ast, index, source, typer, "seed").0
+                    && tree_index == reject_rhs.index()
+            ));
+            assert!(typer.source_typed_index().get(source, reject_rhs).is_none());
+
             let constructor = ast
                 .iter()
                 .find_map(|(_, node)| match &node.kind {
@@ -4187,6 +4286,11 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
                 })
                 .unwrap();
             typer.complete_symbol(constructor).unwrap();
+            assert_eq!(
+                typer.store().symbols.get(constructor).kind,
+                SymbolKind::Constructor
+            );
+            assert_eq!(typer.store().symbols.get(constructor).owner, Some(counter));
             let dotty_core::SymbolInfo::Complete(constructor_type) =
                 typer.store().symbols.get(constructor).info
             else {
@@ -4197,6 +4301,126 @@ fn public_class_body_accessors_keep_canonical_symbols_and_typed_initializer_root
             };
             assert_eq!(signature.params.len(), 1);
             assert_eq!(signature.params[0].ty, definitions.int);
+            let constructor_tree = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template)
+                        if index.symbol_at(source, template.constructor) == Some(constructor) =>
+                    {
+                        Some(template.constructor)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                index.definition_of(constructor),
+                Some(dotty_namer::SourceDefinition::Canonical {
+                    source,
+                    tree: constructor_tree,
+                })
+            );
+            let TreeKind::DefDef(constructor_definition) = &ast.get(constructor_tree).kind else {
+                panic!("Counter constructor definition should be DefDef");
+            };
+            let [id_parameter] = constructor_definition.value_param_clauses[0].as_slice() else {
+                panic!("Counter should have exactly one constructor parameter");
+            };
+            let id_field = index.symbol_at(source, *id_parameter).unwrap();
+            let id_formal = index
+                .derived_symbol_at(constructor, source, *id_parameter)
+                .unwrap();
+            assert_ne!(id_field, id_formal);
+            assert_eq!(
+                index.definition_of(id_field),
+                Some(dotty_namer::SourceDefinition::Canonical {
+                    source,
+                    tree: *id_parameter,
+                })
+            );
+            assert_eq!(typer.store().symbols.get(id_field).kind, SymbolKind::Field);
+            assert_eq!(typer.store().symbols.get(id_field).owner, Some(counter));
+            assert_eq!(
+                typer.store().symbols.get(id_formal).kind,
+                SymbolKind::Parameter
+            );
+            assert_eq!(
+                typer.store().symbols.get(id_formal).owner,
+                Some(constructor)
+            );
+            assert_eq!(
+                index.definition_of(id_formal),
+                Some(dotty_namer::SourceDefinition::Derived {
+                    source,
+                    tree: *id_parameter,
+                })
+            );
+            let (from_id, _, from_id_rhs) = field_tree_and_rhs(ast, index, source, typer, "fromId");
+            let from_id_type = match typer.store().symbols.get(from_id).info {
+                dotty_core::SymbolInfo::Complete(ty) => ty,
+                _ => panic!("fromId field type should be complete"),
+            };
+            let from_id_context = typer.field_initializer_context_for(from_id).unwrap();
+            let typed_from_id = typer
+                .type_expression_expected(from_id_rhs, from_id_context, from_id_type)
+                .unwrap();
+            let from_id_rhs_type = typer
+                .store()
+                .types
+                .get(typer.typed_ast().get(typed_from_id).ty);
+            assert!(
+                matches!(
+                    from_id_rhs_type,
+                    Type::TermRef {
+                        target: TermRefTarget::Symbol(target),
+                        ..
+                    } if *target == id_formal && *target != id_field
+                ),
+                "fromId type {from_id_rhs_type:?}, id field {id_field:?}, derived formal {id_formal:?}"
+            );
+        },
+    );
+}
+
+#[test]
+fn public_body_field_initializers_preserve_earlier_self_and_forward_targets() {
+    with_source(
+        "class InitReads:\n  val earlier: Int = 1\n  val copied: Int = earlier\n  val self: Int = this.self\n  val forward: Int = later\n  val later: Int = 2\n",
+        |ast, source, index, _, typer| {
+            let class = symbol_named(ast, index, source, typer, "InitReads");
+            typer.complete_symbol(class).unwrap();
+            for (name, target_name) in [
+                ("copied", "earlier"),
+                ("self", "self"),
+                ("forward", "later"),
+            ] {
+                let (field, declaration, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
+                let target = field_tree_and_rhs(ast, index, source, typer, target_name).0;
+                assert_eq!(
+                    index.definition_of(field),
+                    Some(dotty_namer::SourceDefinition::Canonical {
+                        source,
+                        tree: declaration,
+                    })
+                );
+                typer.complete_symbol(field).unwrap();
+                let dotty_core::SymbolInfo::Complete(field_type) =
+                    typer.store().symbols.get(field).info
+                else {
+                    panic!("{name} field type should complete");
+                };
+                let context = typer.field_initializer_context_for(field).unwrap();
+                let typed_rhs = typer
+                    .type_expression_expected(rhs, context, field_type)
+                    .unwrap();
+                assert_eq!(typer.source_typed_index().get(source, rhs), Some(typed_rhs));
+                assert!(matches!(
+                    typer.store().types.get(typer.typed_ast().get(typed_rhs).ty),
+                    Type::TermRef {
+                        target: TermRefTarget::Symbol(actual),
+                        ..
+                    } if *actual == target
+                ));
+            }
         },
     );
 }
