@@ -51,32 +51,64 @@ match Scala's constructor instruction order byte for byte. The oracle class
 files use major version 61 by default; this does not change the backend's
 independent Java 21 class-file target (major 65).
 
-## Source identities and current Typer behavior
+## Source identities, Typer readiness, and call-site boundary
 
-The real source pipeline test in
-`tests/jvm_stateful_class_contract.rs` runs the requested `Measurement`,
-`Mixed`, and `Ref` declarations through scanner, parser, namer, and Typer.
-For each constructor parameter accessor it verifies:
+`tests/jvm_stateful_class_contract.rs` exercises the real scanner, parser,
+namer, and Typer on a `Counter(val id: Int, var count: Long)` plus a separate
+`Reader`. It records the typed tree mapping for every source expression and
+checks that selections remain `TermRefTarget::Symbol` references to the
+original class-owned `Field`. Receiver expressions retain their own source
+mapping and span; receiver references remain the original `this`, parameter,
+or local expression. No getter or setter `Method` symbol is added to source
+lookup. Successful `c.count = next` remains a source `Assign` whose lvalue is
+the canonical field, whose RHS widens to `Long`, and whose result type is
+canonical `Unit`.
 
-- the source parameter tree maps to a class-owned `Field`;
-- `derived_symbol_at(constructor, source, tree)` yields a distinct,
-  constructor-owned `Parameter`;
-- mutability belongs to the `Field`, while the derived parameter remains
-  immutable;
-- field and parameter types preserve the canonical primitive or class type;
-- parameter order is the source constructor-clause order.
+The source matrix was also compiled with the pinned Scala 3.9.0 compiler built
+from revision
+[`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
+The local launcher reported `3.9.0-bin-SNAPSHOT-git-777528f` on JDK 21.0.8.
+The positive `Counter`/`Reader` fixture compiled successfully and `javap`
+showed calls to `Counter.id()I`, `Counter.count()J`, and
+`Counter.count_$eq(J)V` for `this`, parameter, stable local `val`, and mutable
+local `var` receivers, including `val c` reads and writes of `count`. Negative
+oracle controls reported `Reassignment to val id`,
+`Found: Boolean / Required: Long`, and `value count is not a member of Other`
+for the corresponding invalid sources.
 
-The frontend does not synthesize source `Method` symbols for JVM accessors.
-The JVM getter/setter entrypoints are an ABI projection and must not be
-inserted into source name lookup or substituted for the field's `SymbolId`.
+| Source form | Pinned Scala 3.9.0 | Current Typer | Identity / first failure | Backend status |
+| --- | --- | --- | --- | --- |
+| `this.id`, `this.count` | Accepted; getter calls | Accepted | Canonical `Counter.id` / `Counter.count` fields | Accessor metadata exists; call-site dispatch is not integrated. |
+| `c.id`, `c.count` | Accepted; getter calls | Accepted | Canonical `Counter` fields, with typed parameter receiver | #1562 must lower through the getter metadata. |
+| `this.count = next`, `c.count = next` | Accepted; setter call | Accepted | Canonical mutable `Counter.count`; typed assignment is `Unit`, RHS is `Long` | #1562 must dispatch through the setter metadata. |
+| Unqualified `count` in `Counter` | Accepted | Accepted | `Ident` resolves to the same canonical `count` field | No source accessor method is synthesized. |
+| `val c = new Counter(...); c.id` | Accepted | Accepted | Selection keeps the local receiver and canonical `Counter.id` field | Requires the same getter dispatch as parameter receivers. |
+| `val c = new Counter(...); c.count` | Accepted; getter call | Accepted | Selection retains the exact mapped local receiver and canonical mutable `Counter.count` field | Requires getter dispatch through #1555 metadata. |
+| `val c = new Counter(...); c.count = next` | Accepted; setter call | Accepted | Typed `Assign` keeps the local receiver and canonical `count` field; result is `Unit`, RHS is `Long` | Requires setter dispatch through #1555 metadata. |
+| `var c = new Counter(...); c.id` | Accepted | Rejected | `UnstableSelectionPrefix` at `c.id`; nested mappings roll back | Do not include until a Typer-owned change supports it. |
+| `this.id = 2`, `c.id = 2` | Rejected: `Reassignment to val id` | Rejected: `AssignmentTargetImmutable` for canonical `id` | Error points to the assignment; no typed mappings survive | No setter exists for `val`. |
+| `c.count = true` | Rejected: Boolean required to be Long | Rejected: `ExpectedExpressionTypeMismatch` (Boolean / Long) | Error points to RHS; nested mappings roll back | Invalid typed shape never reaches the backend. |
+| `other.count` where `other: Other` | Rejected: member is absent | Rejected: `MemberNotFound` on `Other` | Error points to the selection; nested mappings roll back | No same-spelled field guess is allowed. |
 
-The current Typer successfully types all of the following in the same source
-session: external `m.id` and `m.value`, `this.id` and `this.value`, the
-assignment `m.value = 42.0`, and passing `m.id` as an argument to another
-method. The typed references for each selected member designate the canonical
-field symbol. JVM getter emission is tested independently through decoded
-class files and Java 21 invocation; source call-site lowering remains outside
-this issue.
+The call-site boundary is confirmed by code inspection: `dotty-jvm` currently
+routes typed field selections and assignments through its planned field
+read/write paths. Those paths require the field to be owned by the current
+class and emit `getfield`/`putfield`; they do not resolve
+`JvmAccessorMetadata` and emit the generated `invokevirtual` methods. The
+metadata is sufficient input for that future lowering, but does not currently
+make external or local source accessor calls compile. #1560 therefore proves
+the stable source forms ready for the optional backend work in #1562; it does
+not implement that lowering. The mutable-local selection remains a separate
+Typer-owned follow-up if that source form is brought into scope.
+
+Oracle reproduction, from the pinned checkout, uses
+`dist/target/universal/stage/bin/scalac -version`, then compiles the issue's
+unchanged `Counter`/`Reader` source with
+`dist/target/universal/stage/bin/scalac -d <output> <source>`. Inspect the
+successful output with `javap -classpath <output> -c -p Counter Reader`; compile
+the invalid assignments and unrelated receiver as separate negative controls
+to capture their first diagnostics. The focused Rust regressions assert
+canonical `SourceTypedIndex` edges and rollback on those same invalid shapes.
 
 `JvmPrimaryConstructorPlan::from_source` accepts the audited parameter roles
 and produces an immutable source binding. The backend emits private backing
