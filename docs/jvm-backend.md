@@ -708,11 +708,11 @@ constructor metadata. Both constructor forms begin with one
 store constructor accessors in parameter order, followed by source-ordered
 private and public-body fields. No parameterized class gets an extra `()V`.
 Body accessor backing fields are emitted with one public getter per validated
-body accessor, through the same getter bytecode path as constructor
-accessors. Body setters remain metadata-only in this increment. Method bodies
-use the same typed lowering path as before. The file is encoded into an owned
-`GeneratedClass` only after every method and class-file structure has been
-built successfully.
+body accessor and one public setter per validated mutable body accessor,
+through the same accessor bytecode path as constructor accessors. Immutable
+body fields have no setter. Method bodies use the same typed lowering path as
+before. The file is encoded into an owned `GeneratedClass` only after every
+method and class-file structure has been built successfully.
 
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
