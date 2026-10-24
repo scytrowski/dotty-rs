@@ -28790,6 +28790,82 @@ mod tests {
     }
 
     #[test]
+    fn integer_plus_assign_falls_back_to_addition_for_a_mutable_local() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("class C { def use: Unit = { var value = 1; value += 2 } }");
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        let typed = typer.type_expression(rhs, context).unwrap();
+
+        assert_eq!(typer.typed_ast().get(typed).ty, definitions.unit);
+        let TreeKind::Block(block) = &typer.typed_ast().get(typed).kind else {
+            panic!("method body should remain a block");
+        };
+        let TreeKind::Assign(assignment) = &typer.typed_ast().get(block.expr).kind else {
+            panic!("integer `+=` should lower to assignment after `+`");
+        };
+        let target = match typer
+            .store()
+            .types
+            .get(typer.typed_ast().get(assignment.lhs).ty)
+        {
+            Type::TermRef {
+                target: TermRefTarget::Symbol(symbol),
+                ..
+            } => *symbol,
+            other => panic!("expected a direct local reference, got {other:?}"),
+        };
+        let target_symbol = typer.store().symbols.get(target);
+        assert_eq!(target_symbol.kind, SymbolKind::Local);
+        assert!(target_symbol.flags.contains(SymbolFlags::MUTABLE));
+        let TreeKind::Apply(addition) = &typer.typed_ast().get(assignment.rhs).kind else {
+            panic!("compound assignment RHS should be a typed addition");
+        };
+        let TreeKind::Select(selection) = &typer.typed_ast().get(addition.function).kind else {
+            panic!("addition should select the canonical integer member");
+        };
+        assert_eq!(typer.store().names.resolve(selection.name.text()), "+");
+        assert_eq!(
+            typer
+                .widen_expression_type(typer.typed_ast().get(selection.qualifier).ty)
+                .unwrap(),
+            definitions.int
+        );
+    }
+
+    #[test]
+    fn integer_plus_assign_does_not_skip_a_lexical_extension() {
+        let (parsed, mut store, packages, definitions, index, source) = parse_and_name(
+            "class C { def use: Unit = { var value = 1; extension (receiver: Int) { def +=(delta: Int): Int = receiver }; value += 2 } }",
+        );
+        let (method, rhs) = method_definition_and_rhs(&parsed, &store, &index, source, "use");
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+        let context = typer.expression_context_for(method).unwrap();
+
+        assert!(matches!(
+            typer.type_expression(rhs, context),
+            Err(TyperError::MemberNotFound { name, .. })
+                if typer.store().names.resolve(name.text()) == "+="
+        ));
+    }
+
+    #[test]
     fn assignment_rejects_immutable_local_and_parameter() {
         for (source_text, assigned_name) in [
             (
