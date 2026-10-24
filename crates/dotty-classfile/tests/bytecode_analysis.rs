@@ -66,6 +66,44 @@ fn linear_analyzer_counts_long_parameters_and_locals_as_two_slots() {
 }
 
 #[test]
+fn linear_analyzer_counts_float_double_and_mixed_parameter_slots() {
+    use dotty_classfile::bytecode::{AnalysisError, ValueKind};
+
+    let pool = ConstantPoolBuilder::new().finish().unwrap();
+    assert_eq!(
+        analyze("(FD)V", true, &[Instruction::Return], &pool),
+        Ok(CodeAnalysis {
+            max_stack: 0,
+            max_locals: 3,
+        })
+    );
+    assert_eq!(
+        analyze("(IFDJ)V", false, &[Instruction::Return], &pool),
+        Ok(CodeAnalysis {
+            max_stack: 0,
+            max_locals: 7,
+        })
+    );
+
+    assert_eq!(
+        analyze("()F", true, &[Instruction::IReturn], &pool),
+        Err(AnalysisError::WrongReturnOpcode {
+            instruction: 0,
+            expected: Some(ValueKind::Float),
+            actual: Some(ValueKind::Int),
+        })
+    );
+    assert_eq!(
+        analyze("()D", true, &[Instruction::IReturn], &pool),
+        Err(AnalysisError::WrongReturnOpcode {
+            instruction: 0,
+            expected: Some(ValueKind::Double),
+            actual: Some(ValueKind::Int),
+        })
+    );
+}
+
+#[test]
 fn public_analyzer_validates_int_bitwise_stack_effects() {
     let pool = ConstantPoolBuilder::new().finish().unwrap();
     for operation in [Instruction::IAnd, Instruction::IOr, Instruction::IXor] {

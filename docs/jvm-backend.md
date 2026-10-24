@@ -32,6 +32,12 @@ three-class source path and its signed 64-bit execution cases on JDK 21; the
 focused positive and fail-closed coverage is mapped in
 [`jvm-long-category2.md`](jvm-long-category2.md).
 
+Float and Double source, constant-pool, descriptor, linear-analysis, CFG, and
+verifier boundaries are audited in [`jvm-floating-point.md`](jvm-floating-point.md).
+Their source backend projection and CFG parameter state remain unsupported;
+the audit records the pinned Scala 3.9.0 oracle limitation and the ordered
+follow-up issues without claiming Float/Double code generation.
+
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,
 and preserving source parameter order. Backend validation does not rediscover
