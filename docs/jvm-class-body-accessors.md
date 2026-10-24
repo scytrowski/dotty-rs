@@ -1,10 +1,10 @@
 # JVM class-body `val` / `var` audit
 
 This audit records the Scala 3.9.0 class-file ABI for ordinary class-body
-`val` and `var` declarations, and the current source-pipeline boundary in
-`dotty-rs`. It is characterization only: it makes no production backend or
-Typer changes and does not claim that Rust-emitted classes match Scala's
-accessor ABI.
+`val` and `var` declarations and the supported source pipeline in `dotty-rs`.
+The backend emits the bounded accessor ABI and lowers the typed source forms
+listed below; this does not claim full Scala ABI compatibility or change Typer
+semantics.
 
 The Scala reference is pinned to
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8)
@@ -275,9 +275,11 @@ Body-bearing zero-argument classes retain the `ImplicitNoArg` source shape and
 carry their checked field plans through metadata validation and emission. Their
 backing fields initialize after the direct-super call; approved public body
 accessors receive public getters and mutable body accessors receive public
-setters. Scala source call-site lowering remains a later increment. Generated
-getter and setter signatures are checked against each other and planned source
-methods before class-file emission.
+setters. #1584 lowers supported typed reads and assignments through those
+getters and setters, while preserving the original canonical field symbols
+and source-to-typed mappings. Generated getter and setter signatures are
+checked against each other and planned source methods before class-file
+emission.
 
 The frontend preserves the `private[this]` qualifier in the source AST, but
 the shared symbol visibility is `Private`, just as it is for plain `private`;
@@ -295,5 +297,8 @@ accessor/visibility forms. It does
 not establish behavior for lazy or abstract members, overrides/bridges,
 traits, generic fields, broader inheritance, or combined Scala ABI/TASTy
 emission. Public class-body getters and setters have JDK
-verification/execution coverage; source call-site lowering remains separate
-work.
+verification/execution coverage. For the accepted typed selections and
+assignments, the backend calls the checked public getter/setter methods;
+private source fields retain their existing direct access path. Mutable-local
+receiver stability, accessor inheritance, traits, generics, and Scala
+ABI/TASTy integration remain outside this subset.
