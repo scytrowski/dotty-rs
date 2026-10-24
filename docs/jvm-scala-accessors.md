@@ -70,13 +70,32 @@ The frontend does not synthesize source `Method` symbols for JVM accessors.
 The JVM getter/setter entrypoints are an ABI projection and must not be
 inserted into source name lookup or substituted for the field's `SymbolId`.
 
-The current Typer successfully types all of the following in the same source
-session: external `m.id` and `m.value`, `this.id` and `this.value`, the
-assignment `m.value = 42.0`, and passing `m.id` as an argument to another
-method. The typed references for each selected member designate the canonical
-field symbol. JVM getter emission is tested independently through decoded
-class files and Java 21 invocation; source call-site lowering remains outside
-this issue.
+The current source Typer readiness probe for
+[#1560](https://github.com/scytrowski/dotty-rs/issues/1560) uses one real
+scanner → parser → namer → Typer session for these forms:
+
+| Source form | Current Typer result | Identity / rejection evidence |
+| --- | --- | --- |
+| `m.id`, `m.value` | Types | Each `Select` and its receiver have source-to-typed mappings; selected references point to the class-owned canonical `Field`. |
+| `this.id`, `this.value` | Types | Same canonical field identity; no source accessor `Method` is synthesized. |
+| Unqualified `value` | Types | The typed reference points to the same canonical `Field` as `this.value`. |
+| `m.value = 42.0` | Types | Produces a typed `Assign` of `Unit`; its LHS is a reference to the mutable `value` field. |
+| Unqualified `value = next` | Types | Produces a typed `Assign` of `Unit` to the same mutable field. |
+| `val m = this; m.value = next` | Types | The block's assignment is mapped and targets the canonical mutable field through the stable local receiver. |
+| `this.id = next` | Rejected | Stops with `AssignmentTargetImmutable` for the canonical immutable `id` field; no typed assignment is produced. |
+| Passing `m.id` to another method | Types | Argument selection retains the canonical field symbol. |
+
+This establishes source typing and identity only. It does not establish a
+generated accessor call in JVM bytecode: getter/setter emission is tested
+independently through decoded class files and Java 21 invocation, while source
+call-site lowering remains outside this issue. A mutable (`var`) receiver local
+and assignment through it are not characterized by this probe.
+
+Readiness outcome: these supported reads and mutable writes give the
+source-level shapes needed to begin dependent call-site lowering work in
+[#1562](https://github.com/scytrowski/dotty-rs/issues/1562). This does not
+claim that those expressions already emit accessor calls; #1562 must consume
+the typed source trees while preserving the canonical field identities.
 
 `JvmPrimaryConstructorPlan::from_source` accepts the audited parameter roles
 and produces an immutable source binding. The backend emits private backing
