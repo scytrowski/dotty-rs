@@ -2117,12 +2117,8 @@ fn source_typed_float_double_metadata_projects_descriptors_and_parameter_slots()
 class NumericMetadata(initialF: Float, initialD: Double):
   private var fieldF: Float = 0.0f
   private var fieldD: Double = 0.0
-  def readF(): Int =
-    fieldF
-    1
-  def readD(): Int =
-    fieldD
-    1
+  def readF(): Float = fieldF
+  def readD(): Double = fieldD
   def floatValue(): Float = 1.5f
   def doubleValue(): Double = 3.5
   def mixed(i: Int, f: Float, d: Double, j: Long): Double = 3.5
@@ -2175,8 +2171,8 @@ class NumericMetadata(initialF: Float, initialD: Double):
                 .unwrap_or_else(|| panic!("source method {name} has metadata"))
         };
         for (name, descriptor) in [
-            ("readF", "()I"),
-            ("readD", "()I"),
+            ("readF", "()F"),
+            ("readD", "()D"),
             ("floatValue", "()F"),
             ("doubleValue", "()D"),
             ("mixed", "(IFDJ)D"),
@@ -2186,23 +2182,12 @@ class NumericMetadata(initialF: Float, initialD: Double):
             assert_eq!(method(name).descriptor().as_str(), descriptor, "{name}");
         }
         for name in ["readF", "readD"] {
-            let error = unit
-                .lower_method_body(
-                    class.identity().symbol(),
-                    method(name).symbol(),
-                    definitions,
-                )
-                .expect_err("floating-point field reads remain outside metadata projection");
-            assert!(
-                matches!(
-                    error,
-                    JvmCodegenError::UnsupportedTypedExpression {
-                        node: "floating-point field read",
-                        ..
-                    }
-                ),
-                "{name} fails before emitting a getfield: {error:?}"
-            );
+            unit.lower_method_body(
+                class.identity().symbol(),
+                method(name).symbol(),
+                definitions,
+            )
+            .unwrap_or_else(|error| panic!("{name} lowers its exact FP field read: {error:?}"));
         }
         assert_eq!(
             method("mixed")
@@ -2238,28 +2223,13 @@ class NumericMetadata(initialF: Float, initialD: Double):
         &mut observe,
     );
     assert!(observed, "real source typing reached the metadata observer");
-    assert!(
-        matches!(result, Err(PipelineFailure::Codegen(_))),
-        "FP metadata is available while unsupported field reads remain rejected: {result:?}"
-    );
-    assert!(output.class_files().is_empty());
+    assert!(result.is_ok(), "FP field reads now lower: {result:?}");
+    assert_eq!(output.class_files().len(), 1);
 }
 
 #[test]
-fn unsupported_float_double_fields_and_constructors_fail_without_artifacts() {
+fn unsupported_float_double_control_flow_fails_without_artifacts() {
     for (label, source) in [
-        (
-            "FloatField",
-            "class FloatField:\n  private var value: Float = 0.0f\n",
-        ),
-        (
-            "DoubleField",
-            "class DoubleField:\n  private var value: Double = 0.0\n",
-        ),
-        (
-            "FloatFieldsAndConstructor",
-            "class NumericBox(initialF: Float, initialD: Double):\n  private var f: Float = initialF\n  private var d: Double = initialD\n  def getF(): Float = f\n  def getD(): Double = d\n  def setD(value: Double): Unit = d = value\n",
-        ),
         (
             "FloatBranch",
             "class Runner:\n  def choose(flag: Boolean, a: Float, b: Float): Float =\n    if flag then a else b\n",
@@ -2292,6 +2262,224 @@ fn unsupported_float_double_fields_and_constructors_fail_without_artifacts() {
             output.class_files().is_empty(),
             "{label} failure publishes no class files"
         );
+    }
+}
+
+#[test]
+fn float_double_fields_and_primary_constructor_initialization_verify_and_execute() {
+    let first_output = TestOutputDirectory::new("float-double-fields-first");
+    let second_output = TestOutputDirectory::new("float-double-fields-second");
+    let first = compile_fixture_classes("FloatDoubleFields.scala", first_output.path()).unwrap();
+    let second = compile_fixture_classes("FloatDoubleFields.scala", second_output.path()).unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name(),
+                artifact.class.bytes().to_vec()
+            ))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name(),
+                artifact.class.bytes().to_vec()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    let decode = |name: &str| {
+        let artifact = first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("missing emitted class {name}"));
+        decode_emitted_class(artifact)
+    };
+    let numeric_box = decode("NumericBox");
+    let numeric_constants = decode("NumericConstants");
+    assert_eq!(
+        numeric_box
+            .fields
+            .iter()
+            .map(|field| (
+                numeric_box.constant_pool.utf8(field.name_index).unwrap(),
+                numeric_box
+                    .constant_pool
+                    .utf8(field.descriptor_index)
+                    .unwrap(),
+                field.access_flags.0,
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("f", "F", dotty_classfile::access_flags::ACC_PRIVATE),
+            ("d", "D", dotty_classfile::access_flags::ACC_PRIVATE),
+        ]
+    );
+    assert_eq!(
+        methods_with_descriptors(&numeric_box),
+        [
+            ("<init>".to_owned(), "(FD)V".to_owned()),
+            ("getF".to_owned(), "()F".to_owned()),
+            ("getD".to_owned(), "()D".to_owned()),
+            ("setF".to_owned(), "(F)V".to_owned()),
+            ("setD".to_owned(), "(D)V".to_owned()),
+        ]
+    );
+    let constructor = emitted_method_code(&numeric_box, "<init>");
+    assert_opcode_sequence(
+        constructor,
+        &[0x2a, 0xb7, 0x2a, 0x23, 0xb5, 0x2a, 0x28, 0xb5, 0xb1],
+    );
+    assert_method_reference(
+        &numeric_box,
+        constructor,
+        0xb7,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+    );
+    assert_field_reference_sequence(
+        &numeric_box,
+        constructor,
+        &[
+            (0xb5, "NumericBox", "f", "F"),
+            (0xb5, "NumericBox", "d", "D"),
+        ],
+    );
+    assert_eq!(code_max_stack(&numeric_box, "<init>"), 3);
+    assert_eq!(code_max_locals(&numeric_box, "<init>"), 4);
+    assert_opcode_sequence(
+        emitted_method_code(&numeric_box, "getF"),
+        &[0x2a, 0xb4, 0xae],
+    );
+    assert_field_reference(
+        &numeric_box,
+        emitted_method_code(&numeric_box, "getF"),
+        0xb4,
+        "NumericBox",
+        "f",
+        "F",
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&numeric_box, "getD"),
+        &[0x2a, 0xb4, 0xaf],
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&numeric_box, "setF"),
+        &[0x2a, 0x4d, 0x23, 0x46, 0x2c, 0x25, 0xb5, 0xb1],
+    );
+    assert_eq!(code_max_stack(&numeric_box, "setF"), 2);
+    assert_eq!(code_max_locals(&numeric_box, "setF"), 4);
+    assert_opcode_sequence(
+        emitted_method_code(&numeric_box, "setD"),
+        &[0x2a, 0x4e, 0x27, 0x39, 0x2d, 0x18, 0xb5, 0xb1],
+    );
+    assert_eq!(code_max_stack(&numeric_box, "setD"), 3);
+    assert_eq!(code_max_locals(&numeric_box, "setD"), 6);
+
+    for (name, descriptor) in [("f", "F"), ("d", "D")] {
+        let field = numeric_constants
+            .fields
+            .iter()
+            .find(|field| numeric_constants.constant_pool.utf8(field.name_index) == Ok(name))
+            .expect("private constant field emitted");
+        assert_eq!(
+            numeric_constants.constant_pool.utf8(field.descriptor_index),
+            Ok(descriptor)
+        );
+        assert_eq!(
+            field.access_flags.0,
+            dotty_classfile::access_flags::ACC_PRIVATE | dotty_classfile::access_flags::ACC_FINAL
+        );
+    }
+    let constant_constructor = emitted_method_code(&numeric_constants, "<init>");
+    let load_constants = decode_subset_instructions(constant_constructor)
+        .into_iter()
+        .filter_map(|(offset, opcode)| match opcode {
+            0x12 => Some(ConstantPoolIndex(u16::from(
+                constant_constructor[offset + 1],
+            ))),
+            0x13 | 0x14 => Some(ConstantPoolIndex(u16::from_be_bytes([
+                constant_constructor[offset + 1],
+                constant_constructor[offset + 2],
+            ]))),
+            _ => None,
+        })
+        .filter_map(|index| numeric_constants.constant_pool.get(index))
+        .collect::<Vec<_>>();
+    assert!(load_constants.iter().any(
+        |entry| matches!(entry, ConstantPoolEntry::Float(value) if value.to_bits() == 1.5f32.to_bits())
+    ));
+    assert!(load_constants.iter().any(
+        |entry| matches!(entry, ConstantPoolEntry::Double(value) if value.to_bits() == 3.5f64.to_bits())
+    ));
+
+    if require_jdk_or_skip() {
+        for (class_name, expected) in [
+            ("NumericBox", "descriptor: (FD)V"),
+            ("NumericConstants", "descriptor: ()F"),
+        ] {
+            let javap = Command::new("javap")
+                .args([
+                    "-v",
+                    "-c",
+                    "-classpath",
+                    first_output.path().to_str().unwrap(),
+                    class_name,
+                ])
+                .output()
+                .expect("start javap");
+            assert!(javap.status.success(), "javap failed: {javap:?}");
+            let text = String::from_utf8_lossy(&javap.stdout);
+            assert!(text.contains(expected), "{class_name}: {text}");
+            assert!(text.contains("putfield"), "{class_name}: {text}");
+            if class_name == "NumericBox" {
+                assert!(text.contains("fload_1"), "{class_name}: {text}");
+                assert!(text.contains("dload_2"), "{class_name}: {text}");
+            }
+        }
+        let harness_path = first_output.path().join("FloatDoubleFieldsHarness.java");
+        fs::write(
+            &harness_path,
+            r#"public final class FloatDoubleFieldsHarness {
+  public static void main(String[] args) {
+    NumericBox first = new NumericBox(1.25f, 2.5d);
+    NumericBox second = new NumericBox(-3.0f, -4.0d);
+    if (first.getF() != 1.25f || first.getD() != 2.5d) throw new AssertionError("constructor fields");
+    first.setF(-0.0f);
+    first.setD(-0.0d);
+    if (Float.floatToRawIntBits(first.getF()) != Float.floatToRawIntBits(-0.0f)) throw new AssertionError("float negative zero");
+    if (Double.doubleToRawLongBits(first.getD()) != Double.doubleToRawLongBits(-0.0d)) throw new AssertionError("double negative zero");
+    second.setF(7.0f);
+    second.setD(8.0d);
+    if (Float.floatToRawIntBits(first.getF()) != Float.floatToRawIntBits(-0.0f) || Double.doubleToRawLongBits(first.getD()) != Double.doubleToRawLongBits(-0.0d) || second.getF() != 7.0f || second.getD() != 8.0d) throw new AssertionError("instance isolation");
+    second.setF(Float.NaN);
+    second.setD(Double.NaN);
+    if (!Float.isNaN(second.getF()) || !Double.isNaN(second.getD())) throw new AssertionError("NaN fields");
+    NumericConstants constants = new NumericConstants();
+    if (constants.getF() != 1.5f || constants.getD() != 3.5d) throw new AssertionError("literal fields");
+  }
+}
+"#,
+        )
+        .expect("write FloatDoubleFieldsHarness.java");
+        let javac = Command::new("javac")
+            .args(["-classpath", first_output.path().to_str().unwrap(), "-d"])
+            .arg(first_output.path())
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(javac.status.success(), "javac failed: {javac:?}");
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                first_output.path().to_str().unwrap(),
+                "FloatDoubleFieldsHarness",
+            ])
+            .output()
+            .expect("start java");
+        assert!(java.status.success(), "java verification failed: {java:?}");
     }
 }
 
@@ -7721,9 +7909,11 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0x02..=0x0f
             | 0x1a..=0x1d
             | 0x1e..=0x21
+            | 0x22..=0x29
             | 0x2a..=0x2d
             | 0x3b..=0x3e
             | 0x3f..=0x42
+            | 0x43..=0x4a
             | 0x4b..=0x4e
             | 0x57
             | 0x59
@@ -7737,9 +7927,11 @@ fn decode_subset_instructions(code: &[u8]) -> Vec<(usize, u8)> {
             | 0x82
             | 0xac
             | 0xad
+            | 0xae
+            | 0xaf
             | 0xb0
             | 0xb1 => 1,
-            0x10 | 0x12 | 0x15 | 0x16 | 0x19 | 0x36 | 0x37 | 0x3a => 2,
+            0x10 | 0x12 | 0x15..=0x19 | 0x36..=0x3a => 2,
             0x13 | 0x14 | 0x99..=0x9a | 0x9f..=0xa6 | 0xa7 | 0xb4..=0xb8 | 0xbb => 3,
             other => panic!("unexpected opcode in supported JVM fixture: {other:#04x}"),
         };

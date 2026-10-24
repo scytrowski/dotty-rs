@@ -2222,13 +2222,13 @@ fn non_private_visibility_forms_are_canonicalized_and_self_forward_reads_type() 
 fn real_source_private_primitive_fields_project_in_frontend_order() {
     let snapshot = || {
         with_source(
-            "class Fields { private val seed: Int = 42; private var enabled: Boolean = true; private val large: Long = 9000000000L }",
+            "class Fields { private val seed: Int = 42; private var enabled: Boolean = true; private val large: Long = 9000000000L; private val small: Float = 1.5f; private var precise: Double = 2.5 }",
             |ast, source, index, definitions, typer| {
                 let class = symbol_named(ast, index, source, typer, "Fields");
                 typer.complete_symbol(class).unwrap();
 
                 let mut fields = Vec::new();
-                for name in ["seed", "enabled", "large"] {
+                for name in ["seed", "enabled", "large", "small", "precise"] {
                     let (field, _, rhs) = field_tree_and_rhs(ast, index, source, typer, name);
                     typer.complete_symbol(field).unwrap();
                     let SymbolInfo::Complete(field_type) = typer.store().symbols.get(field).info
@@ -2258,7 +2258,7 @@ fn real_source_private_primitive_fields_project_in_frontend_order() {
                 };
                 let metadata = unit.metadata(definitions).unwrap();
                 let projected = metadata[0].fields();
-                assert_eq!(projected.len(), 3);
+                assert_eq!(projected.len(), 5);
                 assert_eq!(projected[0].name(), "seed");
                 assert_eq!(projected[0].descriptor(), "I");
                 assert!(projected[0].access_flags().is_private());
@@ -2271,6 +2271,14 @@ fn real_source_private_primitive_fields_project_in_frontend_order() {
                 assert_eq!(projected[2].descriptor(), "J");
                 assert!(projected[2].access_flags().is_private());
                 assert!(projected[2].access_flags().is_final());
+                assert_eq!(projected[3].name(), "small");
+                assert_eq!(projected[3].descriptor(), "F");
+                assert!(projected[3].access_flags().is_private());
+                assert!(projected[3].access_flags().is_final());
+                assert_eq!(projected[4].name(), "precise");
+                assert_eq!(projected[4].descriptor(), "D");
+                assert!(projected[4].access_flags().is_private());
+                assert!(!projected[4].access_flags().is_final());
 
                 assert_eq!(unit.metadata(definitions).unwrap(), metadata);
                 let snapshot = projected

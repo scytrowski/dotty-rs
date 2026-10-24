@@ -1,7 +1,8 @@
 # JVM stateful class source contract
 
 This document records the current bounded Parser → Namer → Typer → JVM
-contract for private primitive fields (including category-two `Long`) and
+contract for private primitive fields (`Int`, `Boolean`, `Long`, `Float`, and
+`Double`) and
 primary constructors. It targets the
 pinned Scala 3.9.0 reference at revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
@@ -22,6 +23,8 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | `class Counter(start: Int) { private var current: Int = start; def get(): Int = current }` | `current` is a private mutable field owned by `Counter`. The plain constructor parameter has a class-owned private `Parameter` identity and a separate constructor-owned public `Parameter` identity. The initializer reference resolves to the constructor-owned ID. | The primary constructor has one ordinary clause, one Int parameter, and a result `TypeRef` to `Counter`. The typed RHS root has `Type::TermRef(Symbol(constructorParameter))`; it is not rebound to the class-owned parameter or `current`. | The `Counter.scala` source integration emits exactly `<init>(I)V`, initializes `current:I` from the canonical constructor parameter, and lowers `get`, `set`, and `increment`. Fresh frontend runs produce identical class bytes; JDK CI verifies independent instance state and method behavior. |
 | `class LongBox(initial: Long) { private var current: Long = initial }` | The source constructor parameter and derived constructor-owned formal remain distinct identities. The initializer references the exact constructor-owned `SymbolId`. | Descriptor `(J)V`; `initial` begins at local slot 1 and occupies slots 1/2. The initializer plan contains a Long parameter load and `putfield current:J`. | `LongFields.scala` emits the category-two constructor, setter, and getter with exact `J` descriptors; a JDK harness checks signed values and independent instances. |
 | `class LongConstant { private val number: Long = 9000000000L }` | `number` is a canonical private immutable Long field owned by `LongConstant`. | Its typed constant preserves the exact signed `i64` value and lowers to `lconst`/`ldc2_w` before `putfield number:J`. | `LongFields.scala` decodes the Long constant pool entry and executes the class with `java -Xverify:all`. |
+| `class NumericBox(initialF: Float, initialD: Double) { private var f: Float = initialF; private var d: Double = initialD }` | `f` and `d` are distinct canonical private mutable field symbols in source order. Constructor parameter references retain their exact constructor-owned identities. | Descriptor `(FD)V`; slots 1 and 2/3 load with `fload` and `dload`. The parent constructor runs once before the two `putfield` instructions. | `FloatDoubleFields.scala` checks source order, `(F)V`/`(D)V` setters, `()F`/`()D` getters, fresh-session deterministic bytes, and JDK execution. No Scala-generated accessors are emitted. |
+| `class NumericConstants { private val f: Float = 1.5f; private val d: Double = 3.5 }` | Both values remain canonical private immutable fields. | Typed literal roots preserve the Float/Double bit patterns and lower through `fconst_bits`/`dconst_bits` before exact `putfield` instructions. | The fixture verifies the `CONSTANT_Float` and `CONSTANT_Double` values and executes both getters under JDK 21. |
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The parameter order comes from the source constructor clause. | Identity audit only; public accessor ABI is out of scope. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same clause ordering as `val`. | Identity audit only; public getter/setter ABI is out of scope. |
 
@@ -55,8 +58,8 @@ For the supported subset, constructor invocation must call
 `java/lang/Object.<init>()V` first, then run supported field initializers in
 `Template.body` source order, then return. The
 `JvmCompilationUnit::lower_constructor_field_initializers` method now
-produces checked fragments for Int/Boolean/Long literals and constructor
-parameters, including two-slot Long loads,
+produces checked fragments for Int/Boolean/Long/Float/Double literals and
+constructor parameters, including category-two Long/Double loads,
 approved primitive intrinsics, reads of earlier initialized fields, and one
 completed direct allocation for a reference field. That allocation is limited
 to a planned public class and primitive literal or exact enclosing-constructor
@@ -102,7 +105,7 @@ These rules are visible in the pinned compiler sources:
 - [`SymDenotations.scala`](https://github.com/scala/scala3/blob/777528f19a58e794c9954a42f433373472ec57f8/compiler/src/dotty/tools/dotc/core/SymDenotations.scala) defines class parameter accessors and distinguishes getters from setters.
 
 The current whole-class emitter supports private primitive instance fields,
-including category-two Long fields,
+including category-two Long and Double fields,
 one plain primary constructor, and planned ordinary user methods for a
 top-level Object-derived class. The JDK 21 CI gate uses `javap -c -v`,
 `javac`, and `java -Xverify:all` on the real fixtures. It does not claim

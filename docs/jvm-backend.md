@@ -34,13 +34,11 @@ focused positive and fail-closed coverage is mapped in
 
 Float and Double source, constant-pool, descriptor, linear-analysis, CFG, and
 verifier boundaries are audited in [`jvm-floating-point.md`](jvm-floating-point.md).
-Canonical Float/Double types and literal constants project to JVM metadata,
-descriptors, field signatures, and parameter slots. Body lowering remains
-unsupported: expressions, loads/stores, returns, field writes, calls, and
-field reads fail with typed errors before instructions are emitted; calls and
-constructor arguments also fail before class artifacts are published. The
-audit records the pinned Scala 3.9.0 oracle limitation and the remaining
-follow-up issues without claiming Float/Double code generation.
+The bounded source backend now emits private Float/Double instance fields,
+primary-constructor literal/parameter initialization, exact field reads and
+mutable writes, and ordinary Float/Double method returns and parameters.
+Floating-point control flow, arithmetic, conversions, and calls remain outside
+this increment.
 
 Frontend assembly remains outside `dotty-jvm`. A future compiler/session layer
 is responsible for parsing, naming, typing, selecting class and method plans,

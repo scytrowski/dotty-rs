@@ -46,6 +46,10 @@ pub enum JvmConstructorInitializerInstruction {
     Constant(i32),
     /// Push a signed category-two Long constant without narrowing it.
     LongConstant(i64),
+    /// Push an exact IEEE-754 Float bit pattern.
+    FloatBits(u32),
+    /// Push an exact IEEE-754 Double bit pattern.
+    DoubleBits(u64),
     /// Allocate one planned class for a reference-valued field initializer.
     NewObject {
         /// Checked JVM internal name of the allocated class.
@@ -121,6 +125,12 @@ impl JvmConstructorFieldInitializerPlan {
                     JvmConstructorInitializerInstruction::LongConstant(value) => {
                         code.lconst(*value)
                     }
+                    JvmConstructorInitializerInstruction::FloatBits(bits) => {
+                        code.fconst_bits(*bits)
+                    }
+                    JvmConstructorInitializerInstruction::DoubleBits(bits) => {
+                        code.dconst_bits(*bits)
+                    }
                     JvmConstructorInitializerInstruction::NewObject { owner } => {
                         code.new_object(owner.clone())
                     }
@@ -133,13 +143,8 @@ impl JvmConstructorFieldInitializerPlan {
                         JvmType::Int | JvmType::Boolean => code.iload(usize::from(*slot)),
                         JvmType::Reference(_) => code.aload(usize::from(*slot)),
                         JvmType::Long => code.lload(usize::from(*slot)),
-                        JvmType::Float | JvmType::Double => {
-                            return Err(JvmCodegenError::UnsupportedConstructorFieldInitializer {
-                                field: field.field,
-                                tree: field.initializer,
-                                node: "floating-point parameter load",
-                            });
-                        }
+                        JvmType::Float => code.fload(usize::from(*slot)),
+                        JvmType::Double => code.dload(usize::from(*slot)),
                     },
                     JvmConstructorInitializerInstruction::IntAdd => code.iadd(),
                     JvmConstructorInitializerInstruction::BooleanNot => {
@@ -503,6 +508,38 @@ impl ConstructorInitializerContext<'_> {
 
         match &tree.kind {
             TreeKind::Literal(literal) => {
+                if let Constant::FloatBits(bits) = literal.value {
+                    let found = self.tree_value_type(tree_id, tree.ty)?;
+                    let constant_matches = match self.store.types.try_get(tree.ty) {
+                        Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                        _ => found == JvmType::Float,
+                    };
+                    if found != JvmType::Float || !constant_matches {
+                        return Err(JvmCodegenError::LiteralTypeMismatch {
+                            tree: tree_id,
+                            value: JvmType::Float,
+                            typed: Some(found),
+                        });
+                    }
+                    instructions.push(JvmConstructorInitializerInstruction::FloatBits(bits));
+                    return Ok(JvmType::Float);
+                }
+                if let Constant::DoubleBits(bits) = literal.value {
+                    let found = self.tree_value_type(tree_id, tree.ty)?;
+                    let constant_matches = match self.store.types.try_get(tree.ty) {
+                        Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                        _ => found == JvmType::Double,
+                    };
+                    if found != JvmType::Double || !constant_matches {
+                        return Err(JvmCodegenError::LiteralTypeMismatch {
+                            tree: tree_id,
+                            value: JvmType::Double,
+                            typed: Some(found),
+                        });
+                    }
+                    instructions.push(JvmConstructorInitializerInstruction::DoubleBits(bits));
+                    return Ok(JvmType::Double);
+                }
                 if let Constant::Long(value) = literal.value {
                     let found = self.tree_value_type(tree_id, tree.ty)?;
                     let constant_matches = match self.store.types.try_get(tree.ty) {
