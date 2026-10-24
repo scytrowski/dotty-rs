@@ -73,23 +73,29 @@ impl SourceTyper<'_> {
         if !matches!(source_kind, TreeKind::Ident(_) | TreeKind::Select(_)) {
             return None;
         }
-        let Some(Type::TermRef {
-            target: TermRefTarget::Symbol(symbol),
-            ..
-        }) = self
+        let symbol = match self
             .store
             .types
             .try_get(self.typed_arena.get(typed_tree).ty)
-        else {
-            return None;
+        {
+            Some(
+                Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }
+                | Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                },
+            ) => symbol,
+            _ => return None,
         };
         if !self.store.symbols.contains(*symbol) {
             return None;
         }
         let kind = self.store.symbols.get(*symbol).kind;
         let invalid_as_expression = match source_kind {
-            TreeKind::Ident(_) => kind == SymbolKind::Package,
-            TreeKind::Select(_) => matches!(
+            TreeKind::Ident(_) | TreeKind::Select(_) => matches!(
                 kind,
                 SymbolKind::Package
                     | SymbolKind::Class

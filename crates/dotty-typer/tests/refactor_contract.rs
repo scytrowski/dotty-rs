@@ -1059,6 +1059,50 @@ fn java_class_import_qualifier_exposes_only_static_members() {
 }
 
 #[test]
+fn cached_java_class_qualifier_is_still_rejected_as_a_value() {
+    let mut fixture = Fixture::new(
+        "package lib { class JavaApi { def staticValue(): Int = 1 } }; package app { import lib.JavaApi; object Use { def value: Int = JavaApi.staticValue() } }",
+    );
+    let java_api = fixture.symbol_named("JavaApi", SymbolKind::Class);
+    fixture.store.symbols.get_mut(java_api).flags = SymbolFlags::JAVA_DEFINED;
+    let static_value = fixture
+        .methods_named("staticValue")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(java_api))
+        .unwrap()
+        .1;
+    fixture.store.symbols.get_mut(static_value).flags = SymbolFlags::STATIC;
+    let (_, method, rhs) = fixture.method("value");
+    let TreeKind::Apply(application) = &fixture.ast.get(rhs).kind else {
+        panic!("source call should be an application")
+    };
+    let TreeKind::Select(selection) = &fixture.ast.get(application.function).kind else {
+        panic!("source function should select the static method")
+    };
+    let class_qualifier = selection.qualifier;
+
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    assert!(matches!(
+        typer.type_expression(class_qualifier, context),
+        Err(TyperError::TermNameNotFound { .. })
+    ));
+    typer.type_expression(rhs, context).unwrap();
+    let cached_qualifier = typer.type_expression(class_qualifier, context);
+    assert!(
+        matches!(
+            cached_qualifier,
+            Err(TyperError::UnsupportedTermReference {
+                symbol,
+                kind: SymbolKind::Class,
+                ..
+            }) if symbol == java_api
+        ),
+        "unexpected cached qualifier result: {cached_qualifier:?}"
+    );
+}
+
+#[test]
 fn java_class_import_qualifier_rejects_instance_members() {
     let mut fixture = Fixture::new(
         "package lib { class JavaApi { def instanceValue: Int = 2 } }; package app { import lib.JavaApi; object Use { def value: Int = JavaApi.instanceValue } }",
