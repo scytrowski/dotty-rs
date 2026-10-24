@@ -1,7 +1,7 @@
 //! Descriptor-aware analysis for straight-line code and typed CFGs.
 //!
 //! [`LinearCodeAnalyzer`] retains the typed straight-line analysis API.
-//! [`CfgCodeAnalyzer`] propagates integer, null, and initialized-class
+//! [`CfgCodeAnalyzer`] propagates integer, Float/Double, null, and initialized-class
 //! references across symbolic branches, including proven common-superclass
 //! operand-stack and initialized-reference local joins when given an explicit hierarchy,
 //! bounded field transfers, constructor arguments, primitive virtual calls,
@@ -245,8 +245,12 @@ impl ClassHierarchy {
 pub enum FlowValue {
     /// An int-like JVM value.
     Integer,
+    /// A category-one JVM `float` value.
+    Float,
     /// A category-two JVM `long` value occupying two operand-stack slots.
     Long,
+    /// A category-two JVM `double` value occupying two operand-stack slots.
+    Double,
     /// The JVM null verification type.
     Null,
     /// An initialized reference to this exact class.
@@ -2326,6 +2330,17 @@ impl Frame {
                     index: index.get(),
                 })
             }
+            Some(LocalSlot::Value(ValueKind::Double))
+                if !matches!(
+                    self.locals.get(usize::from(index.get()) + 1),
+                    Some(Some(LocalSlot::CategoryTwoTail))
+                ) =>
+            {
+                Err(AnalysisError::LocalSlotOverlap {
+                    instruction,
+                    index: index.get(),
+                })
+            }
             Some(LocalSlot::Value(actual)) => self.push(instruction, actual),
             Some(LocalSlot::Object(class)) if expected == ValueKind::Reference => {
                 self.push_object(instruction, class)?;
@@ -3376,10 +3391,16 @@ pub enum FlowLocalState {
     Top,
     /// The slot contains an int-like JVM value.
     Integer,
+    /// The slot contains a category-one JVM `float` value.
+    Float,
     /// The first physical slot of an initialized category-two `long` local.
     Long,
     /// The inaccessible second physical slot of a category-two `long` local.
     LongTail,
+    /// The first physical slot of an initialized category-two `double` local.
+    Double,
+    /// The inaccessible second physical slot of a category-two `double` local.
+    DoubleTail,
     /// The slot contains the JVM null verification type.
     Null,
     /// The slot is the current instance receiver.
@@ -3393,7 +3414,7 @@ pub enum FlowLocalState {
 pub struct BlockEntryState {
     /// Local slots, including receiver/argument slots and slots grown by stores.
     pub locals: Vec<FlowLocalState>,
-    /// Exact int, long, null, or initialized-class values in bottom-to-top order.
+    /// Exact int, Float, Long, Double, null, or initialized-class values in bottom-to-top order.
     pub operand_stack: Vec<FlowValue>,
 }
 
@@ -3662,8 +3683,10 @@ impl CfgCodeAnalyzer {
         validate_bounded_reference_descriptor(&descriptor)?;
         check_parameter_slots(&descriptor, !is_static, None)?;
         for (parameter, ty) in descriptor.parameters.iter().enumerate() {
-            if !matches!(value_kind(ty), ValueKind::Int | ValueKind::Long)
-                && !(current_class.is_some() && matches!(ty, FieldType::Object(_)))
+            if !matches!(
+                value_kind(ty),
+                ValueKind::Int | ValueKind::Float | ValueKind::Long | ValueKind::Double
+            ) && !(current_class.is_some() && matches!(ty, FieldType::Object(_)))
             {
                 return Err(AnalysisError::UnsupportedFlowParameter {
                     parameter,
@@ -3957,11 +3980,21 @@ fn validate_flow_instruction_with_context(
             | Instruction::Sipush(_)
             | Instruction::ILoad(_)
             | Instruction::IStore(_)
+            | Instruction::FConst(_)
+            | Instruction::DConst(_)
+            | Instruction::FLoad(_)
+            | Instruction::DLoad(_)
+            | Instruction::FStore(_)
+            | Instruction::DStore(_)
             | Instruction::LConst(_)
+            | Instruction::Ldc(LdcConstant::Float(_))
             | Instruction::Ldc2(Ldc2Constant::Long(_))
+            | Instruction::Ldc2(Ldc2Constant::Double(_))
             | Instruction::LLoad(_)
             | Instruction::LStore(_)
             | Instruction::LReturn
+            | Instruction::FReturn
+            | Instruction::DReturn
             | Instruction::IAdd
             | Instruction::ISub
             | Instruction::IMul
@@ -4187,9 +4220,21 @@ fn state_from_frame(frame: &Frame) -> Result<BlockEntryState, AnalysisError> {
     let locals = frame
         .locals
         .iter()
-        .map(|slot| match slot {
+        .enumerate()
+        .map(|(index, slot)| match slot {
             Some(LocalSlot::Value(ValueKind::Int)) => FlowLocalState::Integer,
+            Some(LocalSlot::Value(ValueKind::Float)) => FlowLocalState::Float,
             Some(LocalSlot::Value(ValueKind::Long)) => FlowLocalState::Long,
+            Some(LocalSlot::Value(ValueKind::Double)) => FlowLocalState::Double,
+            Some(LocalSlot::CategoryTwoTail)
+                if index > 0
+                    && matches!(
+                        frame.locals.get(index - 1),
+                        Some(Some(LocalSlot::Value(ValueKind::Double)))
+                    ) =>
+            {
+                FlowLocalState::DoubleTail
+            }
             Some(LocalSlot::CategoryTwoTail) => FlowLocalState::LongTail,
             Some(LocalSlot::Null) => FlowLocalState::Null,
             Some(LocalSlot::Receiver) => FlowLocalState::Receiver,
@@ -4204,7 +4249,9 @@ fn state_from_frame(frame: &Frame) -> Result<BlockEntryState, AnalysisError> {
         .zip(&frame.stack_nulls)
         .map(|((value, class), is_null)| match (value, class, is_null) {
             (ValueKind::Int, _, _) => Ok(FlowValue::Integer),
+            (ValueKind::Float, _, _) => Ok(FlowValue::Float),
             (ValueKind::Long, _, _) => Ok(FlowValue::Long),
+            (ValueKind::Double, _, _) => Ok(FlowValue::Double),
             (ValueKind::Reference, _, true) => Ok(FlowValue::Null),
             (ValueKind::Reference, Some(class), false) => Ok(FlowValue::Object(class.clone())),
             (value, _, _) => Err(AnalysisError::UnsupportedFlowStackValue { actual: *value }),
@@ -4226,8 +4273,11 @@ fn frame_from_state(
         .map(|local| match local {
             FlowLocalState::Top => None,
             FlowLocalState::Integer => Some(LocalSlot::Value(ValueKind::Int)),
+            FlowLocalState::Float => Some(LocalSlot::Value(ValueKind::Float)),
             FlowLocalState::Long => Some(LocalSlot::Value(ValueKind::Long)),
+            FlowLocalState::Double => Some(LocalSlot::Value(ValueKind::Double)),
             FlowLocalState::LongTail => Some(LocalSlot::CategoryTwoTail),
+            FlowLocalState::DoubleTail => Some(LocalSlot::CategoryTwoTail),
             FlowLocalState::Null => Some(LocalSlot::Null),
             FlowLocalState::Receiver => Some(LocalSlot::Receiver),
             FlowLocalState::Object(class) => Some(LocalSlot::Object(class.clone())),
@@ -4238,7 +4288,9 @@ fn frame_from_state(
         .iter()
         .map(|value| match value {
             FlowValue::Integer => ValueKind::Int,
+            FlowValue::Float => ValueKind::Float,
             FlowValue::Long => ValueKind::Long,
+            FlowValue::Double => ValueKind::Double,
             FlowValue::Null => ValueKind::Reference,
             FlowValue::Object(_) => ValueKind::Reference,
         })
@@ -4248,7 +4300,9 @@ fn frame_from_state(
         .iter()
         .map(|value| match value {
             FlowValue::Integer => None,
+            FlowValue::Float => None,
             FlowValue::Long => None,
+            FlowValue::Double => None,
             FlowValue::Null => None,
             FlowValue::Object(class) => Some(class.clone()),
         })
@@ -4269,7 +4323,9 @@ fn frame_from_state(
             .iter()
             .map(|value| match value {
                 FlowValue::Integer => std::collections::BTreeSet::new(),
+                FlowValue::Float => std::collections::BTreeSet::new(),
                 FlowValue::Long => std::collections::BTreeSet::new(),
+                FlowValue::Double => std::collections::BTreeSet::new(),
                 FlowValue::Null => std::collections::BTreeSet::new(),
                 FlowValue::Object(class) => std::collections::BTreeSet::from([class.clone()]),
             })
@@ -4438,7 +4494,9 @@ fn merge_flow_states_with_evidence(
                 }
             }
             (FlowLocalState::Long, FlowLocalState::Long)
-            | (FlowLocalState::LongTail, FlowLocalState::LongTail) => {}
+            | (FlowLocalState::LongTail, FlowLocalState::LongTail)
+            | (FlowLocalState::Double, FlowLocalState::Double)
+            | (FlowLocalState::DoubleTail, FlowLocalState::DoubleTail) => {}
             (left, right) if left == right => {}
             _ => {
                 *existing = FlowLocalState::Top;
@@ -4464,7 +4522,15 @@ fn merge_flow_states_with_evidence(
                 }
                 index += 2;
             }
-            FlowLocalState::LongTail => {
+            FlowLocalState::Double => {
+                if existing.locals.get(index + 1) != Some(&FlowLocalState::DoubleTail) {
+                    existing.locals[index] = FlowLocalState::Top;
+                    local_evidence[index].clear();
+                    changed = true;
+                }
+                index += 2;
+            }
+            FlowLocalState::LongTail | FlowLocalState::DoubleTail => {
                 existing.locals[index] = FlowLocalState::Top;
                 local_evidence[index].clear();
                 changed = true;
@@ -4482,7 +4548,9 @@ fn stack_join_evidence(state: &BlockEntryState) -> Vec<std::collections::BTreeSe
         .iter()
         .map(|value| match value {
             FlowValue::Integer => std::collections::BTreeSet::new(),
+            FlowValue::Float => std::collections::BTreeSet::new(),
             FlowValue::Long => std::collections::BTreeSet::new(),
+            FlowValue::Double => std::collections::BTreeSet::new(),
             FlowValue::Null => std::collections::BTreeSet::new(),
             FlowValue::Object(class) => std::collections::BTreeSet::from([class.clone()]),
         })
@@ -4607,7 +4675,9 @@ fn join_flow_values(
 ) -> Option<FlowValue> {
     match (left, right) {
         (FlowValue::Integer, FlowValue::Integer) => Some(FlowValue::Integer),
+        (FlowValue::Float, FlowValue::Float) => Some(FlowValue::Float),
         (FlowValue::Long, FlowValue::Long) => Some(FlowValue::Long),
+        (FlowValue::Double, FlowValue::Double) => Some(FlowValue::Double),
         (FlowValue::Null, FlowValue::Null) => Some(FlowValue::Null),
         (FlowValue::Null, FlowValue::Object(class))
         | (FlowValue::Object(class), FlowValue::Null) => Some(FlowValue::Object(class.clone())),
@@ -4794,7 +4864,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_float_double_instructions_out_of_cfg_transfer() {
+    fn accepts_bounded_float_double_instructions_in_cfg_transfer() {
         let mut builder = ConstantPoolBuilder::new();
         let float = builder.float(1.5).unwrap();
         let double = builder.double(3.5).unwrap();
@@ -4814,11 +4884,8 @@ mod tests {
         for instruction in instructions {
             assert_eq!(
                 validate_flow_instruction(3, instruction),
-                Err(AnalysisError::UnsupportedFlowInstruction {
-                    instruction: 3,
-                    kind: UnsupportedFlowInstructionKind::Operation,
-                }),
-                "CFG must remain unsupported for {instruction:?}"
+                Ok(()),
+                "bounded Float/Double CFG instruction should be accepted: {instruction:?}"
             );
         }
     }
