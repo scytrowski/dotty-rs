@@ -875,6 +875,12 @@ pub enum JvmCodegenError {
     InvalidPublicBodyFieldSourceProof { field: SymbolId },
     /// Public-body field plans do not retain source template order.
     OutOfOrderPublicBodyFieldPlan { class: SymbolId, field: SymbolId },
+    /// Field plans do not retain initializer source order across visibility forms.
+    OutOfOrderFieldPlan { class: SymbolId, field: SymbolId },
+    /// A planned field initializer has no source position for order validation.
+    FieldInitializerSourcePositionUnavailable { field: SymbolId },
+    /// Planned field initializers come from different source files.
+    FieldInitializersFromDifferentSources { class: SymbolId, field: SymbolId },
     /// The parameter ID is outside the supplied symbol table.
     UnknownParameter { parameter: SymbolId },
     /// A local symbol ID is outside the supplied symbol table.
@@ -2854,6 +2860,18 @@ impl JvmCompilationUnit<'_> {
 
             let mut class_field_symbols = HashSet::new();
             let mut last_public_body_position = None;
+            let mut last_field_source_position: Option<(SourceId, u32)> = None;
+            let mixed_visibility_fields = class_plan.fields.iter().any(|field| {
+                matches!(
+                    field.source_visibility,
+                    JvmFieldSourceVisibility::PlainPublic(_)
+                )
+            }) && class_plan.fields.iter().any(|field| {
+                matches!(
+                    field.source_visibility,
+                    JvmFieldSourceVisibility::PlainPrivate
+                )
+            });
             for field_plan in &class_plan.fields {
                 if !class_field_symbols.insert(field_plan.field)
                     || !seen_fields.insert(field_plan.field)
@@ -2960,6 +2978,29 @@ impl JvmCompilationUnit<'_> {
                         initializer,
                     },
                 )?;
+                if mixed_visibility_fields {
+                    let source_position = initializer_tree
+                        .position
+                        .map(|position| (position.source(), position.span().range().start()))
+                        .ok_or(JvmCodegenError::FieldInitializerSourcePositionUnavailable {
+                            field: field_plan.field,
+                        })?;
+                    if let Some((previous_source, previous_start)) = last_field_source_position {
+                        if previous_source != source_position.0 {
+                            return Err(JvmCodegenError::FieldInitializersFromDifferentSources {
+                                class: class_plan.class,
+                                field: field_plan.field,
+                            });
+                        }
+                        if previous_start >= source_position.1 {
+                            return Err(JvmCodegenError::OutOfOrderFieldPlan {
+                                class: class_plan.class,
+                                field: field_plan.field,
+                            });
+                        }
+                    }
+                    last_field_source_position = Some(source_position);
+                }
                 validate_tree_type(self.store, initializer, initializer_tree)?;
             }
 

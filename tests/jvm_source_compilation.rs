@@ -18750,6 +18750,35 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
                     .expect("restoring source order restores the validated plan");
             }
 
+            if class_name == "Counter" {
+                let class_index = unit
+                    .classes
+                    .iter()
+                    .position(|candidate| candidate.class == class)
+                    .expect("Counter has a mutable class plan");
+                let private_index = unit.classes[class_index]
+                    .fields
+                    .iter()
+                    .position(|field| {
+                        matches!(
+                            field.source_visibility,
+                            JvmFieldSourceVisibility::PlainPrivate
+                        )
+                    })
+                    .expect("Counter includes a private body field");
+                unit.classes[class_index].fields.swap(0, private_index);
+                assert!(matches!(
+                    unit.validate(),
+                    Err(JvmCodegenError::OutOfOrderFieldPlan {
+                        class: found_class,
+                        ..
+                    }) if found_class == class
+                ));
+                unit.classes[class_index].fields.swap(0, private_index);
+                unit.validate()
+                    .expect("restoring mixed visibility field order restores the plan");
+            }
+
             if class_name == "BodyOnly" {
                 let current_plan = unit
                     .classes
@@ -18971,6 +19000,46 @@ fn public_body_fields_lower_to_source_ordered_constructor_stores() {
             .expect("start java verifier for body-field harness");
         assert!(java.status.success(), "java failed: {java:?}");
     }
+}
+
+#[test]
+fn mixed_visibility_plan_permutation_cannot_hide_a_forward_field_read() {
+    let source_text = "class Mixed:\n  val first: Int = later\n  private val later: Int = 2";
+    let output = TestOutputDirectory::new("mixed-field-order-permutation");
+    let mut observed = false;
+    let mut observe = |unit: &mut JvmCompilationUnit<'_>, _definitions: &Definitions| {
+        let class = audit_class_named(unit, "Mixed");
+        let class_plan = unit
+            .classes
+            .iter_mut()
+            .find(|plan| plan.class == class)
+            .expect("Mixed has a class plan");
+        assert_eq!(class_plan.fields.len(), 2);
+        class_plan.fields.swap(0, 1);
+        observed = true;
+    };
+    let result = compile_source_batch_observed(
+        source_text,
+        "Mixed.scala",
+        output.path(),
+        SourceId::from_index(1481),
+        SourceUnitCardinality::ExactlyOne,
+        Some(&mut observe),
+    );
+    assert!(
+        observed,
+        "the test permutes the validated frontend field plan"
+    );
+    assert!(matches!(
+        result,
+        Err(PipelineFailure::Codegen(
+            JvmCodegenError::OutOfOrderFieldPlan { .. }
+        ))
+    ));
+    assert!(
+        output.class_files().is_empty(),
+        "an out-of-source-order mixed field plan must publish no class file"
+    );
 }
 
 #[test]
