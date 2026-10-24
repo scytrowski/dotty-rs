@@ -1,0 +1,10 @@
+run	file	resource_lookup_ns	classfile_decode_ns	tasty_decode_ns	load_uncached_inclusive_ns
+1	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	104383345	13978742	1181632854	120649270
+1	compiler/src/dotty/tools/dotc/ast/tpd.scala	132365719	14532522	1223044557	122429532
+1	compiler/src/dotty/tools/dotc/core/Types.scala	44561748	15502554	1395234545	105594886
+2	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	102644182	14177498	1164607390	119242304
+2	compiler/src/dotty/tools/dotc/ast/tpd.scala	130246687	14457272	1217004978	120919089
+2	compiler/src/dotty/tools/dotc/core/Types.scala	44566490	15857477	1399474057	106630280
+3	compiler/src/dotty/tools/backend/jvm/GenericSignatures.scala	103815331	14055437	1172410625	119661707
+3	compiler/src/dotty/tools/dotc/ast/tpd.scala	131991696	14338995	1272823817	122360369
+3	compiler/src/dotty/tools/dotc/core/Types.scala	44300146	15417745	1399095196	106326157

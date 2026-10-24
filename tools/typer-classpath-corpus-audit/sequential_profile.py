@@ -203,7 +203,9 @@ def parse_run(log: str) -> dict:
         elif line.startswith("AUDIT_CLASSLOAD_TIMINGS "):
             result["classload_timings"] = {key: int(value) for key, value in kvs(line).items()}
         elif line.startswith("AUDIT_RESOLVER_ROOT_PHASE "):
-            result["resolver_root_phases"].append(kvs(line))
+            values = kvs(line)
+            values.setdefault("scope", "source")
+            result["resolver_root_phases"].append(values)
         elif line.startswith("AUDIT_RESOLVER_ROOT "):
             values = kvs(line)
             values.setdefault("stable_key_observations", values.pop("request_observations", "not_captured"))
@@ -585,7 +587,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
             for run_index, run in enumerate(runs, 1)
             for row in run.get("match_resolver_profiles", [])
         ), encoding="utf-8")
-    root_rows = ["run\tscope\troot\tresolver_calls\trequest_observations\tsuccesses\tmisses\terrors\trollbacks\tunique_keys\trepeated_keys\tretry_after_failed_lookup\ttop_repeated"]
+    root_rows = ["run\tscope\troot\tresolver_calls\tstable_key_observations\tsuccesses\tmisses\terrors\trollbacks\tunique_keys\trepeated_keys\tretry_after_failed_lookup\ttop_repeated"]
     root_phase_rows = ["run\tscope\troot\tstage\tcalls\telapsed_ns\texclusive_ns"]
     cache_rows = ["run\t" + "\t".join(sorted({key for run in runs for key in run.get("resolver_cache", {})}))]
     cache_keys = cache_rows[0].split("\t")[1:]
@@ -862,9 +864,9 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
                 aggregate[key] += value
     for operation, values in sorted(wrapper_totals.items(), key=lambda item: (-item[1].get("wall_us", 0), item[0])):
         lines.append(f"| `{operation}` | {values.get('calls', 0)} | {values.get('wall_us', 0) / 1000:.3f} | {values.get('delegated_us', 0) / 1000:.3f} | {values.get('exclusive_us', 0) / 1000:.3f} |")
-    lines += ["", "## Full-mode AuditResolver subphases", "", "These separately timed wrapper windows attribute request preparation/identity, result classification, event collection, and transaction bookkeeping. They are inclusive across resolver operations that can nest; do not sum them with delegated resolver intervals or wrapper totals.", "", "| Scope | Stage | Calls | Elapsed ms |", "| --- | --- | ---: | ---: |"]
+    lines += ["", "## Full-mode AuditResolver subphases", "", "These separately timed wrapper windows attribute request preparation/identity, result classification, event collection, and transaction bookkeeping. They are inclusive across resolver operations that can nest; do not sum them with delegated resolver intervals or wrapper totals.", "", "| Scope | Stage | Calls | Elapsed ms | Exclusive ms |", "| --- | --- | ---: | ---: | ---: |"]
     for (scope, stage), values in sorted(resolver_stage_totals.items(), key=lambda row: (-row[1]["elapsed_us"], row[0])):
-        lines.append(f"| `{scope}` | `{stage}` | {values['calls']} | {values['elapsed_us'] / 1000:.3f} |")
+        lines.append(f"| `{scope}` | `{stage}` | {values['calls']} | {values['elapsed_us'] / 1000:.3f} | {values['exclusive_ns'] / 1_000_000:.3f} |")
     lines += ["", "## Largest classpath request roots", "", "Existing resolver observations sorted these by completed-class fanout; paths and method/tree identities are unchanged.", "", "| Root | File and method | Classes touched | Completions | Cache hits |", "| --- | --- | ---: | ---: | ---: |"]
     sorted_roots = sorted(load_root_rows, key=lambda item: (-item[1]["distinct_classes"], item[1]["root"], item[1]["file"], item[1]["method"], item[0]))
     lines += [
@@ -890,7 +892,7 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
     if not timing_only:
         lines += [
         "",
-        "All three hot roots spend nearly all observed method time in delegated `resolve_member`. Full-mode sidecars now attribute aggregate resolver phases and request outcomes; `resolver-stages.tsv`, `repeated-requests.tsv`, and `classload-timings.tsv` describe the selected profile. These timings are diagnostic, nested phases overlap, and the selected attempts stop at their first typer blocker. Treat request reuse and cache changes as follow-up candidates only; this profile does not establish an optimization speedup or justify cross-session semantic caching.",
+        "All three hot roots spend most observed method-attempt time in delegated member resolution. The largest nested interval is module completion, including classloader decode and resource work; exclusive target-selection time is small. Full-mode sidecars retain per-root exclusive/inclusive stages, stable-key outcomes, cache/completion counts, and exact method/match identities. Use `resolver-root-phases.tsv`, `resolver-roots.tsv`, `resolver-cache.tsv`, `match-resolver-cache.tsv`, and `resolver-stages.tsv` for those records. These timings stop at first blockers, overlap where marked inclusive, and do not establish an optimization speedup or justify cross-session semantic caching.",
         ]
     lines += [
         "",

@@ -1,0 +1,13 @@
+run	shape	requests	known_requests	distinct_keys	unknown_identity_requests	owners	names	files	repeated_hit_factor
+1	space=Prefix::prefix=module-class TypeRef::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver	1908	1908	224	0	22	24	3	8.518
+1	space=Prefix::prefix=module-class TypeRef::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver	1345	1345	215	0	23	22	3	6.256
+1	space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver	548	548	32	0	6	28	3	17.125
+1	space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver	12	12	4	0	1	4	1	3.0
+2	space=Prefix::prefix=module-class TypeRef::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver	1908	1908	224	0	22	24	3	8.518
+2	space=Prefix::prefix=module-class TypeRef::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver	1345	1345	215	0	23	22	3	6.256
+2	space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver	548	548	32	0	6	28	3	17.125
+2	space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver	12	12	4	0	1	4	1	3.0
+3	space=Prefix::prefix=module-class TypeRef::target=ModuleClass::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver	1908	1908	224	0	22	24	3	8.518
+3	space=Prefix::prefix=module-class TypeRef::target=ModuleClass::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver	1345	1345	215	0	23	22	3	6.256
+3	space=Prefix::prefix=package TypeRef::target=Package::namespace=term::selector=Unique::site=not-exposed-by-SymbolResolver	548	548	32	0	6	28	3	17.125
+3	space=Prefix::prefix=package TypeRef::target=Package::namespace=type::selector=Unique::site=not-exposed-by-SymbolResolver	12	12	4	0	1	4	1	3.0

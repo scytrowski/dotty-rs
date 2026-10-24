@@ -1,23 +1,26 @@
 # Typer delegated member resolver profile (Scala 3.9.0)
 
-This is a bounded measurement for issue #1525, not a corpus-wide performance
-claim or an optimization result. It profiles the four-file manifest in
-[`typer-hot-path-profile-manifest-3.9.0.tsv`](typer-hot-path-profile-manifest-3.9.0.tsv)
-with two root methods per file and one match probe per file. The selected
-attempts stop at the first typer blocker. The complete raw logs remain in the
-ignored `target/issue-1525-*` directories; the tables below retain the stable
-aggregate evidence needed to review this measurement.
+This bounded profile answers issue #1525 for the checked-in four-file manifest;
+it is not a corpus-wide performance result and does not apply an optimization.
+It selects up to two root methods and one supported-match probe per manifest
+file. Six method roots and three match probes were actually selected. Every
+match selector failed before its case body was typed.
+
+The committed machine-readable evidence is in
+[`typer-resolver-profile-3.9.0/`](typer-resolver-profile-3.9.0/): per-run timings,
+per-root requests and stages, cache/completion counts, selected identities and
+outcomes, match probes, classloader timings, and the instrumentation comparison.
+The complete logs remain under ignored `target/issue-1525-committed-*` paths.
 
 ## Reproduction inputs
 
 - Repository base: `a3c0131f0faa976dd91db58bbb8b3d9fca28aaec`.
-- Profile instrumentation: `56b7f8915b` (measured working tree; report changes are
-  committed separately).
-- Scala source checkout: revision
-  `777528f19a58e794c9954a42f433373472ec57f8` (Scala 3.9.0).
-- JDK: Temurin `21.0.8+9`, Linux x64; downloaded bundle SHA-256
+- Measured implementation: `317ea0e029e83bed0033de3d32a79dd0e194b975`.
+- Scala checkout: revision `777528f19a58e794c9954a42f433373472ec57f8` (Scala
+  3.9.0).
+- JDK: Temurin `21.0.8+9`, Linux x64; bundle SHA-256
   `f2dc5418092c43003db8f9005c4a286e1c0104fea96ccdd49e8ebd037cac9219`.
-- Scala Maven inputs (artifact: SHA-256):
+- Scala Maven artifacts (artifact: SHA-256):
   - `scala3-library_3-3.9.0.jar`: `9343f9651453945fc6a9b75bb4fd230418ee28a1f88ea28ee429f3ebe0511aba`
   - `scala-library-3.9.0.jar`: `b844bf6fb3080c73df6b9c523b7a69b9ef4a980bb15e5c37c35443d1d0b0e0cd`
   - `scala3-compiler_3-3.9.0.jar`: `3e2c09a5ca6cef17a55f2f66e123815f9c4ea061fce20d0e9d2371989405a61a`
@@ -26,14 +29,12 @@ aggregate evidence needed to review this measurement.
   - `scala-asm-9.9.0-scala-1.jar`: `75ac366e8ecb691e06a7e85041eed0f67919a646e5262fa0901225698c104375`
   - `compiler-interface-1.12.0.jar`: `92f487a505eafdd0a033e4ff4f38a81509a655c76257c64e6808dd873cc145c3`
   - `util-interface-1.11.5.jar`: `1fc950a9e1a35385e79316e23c120d4fd184f6a7af0274e00a703b0dc76376af`
-- Rust `1.98.1`, Cargo `1.98.1`, test profile; AMD Ryzen 9 7940HS,
-  Linux x86_64; Cargo and test concurrency set to 1.
-- The exact `local_definition_audit` test binary was prebuilt outside each
-  sample. All three samples used a warm Cargo target and warmed selected input
-  files/JARs/JDK modules. No full-corpus audit was run.
+- Rust/Cargo `1.98.1`; host AMD Ryzen 9 7940HS, Linux x86_64; one Cargo
+  build job and one test thread. The audit binary was prebuilt outside each
+  timed run. JDK/Scala inputs and Cargo target were warm. No full-corpus audit
+  was run.
 
-Run the full profile from the repository root with the pinned source checkout,
-JDK, and Maven files supplied through the corresponding environment variables:
+The measured command (set the four roots to the pinned local inputs) was:
 
 ```sh
 SCALA39_ROOT=target/dotty-scala39-1525 \
@@ -43,71 +44,138 @@ COURSIER_MAVEN_ROOT=target/scala39-maven \
 python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
   --manifest docs/typer-hot-path-profile-manifest-3.9.0.tsv \
   --runs 3 --method-limit-per-file 2 --match-limit-per-file 1 \
-  --output-dir target/issue-1525-instrumented-final
+  --compare-with target/issue-1525-baseline-profile \
+  --compare-with target/issue-1525-semantic-final \
+  --output-dir target/issue-1525-committed-full
 ```
 
-The audit wall times were 12,113, 12,170, and 12,229 ms (median 12,170 ms).
-The selected root method typing totaled 18,031 ms across the three repetitions;
-match-probe typing is reported separately. The original baseline and instrumented
-profile had identical method identities, method outcomes, match-probe identities,
-and match outcomes. The instrumented full run and a separate three-run
-`semantic_only` run also had identical selections and outcomes. These checks
-establish that opt-in timing did not change this cohort's observed results;
-they do not establish semantic equivalence outside it.
+The baseline, semantic-only, cheap-counter, and full-profile runs selected the
+same method identities, method outcomes/blockers, match-probe identities, and
+match outcomes. This is evidence for this bounded cohort only. Three warm
+Cargo wall samples were 12,082, 11,981, and 12,083 ms in full mode; comparison
+means were 12,048.7 ms full, 12,113.0 ms semantic-only, and 11,915.7 ms
+cheap-counters. Those differences are within run-to-run drift and show no
+measurable profiler overhead or speedup. See
+[`variant-comparison.tsv`](typer-resolver-profile-3.9.0/variant-comparison.tsv)
+and [`run-timings.tsv`](typer-resolver-profile-3.9.0/run-timings.tsv).
 
-## Resolver results
+## Delegated resolver measurements
 
-Counts and stage totals below are for source root-method requests, aggregated
-over the three serial repetitions. Per-run counts and timings were stable; the
-raw sidecars are retained in the ignored output directory.
+The table reports mean time per run over three repetitions. “Exclusive” is the
+phase elapsed time after subtracting the explicitly timed children shown by the
+instrumentation; it is not a sampled CPU profile. Use the inclusive and
+exclusive columns for attribution, not as additive totals.
 
-| Delegated resolver phase | Calls | Mean elapsed per run |
-| --- | ---: | ---: |
-| Member lookup, inclusive | 11,439 | 5,956 ms |
-| Prefix classification | 11,439 | 0.094 ms |
-| Module cache validation | 11,439 | 415 ms |
-| Target resolution | 1,809 | 5,452 ms |
-| Declaration selection | 1,806 | 0.027 ms |
-| Module identity resolution | 1,359 | 85.6 ms |
-| Class loading, inclusive | 36 | 0.030 ms |
+| Phase | Source calls | Source inclusive / exclusive | Match calls | Match inclusive / exclusive |
+| --- | ---: | ---: | ---: | ---: |
+| Member lookup | 3,813 | 5,837 ms / 5,837 ms | 2,717 | 5,740 ms / 5,740 ms |
+| Module-cache validation | 3,813 | 411 ms / 3.2 ms | 2,717 | 310 ms / 2.5 ms |
+| Target resolution | 603 | 5,338 ms / 0.31 ms | 319 | 5,378 ms / 0.30 ms |
+| Module completion | 43 | 5,338 ms / 1,562 ms | 41 | 5,377 ms / 1,616 ms |
+| Module snapshot validation | 3,253 | 408 ms / 0.14 ms | 2,439 | 308 ms / 0.11 ms |
+| Classpath resource lookup | 11,531 | 698 ms / 698 ms | 9,563 | 594 ms / 594 ms |
+| TASTy decode | 47 | 3,825 ms / 3,825 ms | 46 | 3,808 ms / 3,808 ms |
+| Class-file decode | 845 | 45 ms / 45 ms | 813 | 44 ms / 44 ms |
+| Transaction bookkeeping | 4,625 | 5,837 ms / 0.38 ms | 3,298 | 5,740 ms / 0.29 ms |
+| Rollback | 4,340 | 0.54 ms / 0.54 ms | 3,042 | 0.52 ms / 0.52 ms |
+| Package-term key selection | 3,813 | 0.32 ms / 0.32 ms | 2,717 | 0.19 ms / 0.19 ms |
 
-Each run observed 3,813 source member requests: 161 successes, 3,651 misses,
-and one error. The 3,652 misses/errors rolled back their member transaction.
-The separate match-probe pass observed 2,717 requests per run: 86 successes,
-2,630 misses, and one error.
+The large target-resolution interval is almost entirely nested module
+completion. Its measured exclusive remainder is about 0.3 ms per run. Module
+completion itself includes TASTy decode, resource access, and other completion
+work; its 1.56–1.62 s residual is after subtracting the directly timed resource
+and decode intervals. Source and match cache profiles recorded 3,211 and
+2,398 positive module-cache validations per run, 602 and 343 negative member
+cache hits (included in those validation counts), and 42 and 41 module-cache
+misses. Module completion returned 42
+successes and one error per source run; in the match pass it returned 40
+successes and one error.
 
-| Source request shape (per run) | Requests | Distinct keys | Requests per key |
-| --- | ---: | ---: | ---: |
-| Module-class prefix, term | 1,908 | 224 | 8.518 |
-| Module-class prefix, type | 1,345 | 215 | 6.256 |
-| Package prefix, term | 548 | 32 | 17.125 |
-| Package prefix, type | 12 | 4 | 3.000 |
+The three named hot method roots show where that delegated time lands:
 
-The main follow-up candidate is the target-resolution path: it accounts for
-about 5.46 seconds per run, while prefix classification and declaration
-selection are below 0.1 ms combined. Repeated requests and the high miss rate
-make cache behavior worth investigating by request shape. This profile does
-not identify a safe cache key or justify a semantic cache change; the next
-measurement should split target resolution by target kind and success/miss
-before an optimization is proposed.
+| Root method | Member calls/run | Successes | Misses | Errors | Exclusive target/run | Exclusive module-completion/run | TASTy decode/run |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `GenericSignatures$.mayNeedSignature` | 570 | 55 | 515 | 0 | 0.075 ms | 600 ms | 1,172 ms |
+| `tpd$.DefDef` | 470 | 13 | 457 | 0 | 0.103 ms | 732 ms | 1,237 ms |
+| `Types$.Type.derivesFrom` | 1,687 | 18 | 1,668 | 1 | 0.111 ms | 221 ms | 1,406 ms |
 
-## Interpretation limits
+The source-level path explanations below are hypotheses from the pinned Scala
+3.9.0 implementations, not proof that any one expression accounts for the
+measured duration:
 
-- Phase timings are inclusive and nested. In particular, target resolution
-  occurs inside member lookup. Do not sum phase totals as disjoint CPU time.
-- The 12 class-loading phase calls per run spent about 30 microseconds in
-  total. The selected dependency observations recorded about 1.3 microseconds
-  of resource lookup and no ClassFile or TASTy decode time. This is a property
-  of this bounded cohort, not evidence that decoding is free in other workloads.
-- Classpath resource observations count logical results and returned bytes,
-  not physical archive reads or decompressions. The adapter does not expose
-  those events.
-- Resolver outcomes are mostly unresolved attempts, and every selected method
-  attempt stops at its first typer blocker. These timings describe current
-  bounded audit work, not successful compilation of complete methods.
-- No implementation optimization was applied and no speedup is claimed.
+- `GenericSignatures$.mayNeedSignature` (`GenericSignatures.scala:41`) walks
+  `ExprType`, `MethodTpe`, and `TypeRef`, then asks the type predicates
+  `isAny`, `isAnyRef`, `isRef`, and `isPrimitiveValueType`. That recursive
+  inspection is consistent with its 51 repeated stable keys and the unresolved
+  package/type requests in its root profile.
+- `tpd$.DefDef` (`tpd.scala:237`) maps parameter symbols through `TypeDef` or
+  `ValDef`, constructs a result `TypeTree`, and passes the result to
+  `ta.assignType`. Those parameter/result type projections are plausible
+  sources of its repeated member requests and module completion.
+- `Types$.Type.derivesFrom` (`Types.scala:283`) recursively follows a
+  `TypeRef` symbol and `superType`, then traverses proxies, applied, match,
+  intersection, and union types. Its 1,687 delegated member calls and 1,406 ms
+  decode interval fit repeated traversal into incomplete external identities.
 
-The full generated tables, including per-run details and audit-wrapper
-overhead, can be regenerated into `target/issue-1525-instrumented-final` using
-the command above. The parser and report unit tests cover the new profile
-records and sidecars.
+All three stop at their first observed typer blocker: `TypeNameNotFound`,
+`TypeNameNotFound`, and `MemberLookup`, respectively. The match selector
+profiles are keyed by exact method symbol, case tree, and selector tree; all
+three selectors failed (`TermNameNotFound`, `TypeNameNotFound`, and
+`SymbolResolution`), so their case bodies had no delegated requests. The
+committed outcome tables retain every selected root and probe, including the
+non-hot roots: [`methods.tsv`](typer-resolver-profile-3.9.0/methods.tsv),
+[`method-outcomes.tsv`](typer-resolver-profile-3.9.0/method-outcomes.tsv),
+[`match-probes.tsv`](typer-resolver-profile-3.9.0/match-probes.tsv), and
+[`match-probe-counts.tsv`](typer-resolver-profile-3.9.0/match-probe-counts.tsv).
+
+Stable-key observations include both package and member requests, while
+`resolver_calls` counts the lower-level classpath member resolver. They are
+reported separately because package lookups add observations beyond member
+calls. Per-root request-key frequencies, first outcomes, and retries after a
+failed request are retained in
+[`resolver-roots.tsv`](typer-resolver-profile-3.9.0/resolver-roots.tsv); phase
+times for each root are in
+[`resolver-root-phases.tsv`](typer-resolver-profile-3.9.0/resolver-root-phases.tsv).
+No per-call log is required to inspect the repeated-key aggregates.
+
+## Ranked follow-up candidates
+
+1. **Investigate repeated module completion and TASTy projection.** This is the
+   largest measured cost: up to about 3.8 s/run in TASTy decode intervals, plus
+   completion residuals. Potential benefit is the largest of these candidates,
+   but this profile does not show how much work can safely be removed.
+   Complexity is high. Any reuse must validate exact resource identity and
+   classpath precedence and must preserve rollback/session identity.
+2. **Reduce module snapshot resource revalidation.** The selected passes perform
+   about 5,700 snapshot validations per run and spend about 0.7 s in measured
+   resource lookup across loader and snapshot paths. The safe benefit is below
+   that measured lookup total. Complexity is medium; stale positive or negative
+   evidence, multi-release selection, and changed classpath contents are the
+   correctness risks.
+3. **Revisit repeated unresolved member requests only after the first two.**
+   The three hot methods have 392 distinct request keys combined and many
+   repeated keys, but prefix classification, declaration selection, and the
+   exclusive target path are all below 0.4 ms per run. Expected benefit is
+   small on this cohort. Complexity is medium, with risks around namespace,
+   selector, module identity, and transaction-sensitive negative results.
+
+No optimization was applied. These candidates rank measurement evidence for
+future work; they do not claim a speedup or license a semantic cache.
+
+## Limits
+
+- Parent phases are inclusive and nested. The exclusive columns subtract only
+  intervals explicitly measured as children; do not add all columns together.
+- The TASTy decoder invokes classpath-backed alias and bare-reference helpers.
+  Their work remains inside the decode interval and is not separately counted
+  as `find_class` calls. Resource counters are logical adapter lookups and
+  returned bytes, not physical archive reads, decompressions, or filesystem
+  I/O. That uninstrumented callback time is part of the accounted TASTy decode
+  interval, not unaccounted wall time.
+- Class completion had zero calls in this cohort. The emitted class-completion
+  counters and timers are opt-in and are available for workloads that exercise
+  that path.
+- Method and match attempts stop at their first blocker. These measurements do
+  not represent successful compilation of complete methods or match bodies.
+- The profiler is inactive by default. No semantic behavior or optimization was
+  changed by the profile collection.
