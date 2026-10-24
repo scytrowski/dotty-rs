@@ -2,8 +2,8 @@
 
 This document records the current bounded Parser → Namer → Typer → JVM
 contract for private primitive fields (`Int`, `Boolean`, `Long`, `Float`, and
-`Double`) and
-primary constructors. It targets the
+`Double`), primary constructors, and signature-only accessor metadata for
+ordinary public class-body `val`/`var`. It targets the
 pinned Scala 3.9.0 reference at revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
 It covers the real-source `Counter`, `PrivateFields`, and bounded constructor
@@ -28,6 +28,7 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | `class NumericConstants { private val f: Float = 1.5f; private val d: Double = 3.5 }` | Both values remain canonical private immutable fields. | Typed literal roots preserve the Float/Double bit patterns and lower through `fconst_bits`/`dconst_bits` before exact `putfield` instructions. | The fixture verifies the `CONSTANT_Float` and `CONSTANT_Double` values and executes both getters under JDK 21. |
 | `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The source ordinal and exact JVM local slot are preserved in a checked accessor initializer. | Emission creates private-final `x:I` storage, copies the exact formal after the verified direct-super call, and emits public `x()I` from that field. No source Method symbol is added. |
 | `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same source ordering as `val`; the binding records mutability and local width. | Emission creates private `x:I` storage, initializes it from the exact formal, emits public `x()I` and `x_$eq(I)V`, and does not add a source Method symbol. |
+| `class Counter(val id: Int) { val initial: Int = 10; var current: Long = 0L }` | `id`, `initial`, and `current` remain canonical class-owned `Field` symbols. Body fields retain the exact `ValDef`, template position, source RHS, typed RHS, and source mutability proof. | Constructor `id` retains its derived formal binding; body declarations do not have or fabricate one. | `JvmClassMetadata::accessors()` projects both origins into one metadata list: private-final `id:I` / `initial:I`, private mutable `current:J`, public getters, and `current_$eq(J)V`. The body-field projections are metadata-only; their initialization and accessor code remain deferred. |
 
 The `constructor_accessor_getters_and_setters_emit_verified_abi_methods` regression also
 decodes `Measurement`, `Mixed`, `Ref`, and `Plain` output. It checks public
@@ -36,6 +37,14 @@ load/read/write/return bytecode, stack/local bounds, source accessor order, and
 deterministic bytes. Its Java 21 harness invokes getters and mutates primitive
 and planned-reference `var`s under `java -Xverify:all`; a `val` has no setter,
 and a plain constructor parameter has no generated field or accessor method.
+
+The `public_body_fields_project_to_origin_aware_accessor_metadata` regression
+checks the combined constructor/body shape, including distinct origin proofs,
+body template order, exact `I`/`J`/`D` descriptors, private backing flags,
+public getters, and the mutable Long setter. `JvmClassMetadata::fields()` does
+not also expose those public body accessors as direct fields. No constructor
+store, getter/setter bytecode, or source `Method` symbol is introduced for
+those body fields by this metadata increment.
 
 The separate
 [`jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs)
@@ -219,6 +228,12 @@ field, method, constructor, and class-file structure validates successfully.
 `JvmClassInitializationPlan::PrimaryConstructor` authorizes emission of its
 exact constructor descriptor/access and source-ordered private primitive field
 initializers, including Long descriptor `J` and category-two parameter slots.
+`PlainPublic` plans produce signature-only body accessor metadata from their
+immutable source proof; they are not included in direct `fields()` metadata or
+constructor field initialization. Constructor accessor metadata uses the
+separate derived-formal proof. Future #1584 call lowering must validate each
+origin against its own proof and must not represent a body field as a
+constructor binding.
 `ImplicitNoArg` is reserved for the empty no-argument class
 subset and never implies fields or constructor parameters. The real-source
 test adapter collects class-body fields in template order for both
