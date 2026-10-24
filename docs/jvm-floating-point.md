@@ -101,7 +101,7 @@ and [instruction set](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6
 | --- | --- | --- |
 | Field/method descriptor | `F` | `D` |
 | Operand/local category | Category one, one slot | Category two, two stack/local slots |
-| Constant-pool entry | `CONSTANT_Float`, tag 4, four raw bits | `CONSTANT_Double`, tag 6, eight raw bits and a reserved next pool slot |
+| Constant-pool entry | `CONSTANT_Float`, tag 4, 32 raw bits (four bytes) | `CONSTANT_Double`, tag 6, 64 raw bits (eight bytes) and a reserved next pool slot |
 | Stack-map verification entry | `Float_variable_info`, tag 2, one slot | `Double_variable_info`, tag 3, two slots, encoded as one entry |
 | Immediate constants | `fconst_0`, `fconst_1`, `fconst_2` only | `dconst_0`, `dconst_1` only |
 | General constant loads | `ldc` or `ldc_w` for Float | `ldc2_w` only for Double |
@@ -114,6 +114,40 @@ preserve raw bits so signed zero and distinct NaN payloads do not collapse.
 Source parsing/type acceptance of negative-zero spellings is not established
 by this audit's pinned compiler run; raw-bit tests use the independent
 class-file/core APIs and make no source-language claim.
+
+## Instruction encodings required by #1533
+
+The following table freezes the JVMS 21 encodings for the bounded constant,
+local, and return families. Lengths include opcode and operands and are in
+bytes. Opcode names and forms link to JVMS 21 §6.5.
+
+| Value / operation | Compact form (opcode, length) | Indexed / wide form (opcode and operands, length) | Required operand validation |
+| --- | --- | --- | --- |
+| Float constant | `fconst_0` `0x0b`, `fconst_1` `0x0c`, `fconst_2` `0x0d`; each 1 byte | None | These forms represent exactly positive `0.0f`, `1.0f`, `2.0f`. |
+| Double constant | `dconst_0` `0x0e`, `dconst_1` `0x0f`; each 1 byte | None | These forms represent exactly positive `0.0`, `1.0`. |
+| Float load | [`fload_0`–`fload_3`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.fload_n), opcodes `0x22`–`0x25`; each 1 byte | [`fload`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.fload) `0x17`, `index:u1` (2 bytes); or [`wide fload`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.wide) `0xc4 0x17`, `index:u2` (4 bytes) | Compact index 0–3; narrow index 0–255; wide operand encodes 0–65535. The selected one-slot local must fit below `max_locals`. |
+| Double load | [`dload_0`–`dload_3`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dload_n), opcodes `0x26`–`0x29`; each 1 byte | [`dload`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dload) `0x18`, `index:u1` (2 bytes); or [`wide dload`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.wide) `0xc4 0x18`, `index:u2` (4 bytes) | Encoded index ranges match Float. The index names the Double head; both `index` and `index + 1` must fit below `max_locals`, and the second slot cannot be loaded as a value. |
+| Float store | [`fstore_0`–`fstore_3`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.fstore_n), opcodes `0x43`–`0x46`; each 1 byte | [`fstore`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.fstore) `0x38`, `index:u1` (2 bytes); or [`wide fstore`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.wide) `0xc4 0x38`, `index:u2` (4 bytes) | Compact/narrow/wide index ranges match Float load; storing at a Double tail invalidates the old Double pair. |
+| Double store | [`dstore_0`–`dstore_3`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dstore_n), opcodes `0x47`–`0x4a`; each 1 byte | [`dstore`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dstore) `0x39`, `index:u1` (2 bytes); or [`wide dstore`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.wide) `0xc4 0x39`, `index:u2` (4 bytes) | Encoded index ranges match Double load. Both destination slots must fit; overlapping category-one or category-two values are invalidated as a whole. |
+| Float return | [`freturn`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.freturn) `0xae`; 1 byte | None | Requires a Float result and one Float on the operand stack. |
+| Double return | [`dreturn`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dreturn) `0xaf`; 1 byte | None | Requires a Double result and one Double value (two slots) on the operand stack. |
+| Float constant-pool load | None | [`ldc`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc) `0x12`, `index:u1` (2 bytes); [`ldc_w`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc_w) `0x13`, `index:u2` (3 bytes) | Index must be 1–255 for `ldc`, 1–65534 for `ldc_w`, and resolve to tag 4 (`CONSTANT_Float`). Dynamic constants are outside this bounded contract. |
+| Double constant-pool load | None | [`ldc2_w`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc2_w) `0x14`, `index:u2` (3 bytes) | Index must be 1–65534 and resolve to tag 6 (`CONSTANT_Double`); the following reserved pool slot is not a valid index. There is no narrow `ldc2` form. Dynamic constants are outside this bounded contract. |
+
+For `wide` local operands, the u2 encoding can name 0–65535, but validity is
+also bounded by the u2 `max_locals` field. With `max_locals = 65535`, a
+category-one local can start at 65534; a Double head can start no later than
+65533 because its tail must occupy slot 65534. The Double tail is not an
+independent local. Constant-pool indexes are one-based and the largest
+representable valid entry index is 65534; `ldc` can address only indexes
+through 255, so index 256 requires `ldc_w` for Float. A Double uses only
+`ldc2_w` regardless of its index.
+
+These operands must preserve exact kind: `ldc`/`ldc_w` use a Float entry, and
+`ldc2_w` uses a Double entry. A Float entry cannot be loaded by `ldc2_w`, a
+Double entry cannot be loaded by `ldc`/`ldc_w`, and the reserved second slot
+after Double cannot be used as a constant. Source-derived descriptors must
+also stay exact (`F` and `D`); primitive values cannot fall back to references.
 
 Verifier state must preserve Float as category one and Double as category two
 through parameters, locals, operand stacks, branches, joins, loops, fields,
