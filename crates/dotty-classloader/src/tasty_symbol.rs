@@ -10,11 +10,11 @@ use dotty_tasty::tasty::{
     AstError, CASEACCESSOR_TAG, DEFDEF_TAG, DefDefBody, DefinitionBody, DefinitionTail,
     FIELDACCESSOR_TAG, FINAL_TAG, IdentNode, LOCAL_TAG, MUTABLE_TAG, OBJECT_TAG, PACKAGE_TAG,
     PRIVATE_TAG, PRIVATEQUALIFIED_TAG, PROTECTED_TAG, PROTECTEDQUALIFIED_TAG, ParameterNode,
-    RawName, RawTree, Reader, ReferenceNode, RenderedSignedName, SHAREDTERM_TAG, SHAREDTYPE_TAG,
-    STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode, StructuredTree,
-    TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG, TYPEDEF_TAG,
-    TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError, TermValue,
-    TypeApplyNode, VALDEF_TAG,
+    RawName, RawTree, Reader, ReferenceNode, RenderedSignedName, SELECTIN_TAG, SHAREDTERM_TAG,
+    SHAREDTYPE_TAG, STATIC_TAG, SYNTHETIC_TAG, SelectNode, StandardSection, StructuredNode,
+    StructuredTree, TEMPLATE_TAG, TERMREF_TAG, TERMREFPKG_TAG, TERMREFSYMBOL_TAG, TRAIT_TAG,
+    TYPEDEF_TAG, TYPEREF_TAG, TYPEREFPKG_TAG, TYPEREFSYMBOL_TAG, TastyFile, TastyFileError,
+    TermValue, TypeApplyNode, VALDEF_TAG,
 };
 use std::collections::HashSet;
 use std::fmt;
@@ -2874,6 +2874,36 @@ fn unresolved_alias_reference(
     unresolved_alias_reference_at_depth(file, tree, 0)
 }
 
+fn declared_term_alias_reference(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<(BinaryName, String)> {
+    const MAX_ALIAS_TREE_DEPTH: usize = 128;
+    if depth >= MAX_ALIAS_TREE_DEPTH {
+        return None;
+    }
+    if let RawTree::Leaf(term) = tree
+        && matches!(term.tag, SHAREDTERM_TAG | SHAREDTYPE_TAG)
+        && let Some(reference) = term.ast_ref()
+    {
+        let shared = decode_shared_tree(file, reference.address)?;
+        return declared_term_alias_reference(file, &shared, depth + 1);
+    }
+    match tree.decode_structured().ok()? {
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREF_TAG,
+            reference,
+            qualifier,
+        }) => {
+            let name = resolve_qualified_name(file, reference)?;
+            let owner = resolve_selection_path_at_depth(file, &qualifier, depth + 1)?;
+            Some((owner, name))
+        }
+        _ => None,
+    }
+}
+
 fn unresolved_alias_reference_at_depth(
     file: &TastyFile<'_>,
     tree: &RawTree<'_>,
@@ -3081,6 +3111,197 @@ pub(crate) fn resolve_type_alias_target(
         return Ok(candidate.map(TypeAliasTarget::Candidate));
     }
     Ok(None)
+}
+
+fn direct_term_alias_reference(
+    file: &TastyFile<'_>,
+    tree: &RawTree<'_>,
+    depth: usize,
+) -> Option<(BinaryName, String)> {
+    const MAX_ALIAS_TREE_DEPTH: usize = 128;
+    if depth >= MAX_ALIAS_TREE_DEPTH {
+        return None;
+    }
+    if let RawTree::LengthNode(node) = tree
+        && node.tag == SELECTIN_TAG
+    {
+        let StructuredNode::SelectIn(selection) = node.decode_structured().ok()? else {
+            return None;
+        };
+        let name = wire_name(file, selection.name)?;
+        let owner = resolve_selection_path_at_depth(file, &selection.qualifier, depth + 1)?;
+        return Some((owner, name));
+    }
+    match tree.decode_structured().ok()? {
+        StructuredTree::Ident(IdentNode { type_tree, .. }) => {
+            direct_term_alias_reference(file, &type_tree, depth + 1)
+        }
+        StructuredTree::Length(StructuredNode::Typed(typed)) => {
+            direct_term_alias_reference(file, &typed.expression, depth + 1)
+        }
+        StructuredTree::Reference(ReferenceNode {
+            tag: TERMREF_TAG,
+            reference,
+            qualifier,
+        }) => {
+            let name = resolve_qualified_name(file, reference)?;
+            let owner = resolve_selection_path_at_depth(file, &qualifier, depth + 1)?;
+            Some((owner, name))
+        }
+        StructuredTree::Select(SelectNode {
+            name, qualifier, ..
+        }) => {
+            let name = wire_name(file, name)?;
+            let owner = resolve_selection_path_at_depth(file, &qualifier, depth + 1)?;
+            Some((owner, name))
+        }
+        _ => None,
+    }
+}
+
+/// Reads a package-object value alias and reduces its right-hand side to a
+/// classpath candidate. The caller validates that the candidate is a real
+/// module identity before exposing it as a term.
+pub(crate) fn resolve_term_alias_target(
+    file: &TastyFile<'_>,
+    alias_name: &str,
+    current_package: &str,
+) -> Result<Option<TypeAliasTarget>, TastyDecodeError> {
+    let index = file.ast_address_index()?;
+    for node in index.iter() {
+        if node.tag != VALDEF_TAG {
+            continue;
+        }
+        if !is_public_package_object_value(file, &index, node, current_package)? {
+            continue;
+        }
+        let StructuredNode::ValDef(DefinitionBody::ValDef {
+            name,
+            type_tree,
+            rhs: Some(rhs),
+            tail,
+        }) = node.decode_structured()?
+        else {
+            continue;
+        };
+        if file.render_name(name).ok().as_deref() != Some(alias_name) {
+            continue;
+        }
+        let Some((owner, name)) = direct_term_alias_reference(file, &rhs, 0) else {
+            return Ok(None);
+        };
+        if has_modifier(&tail, MUTABLE_TAG) {
+            return Ok(None);
+        }
+        let Some((declared_owner, declared_name)) =
+            declared_term_alias_reference(file, &type_tree, 0)
+        else {
+            return Ok(None);
+        };
+        if declared_owner != owner || declared_name != name {
+            return Ok(None);
+        }
+        let package_path = owner.package_path();
+        let owner_path = if !current_package.is_empty()
+            && package_path.starts_with(&format!("{current_package}/"))
+        {
+            owner
+                .as_internal()
+                .strip_prefix(&format!("{current_package}/"))
+                .unwrap_or(owner.as_internal())
+                .to_owned()
+        } else {
+            owner.as_internal().to_owned()
+        };
+        let candidate = BinaryName::from_internal(format!("{owner_path}/{name}"));
+        return Ok(Some(TypeAliasTarget::Candidate(
+            package_relative_candidate(candidate, current_package),
+        )));
+    }
+    Ok(None)
+}
+
+fn is_public_package_object_value(
+    file: &TastyFile<'_>,
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    value: &dotty_tasty::tasty::RawNode<'_>,
+    current_package: &str,
+) -> Result<bool, TastyDecodeError> {
+    let Ok(value_address) = u32::try_from(value.offset) else {
+        return Ok(false);
+    };
+    let Some(template) = index.parent_of(value_address) else {
+        return Ok(false);
+    };
+    if template.tag != TEMPLATE_TAG {
+        return Ok(false);
+    }
+    let Some(template_owner) = index.parent_of(template.offset as u32) else {
+        return Ok(false);
+    };
+    if template_owner.tag != TYPEDEF_TAG {
+        return Ok(false);
+    }
+    if !is_package_object_in_requested_package(file, index, template_owner.offset, current_package)
+    {
+        return Ok(false);
+    }
+    let Some(owner) = index.get(template_owner.offset as u32) else {
+        return Ok(false);
+    };
+    let StructuredNode::TypeDef(DefinitionBody::TypeDef { name, tail, .. }) =
+        owner.decode_structured()?
+    else {
+        return Ok(false);
+    };
+    if !matches!(
+        file.render_name(name).ok().as_deref(),
+        Some("package" | "package$")
+    ) || !has_modifier(&tail, OBJECT_TAG)
+    {
+        return Ok(false);
+    }
+
+    let StructuredNode::ValDef(DefinitionBody::ValDef { tail, .. }) = value.decode_structured()?
+    else {
+        return Ok(false);
+    };
+    Ok(is_public_package_object_value_tail(&tail))
+}
+
+fn is_public_package_object_value_tail(tail: &[DefinitionTail<'_>]) -> bool {
+    let inaccessible = [PRIVATE_TAG, PROTECTED_TAG, LOCAL_TAG, MUTABLE_TAG];
+    !tail.iter().any(|item| match item {
+        DefinitionTail::Modifier(tag) => inaccessible.contains(tag),
+        DefinitionTail::QualifiedModifier(modifier) => {
+            matches!(modifier.tag, PRIVATEQUALIFIED_TAG | PROTECTEDQUALIFIED_TAG)
+        }
+        DefinitionTail::Annotation(_) => false,
+    })
+}
+
+fn is_package_object_in_requested_package(
+    file: &TastyFile<'_>,
+    index: &dotty_tasty::tasty::AstAddressIndex<'_>,
+    address: usize,
+    requested_package: &str,
+) -> bool {
+    let Ok(address) = u32::try_from(address) else {
+        return false;
+    };
+    let Some(parent) = index.parent_of(address) else {
+        return false;
+    };
+    if parent.tag != PACKAGE_TAG {
+        return false;
+    }
+    let Some(package_node) = index.get(parent.offset as u32) else {
+        return false;
+    };
+    let Ok(package) = package_node.decode_package() else {
+        return false;
+    };
+    resolve_reference_prefix(file, &package.path).as_deref() == Some(requested_package)
 }
 
 fn package_relative_candidate(candidate: BinaryName, current_package: &str) -> BinaryName {
@@ -4296,6 +4517,55 @@ mod tests {
             resolve_type_alias_candidate(&file, "Iterator", "scala"),
             Some(BinaryName::from_internal("collection/Iterator"))
         );
+    }
+
+    #[test]
+    fn resolves_package_object_term_aliases_in_their_defining_package() {
+        let bytes = fixture_bytes("scala3-library/scala/package.tasty");
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+
+        assert_eq!(
+            resolve_term_alias_target(&file, "Nil", "scala").unwrap(),
+            Some(TypeAliasTarget::Candidate(BinaryName::from_internal(
+                "collection/immutable/Nil"
+            )))
+        );
+        assert_eq!(
+            resolve_term_alias_target(&file, "AnyRef", "scala").unwrap(),
+            None,
+            "a package-object value constructed with `new` is not an object alias"
+        );
+    }
+
+    #[test]
+    fn package_term_alias_lookup_rejects_nested_and_inaccessible_values() {
+        let bytes = fixture_bytes("scala3-library/scala/package.tasty");
+        let file = TastyFile::parse_scala_3_9(&bytes).unwrap();
+        let index = file.ast_address_index().unwrap();
+        let nested_value = index
+            .iter()
+            .filter(|node| node.tag == VALDEF_TAG)
+            .find(|node| {
+                index
+                    .parent_of(node.offset as u32)
+                    .is_none_or(|parent| parent.tag != TEMPLATE_TAG)
+            })
+            .expect("package TASTy should contain nested values as well as package members");
+
+        assert!(!is_public_package_object_value(&file, &index, nested_value, "scala").unwrap());
+        assert!(is_public_package_object_value_tail(&[]));
+        assert!(!is_public_package_object_value_tail(&[
+            DefinitionTail::Modifier(PRIVATE_TAG,)
+        ]));
+        assert!(!is_public_package_object_value_tail(&[
+            DefinitionTail::Modifier(PROTECTED_TAG,)
+        ]));
+        assert!(!is_public_package_object_value_tail(&[
+            DefinitionTail::Modifier(LOCAL_TAG,)
+        ]));
+        assert!(!is_public_package_object_value_tail(&[
+            DefinitionTail::Modifier(MUTABLE_TAG,)
+        ]));
     }
 
     #[test]

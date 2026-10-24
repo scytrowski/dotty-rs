@@ -1400,7 +1400,7 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                             reason: "package prefix has an invalid owner chain".to_owned(),
                         }
                     })?;
-                let simple_name = store.names.resolve(request.name.text());
+                let simple_name = store.names.resolve(request.name.text()).to_owned();
                 let binary_name = if package_path.is_empty() {
                     simple_name.to_owned()
                 } else {
@@ -1419,6 +1419,33 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                 match identity? {
                     Some(identity) => {
                         self.validate_module_object(store, resolved_owner, identity.object)?;
+                        Ok(Some(identity.object))
+                    }
+                    None if package_path.as_slice() == ["scala"] => {
+                        let package_object = BinaryName::from_internal("scala/package");
+                        let class_path = self
+                            .class_path
+                            .as_ref()
+                            .expect("resolver operation is exclusive");
+                        let alias = crate::loader::resolve_tasty_term_alias(
+                            class_path,
+                            &package_object,
+                            &simple_name,
+                        )
+                        .map_err(|error| ResolutionError::Malformed {
+                            reason: format!("cannot resolve scala package term alias: {error:?}"),
+                        })?;
+                        let Some(alias) = alias else {
+                            return Ok(None);
+                        };
+                        let Some(identity) = self.try_ensure_module_identity(store, &alias)? else {
+                            return Ok(None);
+                        };
+                        let owner = self
+                            .session
+                            .packages
+                            .resolve_package(store, alias.package_path());
+                        self.validate_module_object(store, owner, identity.object)?;
                         Ok(Some(identity.object))
                     }
                     None => Ok(None),
@@ -2775,6 +2802,67 @@ mod tests {
             store.symbols.get(identity.module_class).kind,
             SymbolKind::ModuleClass
         );
+    }
+
+    #[test]
+    fn scala_default_package_term_resolves_through_its_tasty_alias() {
+        let library_root = fixture_path("../dotty-tasty/tests/fixtures/scala3-library");
+        let class_path = DirectoryClassPath::new(library_root);
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let mut resolver =
+            ClasspathSymbolResolver::new(class_path, definitions, LoadingSession::new());
+        let package = resolver
+            .resolve_package(&mut store, &["scala"])
+            .unwrap()
+            .unwrap();
+        let prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let name = Name::new(store.names.intern("Nil"), Namespace::Term);
+
+        let nil = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix,
+                    name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .expect("scala.Nil should resolve through scala/package.tasty");
+        let identity = resolver
+            .session
+            .modules
+            .get(&BinaryName::from_internal("scala/collection/immutable/Nil"))
+            .expect("the alias target should have canonical module identity");
+        assert_eq!(identity.object, nil);
+        assert_eq!(store.symbols.get(nil).kind, SymbolKind::Object);
+        assert_eq!(
+            store.names.resolve(store.symbols.get(nil).name.text()),
+            "Nil"
+        );
+        let store_checkpoint = store.checkpoint();
+        let resolver_checkpoint = resolver.checkpoint();
+        let missing_name = Name::new(store.names.intern("NotAStandardTerm"), Namespace::Term);
+        assert_eq!(
+            resolver
+                .resolve_member(
+                    &mut store,
+                    &MemberRequest {
+                        prefix,
+                        name: missing_name,
+                        selector: MemberSelector::Unique,
+                        space: MemberSpace::Prefix,
+                    },
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(store.checkpoint(), store_checkpoint);
+        assert_eq!(resolver.checkpoint(), resolver_checkpoint);
     }
 
     #[test]
