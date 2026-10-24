@@ -2,8 +2,8 @@
 
 use super::{
     ClassReference, ConstantPoolIndexOperand, FieldReference, Instruction, Ldc2Constant,
-    LdcConstant, LocalIndex, SmallIntConstant, SmallLongConstant, SpecialMethodReference,
-    StaticMethodReference, VirtualMethodReference,
+    LdcConstant, LocalIndex, SmallDoubleConstant, SmallFloatConstant, SmallIntConstant,
+    SmallLongConstant, SpecialMethodReference, StaticMethodReference, VirtualMethodReference,
 };
 use crate::constant_pool::ConstantPoolIndex;
 use crate::descriptor::{DescriptorError, FieldType, MethodDescriptor};
@@ -109,6 +109,8 @@ pub(crate) enum SymbolicInstruction {
     Typed(Instruction),
     Integer(i32),
     Long(i64),
+    FloatBits(u32),
+    DoubleBits(u64),
     New(String),
     Field {
         operation: FieldOperation,
@@ -410,6 +412,43 @@ impl CodeBuilder {
         Ok(self)
     }
 
+    /// Pushes the exact Float bit pattern. Only positive zero, one, and two
+    /// use `fconst`; all other patterns are preserved in a pool entry.
+    pub fn fconst_bits(&mut self, bits: u32) -> Result<&mut Self, CodeBuilderError> {
+        let instruction = match bits {
+            0x0000_0000 => Some(Instruction::FConst(SmallFloatConstant::Zero)),
+            0x3f80_0000 => Some(Instruction::FConst(SmallFloatConstant::One)),
+            0x4000_0000 => Some(Instruction::FConst(SmallFloatConstant::Two)),
+            _ => None,
+        };
+        if let Some(instruction) = instruction {
+            self.push(instruction);
+        } else {
+            self.elements.push(SymbolicCodeElement::Instruction(
+                SymbolicInstruction::FloatBits(bits),
+            ));
+        }
+        Ok(self)
+    }
+
+    /// Pushes the exact Double bit pattern. Only positive zero and one use
+    /// `dconst`; all other patterns are preserved in a pool entry.
+    pub fn dconst_bits(&mut self, bits: u64) -> Result<&mut Self, CodeBuilderError> {
+        let instruction = match bits {
+            0x0000_0000_0000_0000 => Some(Instruction::DConst(SmallDoubleConstant::Zero)),
+            0x3ff0_0000_0000_0000 => Some(Instruction::DConst(SmallDoubleConstant::One)),
+            _ => None,
+        };
+        if let Some(instruction) = instruction {
+            self.push(instruction);
+        } else {
+            self.elements.push(SymbolicCodeElement::Instruction(
+                SymbolicInstruction::DoubleBits(bits),
+            ));
+        }
+        Ok(self)
+    }
+
     /// Pushes a null reference.
     pub fn aconst_null(&mut self) -> Result<&mut Self, CodeBuilderError> {
         self.push(Instruction::AConstNull);
@@ -426,6 +465,16 @@ impl CodeBuilder {
         self.local(index, Instruction::LLoad)
     }
 
+    /// Loads a float local.
+    pub fn fload(&mut self, index: usize) -> Result<&mut Self, CodeBuilderError> {
+        self.local(index, Instruction::FLoad)
+    }
+
+    /// Loads a double local.
+    pub fn dload(&mut self, index: usize) -> Result<&mut Self, CodeBuilderError> {
+        self.local(index, Instruction::DLoad)
+    }
+
     /// Loads a reference local.
     pub fn aload(&mut self, index: usize) -> Result<&mut Self, CodeBuilderError> {
         self.local(index, Instruction::ALoad)
@@ -439,6 +488,16 @@ impl CodeBuilder {
     /// Stores a long in a local.
     pub fn lstore(&mut self, index: usize) -> Result<&mut Self, CodeBuilderError> {
         self.local(index, Instruction::LStore)
+    }
+
+    /// Stores a float local.
+    pub fn fstore(&mut self, index: usize) -> Result<&mut Self, CodeBuilderError> {
+        self.local(index, Instruction::FStore)
+    }
+
+    /// Stores a double local.
+    pub fn dstore(&mut self, index: usize) -> Result<&mut Self, CodeBuilderError> {
+        self.local(index, Instruction::DStore)
     }
 
     /// Stores a reference in a local.
@@ -631,6 +690,18 @@ impl CodeBuilder {
         Ok(self)
     }
 
+    /// Returns a float from a method.
+    pub fn freturn(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::FReturn);
+        Ok(self)
+    }
+
+    /// Returns a double from a method.
+    pub fn dreturn(&mut self) -> Result<&mut Self, CodeBuilderError> {
+        self.push(Instruction::DReturn);
+        Ok(self)
+    }
+
     fn push(&mut self, instruction: Instruction) {
         self.elements.push(SymbolicCodeElement::Instruction(
             SymbolicInstruction::Typed(instruction),
@@ -815,10 +886,18 @@ pub(crate) fn long_load(index: ConstantPoolIndex) -> Result<Instruction, CodeBui
     Ok(Instruction::Ldc2(Ldc2Constant::Long(operand(index)?)))
 }
 
+pub(crate) fn float_load(index: ConstantPoolIndex) -> Result<Instruction, CodeBuilderError> {
+    Ok(Instruction::Ldc(LdcConstant::Float(operand(index)?)))
+}
+
+pub(crate) fn double_load(index: ConstantPoolIndex) -> Result<Instruction, CodeBuilderError> {
+    Ok(Instruction::Ldc2(Ldc2Constant::Double(operand(index)?)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CodeBuilder, SymbolicCodeElement, SymbolicInstruction};
-    use crate::bytecode::{Instruction, SmallIntConstant};
+    use crate::bytecode::{Instruction, SmallDoubleConstant, SmallFloatConstant, SmallIntConstant};
 
     #[test]
     fn pop_appends_one_deterministic_typed_instruction() {
@@ -858,6 +937,67 @@ mod tests {
                 ))),
                 SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::Pop)),
                 SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::Return)),
+            ]
+        ));
+    }
+
+    #[test]
+    fn raw_float_and_double_constants_use_immediates_only_for_exact_positive_bits() {
+        let mut builder = CodeBuilder::new();
+        builder
+            .fconst_bits(0x0000_0000)
+            .unwrap()
+            .fconst_bits(0x3f80_0000)
+            .unwrap()
+            .fconst_bits(0x4000_0000)
+            .unwrap()
+            .fconst_bits(0x8000_0000)
+            .unwrap()
+            .fconst_bits(0x7fc0_0001)
+            .unwrap()
+            .fconst_bits(0x7fc0_0002)
+            .unwrap()
+            .dconst_bits(0x0000_0000_0000_0000)
+            .unwrap()
+            .dconst_bits(0x3ff0_0000_0000_0000)
+            .unwrap()
+            .dconst_bits(0x8000_0000_0000_0000)
+            .unwrap()
+            .dconst_bits(0x7ff8_0000_0000_0001)
+            .unwrap()
+            .dconst_bits(0x7ff8_0000_0000_0002)
+            .unwrap();
+
+        assert!(matches!(
+            builder.elements.as_slice(),
+            [
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::FConst(
+                    SmallFloatConstant::Zero
+                ))),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::FConst(
+                    SmallFloatConstant::One
+                ))),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::FConst(
+                    SmallFloatConstant::Two
+                ))),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::FloatBits(0x8000_0000)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::FloatBits(0x7fc0_0001)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::FloatBits(0x7fc0_0002)),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::DConst(
+                    SmallDoubleConstant::Zero
+                ))),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::Typed(Instruction::DConst(
+                    SmallDoubleConstant::One
+                ))),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::DoubleBits(
+                    0x8000_0000_0000_0000
+                )),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::DoubleBits(
+                    0x7ff8_0000_0000_0001
+                )),
+                SymbolicCodeElement::Instruction(SymbolicInstruction::DoubleBits(
+                    0x7ff8_0000_0000_0002
+                )),
             ]
         ));
     }

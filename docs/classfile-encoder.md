@@ -63,7 +63,15 @@ Symbolic class, field, and method references are interned into the shared pool
 before it is finalized. The builder assembles the typed instructions and uses
 the method descriptor and static flag to compute `max_stack` and `max_locals`.
 The supported bytecode instruction matrix documents the available operations.
-Straight-line methods use the linear analyzer and do not receive an automatic
+Straight-line methods can use Float and Double constants, local loads/stores,
+and typed returns alongside the existing integer/reference operations. The
+`fconst_bits` and `dconst_bits` entry points preserve raw IEEE-754 bits and use
+immediate instructions only for exact positive zero/one/two (Float) or
+zero/one (Double); all other patterns are resolved through the constant pool.
+Float constants use `ldc`/`ldc_w` and tag 4, while Double constants use
+`ldc2_w` and tag 6. The linear analyzer tracks Float as category one and Double
+as category two, including Double local head/tail overlap and exact return
+types. These methods do not receive an automatic
 `StackMapTable`. Branched methods use symbolic labels, CFG analysis, final
 assembled byte offsets, and `full_frame` entries. Automatic branched emission
 requires class-file major version 65 or newer. It accepts only the analyzer's
@@ -132,6 +140,7 @@ subsets:
 | `Calculator.nested` | nested integer conditionals, four branch targets, and a shared join of initialized integer locals |
 | `Box` | `aload`, `iload`, `invokespecial`, `putfield`, `getfield`, `return`, `ireturn` |
 | `Caller` | integer constants, `invokestatic`, `new`, `dup`, `iload`, `invokespecial`, `areturn`, `ireturn` |
+| `FloatingPointValues` | bit-preserving Float/Double constants, `ldc`/`ldc2_w`, parameter and local loads/stores, `freturn`/`dreturn`; verified and executed with JDK 21 |
 
 These integer instructions operate directly on JVM 32-bit values. Subtraction
 and multiplication wrap modulo 2^32; division truncates toward zero; remainder
@@ -154,7 +163,7 @@ uses `invokestatic` to invoke the generated `Calculator.add` method. Its
 
 ## JVM execution gate
 
-`tests/classfile_jvm_encoder.rs` asks `javap -v` to parse all three generated
+`tests/classfile_jvm_encoder.rs` asks `javap -v` to parse generated
 classes, compiles a small Java caller, and executes it with
 `java -Xverify:all`. The Java assertions check `Calculator.add(20, 22)`, all
 three `Calculator.max` branch outcomes, `Calculator.sumTo` for zero, one, and
@@ -187,7 +196,9 @@ tools or verifier failures fail that job. The JDK corpus itself is checked in,
 so the structural round-trip suite does not depend on an installed JDK.
 
 The existing `assemble(&[Instruction], ...)` and linear analyzer remain
-straight-line APIs. The separate symbolic `CodeSequence` API supports labels
+straight-line APIs. Their typed instruction set includes bounded Float/Double
+constants, locals and returns; arithmetic, conversions and comparisons remain
+unsupported. The separate symbolic `CodeSequence` API supports labels
 and `goto`, `goto_w`, `ifeq`, `ifne`, `if_icmp{eq,ne,lt,ge,gt,le}`,
 `if_acmpeq`, `if_acmpne`, `ifnull`, and `ifnonnull` branches.
 `assemble_labeled` returns complete bytes plus deterministic instruction and
@@ -196,6 +207,6 @@ arithmetic, and never widens a short branch automatically. The public typed
 `CodeBuilder` connects these pieces for the supported integer and initialized
 reference subset and emits `StackMapTable`; it rejects unreachable blocks and
 unsupported verifier states. Follow-up work can add switch instructions,
-exception edges, and broader object initialization states. Frame compression
+exception edges, Float/Double flow states, and broader object initialization states. Frame compression
 and general JVM verification remain out of scope. This does not add Scala
 compilation or a JVM backend.

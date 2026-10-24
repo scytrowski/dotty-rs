@@ -64,8 +64,8 @@ an executable pinned compiler oracle.
 | Typer | Literal projection maps FloatBits and DoubleBits to canonical `Definitions.float` and `Definitions.double`. The new `source_float_and_double_literals_keep_exact_bits_and_canonical_types` test checks source values `0.0f`, `1.0f`, `1.5f`, `0.0`, `1.0`, and `3.5`. The existing `LiteralSingletons.scala` fixture has a Scala 3.9.0 oracle and covers `1.0f` and `1.0` singleton types. This does not imply JVM lowering support. |
 | Class-file constant pool | Tags 4 (`CONSTANT_Float`) and 6 (`CONSTANT_Double`) preserve raw bits. Double reserves its following constant-pool slot. Builder deduplication uses bits, so positive/negative zero and distinct NaN payloads remain distinct. |
 | Descriptors and frames | The descriptor parser recognizes `F` and `D`. Stack-map verification tags are Float=2 and Double=3; one Double entry occupies two JVM slots. Tests cover F/D descriptors, verification tags, entry counts, and slot counts. |
-| Linear bytecode analysis | `ValueKind` recognizes Float and Double and descriptor-derived parameter/local sizes count them. The new regression test checks mixed `(IFDJ)V` instance parameters and exact wrong-return errors. The instruction model has no Float/Double load, store, constant, or return variants, so this is descriptor accounting rather than instruction support. |
-| CFG analysis | The CFG entry currently returns `UnsupportedFlowParameter` for Float or Double descriptors. `FlowValue` and `FlowLocalState` do not represent Float/Double values or local heads/tails. The new regression test pins rejection for both kinds, including Double after a preceding Int parameter. |
+| Linear bytecode analysis | Typed `fconst`/`dconst`, Float `ldc`, Double `ldc2_w`, F/D locals, and F/D returns are modeled and analyzed. Descriptor-derived parameter/local sizes, stack slots, exact kinds, Double heads/tails, overlapping stores, and typed wrong-return errors have focused regression tests. |
+| CFG analysis | Float/Double flow remains explicitly unsupported. The CFG validator rejects F/D instructions with `UnsupportedFlowInstruction`; it does not infer CFG Float/Double parameter or local states. |
 | JVM source backend | `JvmType` contains Int, Boolean, Long, and planned references, but not Float or Double. The source integration test checks each fixture shape below: it first fails during backend projection with `UnsupportedJvmReferenceType(ExternalClass)` and publishes no class files. |
 
 The source integration test covers these isolated shapes so the current first
@@ -150,6 +150,15 @@ Double entry cannot be loaded by `ldc`/`ldc_w`, and the reserved second slot
 after Double cannot be used as a constant. Source-derived descriptors must
 also stay exact (`F` and `D`); primitive values cannot fall back to references.
 
+The #1533 typed class-file API implements these constant, local and return
+families for straight-line methods. Its bit-oriented `fconst_bits` and
+`dconst_bits` choose immediate forms only for exact positive values; signed
+zero, noncanonical NaNs, infinities and other values are pooled with raw bits
+preserved. The assembler checks constant tags and all compact, narrow and wide
+local encodings. The linear analyzer checks category widths and exact types.
+JDK 21 verification and execution cover generated Float/Double constants,
+locals, parameters and returns, including signed zero and NaN payloads.
+
 Verifier state must preserve Float as category one and Double as category two
 through parameters, locals, operand stacks, branches, joins, loops, fields,
 and calls. A Double local is represented as one logical value plus a physical
@@ -172,13 +181,13 @@ and invocation transfers must check exact descriptor kinds. No fallback to
 | --- | --- |
 | Source backend | Unsupported Float/Double type projection fails before artifact publication. |
 | CFG | Float/Double method parameters fail with typed `UnsupportedFlowParameter`; no speculative `FlowValue` is created. |
-| Instruction encoding/analysis | F/D opcodes are absent from the typed instruction model. Wrong return kinds remain typed analyzer failures. |
-| Class-file pool | A category-one load must not accept a Double entry, nor `ldc2_w` a Float entry. Existing pool validators have separate Float/Double tag checks; future opcode support must keep those checks at the assembler boundary. |
-| Verifier shape | Category-one operations on Double and category-two operations on Float must fail. Double tail reads, overwrites, unassigned paths, incompatible joins, and loop backedges require pair-aware tests. |
+| Instruction encoding/analysis | Arithmetic, conversions, comparisons, branches and generated frame projection for Float/Double remain unsupported. Wrong return kinds, wrong constant tags, and category mismatches fail with typed errors. |
+| Class-file pool | A category-one load rejects Double; `ldc2_w` rejects Float, Long and the reserved second slot. Float bits and Double bits (including NaN payloads) remain exact. |
+| Verifier shape | The linear analyzer rejects category-one operations on Double, category-two operations on Float, Double tail reads, and overlapping stores that invalidate the whole Double local. CFG joins, branches and loops await FP flow state support. |
 
 Planned follow-ups remain ordered: #1533 adds class-file FP opcodes, pool
-operand validation, and linear analysis; #1534 adds FP CFG states and
-StackMapTable projection after #1533; #1535 adds JVM metadata and slot
+operand validation, and linear analysis (implemented by this issue); #1534
+adds FP CFG states and StackMapTable projection after #1533; #1535 adds JVM metadata and slot
 projection after this audit and can proceed alongside #1533/#1534; #1536 adds
 literal/local/return lowering after #1533–#1535; #1537 adds fields and
 constructors after #1536; #1538 adds calls and control flow after #1536 (its

@@ -1410,9 +1410,14 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                 ConstructorPrologueValue::Int
             }
             Instruction::LConst(_) => ConstructorPrologueValue::Long,
-            Instruction::Ldc2(constant) => {
+            Instruction::Ldc2(constant @ Ldc2Constant::Long(_)) => {
                 resolver.validate_ldc2(instruction_index, constant, constant_pool)?;
                 ConstructorPrologueValue::Long
+            }
+            Instruction::Ldc2(Ldc2Constant::Double(_)) => {
+                return Err(AnalysisError::InvalidConstructorSuperCall {
+                    instruction: instruction_index,
+                });
             }
             Instruction::ILoad(index) => match parameter_locals.get(usize::from(index.get())) {
                 Some(ConstructorParameterLocal::Int) => ConstructorPrologueValue::Int,
@@ -1863,19 +1868,40 @@ impl Frame {
                 self.push(instruction_index, ValueKind::Int)?
             }
             Instruction::LConst(_) => self.push(instruction_index, ValueKind::Long)?,
+            Instruction::FConst(_) => self.push(instruction_index, ValueKind::Float)?,
+            Instruction::DConst(_) => self.push(instruction_index, ValueKind::Double)?,
             Instruction::Ldc(value) => {
                 let kind = self.ldc_kind(instruction_index, value, pool)?;
                 self.push(instruction_index, kind)?;
             }
             Instruction::Ldc2(value) => {
                 self.validate_ldc2(instruction_index, value, pool)?;
-                self.push(instruction_index, ValueKind::Long)?;
+                let kind = match value.kind() {
+                    super::JvmValueKind::Long => ValueKind::Long,
+                    super::JvmValueKind::Double => ValueKind::Double,
+                    super::JvmValueKind::Int
+                    | super::JvmValueKind::Float
+                    | super::JvmValueKind::Reference => {
+                        return Err(AnalysisError::InvalidConstantPoolOperand {
+                            instruction: instruction_index,
+                            index: value.index().get(),
+                            expected: ConstantPoolOperandKind::LongConstant,
+                        });
+                    }
+                };
+                self.push(instruction_index, kind)?;
             }
             Instruction::ILoad(index) => {
                 self.load_local(instruction_index, index, ValueKind::Int)?
             }
             Instruction::LLoad(index) => {
                 self.load_local(instruction_index, index, ValueKind::Long)?
+            }
+            Instruction::FLoad(index) => {
+                self.load_local(instruction_index, index, ValueKind::Float)?
+            }
+            Instruction::DLoad(index) => {
+                self.load_local(instruction_index, index, ValueKind::Double)?
             }
             Instruction::ALoad(index) => {
                 self.load_local(instruction_index, index, ValueKind::Reference)?
@@ -1885,6 +1911,12 @@ impl Frame {
             }
             Instruction::LStore(index) => {
                 self.store_local(instruction_index, index, ValueKind::Long)?
+            }
+            Instruction::FStore(index) => {
+                self.store_local(instruction_index, index, ValueKind::Float)?
+            }
+            Instruction::DStore(index) => {
+                self.store_local(instruction_index, index, ValueKind::Double)?
             }
             Instruction::AStore(index) => {
                 self.store_local(instruction_index, index, ValueKind::Reference)?
@@ -2136,6 +2168,22 @@ impl Frame {
                 self.ensure_no_pending_allocation(instruction_index)?;
                 self.check_return(instruction_index, Some(ValueKind::Long), method_descriptor)?;
                 self.pop_expected(instruction_index, ValueKind::Long)?;
+                self.ensure_empty_stack(instruction_index)?;
+            }
+            Instruction::FReturn => {
+                self.ensure_no_pending_allocation(instruction_index)?;
+                self.check_return(instruction_index, Some(ValueKind::Float), method_descriptor)?;
+                self.pop_expected(instruction_index, ValueKind::Float)?;
+                self.ensure_empty_stack(instruction_index)?;
+            }
+            Instruction::DReturn => {
+                self.ensure_no_pending_allocation(instruction_index)?;
+                self.check_return(
+                    instruction_index,
+                    Some(ValueKind::Double),
+                    method_descriptor,
+                )?;
+                self.pop_expected(instruction_index, ValueKind::Double)?;
                 self.ensure_empty_stack(instruction_index)?;
             }
         }
@@ -2530,6 +2578,7 @@ impl Frame {
         let index = constant.index().get();
         let expected = match constant {
             LdcConstant::Integer(_) => ConstantPoolOperandKind::IntegerConstant,
+            LdcConstant::Float(_) => ConstantPoolOperandKind::FloatConstant,
             LdcConstant::Reference(_) => ConstantPoolOperandKind::ReferenceConstant,
         };
         let entry = pool
@@ -2541,6 +2590,7 @@ impl Frame {
             })?;
         let kind = match (constant, entry) {
             (LdcConstant::Integer(_), ConstantPoolEntry::Integer(_)) => ValueKind::Int,
+            (LdcConstant::Float(_), ConstantPoolEntry::Float(_)) => ValueKind::Float,
             (
                 LdcConstant::Reference(_),
                 ConstantPoolEntry::String { .. }
@@ -2585,12 +2635,20 @@ impl Frame {
         pool: &ConstantPool,
     ) -> Result<(), AnalysisError> {
         let index = constant.index().get();
-        match pool.get(index) {
-            Some(ConstantPoolEntry::Long(_)) => Ok(()),
-            Some(ConstantPoolEntry::Dynamic {
-                name_and_type_index,
-                ..
-            }) => {
+        let expected = match constant {
+            Ldc2Constant::Long(_) => ConstantPoolOperandKind::LongConstant,
+            Ldc2Constant::Double(_) => ConstantPoolOperandKind::DoubleConstant,
+        };
+        match (constant, pool.get(index)) {
+            (Ldc2Constant::Long(_), Some(ConstantPoolEntry::Long(_)))
+            | (Ldc2Constant::Double(_), Some(ConstantPoolEntry::Double(_))) => Ok(()),
+            (
+                Ldc2Constant::Long(_),
+                Some(ConstantPoolEntry::Dynamic {
+                    name_and_type_index,
+                    ..
+                }),
+            ) => {
                 let field_type =
                     self.dynamic_field_type(instruction, index, *name_and_type_index, pool)?;
                 if field_type == FieldType::Long {
@@ -2599,14 +2657,14 @@ impl Frame {
                     Err(AnalysisError::InvalidConstantPoolOperand {
                         instruction,
                         index,
-                        expected: ConstantPoolOperandKind::LongConstant,
+                        expected,
                     })
                 }
             }
             _ => Err(AnalysisError::InvalidConstantPoolOperand {
                 instruction,
                 index,
-                expected: ConstantPoolOperandKind::LongConstant,
+                expected,
             }),
         }
     }
@@ -3302,7 +3360,12 @@ fn value_kind(field_type: &FieldType) -> ValueKind {
 fn is_return(instruction: Instruction) -> bool {
     matches!(
         instruction,
-        Instruction::Return | Instruction::IReturn | Instruction::AReturn | Instruction::LReturn
+        Instruction::Return
+            | Instruction::IReturn
+            | Instruction::AReturn
+            | Instruction::LReturn
+            | Instruction::FReturn
+            | Instruction::DReturn
     )
 }
 
@@ -3895,7 +3958,7 @@ fn validate_flow_instruction_with_context(
             | Instruction::ILoad(_)
             | Instruction::IStore(_)
             | Instruction::LConst(_)
-            | Instruction::Ldc2(_)
+            | Instruction::Ldc2(Ldc2Constant::Long(_))
             | Instruction::LLoad(_)
             | Instruction::LStore(_)
             | Instruction::LReturn
@@ -4070,9 +4133,14 @@ fn local_access(instruction: Instruction) -> Option<(LocalIndex, u8)> {
     match instruction {
         Instruction::ILoad(index)
         | Instruction::IStore(index)
+        | Instruction::FLoad(index)
+        | Instruction::FStore(index)
         | Instruction::ALoad(index)
         | Instruction::AStore(index) => Some((index, 1)),
-        Instruction::LLoad(index) | Instruction::LStore(index) => Some((index, 2)),
+        Instruction::LLoad(index)
+        | Instruction::LStore(index)
+        | Instruction::DLoad(index)
+        | Instruction::DStore(index) => Some((index, 2)),
         _ => None,
     }
 }
@@ -4568,7 +4636,8 @@ mod tests {
     use super::*;
     use crate::bytecode::{
         BranchInstruction, CodeSequence, ConstantPoolIndexOperand, ControlFlowGraph,
-        FieldReference, SmallIntConstant, SmallLongConstant,
+        FieldReference, SmallDoubleConstant, SmallFloatConstant, SmallIntConstant,
+        SmallLongConstant,
     };
     use crate::constant_pool::ConstantPool;
     use crate::constant_pool_builder::ConstantPoolBuilder;
@@ -4720,6 +4789,36 @@ mod tests {
                     kind: UnsupportedFlowInstructionKind::Reference,
                 }),
                 "context-free CFG rejection for {instruction:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_float_double_instructions_out_of_cfg_transfer() {
+        let mut builder = ConstantPoolBuilder::new();
+        let float = builder.float(1.5).unwrap();
+        let double = builder.double(3.5).unwrap();
+        let _pool = builder.finish().unwrap();
+        let instructions = [
+            Instruction::FConst(SmallFloatConstant::One),
+            Instruction::DConst(SmallDoubleConstant::One),
+            Instruction::Ldc(LdcConstant::Float(operand(float))),
+            Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+            Instruction::FLoad(LocalIndex::new(1)),
+            Instruction::DLoad(LocalIndex::new(1)),
+            Instruction::FStore(LocalIndex::new(1)),
+            Instruction::DStore(LocalIndex::new(1)),
+            Instruction::FReturn,
+            Instruction::DReturn,
+        ];
+        for instruction in instructions {
+            assert_eq!(
+                validate_flow_instruction(3, instruction),
+                Err(AnalysisError::UnsupportedFlowInstruction {
+                    instruction: 3,
+                    kind: UnsupportedFlowInstructionKind::Operation,
+                }),
+                "CFG must remain unsupported for {instruction:?}"
             );
         }
     }
@@ -7018,6 +7117,256 @@ mod tests {
                 instruction: 0,
                 index: string,
                 expected: ConstantPoolOperandKind::IntegerConstant,
+            })
+        );
+    }
+
+    #[test]
+    fn linear_analyzer_tracks_float_double_constants_locals_and_returns() {
+        let mut builder = ConstantPoolBuilder::new();
+        let float = builder.float(f32::from_bits(0x8000_0000)).unwrap();
+        let double = builder
+            .double(f64::from_bits(0x7ff8_0000_0000_0001))
+            .unwrap();
+        let integer = builder.integer(7).unwrap();
+        let long = builder.long(9).unwrap();
+        let pool = builder.finish().unwrap();
+
+        let float_constant = analyze(
+            "()F",
+            true,
+            &[
+                Instruction::Ldc(LdcConstant::Float(operand(float))),
+                Instruction::FReturn,
+            ],
+            &pool,
+        )
+        .unwrap();
+        assert_eq!(float_constant.max_stack, 1);
+        assert_eq!(float_constant.max_locals, 0);
+
+        let double_local = analyze(
+            "()D",
+            true,
+            &[
+                Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+                Instruction::DStore(LocalIndex::new(2)),
+                Instruction::DLoad(LocalIndex::new(2)),
+                Instruction::DReturn,
+            ],
+            &pool,
+        )
+        .unwrap();
+        assert_eq!(double_local.max_stack, 2);
+        assert_eq!(double_local.max_locals, 4);
+
+        let float_local = analyze(
+            "()F",
+            true,
+            &[
+                Instruction::Ldc(LdcConstant::Float(operand(float))),
+                Instruction::FStore(LocalIndex::new(255)),
+                Instruction::FLoad(LocalIndex::new(255)),
+                Instruction::FReturn,
+            ],
+            &pool,
+        )
+        .unwrap();
+        assert_eq!(float_local.max_stack, 1);
+        assert_eq!(float_local.max_locals, 256);
+
+        let mixed_parameters = analyze(
+            "(IFDJ)D",
+            false,
+            &[Instruction::DLoad(LocalIndex::new(3)), Instruction::DReturn],
+            &pool,
+        )
+        .unwrap();
+        assert_eq!(mixed_parameters.max_stack, 2);
+        assert_eq!(mixed_parameters.max_locals, 7);
+
+        assert_eq!(
+            analyze(
+                "()D",
+                true,
+                &[
+                    Instruction::FConst(SmallFloatConstant::One),
+                    Instruction::FReturn
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::WrongReturnOpcode {
+                instruction: 1,
+                expected: Some(ValueKind::Double),
+                actual: Some(ValueKind::Float),
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()F",
+                true,
+                &[
+                    Instruction::DConst(SmallDoubleConstant::One),
+                    Instruction::DReturn
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::WrongReturnOpcode {
+                instruction: 1,
+                expected: Some(ValueKind::Float),
+                actual: Some(ValueKind::Double),
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+                    Instruction::Pop,
+                    Instruction::Return,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::PopCategoryTwo {
+                instruction: 1,
+                actual: ValueKind::Double,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+                    Instruction::Dup,
+                    Instruction::Return,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::DupCategoryTwo {
+                instruction: 1,
+                actual: ValueKind::Double,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+                    Instruction::DStore(LocalIndex::new(1)),
+                    Instruction::FLoad(LocalIndex::new(1)),
+                    Instruction::Return,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::LocalTypeMismatch {
+                instruction: 2,
+                index: 1,
+                expected: ValueKind::Float,
+                actual: ValueKind::Double,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+                    Instruction::DStore(LocalIndex::new(1)),
+                    Instruction::DLoad(LocalIndex::new(2)),
+                    Instruction::Return,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::LocalSlotOverlap {
+                instruction: 2,
+                index: 2,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+                    Instruction::DStore(LocalIndex::new(1)),
+                    Instruction::IConst(SmallIntConstant::Zero),
+                    Instruction::IStore(LocalIndex::new(2)),
+                    Instruction::DLoad(LocalIndex::new(1)),
+                    Instruction::DReturn,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::UninitializedLocal {
+                instruction: 4,
+                index: 1,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()V",
+                true,
+                &[
+                    Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+                    Instruction::DStore(LocalIndex::new(65_534)),
+                    Instruction::Return,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::LocalLimitExceeded {
+                instruction: 1,
+                index: 65_534,
+                width: 2,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()F",
+                true,
+                &[
+                    Instruction::Ldc(LdcConstant::Float(operand(double))),
+                    Instruction::FReturn,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::InvalidConstantPoolOperand {
+                instruction: 0,
+                index: double,
+                expected: ConstantPoolOperandKind::FloatConstant,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()D",
+                true,
+                &[
+                    Instruction::Ldc2(Ldc2Constant::Double(operand(long))),
+                    Instruction::DReturn,
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::InvalidConstantPoolOperand {
+                instruction: 0,
+                index: long,
+                expected: ConstantPoolOperandKind::DoubleConstant,
+            })
+        );
+        assert_eq!(
+            analyze(
+                "()F",
+                true,
+                &[
+                    Instruction::Ldc(LdcConstant::Float(operand(integer))),
+                    Instruction::FReturn
+                ],
+                &pool,
+            ),
+            Err(AnalysisError::InvalidConstantPoolOperand {
+                instruction: 0,
+                index: integer,
+                expected: ConstantPoolOperandKind::FloatConstant,
             })
         );
     }
