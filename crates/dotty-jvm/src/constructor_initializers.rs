@@ -13,7 +13,7 @@ use dotty_core::types::{Constant, TermRefTarget, Type};
 use crate::{
     JVM_EXPRESSION_DEPTH_LIMIT, JVM_EXPRESSION_NODE_BUDGET, JvmClassIdentity,
     JvmClassInitializationPlan, JvmCodegenError, JvmCompilationUnit, JvmConstructorMetadata,
-    JvmFieldMetadata, JvmIntIntrinsic, JvmType, resolve_boolean_intrinsic, resolve_int_intrinsic,
+    JvmIntIntrinsic, JvmType, resolve_boolean_intrinsic, resolve_int_intrinsic,
 };
 
 /// A verified source-ordered list of constructor-local field initializer fragments.
@@ -24,7 +24,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JvmConstructorFieldInitializerPlan {
     class: SymbolId,
-    constructor: JvmConstructorMetadata,
+    constructor: Option<JvmConstructorMetadata>,
     owner_internal_name: String,
     accessors: Vec<JvmConstructorAccessorInitializer>,
     fields: Vec<JvmConstructorFieldInitializer>,
@@ -52,7 +52,43 @@ pub struct JvmConstructorAccessorInitializer {
 pub struct JvmConstructorFieldInitializer {
     field: SymbolId,
     initializer: TreeId<Typed>,
+    origin: JvmConstructorFieldInitializerOrigin,
     instructions: Vec<JvmConstructorInitializerInstruction>,
+}
+
+/// Checked source origin of a constructor field store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JvmConstructorFieldInitializerOrigin {
+    /// Ordinary private class-body field with a typed source RHS.
+    PrivateField,
+    /// Public class-body accessor backing storage with its source proof.
+    ClassBodyAccessor,
+}
+
+#[derive(Clone, Debug)]
+struct InitializableField {
+    symbol: SymbolId,
+    value_type: JvmType,
+    name: String,
+    descriptor: String,
+}
+
+impl InitializableField {
+    const fn symbol(&self) -> SymbolId {
+        self.symbol
+    }
+
+    const fn value_type(&self) -> JvmType {
+        self.value_type
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn descriptor(&self) -> &str {
+        &self.descriptor
+    }
 }
 
 /// Typed instruction plan for the currently supported constructor initializer subset.
@@ -120,8 +156,9 @@ impl JvmConstructorFieldInitializerPlan {
     }
 
     /// Validated constructor metadata, including ordered parameter slots.
-    pub const fn constructor(&self) -> &JvmConstructorMetadata {
-        &self.constructor
+    /// It is absent when this plan initializes a genuine implicit no-arg constructor.
+    pub const fn constructor(&self) -> Option<&JvmConstructorMetadata> {
+        self.constructor.as_ref()
     }
 
     /// Field initializers in the frontend's source declaration order.
@@ -235,6 +272,11 @@ impl JvmConstructorFieldInitializer {
     /// Canonical field receiving this initializer.
     pub const fn field(&self) -> SymbolId {
         self.field
+    }
+
+    /// Checked source origin of this backing-field store.
+    pub const fn origin(&self) -> JvmConstructorFieldInitializerOrigin {
+        self.origin
     }
 
     /// Exact typed initializer root associated with the field plan.
@@ -355,8 +397,8 @@ pub(crate) fn append_direct_super_constructor_call(
         definitions,
         class_identities: &class_identities,
         class,
-        constructor: child_constructor,
-        fields: child_metadata.fields(),
+        constructor: Some(child_constructor),
+        fields: &[],
         initialized_fields: HashSet::new(),
         current_field: class,
         node_visits: 0,
@@ -495,8 +537,8 @@ struct ConstructorInitializerContext<'a> {
     definitions: &'a Definitions,
     class_identities: &'a [JvmClassIdentity],
     class: SymbolId,
-    constructor: &'a JvmConstructorMetadata,
-    fields: &'a [JvmFieldMetadata],
+    constructor: Option<&'a JvmConstructorMetadata>,
+    fields: &'a [InitializableField],
     initialized_fields: HashSet<SymbolId>,
     current_field: SymbolId,
     node_visits: usize,
@@ -513,32 +555,99 @@ pub(super) fn lower(
         .iter()
         .find(|plan| plan.class == class)
         .ok_or(JvmCodegenError::MissingClassPlan { class })?;
-    if let Some(field) = class_plan.fields.iter().find(|field| {
-        matches!(
-            field.source_visibility,
-            crate::JvmFieldSourceVisibility::PlainPublic(_)
-        )
-    }) {
-        return Err(JvmCodegenError::FieldEmissionUnsupported {
-            class,
-            field: field.field,
-        });
-    }
-    if !matches!(
-        class_plan.initialization,
-        JvmClassInitializationPlan::PrimaryConstructor(_)
-    ) {
-        return Err(JvmCodegenError::ConstructorInitializerContextUnavailable { class });
-    }
     let all_metadata = unit.metadata(definitions)?;
     let metadata = all_metadata
         .iter()
         .find(|metadata| metadata.identity().symbol() == class)
         .ok_or(JvmCodegenError::MissingClassPlan { class })?;
-    let constructor = metadata
-        .constructor()
-        .cloned()
-        .ok_or(JvmCodegenError::ConstructorInitializerContextUnavailable { class })?;
+    let constructor = match &class_plan.initialization {
+        JvmClassInitializationPlan::PrimaryConstructor(_) => Some(
+            metadata
+                .constructor()
+                .cloned()
+                .ok_or(JvmCodegenError::ConstructorInitializerContextUnavailable { class })?,
+        ),
+        JvmClassInitializationPlan::ImplicitNoArg => None,
+        JvmClassInitializationPlan::Unsupported => None,
+    };
+    if matches!(
+        class_plan.initialization,
+        JvmClassInitializationPlan::Unsupported
+    ) {
+        return Err(JvmCodegenError::ConstructorInitializerContextUnavailable { class });
+    }
+    if let Some(constructor) = &constructor
+        && metadata
+            .constructor()
+            .is_none_or(|metadata| metadata.symbol() != constructor.symbol())
+    {
+        return Err(JvmCodegenError::ConstructorInitializerContextUnavailable { class });
+    }
+    let mut fields = Vec::with_capacity(class_plan.fields.len());
+    for plan in &class_plan.fields {
+        let initializer = plan
+            .initializer
+            .ok_or(JvmCodegenError::MissingFieldInitializer { field: plan.field })?;
+        match plan.source_visibility {
+            crate::JvmFieldSourceVisibility::PlainPrivate => {
+                let field = metadata
+                    .fields()
+                    .iter()
+                    .find(|field| field.symbol() == plan.field)
+                    .ok_or(JvmCodegenError::FieldNotInJvmPlan {
+                        tree: initializer,
+                        class,
+                        field: plan.field,
+                    })?;
+                if field.initializer() != initializer {
+                    return Err(JvmCodegenError::FieldInitializerTypeMismatch {
+                        field: plan.field,
+                        initializer,
+                        expected: field.value_type(),
+                        found: None,
+                    });
+                }
+                fields.push(InitializableField {
+                    symbol: plan.field,
+                    value_type: field.value_type(),
+                    name: field.name().to_owned(),
+                    descriptor: field.descriptor().to_owned(),
+                });
+            }
+            crate::JvmFieldSourceVisibility::PlainPublic(proof) => {
+                let accessor = metadata
+                    .accessors()
+                    .iter()
+                    .find(|accessor| accessor.source_field() == plan.field)
+                    .ok_or(JvmCodegenError::FieldNotInJvmPlan {
+                        tree: initializer,
+                        class,
+                        field: plan.field,
+                    })?;
+                if accessor.origin() != crate::JvmAccessorOrigin::ClassBodyField(proof)
+                    || proof.initializer() != initializer
+                    || proof.class() != class
+                    || proof.field() != plan.field
+                {
+                    return Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof {
+                        field: plan.field,
+                    });
+                }
+                fields.push(InitializableField {
+                    symbol: plan.field,
+                    value_type: accessor.value_type(),
+                    name: accessor.field_name().to_owned(),
+                    descriptor: accessor.field_descriptor().to_owned(),
+                });
+            }
+            crate::JvmFieldSourceVisibility::PrivateThis => {
+                return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
+                    field: plan.field,
+                    visibility: plan.source_visibility,
+                });
+            }
+        }
+    }
     let class_identities = all_metadata
         .iter()
         .map(|class| class.identity().clone())
@@ -550,8 +659,8 @@ pub(super) fn lower(
         definitions,
         class_identities: &class_identities,
         class,
-        constructor: &constructor,
-        fields: metadata.fields(),
+        constructor: constructor.as_ref(),
+        fields: &fields,
         initialized_fields: HashSet::new(),
         current_field: class,
         node_visits: 0,
@@ -563,6 +672,9 @@ pub(super) fn lower(
     for accessor in metadata.accessors() {
         let Some(binding) = accessor.binding() else {
             continue;
+        };
+        let Some(constructor) = context.constructor else {
+            return Err(JvmCodegenError::ConstructorInitializerContextUnavailable { class });
         };
         let field = accessor.source_field();
         let parameter = binding.parameter();
@@ -619,33 +731,46 @@ pub(super) fn lower(
             field_descriptor: accessor.field_descriptor().to_owned(),
         });
     }
-    let mut lowered_fields = Vec::with_capacity(metadata.fields().len());
-    for field in metadata.fields() {
-        let initializer = field.initializer();
-        context.current_field = field.symbol();
+    let mut lowered_fields = Vec::with_capacity(class_plan.fields.len());
+    for (field_plan, field_metadata) in class_plan.fields.iter().zip(&fields) {
+        let initializer =
+            field_plan
+                .initializer
+                .ok_or(JvmCodegenError::MissingFieldInitializer {
+                    field: field_plan.field,
+                })?;
+        context.current_field = field_metadata.symbol();
         context.node_visits = 0;
-        let expected = field_value_type(field);
+        let expected = field_metadata.value_type();
         let mut instructions = vec![JvmConstructorInitializerInstruction::LoadThis];
         let found = context.lower_expression(initializer, &mut instructions, 0)?;
         if !crate::reference::is_assignable(Some(unit), found, expected, definitions)? {
             return Err(JvmCodegenError::FieldInitializerTypeMismatch {
-                field: field.symbol(),
+                field: field_metadata.symbol(),
                 initializer,
                 expected,
                 found: Some(found),
             });
         }
         instructions.push(JvmConstructorInitializerInstruction::PutField {
-            field: field.symbol(),
-            name: field.name().to_owned(),
-            descriptor: field.descriptor().to_owned(),
+            field: field_metadata.symbol(),
+            name: field_metadata.name().to_owned(),
+            descriptor: field_metadata.descriptor().to_owned(),
         });
         lowered_fields.push(JvmConstructorFieldInitializer {
-            field: field.symbol(),
+            field: field_metadata.symbol(),
             initializer,
+            origin: if matches!(
+                field_plan.source_visibility,
+                crate::JvmFieldSourceVisibility::PlainPublic(_)
+            ) {
+                JvmConstructorFieldInitializerOrigin::ClassBodyAccessor
+            } else {
+                JvmConstructorFieldInitializerOrigin::PrivateField
+            },
             instructions,
         });
-        context.initialized_fields.insert(field.symbol());
+        context.initialized_fields.insert(field_metadata.symbol());
     }
 
     Ok(JvmConstructorFieldInitializerPlan {
@@ -850,12 +975,12 @@ impl ConstructorInitializerContext<'_> {
             });
         }
         let symbol_info = self.store.symbols.get(symbol);
-        if let Some(parameter) = self
-            .constructor
-            .parameters()
-            .iter()
-            .find(|parameter| parameter.symbol() == symbol)
-        {
+        if let Some(parameter) = self.constructor.and_then(|constructor| {
+            constructor
+                .parameters()
+                .iter()
+                .find(|parameter| parameter.symbol() == symbol)
+        }) {
             if receiver.is_some() {
                 return self.unsupported(tree, "qualified constructor parameter reference");
             }
@@ -876,7 +1001,7 @@ impl ConstructorInitializerContext<'_> {
                 );
             }
             if symbol_info.kind != SymbolKind::Parameter
-                || symbol_info.owner != Some(self.constructor.symbol())
+                || symbol_info.owner != self.constructor.map(JvmConstructorMetadata::symbol)
             {
                 return Err(JvmCodegenError::InvalidParameterReference {
                     tree,
@@ -930,12 +1055,9 @@ impl ConstructorInitializerContext<'_> {
                 referenced_field: symbol,
             });
         }
-        let value_type = field_value_type(field);
-        if matches!(value_type, JvmType::Reference(_)) {
-            return self.unsupported(tree, "reference field reads in constructor initializers");
-        }
+        let value_type = field.value_type();
         let found = self.tree_value_type(tree, self.typed_ast.get(tree).ty)?;
-        if found != value_type {
+        if !crate::reference::is_assignable(Some(self.unit), found, value_type, self.definitions)? {
             return self.type_mismatch(tree, value_type, found);
         }
         instructions.push(JvmConstructorInitializerInstruction::GetField {
@@ -984,9 +1106,14 @@ impl ConstructorInitializerContext<'_> {
         instructions: &mut Vec<JvmConstructorInitializerInstruction>,
         depth: usize,
     ) -> Result<JvmType, JvmCodegenError> {
+        let constructor =
+            self.constructor
+                .ok_or(JvmCodegenError::ConstructorInitializerContextUnavailable {
+                    class: self.class,
+                })?;
         let target = self.unit.resolve_constructor_call(
             self.class,
-            self.constructor.symbol(),
+            constructor.symbol(),
             tree_id,
             self.definitions,
         )?;
@@ -1018,12 +1145,12 @@ impl ConstructorInitializerContext<'_> {
                 TreeKind::Literal(_) => {}
                 TreeKind::Ident(_) => {
                     let symbol = self.term_ref_symbol(argument, argument_tree.ty)?;
-                    if !self
-                        .constructor
-                        .parameters()
-                        .iter()
-                        .any(|parameter| parameter.symbol() == symbol)
-                    {
+                    if !self.constructor.is_some_and(|constructor| {
+                        constructor
+                            .parameters()
+                            .iter()
+                            .any(|parameter| parameter.symbol() == symbol)
+                    }) {
                         return self.unsupported(
                             argument,
                             "reference constructor argument is not an exact constructor parameter",
@@ -1073,7 +1200,7 @@ impl ConstructorInitializerContext<'_> {
     fn validate_field_receiver(
         &self,
         tree: TreeId<Typed>,
-        field: &JvmFieldMetadata,
+        field: &InitializableField,
         receiver: Option<TreeId<Typed>>,
     ) -> Result<(), JvmCodegenError> {
         let reference_prefix = match self.store.types.try_get(self.typed_ast.get(tree).ty) {
@@ -1156,8 +1283,10 @@ impl ConstructorInitializerContext<'_> {
             });
             if parameter.kind == SymbolKind::Parameter
                 && matches!(parameter_owner, Some(owner)
-                    if owner.kind == SymbolKind::Constructor
-                        && parameter.owner == Some(self.constructor.symbol()))
+                if owner.kind == SymbolKind::Constructor
+                    && self.constructor.is_some_and(|constructor| {
+                        parameter.owner == Some(constructor.symbol())
+                    }))
             {
                 let parameter_type = match self.store.symbols.info(*symbol) {
                     SymbolInfo::Complete(ty) => *ty,
@@ -1225,10 +1354,6 @@ impl ConstructorInitializerContext<'_> {
             node,
         })
     }
-}
-
-fn field_value_type(field: &JvmFieldMetadata) -> JvmType {
-    field.value_type()
 }
 
 fn is_current_this_type(store: &SemanticStore, ty: dotty_core::TypeId, class: SymbolId) -> bool {
