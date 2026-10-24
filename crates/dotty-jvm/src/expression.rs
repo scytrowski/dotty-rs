@@ -358,13 +358,9 @@ fn append_method_return(
             match expected {
                 JvmType::Long => code.lreturn(),
                 JvmType::Int | JvmType::Boolean => code.ireturn(),
+                JvmType::Float => code.freturn(),
+                JvmType::Double => code.dreturn(),
                 JvmType::Reference(_) => unreachable!("reference returns handled above"),
-                JvmType::Float | JvmType::Double => {
-                    return Err(JvmCodegenError::UnsupportedTypedExpression {
-                        tree: body,
-                        node: "floating-point method return lowering",
-                    });
-                }
             }
             .map_err(|error| JvmCodegenError::CodeBuilder { tree: body, error })?;
         }
@@ -409,6 +405,46 @@ fn lower_leaf(
     let tree = context.tree(tree_id)?;
     match &tree.kind {
         TreeKind::Literal(literal) => {
+            if let Constant::FloatBits(bits) = literal.value {
+                let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
+                let matches_constant_type = match context.store.types.try_get(tree.ty) {
+                    Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                    _ => typed_primitive == Some(JvmType::Float),
+                };
+                if typed_primitive != Some(JvmType::Float) || !matches_constant_type {
+                    return Err(JvmCodegenError::LiteralTypeMismatch {
+                        tree: tree_id,
+                        value: JvmType::Float,
+                        typed: typed_primitive,
+                    });
+                }
+                code.fconst_bits(bits)
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                return Ok(Flow::Value(JvmType::Float));
+            }
+            if let Constant::DoubleBits(bits) = literal.value {
+                let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
+                let matches_constant_type = match context.store.types.try_get(tree.ty) {
+                    Some(Type::Constant(typed_value)) => typed_value == &literal.value,
+                    _ => typed_primitive == Some(JvmType::Double),
+                };
+                if typed_primitive != Some(JvmType::Double) || !matches_constant_type {
+                    return Err(JvmCodegenError::LiteralTypeMismatch {
+                        tree: tree_id,
+                        value: JvmType::Double,
+                        typed: typed_primitive,
+                    });
+                }
+                code.dconst_bits(bits)
+                    .map_err(|error| JvmCodegenError::CodeBuilder {
+                        tree: tree_id,
+                        error,
+                    })?;
+                return Ok(Flow::Value(JvmType::Double));
+            }
             if let Constant::Long(value) = literal.value {
                 let typed_primitive = primitive_type(context.store, tree.ty, context.definitions);
                 let matches_constant_type = match context.store.types.try_get(tree.ty) {
@@ -496,15 +532,11 @@ fn lower_leaf(
                     return Ok(Flow::Value(local.ty()));
                 }
                 let load = match local.ty() {
+                    JvmType::Float => code.fload(usize::from(local.slot())),
+                    JvmType::Double => code.dload(usize::from(local.slot())),
                     JvmType::Long => code.lload(usize::from(local.slot())),
                     JvmType::Int | JvmType::Boolean => code.iload(usize::from(local.slot())),
                     JvmType::Reference(_) => unreachable!("references use aload above"),
-                    JvmType::Float | JvmType::Double => {
-                        return Err(JvmCodegenError::UnsupportedTypedExpression {
-                            tree: tree_id,
-                            node: "floating-point local load",
-                        });
-                    }
                 };
                 load.map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -542,13 +574,9 @@ fn lower_leaf(
             match parameter.ty() {
                 JvmType::Reference(_) => code.aload(usize::from(parameter.slot())),
                 JvmType::Int | JvmType::Boolean => code.iload(usize::from(parameter.slot())),
+                JvmType::Float => code.fload(usize::from(parameter.slot())),
                 JvmType::Long => code.lload(usize::from(parameter.slot())),
-                JvmType::Float | JvmType::Double => {
-                    return Err(JvmCodegenError::UnsupportedTypedExpression {
-                        tree: tree_id,
-                        node: "floating-point parameter load",
-                    });
-                }
+                JvmType::Double => code.dload(usize::from(parameter.slot())),
             }
             .map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
@@ -659,12 +687,14 @@ fn parameter_value_type(
             )?
         }
         JvmType::Float | JvmType::Double => {
-            return Err(JvmCodegenError::ParameterReferenceTypeMismatch {
-                tree,
-                parameter: symbol,
-                expected: parameter.ty(),
-                found: None,
-            });
+            primitive_type(context.store, semantic_type, context.definitions).ok_or(
+                JvmCodegenError::ParameterReferenceTypeMismatch {
+                    tree,
+                    parameter: symbol,
+                    expected: parameter.ty(),
+                    found: None,
+                },
+            )?
         }
     };
     if found != parameter.ty() {
@@ -1352,13 +1382,9 @@ fn emit_assignment(
             let store = match local.ty() {
                 JvmType::Long => code.lstore(usize::from(local.slot())),
                 JvmType::Int | JvmType::Boolean => code.istore(usize::from(local.slot())),
+                JvmType::Float => code.fstore(usize::from(local.slot())),
+                JvmType::Double => code.dstore(usize::from(local.slot())),
                 JvmType::Reference(_) => unreachable!("references use astore above"),
-                JvmType::Float | JvmType::Double => {
-                    return Err(JvmCodegenError::UnsupportedTypedExpression {
-                        tree: tree_id,
-                        node: "floating-point local store",
-                    });
-                }
             };
             store.map_err(|error| JvmCodegenError::CodeBuilder {
                 tree: tree_id,
@@ -1623,10 +1649,10 @@ fn emit_block(
             continue;
         }
         match emit_expression(context, stat, code, depth + 1)? {
-            Flow::Value(JvmType::Long) => {
+            Flow::Value(JvmType::Long | JvmType::Double) => {
                 return Err(JvmCodegenError::UnsupportedTypedExpression {
                     tree: stat,
-                    node: "discarded Long value requires category-two stack operation",
+                    node: "discarded category-two value requires category-two stack operation",
                 });
             }
             Flow::Value(_) => {
@@ -1828,13 +1854,9 @@ fn emit_local_declaration(
         let store = match local.ty() {
             JvmType::Long => code.lstore(usize::from(local.slot())),
             JvmType::Int | JvmType::Boolean => code.istore(usize::from(local.slot())),
+            JvmType::Float => code.fstore(usize::from(local.slot())),
+            JvmType::Double => code.dstore(usize::from(local.slot())),
             JvmType::Reference(_) => unreachable!("references use astore above"),
-            JvmType::Float | JvmType::Double => {
-                return Err(JvmCodegenError::UnsupportedTypedExpression {
-                    tree: declaration,
-                    node: "floating-point local initializer",
-                });
-            }
         };
         store.map_err(|error| JvmCodegenError::CodeBuilder {
             tree: declaration,
@@ -3854,13 +3876,9 @@ fn emit_return(
                 match found {
                     JvmType::Reference(_) => code.areturn(),
                     JvmType::Int | JvmType::Boolean => code.ireturn(),
+                    JvmType::Float => code.freturn(),
                     JvmType::Long => code.lreturn(),
-                    JvmType::Float | JvmType::Double => {
-                        return Err(JvmCodegenError::UnsupportedTypedExpression {
-                            tree: tree_id,
-                            node: "floating-point return lowering",
-                        });
-                    }
+                    JvmType::Double => code.dreturn(),
                 }
                 .map_err(|error| JvmCodegenError::CodeBuilder {
                     tree: tree_id,
@@ -3991,7 +4009,9 @@ fn primitive_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) 
     match store.types.try_get(ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmType::Int),
         Type::Constant(Constant::Boolean(_)) => Some(JvmType::Boolean),
+        Type::Constant(Constant::FloatBits(_)) => Some(JvmType::Float),
         Type::Constant(Constant::Long(_)) => Some(JvmType::Long),
+        Type::Constant(Constant::DoubleBits(_)) => Some(JvmType::Double),
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
             ..
@@ -4008,6 +4028,24 @@ fn primitive_type(store: &SemanticStore, ty: TypeId, definitions: &Definitions) 
             && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) =>
         {
             Some(JvmType::Long)
+        }
+        Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        } if *symbol == type_symbol(store, definitions.float)?
+            && *prefix == definitions.no_prefix
+            && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) =>
+        {
+            Some(JvmType::Float)
+        }
+        Type::TypeRef {
+            prefix,
+            target: TypeRefTarget::Symbol(symbol),
+        } if *symbol == type_symbol(store, definitions.double)?
+            && *prefix == definitions.no_prefix
+            && matches!(store.types.try_get(*prefix), Some(Type::NoPrefix)) =>
+        {
+            Some(JvmType::Double)
         }
         _ => None,
     }
@@ -4654,6 +4692,26 @@ mod tests {
         let long_singleton_type = fixture.store.types.alloc(Type::Constant(Constant::Long(5)));
         let mismatched_long = fixture.literal(Constant::Long(7), long_singleton_type);
         let long_as_int = fixture.literal(Constant::Long(7), fixture.definitions.int);
+        let float_as_double =
+            fixture.literal(Constant::FloatBits(0x3f80_0000), fixture.definitions.double);
+        let double_as_float = fixture.literal(
+            Constant::DoubleBits(0x3ff0_0000_0000_0000),
+            fixture.definitions.float,
+        );
+        let float_singleton_type = fixture
+            .store
+            .types
+            .alloc(Type::Constant(Constant::FloatBits(0x4000_0000)));
+        let mismatched_float_singleton =
+            fixture.literal(Constant::FloatBits(0x3f80_0000), float_singleton_type);
+        let double_singleton_type = fixture
+            .store
+            .types
+            .alloc(Type::Constant(Constant::DoubleBits(0x4000_0000_0000_0000)));
+        let mismatched_double_singleton = fixture.literal(
+            Constant::DoubleBits(0x3ff0_0000_0000_0000),
+            double_singleton_type,
+        );
         for (tree, expected) in [
             (
                 mismatch,
@@ -4685,6 +4743,38 @@ mod tests {
                     tree: long_as_int,
                     value: JvmType::Long,
                     typed: Some(JvmType::Int),
+                },
+            ),
+            (
+                float_as_double,
+                JvmCodegenError::LiteralTypeMismatch {
+                    tree: float_as_double,
+                    value: JvmType::Float,
+                    typed: Some(JvmType::Double),
+                },
+            ),
+            (
+                double_as_float,
+                JvmCodegenError::LiteralTypeMismatch {
+                    tree: double_as_float,
+                    value: JvmType::Double,
+                    typed: Some(JvmType::Float),
+                },
+            ),
+            (
+                mismatched_float_singleton,
+                JvmCodegenError::LiteralTypeMismatch {
+                    tree: mismatched_float_singleton,
+                    value: JvmType::Float,
+                    typed: Some(JvmType::Float),
+                },
+            ),
+            (
+                mismatched_double_singleton,
+                JvmCodegenError::LiteralTypeMismatch {
+                    tree: mismatched_double_singleton,
+                    value: JvmType::Double,
+                    typed: Some(JvmType::Double),
                 },
             ),
         ] {
