@@ -719,6 +719,7 @@ pub enum JvmAccessorCallMetadataIssue {
     DuplicateField,
     OwnerMismatch,
     BindingMissing,
+    BodyFieldProofMismatch,
     ValueTypeMismatch,
     BackingFieldFlagsMismatch,
     GetterSignatureMismatch,
