@@ -2595,6 +2595,120 @@ fn constructor_accessor_metadata_rejects_user_setter_signature_collisions() {
 }
 
 #[test]
+fn accessor_bearing_subclass_is_rejected_before_inherited_method_validation() {
+    with_source(
+        "class Parent { final def id(): Int = 1 }\nclass Child(val id: Int) extends Parent",
+        |ast, source, index, definitions, typer| {
+            let parent = symbol_named(ast, index, source, typer, "Parent");
+            let child = symbol_named(ast, index, source, typer, "Child");
+            typer.complete_symbol(parent).unwrap();
+            typer.complete_symbol(child).unwrap();
+
+            let (parent_method, _, parent_rhs) =
+                method_tree_and_rhs(ast, index, source, typer, parent, "id");
+            typer.complete_symbol(parent_method).unwrap();
+            let context = typer.expression_context_for(parent_method).unwrap();
+            let parent_body = typer.type_expression(parent_rhs, context).unwrap();
+            let Some(dotty_namer::SourceDefinition::Canonical {
+                source: parent_source,
+                tree: parent_tree,
+            }) = index.definition_of(parent)
+            else {
+                panic!("Parent must have a canonical source definition");
+            };
+            let TreeKind::TypeDef(parent_definition) = &ast.get(parent_tree).kind else {
+                panic!("Parent source definition should be a TypeDef");
+            };
+            let TreeKind::Template(parent_template) = &ast.get(parent_definition.rhs).kind else {
+                panic!("Parent definition should contain a template");
+            };
+            let parent_constructor = index
+                .symbol_at(parent_source, parent_template.constructor)
+                .unwrap();
+            typer.complete_symbol(parent_constructor).unwrap();
+            let parent_proof = JvmPrimaryConstructorPlan::from_source(
+                parent,
+                parent_constructor,
+                Vec::new(),
+                ast,
+                index,
+            )
+            .unwrap();
+            let parent_plan = JvmClassPlan {
+                class: parent,
+                methods: vec![JvmMethodPlan {
+                    method: parent_method,
+                    parameters: Vec::new(),
+                    locals: Vec::new(),
+                    body: Some(parent_body),
+                }],
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(parent_proof),
+            };
+
+            let Some(dotty_namer::SourceDefinition::Canonical { source, tree }) =
+                index.definition_of(child)
+            else {
+                panic!("Child must have a canonical source definition");
+            };
+            let TreeKind::TypeDef(class_definition) = &ast.get(tree).kind else {
+                panic!("Child source definition should be a TypeDef");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("Child definition should contain a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("Child primary constructor should be a DefDef");
+            };
+            let parameter_tree = constructor_definition.value_param_clauses[0][0];
+            let field = index.symbol_at(source, parameter_tree).unwrap();
+            let parameter = index
+                .derived_symbol_at(constructor, source, parameter_tree)
+                .unwrap();
+            typer.complete_symbol(field).unwrap();
+            typer.complete_symbol(parameter).unwrap();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                child,
+                constructor,
+                vec![parameter],
+                ast,
+                index,
+            )
+            .unwrap();
+            assert_eq!(proof.accessor_bindings().len(), 1);
+
+            let result = JvmCompilationUnit {
+                store: typer.store(),
+                typed_ast: typer.typed_ast(),
+                classes: vec![
+                    parent_plan,
+                    JvmClassPlan {
+                        class: child,
+                        methods: Vec::new(),
+                        fields: Vec::new(),
+                        initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+                    },
+                ],
+            }
+            .metadata(definitions);
+            assert!(
+                matches!(
+                    &result,
+                    Err(dotty_jvm::JvmCodegenError::UnsupportedJvmAccessorInheritance {
+                        class: found_class,
+                        parent: found_parent,
+                    }) if *found_class == child && *found_parent == parent
+                ),
+                "unexpected result: {result:?}"
+            );
+        },
+    );
+}
+
+#[test]
 fn wrong_typed_field_initializer_is_a_typer_error_and_rolls_back_mapping() {
     with_source(
         "class Broken { private val count: Int = true }",

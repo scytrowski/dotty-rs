@@ -110,7 +110,8 @@ accessor classfile is an accepted backend output yet.
 | Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
 | `private[this]`, class-body public fields, `lazy`, visibility variants | Deferred; no ABI claim is made by this audit. |
 | Secondary, defaulted, multiple-clause, or `using` constructors | Deferred. |
-| Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. |
+| Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. Accessor metadata is rejected on non-Object subclasses and across planned accessor-inheritance edges until generated signatures participate in override/bridge validation. |
+| Accessor-bearing class with a planned non-Object parent | Rejected with `UnsupportedJvmAccessorInheritance`, before accessor metadata is returned. This prevents generated getter/setter signatures from bypassing inherited final-method and override checks. |
 | Malformed owner/derived IDs, stale typed IDs, generated signature collisions | Metadata validation rejects invalid bindings and binary collisions before bytes are published; codegen is not implemented here. |
 | Unsupported source calls or assignments | Keep the actual Typer/backend error observable; do not guess or bypass it. |
 

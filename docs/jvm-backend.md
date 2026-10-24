@@ -1015,9 +1015,11 @@ getter signature, and a public `$eq` setter signature for `var` only. This
 projection uses the exact Scala 3.9.0 oracle evidence recorded in
 [`jvm-scala-accessors.md`](jvm-scala-accessors.md), preserves source order and
 canonical source IDs, and rejects field or binary method-signature collisions
-against planned fields and methods. It does not add semantic symbols, ordinary
-field initializers, or class-file members; accessor and constructor emission
-remain later increments.
+against planned fields and methods. Accessor-bearing inheritance edges are
+rejected with `UnsupportedJvmAccessorInheritance` until generated signatures
+participate in override and final-method validation. The projection does not
+add semantic symbols, ordinary field initializers, or class-file members;
+accessor and constructor emission remain later increments.
 
 `JvmClassMetadata::constructor()` exposes the explicit constructor's canonical
 symbol, owner internal name, descriptor, access flags, and ordered

@@ -1279,6 +1279,27 @@ pub(super) fn unit_metadata(
     let hierarchy = unit_hierarchy(unit, definitions)?;
     let class_identities = unit_class_identities(unit)?;
     let mut metadata = Vec::with_capacity(unit.classes.len());
+    for plan in &unit.classes {
+        let crate::JvmClassInitializationPlan::PrimaryConstructor(constructor) =
+            &plan.initialization
+        else {
+            continue;
+        };
+        if constructor.accessor_bindings().is_empty() {
+            continue;
+        }
+        let superclass = hierarchy
+            .superclasses()
+            .iter()
+            .find(|superclass| superclass.class() == plan.class)
+            .expect("every validated class has one direct superclass");
+        if superclass.parent() != definitions.object_class {
+            return Err(JvmCodegenError::UnsupportedJvmAccessorInheritance {
+                class: plan.class,
+                parent: superclass.parent(),
+            });
+        }
+    }
     for class_plan in &unit.classes {
         let superclass = hierarchy
             .superclasses()
@@ -1295,6 +1316,25 @@ pub(super) fn unit_metadata(
             Some(unit),
         )?;
         metadata.push(class);
+    }
+    for child in &metadata {
+        let Some(superclass) = child.superclass() else {
+            continue;
+        };
+        let parent = superclass.parent();
+        if parent == definitions.object_class {
+            continue;
+        }
+        let parent_has_accessors = metadata
+            .iter()
+            .find(|candidate| candidate.identity().symbol() == parent)
+            .is_some_and(|candidate| !candidate.accessors().is_empty());
+        if !child.accessors().is_empty() || parent_has_accessors {
+            return Err(JvmCodegenError::UnsupportedJvmAccessorInheritance {
+                class: child.identity().symbol(),
+                parent,
+            });
+        }
     }
     validate_final_parent_method_collisions(unit, &metadata)?;
     validate_and_build_method_dispatch(unit, definitions, &mut metadata)?;

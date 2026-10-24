@@ -1291,6 +1291,9 @@ pub enum JvmCodegenError {
         name: String,
         descriptor: String,
     },
+    /// Constructor accessor signatures cannot yet participate in inherited
+    /// method collision and override validation.
+    UnsupportedJvmAccessorInheritance { class: SymbolId, parent: SymbolId },
     /// Two class symbols in one compilation unit project to the same internal name.
     DuplicateJvmClassIdentity {
         class: SymbolId,
