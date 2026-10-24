@@ -3,9 +3,10 @@
 This document records the bounded audit and implementation status for ordinary
 primary-constructor `val`/`var` parameters in Scala 3.9.0, tracked by
 [#1553](https://github.com/scytrowski/dotty-rs/issues/1553). Checked backing
-field metadata and constructor initialization are implemented; generated
-getter/setter methods remain deferred. It keeps source identity, source
-selection typing, and emitted JVM members separate.
+field metadata and constructor initialization are implemented, and the
+backend emits audited public getter methods. Setter emission remains deferred.
+The contract keeps source identity, source selection typing, and emitted JVM
+members separate.
 
 ## Evidence and oracle status
 
@@ -72,14 +73,15 @@ The current Typer successfully types all of the following in the same source
 session: external `m.id` and `m.value`, `this.id` and `this.value`, the
 assignment `m.value = 42.0`, and passing `m.id` as an argument to another
 method. The typed references for each selected member designate the canonical
-field symbol. These tests characterize source typing only; they do not prove
-that the current backend emits a compatible accessor ABI or can compile those
-classes.
+field symbol. JVM getter emission is tested independently through decoded
+class files and Java 21 invocation; source call-site lowering remains outside
+this issue.
 
 `JvmPrimaryConstructorPlan::from_source` accepts the audited parameter roles
 and produces an immutable source binding. The backend emits private backing
-field_info entries and checked constructor stores from those exact bindings;
-generated accessor methods and source call-site integration remain deferred.
+field_info entries, checked constructor stores, and public getter methods from
+those exact bindings; setter emission and source call-site integration remain
+deferred.
 The plan accepts a plain
 parameter only with `ParamAccessor` plus `PrivateLocal`, an immutable public
 accessor only with `ParamAccessor`, and a mutable public accessor only with
@@ -104,16 +106,16 @@ identity must be a typed rejection. Generated JVM signatures must be checked
 for collisions against user-declared and other generated members; the policy
 must reject ambiguity before artifact publication rather than silently
 shadowing either member. Accessor metadata performs these checks. Emitted
-classes now contain the checked backing fields and constructor stores, but no
-generated getter/setter methods.
+classes contain the checked backing fields, constructor stores, and generated
+getter methods. Setter methods remain deferred.
 
 ## Scope matrix
 
 | Shape | Audit result / disposition |
 | --- | --- |
-| `Measurement(val id: Int, var value: Double)` | Emits private `id:I` and `value:D` storage and exactly one initialized store from slots 1 and 2–3 after `Object.<init>`. Getter/setter methods remain deferred. |
-| `Mixed(val enabled: Boolean, var count: Long)` | Emits private `enabled:Z` and `count:J` storage; `Long` uses two constructor local slots. Getter/setter methods remain deferred. |
-| `Ref(val item: Measurement)` | Emits private-final planned reference storage and copies the exact reference formal after direct-super initialization. Getter method remains deferred. |
+| `Measurement(val id: Int, var value: Double)` | Emits private `id:I` and `value:D` storage, exactly one initialized store from slots 1 and 2–3 after `Object.<init>`, and public `id()I` / `value()D` getters. Setter remains deferred. |
+| `Mixed(val enabled: Boolean, var count: Long)` | Emits private `enabled:Z` and `count:J` storage, public `enabled()Z` / `count()J` getters, and uses two constructor local slots for `Long`. Setter remains deferred. |
+| `Ref(val item: Measurement)` | Emits private-final planned reference storage, copies the exact reference formal after direct-super initialization, and emits `item()LMeasurement;`. |
 | Plain constructor parameter | Existing distinct class-owned and constructor-owned parameter identities remain; it does not gain an accessor by implication. |
 | Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
 | `private[this]`, class-body public fields, `lazy`, visibility variants | Deferred; no ABI claim is made by this audit. |
@@ -125,14 +127,10 @@ generated getter/setter methods.
 
 ## Future acceptance gate
 
-Generated getter/setter code remains disabled until a later implementation
-adds focused tests for their exact descriptors and flags, setter `void` return
-behavior, verifier stack bounds, collision rejection, deterministic bytes, and
-rejection without partial artifacts. The backing-field initialization
-increment already tests canonical source/derived bindings, constructor
-parameter/category-two slots, source order, and Java 21 verification. Future
-public getter/setter entrypoints must be callable from Java, and
-generated classes must pass `java -Xverify:all` plus state/constructor behavior
-checks under the repository's mandatory JDK 21 gate. These JVM-only tests must
-not depend on Scala source call-site lowering. Rust-produced output passing the
-JVM verifier alone is not evidence of Scala ABI compatibility.
+Getter emission is covered for `Int`, `Boolean`, `Long`, `Float`, `Double`, and
+validated planned-class references. Tests assert getter names, descriptors,
+flags, field references, return opcodes, deterministic output, and accessor
+order; a Java harness invokes the getters under `java -Xverify:all`. Setter
+code remains deferred. These JVM-only tests do not depend on Scala source
+call-site lowering. Rust-produced output passing the JVM verifier alone is not
+evidence of Scala ABI compatibility.
