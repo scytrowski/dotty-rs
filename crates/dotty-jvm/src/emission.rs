@@ -310,6 +310,18 @@ pub(super) fn validate_emittable_class(
     class_info: &dotty_core::types::ClassInfo,
     superclass: &crate::JvmSuperclassPlan,
 ) -> Result<(), JvmCodegenError> {
+    if let Some(field) = plan.fields.iter().find(|field| {
+        matches!(
+            field.source_visibility,
+            crate::JvmFieldSourceVisibility::PlainPublic(_)
+        )
+    }) {
+        return Err(JvmCodegenError::FieldEmissionUnsupported {
+            class: plan.class,
+            field: field.field,
+        });
+    }
+
     if let Some(self_type) = class_info.self_type {
         return Err(JvmCodegenError::UnsupportedJvmSelfType {
             class: plan.class,

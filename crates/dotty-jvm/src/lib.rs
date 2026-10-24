@@ -12,9 +12,9 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use dotty_core::ast::{Tree, TreeKind, Typed, TypedAst};
+use dotty_core::ast::{AstArena, Tree, TreeKind, Typed, TypedAst, Untyped};
 use dotty_core::definitions::Definitions;
-use dotty_core::ids::{SymbolId, TreeId, TypeId};
+use dotty_core::ids::{SourceId, SymbolId, TreeId, TypeId};
 use dotty_core::store::SemanticStore;
 use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind};
 use dotty_core::types::Type;
@@ -352,14 +352,188 @@ pub struct JvmFieldPlan {
     pub initializer: Option<TreeId<Typed>>,
 }
 
-/// Private source visibility distinctions needed by the JVM field subset.
+/// Source visibility distinctions needed by the JVM field subset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JvmFieldSourceVisibility {
-    /// Unqualified `private`, the only currently supported field form.
+    /// Unqualified `private`, which retains the existing emitted field path.
     PlainPrivate,
     /// Object-private `private[this]`, which shares `Visibility::Private` in
     /// the semantic store but has a distinct Scala accessor/storage contract.
     PrivateThis,
+    /// An ordinary class-body declaration with no explicit visibility
+    /// modifier, paired with checked source and typed-RHS provenance.
+    PlainPublic(JvmPublicBodyFieldSourceProof),
+}
+
+/// Checked immutable provenance for an ordinary public class-body field.
+///
+/// Construct this record from the exact source AST, semantic index, typed
+/// index, and store used by the compilation unit. Its private fields prevent a
+/// caller from changing the canonical declaration or RHS after validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JvmPublicBodyFieldSourceProof {
+    class: SymbolId,
+    field: SymbolId,
+    source: SourceId,
+    declaration: TreeId<Untyped>,
+    template_position: usize,
+    mutable: bool,
+    rhs: TreeId<Untyped>,
+    initializer: TreeId<Typed>,
+}
+
+impl JvmPublicBodyFieldSourceProof {
+    /// Validates that `declaration` is the canonical unqualified class-body
+    /// field and that `initializer` is the typed image of its exact RHS.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_source(
+        class: SymbolId,
+        field: SymbolId,
+        source: SourceId,
+        declaration: TreeId<Untyped>,
+        initializer: TreeId<Typed>,
+        ast: &AstArena<Untyped>,
+        index: &dotty_core::SourceSemanticIndex,
+        source_typed_index: &dotty_core::SourceTypedIndex,
+        typed_ast: &dotty_core::ast::TypedAst,
+        store: &SemanticStore,
+    ) -> Result<Self, JvmCodegenError> {
+        let invalid = || JvmCodegenError::InvalidPublicBodyFieldSourceProof { field };
+        let field_symbol = store
+            .symbols
+            .contains(field)
+            .then(|| store.symbols.get(field))
+            .ok_or(JvmCodegenError::UnknownField { field })?;
+        if field_symbol.kind != SymbolKind::Field {
+            return Err(JvmCodegenError::UnsupportedSymbolKind {
+                symbol: field,
+                expected: SymbolRole::Field,
+                found: field_symbol.kind,
+            });
+        }
+        if field_symbol.owner != Some(class) {
+            return Err(JvmCodegenError::WrongOwner {
+                symbol: field,
+                expected: class,
+                actual: field_symbol.owner,
+            });
+        }
+        if field_symbol.visibility != dotty_core::symbols::Visibility::Public {
+            return Err(JvmCodegenError::UnsupportedJvmVisibility {
+                symbol: field,
+                visibility: field_symbol.visibility,
+            });
+        }
+        if index.symbol_at(source, declaration) != Some(field)
+            || index.definition_of(field)
+                != Some(dotty_core::SourceDefinition::Canonical {
+                    source,
+                    tree: declaration,
+                })
+        {
+            return Err(invalid());
+        }
+        let TreeKind::ValDef(definition) = &ast.try_get(declaration).ok_or_else(invalid)?.kind
+        else {
+            return Err(invalid());
+        };
+        let Some(rhs) = definition.rhs else {
+            return Err(JvmCodegenError::MissingFieldInitializer { field });
+        };
+        let source_rhs = ast.try_get(rhs).ok_or_else(invalid)?;
+        let typed_rhs = typed_ast
+            .try_get(initializer)
+            .ok_or(JvmCodegenError::UnknownFieldInitializer { field, initializer })?;
+        if definition.metadata.visibility.is_some()
+            || source_typed_index.get(source, rhs) != Some(initializer)
+            || source_rhs.position.is_none()
+            || source_rhs.position != typed_rhs.position
+        {
+            return Err(invalid());
+        }
+        let mutable = definition
+            .metadata
+            .modifiers
+            .contains(&dotty_core::ast::Modifier::Var);
+        if field_symbol.flags.contains(SymbolFlags::MUTABLE) != mutable {
+            return Err(invalid());
+        }
+        let Some(dotty_core::SourceDefinition::Canonical {
+            source: class_source,
+            tree: class_tree,
+        }) = index.definition_of(class)
+        else {
+            return Err(invalid());
+        };
+        let TreeKind::TypeDef(class_definition) =
+            &ast.try_get(class_tree).ok_or_else(invalid)?.kind
+        else {
+            return Err(invalid());
+        };
+        let TreeKind::Template(template) =
+            &ast.try_get(class_definition.rhs).ok_or_else(invalid)?.kind
+        else {
+            return Err(invalid());
+        };
+        if class_source != source || !template.body.contains(&declaration) {
+            return Err(invalid());
+        }
+        let template_position = template
+            .body
+            .iter()
+            .position(|tree| *tree == declaration)
+            .ok_or_else(invalid)?;
+        Ok(Self {
+            class,
+            field,
+            source,
+            declaration,
+            template_position,
+            mutable,
+            rhs,
+            initializer,
+        })
+    }
+
+    /// Canonical owning class symbol.
+    pub const fn class(self) -> SymbolId {
+        self.class
+    }
+
+    /// Canonical source field symbol.
+    pub const fn field(self) -> SymbolId {
+        self.field
+    }
+
+    /// Source compilation unit containing the declaration.
+    pub const fn source(self) -> SourceId {
+        self.source
+    }
+
+    /// Exact source `ValDef` declaration tree.
+    pub const fn declaration(self) -> TreeId<Untyped> {
+        self.declaration
+    }
+
+    /// Zero-based source order within the containing template body.
+    pub const fn template_position(self) -> usize {
+        self.template_position
+    }
+
+    /// Whether the source declaration is `var` rather than `val`.
+    pub const fn mutable(self) -> bool {
+        self.mutable
+    }
+
+    /// Exact source RHS tree.
+    pub const fn rhs(self) -> TreeId<Untyped> {
+        self.rhs
+    }
+
+    /// Exact typed initializer root bound to the source RHS.
+    pub const fn initializer(self) -> TreeId<Typed> {
+        self.initializer
+    }
 }
 
 /// Validated JVM metadata for one private primitive or exact-reference instance field.
@@ -670,6 +844,10 @@ pub enum JvmCodegenError {
     MethodNotInJvmPlanForBody { class: SymbolId, method: SymbolId },
     /// The field ID is outside the supplied symbol table.
     UnknownField { field: SymbolId },
+    /// A public-body field plan lacks matching immutable source evidence.
+    InvalidPublicBodyFieldSourceProof { field: SymbolId },
+    /// Public-body field plans do not retain source template order.
+    OutOfOrderPublicBodyFieldPlan { class: SymbolId, field: SymbolId },
     /// The parameter ID is outside the supplied symbol table.
     UnknownParameter { parameter: SymbolId },
     /// A local symbol ID is outside the supplied symbol table.
@@ -2624,6 +2802,7 @@ impl JvmCompilationUnit<'_> {
             }
 
             let mut class_field_symbols = HashSet::new();
+            let mut last_public_body_position = None;
             for field_plan in &class_plan.fields {
                 if !class_field_symbols.insert(field_plan.field)
                     || !seen_fields.insert(field_plan.field)
@@ -2654,17 +2833,54 @@ impl JvmCompilationUnit<'_> {
                         actual: field.owner,
                     });
                 }
-                if field.visibility != dotty_core::symbols::Visibility::Private {
+                let expected_visibility = match field_plan.source_visibility {
+                    JvmFieldSourceVisibility::PlainPrivate
+                    | JvmFieldSourceVisibility::PrivateThis => {
+                        dotty_core::symbols::Visibility::Private
+                    }
+                    JvmFieldSourceVisibility::PlainPublic(_) => {
+                        dotty_core::symbols::Visibility::Public
+                    }
+                };
+                if field.visibility != expected_visibility {
                     return Err(JvmCodegenError::UnsupportedJvmVisibility {
                         symbol: field_plan.field,
                         visibility: field.visibility,
                     });
                 }
-                if field_plan.source_visibility != JvmFieldSourceVisibility::PlainPrivate {
-                    return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
-                        field: field_plan.field,
-                        visibility: field_plan.source_visibility,
-                    });
+                match field_plan.source_visibility {
+                    JvmFieldSourceVisibility::PlainPrivate => {}
+                    JvmFieldSourceVisibility::PrivateThis => {
+                        return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
+                            field: field_plan.field,
+                            visibility: field_plan.source_visibility,
+                        });
+                    }
+                    JvmFieldSourceVisibility::PlainPublic(proof)
+                        if proof.class != class_plan.class
+                            || proof.field != field_plan.field
+                            || Some(proof.initializer) != field_plan.initializer =>
+                    {
+                        return Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof {
+                            field: field_plan.field,
+                        });
+                    }
+                    JvmFieldSourceVisibility::PlainPublic(proof) => {
+                        if proof.mutable != field.flags.contains(SymbolFlags::MUTABLE) {
+                            return Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof {
+                                field: field_plan.field,
+                            });
+                        }
+                        if last_public_body_position
+                            .is_some_and(|position| position >= proof.template_position)
+                        {
+                            return Err(JvmCodegenError::OutOfOrderPublicBodyFieldPlan {
+                                class: class_plan.class,
+                                field: field_plan.field,
+                            });
+                        }
+                        last_public_body_position = Some(proof.template_position);
+                    }
                 }
                 identity::validate_field_flags(field_plan.field, field.flags)?;
                 let class_info = identity::class_info(self.store, class_plan.class)?;

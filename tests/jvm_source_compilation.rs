@@ -15,13 +15,13 @@ use dotty_core::{
 use dotty_jvm::{
     GeneratedClass, JVM_CLASSFILE_MAJOR_VERSION, JvmClassInitializationPlan, JvmClassPlan,
     JvmCodegenError, JvmCompilationUnit, JvmFieldPlan, JvmFieldSourceVisibility, JvmLocalBinding,
-    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan, JvmReturnType,
-    JvmType, emit_class,
+    JvmMethodPlan, JvmNameKind, JvmOverrideIssue, JvmPrimaryConstructorPlan,
+    JvmPublicBodyFieldSourceProof, JvmReturnType, JvmType, emit_class,
 };
 use dotty_lexer::{ContextualScanner, LexerDiagnostic};
 use dotty_namer::{
-    NamerDiagnostic, NamerError, NamingOutcome, SourceParseStatus, SourceSemanticIndex,
-    name_compilation_unit_with_diagnostics,
+    NamerDiagnostic, NamerError, NamingOutcome, SourceDefinition, SourceParseStatus,
+    SourceSemanticIndex, name_compilation_unit_with_diagnostics,
 };
 use dotty_parser::{ParseDiagnostic, parse_compilation_unit};
 use dotty_typer::{SourceTyper, TyperError};
@@ -493,12 +493,6 @@ fn compile_source_batch_with_typer_failure_observer(
         class.initialization = JvmClassInitializationPlan::PrimaryConstructor(constructor_plan);
     }
     for class in &classes {
-        if !matches!(
-            class.initialization,
-            JvmClassInitializationPlan::PrimaryConstructor(_)
-        ) {
-            continue;
-        }
         let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
             return Err(PipelineFailure::UnexpectedSourceShape("class template"));
         };
@@ -529,52 +523,91 @@ fn compile_source_batch_with_typer_failure_observer(
     let mut fields_by_class = Vec::with_capacity(classes.len());
     for class in &classes {
         let mut fields = Vec::new();
-        if matches!(
-            class.initialization,
-            JvmClassInitializationPlan::PrimaryConstructor(_)
-        ) {
-            let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
-                return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+        let TreeKind::Template(template) = &parsed.ast.get(class.template_tree).kind else {
+            return Err(PipelineFailure::UnexpectedSourceShape("class template"));
+        };
+        for tree in &template.body {
+            let TreeKind::ValDef(definition) = &parsed.ast.get(*tree).kind else {
+                continue;
             };
-            for tree in &template.body {
-                let TreeKind::ValDef(definition) = &parsed.ast.get(*tree).kind else {
-                    continue;
-                };
-                let Some(field) = index.symbol_at(source_id, *tree) else {
-                    continue;
-                };
-                if typer.store().symbols.get(field).kind != SymbolKind::Field {
-                    continue;
-                }
-                let initializer = match definition.rhs {
-                    Some(rhs) => {
-                        let ty = match typer.store().symbols.get(field).info {
-                            dotty_core::SymbolInfo::Complete(ty) => ty,
-                            _ => return Err(PipelineFailure::UnexpectedSourceShape("field type")),
-                        };
-                        let context = typer
-                            .field_initializer_context_for(field)
-                            .map_err(PipelineFailure::Typer)?;
-                        Some(
-                            typer
-                                .type_expression_expected(rhs, context, ty)
-                                .map_err(PipelineFailure::Typer)?,
-                        )
-                    }
-                    None => None,
-                };
-                let source_visibility = match &definition.metadata.visibility {
-                    Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
-                        JvmFieldSourceVisibility::PrivateThis
-                    }
-                    _ => JvmFieldSourceVisibility::PlainPrivate,
-                };
-                fields.push(JvmFieldPlan {
-                    field,
-                    source_visibility,
-                    initializer,
-                });
+            let Some(field) = index.symbol_at(source_id, *tree) else {
+                continue;
+            };
+            if typer.store().symbols.get(field).kind != SymbolKind::Field {
+                continue;
             }
+            if index.definition_of(field)
+                != Some(SourceDefinition::Canonical {
+                    source: source_id,
+                    tree: *tree,
+                })
+            {
+                return Err(PipelineFailure::MissingSourceIdentity(
+                    "canonical class-body field definition",
+                ));
+            }
+            if typer.store().symbols.get(field).owner != Some(class.class) {
+                return Err(PipelineFailure::UnexpectedSourceShape(
+                    "class-owned body field",
+                ));
+            }
+            let initializer = match definition.rhs {
+                Some(rhs) => {
+                    let ty = match typer.store().symbols.get(field).info {
+                        dotty_core::SymbolInfo::Complete(ty) => ty,
+                        _ => return Err(PipelineFailure::UnexpectedSourceShape("field type")),
+                    };
+                    let context = typer
+                        .field_initializer_context_for(field)
+                        .map_err(PipelineFailure::Typer)?;
+                    let typed_rhs = typer
+                        .type_expression_expected(rhs, context, ty)
+                        .map_err(PipelineFailure::Typer)?;
+                    if typer.source_typed_index().get(source_id, rhs) != Some(typed_rhs) {
+                        return Err(PipelineFailure::UnexpectedSourceShape(
+                            "source-to-typed field initializer binding",
+                        ));
+                    }
+                    Some(typed_rhs)
+                }
+                None => None,
+            };
+            let source_visibility = match definition.metadata.visibility {
+                None => {
+                    let initializer = initializer.ok_or(PipelineFailure::Codegen(
+                        JvmCodegenError::MissingFieldInitializer { field },
+                    ))?;
+                    JvmFieldSourceVisibility::PlainPublic(
+                        JvmPublicBodyFieldSourceProof::from_source(
+                            class.class,
+                            field,
+                            source_id,
+                            *tree,
+                            initializer,
+                            &parsed.ast,
+                            &index,
+                            typer.source_typed_index(),
+                            typer.typed_ast(),
+                            typer.store(),
+                        )
+                        .map_err(PipelineFailure::Codegen)?,
+                    )
+                }
+                Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None }) => {
+                    JvmFieldSourceVisibility::PlainPrivate
+                }
+                Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
+                    JvmFieldSourceVisibility::PrivateThis
+                }
+                Some(dotty_core::ast::VisibilitySyntax::Protected { .. }) => {
+                    JvmFieldSourceVisibility::PlainPrivate
+                }
+            };
+            fields.push(JvmFieldPlan {
+                field,
+                source_visibility,
+                initializer,
+            });
         }
         fields_by_class.push(fields);
     }
@@ -6635,6 +6668,16 @@ fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, Pi
         if typer.store().symbols.get(field).kind != SymbolKind::Field {
             continue;
         }
+        if index.definition_of(field)
+            != Some(SourceDefinition::Canonical {
+                source: source_id,
+                tree: *tree,
+            })
+        {
+            return Err(PipelineFailure::MissingSourceIdentity(
+                "canonical class-body field definition",
+            ));
+        }
         typer
             .complete_symbol(field)
             .map_err(PipelineFailure::Typer)?;
@@ -6647,19 +6690,48 @@ fn resolve_source_constructor_calls(source_text: &str) -> Result<Vec<String>, Pi
                 let context = typer
                     .field_initializer_context_for(field)
                     .map_err(PipelineFailure::Typer)?;
-                Some(
-                    typer
-                        .type_expression_expected(rhs, context, ty)
-                        .map_err(PipelineFailure::Typer)?,
-                )
+                let typed_rhs = typer
+                    .type_expression_expected(rhs, context, ty)
+                    .map_err(PipelineFailure::Typer)?;
+                if typer.source_typed_index().get(source_id, rhs) != Some(typed_rhs) {
+                    return Err(PipelineFailure::UnexpectedSourceShape(
+                        "source-to-typed field initializer binding",
+                    ));
+                }
+                Some(typed_rhs)
             }
             None => None,
         };
-        let source_visibility = match &definition.metadata.visibility {
+        let source_visibility = match definition.metadata.visibility {
+            None => {
+                let initializer = initializer.ok_or(PipelineFailure::Codegen(
+                    JvmCodegenError::MissingFieldInitializer { field },
+                ))?;
+                JvmFieldSourceVisibility::PlainPublic(
+                    JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        field,
+                        source_id,
+                        *tree,
+                        initializer,
+                        &parsed.ast,
+                        &index,
+                        typer.source_typed_index(),
+                        typer.typed_ast(),
+                        typer.store(),
+                    )
+                    .map_err(PipelineFailure::Codegen)?,
+                )
+            }
+            Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: None }) => {
+                JvmFieldSourceVisibility::PlainPrivate
+            }
             Some(dotty_core::ast::VisibilitySyntax::Private { qualifier: Some(_) }) => {
                 JvmFieldSourceVisibility::PrivateThis
             }
-            _ => JvmFieldSourceVisibility::PlainPrivate,
+            Some(dotty_core::ast::VisibilitySyntax::Protected { .. }) => {
+                JvmFieldSourceVisibility::PlainPrivate
+            }
         };
         fields.push(JvmFieldPlan {
             field,
@@ -6890,6 +6962,15 @@ fn source_initialization_plan(
                 .symbol_at(source, *tree)
                 .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field)
     });
+    let has_public_body_fields = template.body.iter().any(|tree| {
+        let TreeKind::ValDef(definition) = &ast.get(*tree).kind else {
+            return false;
+        };
+        definition.metadata.visibility.is_none()
+            && index
+                .symbol_at(source, *tree)
+                .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field)
+    });
     let constructor = index
         .symbol_at(source, template.constructor)
         .ok_or(JvmCodegenError::UnsupportedConstructor { class })?;
@@ -6910,7 +6991,11 @@ fn source_initialization_plan(
             .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field),
         _ => false,
     });
-    if !has_fields && !has_parameters && !has_parent_arguments {
+    let has_explicit_empty_clause = !definition.value_param_clauses.is_empty();
+    if !has_parameters
+        && !has_parent_arguments
+        && (!has_fields || (has_public_body_fields && !has_explicit_empty_clause))
+    {
         return Ok(prove_implicit_noarg_constructor(
             ast, template, source, index, store,
         ));
@@ -6968,14 +7053,18 @@ fn prove_implicit_noarg_constructor(
         }
         _ => false,
     };
-    let body_contains_methods_only = template
-        .body
-        .iter()
-        .all(|tree| matches!(ast.get(*tree).kind, TreeKind::DefDef(_)));
+    let body_contains_supported_members =
+        template.body.iter().all(|tree| match &ast.get(*tree).kind {
+            TreeKind::DefDef(_) => true,
+            TreeKind::ValDef(_) => index
+                .symbol_at(source, *tree)
+                .is_some_and(|symbol| store.symbols.get(symbol).kind == SymbolKind::Field),
+            _ => false,
+        });
     if constructor_matches_emitted_shape
         && has_supported_noarg_parent(ast, template)
         && template.self_val.is_none()
-        && body_contains_methods_only
+        && body_contains_supported_members
     {
         JvmClassInitializationPlan::ImplicitNoArg
     } else {
@@ -18309,42 +18398,258 @@ fn verify_private_fields_with_jdk(output_directory: &Path) {
 }
 
 #[test]
-fn public_class_body_fields_reach_codegen_but_are_rejected_without_artifacts() {
-    for (label, source) in [
-        (
-            "body-only-public-fields",
-            "class BodyOnly:\n  val seed: Int = 10\n  var active: Boolean = true\n  var reading: Double = 1.5",
-        ),
-        (
-            "explicit-empty-constructor-public-fields",
-            "class BodyOnlyParens():\n  val seed: Int = 10\n  var active: Boolean = true\n  var reading: Double = 1.5",
-        ),
-        (
-            "mixed-constructor-and-body-public-fields",
-            "class Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L\n  def snapshot(): Long = current",
-        ),
-    ] {
-        assert_source_failure(label, source, |failure| {
-            matches!(
-                failure,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility { .. })
-            )
-        });
-    }
-}
+fn public_body_fields_have_validated_source_plans_but_remain_unemitted() {
+    let source_text = "class PublicFields:\n  var enabled: Boolean = true\n  val marker: Boolean = false\n  val ratio: Double = 1.5\n\nclass Counter(val id: Int):\n  val initial: Int = 10\n  var current: Long = 0L";
+    let output = TestOutputDirectory::new("public-body-field-plans");
+    let mut observed = false;
+    let mut observe = |ast: &AstArena<Untyped>,
+                       index: &SourceSemanticIndex,
+                       unit: &mut JvmCompilationUnit<'_>,
+                       definitions: &Definitions| {
+        observed = true;
+        unit.validate()
+            .expect("the source-proven public body field plans validate");
+        let metadata = unit
+            .metadata(definitions)
+            .expect("the public fields project to checked private backing metadata");
 
-#[test]
-fn public_primitive_field_storage_is_rejected_without_an_artifact() {
-    assert_source_failure(
-        "public-field",
-        "class PublicField():\n  val seed: Int = 1",
-        |failure| {
-            matches!(
-                failure,
-                PipelineFailure::Codegen(JvmCodegenError::UnsupportedJvmVisibility { .. })
-            )
-        },
+        for (class_name, expected_fields, expected_accessors) in [
+            ("PublicFields", &["enabled", "marker", "ratio"][..], 0),
+            ("Counter", &["initial", "current"][..], 1),
+        ] {
+            let class = audit_class_named(unit, class_name);
+            let plan = unit
+                .classes
+                .iter()
+                .find(|plan| plan.class == class)
+                .expect("source class has a plan");
+            if class_name == "PublicFields" {
+                assert!(matches!(
+                    plan.initialization,
+                    JvmClassInitializationPlan::ImplicitNoArg
+                ));
+            } else {
+                assert!(matches!(
+                    plan.initialization,
+                    JvmClassInitializationPlan::PrimaryConstructor(_)
+                ));
+            }
+            assert_eq!(plan.fields.len(), expected_fields.len());
+            assert_eq!(
+                plan.fields
+                    .iter()
+                    .map(|field| {
+                        let JvmFieldSourceVisibility::PlainPublic(proof) = field.source_visibility
+                        else {
+                            panic!("ordinary public body field carries its checked source proof");
+                        };
+                        assert_eq!(proof.class(), class);
+                        assert_eq!(proof.field(), field.field);
+                        let symbol = unit.store.symbols.get(field.field);
+                        assert_eq!(symbol.kind, SymbolKind::Field);
+                        assert_eq!(symbol.owner, Some(class));
+                        assert_eq!(symbol.visibility, Visibility::Public);
+                        let dotty_core::SymbolInfo::Complete(_field_type) = symbol.info else {
+                            panic!("public body field type should be complete");
+                        };
+                        assert_eq!(proof.mutable(), symbol.flags.contains(SymbolFlags::MUTABLE));
+                        let initializer = field.initializer.expect("source field has an RHS");
+                        let source_definition = index
+                            .definition_of(field.field)
+                            .expect("body field has canonical source provenance");
+                        let SourceDefinition::Canonical { source, tree } = source_definition else {
+                            panic!("class-body field must keep its canonical source tree");
+                        };
+                        assert_eq!(
+                            source,
+                            SourceId::from_index(1479),
+                            "canonical source identity belongs to this source unit"
+                        );
+                        let TreeKind::ValDef(definition) = &ast.get(tree).kind else {
+                            panic!("field provenance points to its source ValDef");
+                        };
+                        assert_eq!(
+                            proof.mutable(),
+                            definition
+                                .metadata
+                                .modifiers
+                                .contains(&dotty_core::ast::Modifier::Var)
+                        );
+                        assert!(definition.metadata.visibility.is_none());
+                        let rhs = definition.rhs.expect("source field has an RHS");
+                        assert_eq!(proof.source(), source);
+                        assert_eq!(proof.declaration(), tree);
+                        assert_eq!(
+                            proof.template_position(),
+                            expected_fields
+                                .iter()
+                                .position(
+                                    |name| *name == unit.store.names.resolve(symbol.name.text())
+                                )
+                                .unwrap()
+                        );
+                        assert_eq!(proof.rhs(), rhs);
+                        assert_eq!(proof.initializer(), initializer);
+                        unit.store.names.resolve(symbol.name.text()).to_owned()
+                    })
+                    .collect::<Vec<_>>(),
+                expected_fields
+            );
+
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .expect("class has validated metadata");
+            assert_eq!(class_metadata.fields().len(), expected_fields.len());
+            assert_eq!(class_metadata.accessors().len(), expected_accessors);
+            for field_plan in &plan.fields {
+                let field = class_metadata
+                    .fields()
+                    .iter()
+                    .find(|field| field.symbol() == field_plan.field)
+                    .expect("each source body field has a backing field projection");
+                let expected_descriptor = match unit
+                    .store
+                    .names
+                    .resolve(unit.store.symbols.get(field_plan.field).name.text())
+                {
+                    "enabled" => "Z",
+                    "marker" => "Z",
+                    "ratio" => "D",
+                    "initial" => "I",
+                    "current" => "J",
+                    _ => panic!("source field has a covered primitive type"),
+                };
+                assert_eq!(field.descriptor(), expected_descriptor);
+                assert_eq!(field.initializer(), field_plan.initializer.unwrap());
+                assert!(
+                    field
+                        .access_flags()
+                        .contains(dotty_classfile::access_flags::ACC_PRIVATE)
+                );
+                assert_eq!(
+                    field
+                        .access_flags()
+                        .contains(dotty_classfile::access_flags::ACC_FINAL),
+                    !unit
+                        .store
+                        .symbols
+                        .get(field_plan.field)
+                        .flags
+                        .contains(SymbolFlags::MUTABLE)
+                );
+                assert!(
+                    class_metadata
+                        .accessors()
+                        .iter()
+                        .all(|accessor| accessor.source_field() != field_plan.field)
+                );
+            }
+            assert!(matches!(
+                unit.lower_constructor_field_initializers(class, definitions),
+                Err(JvmCodegenError::FieldEmissionUnsupported { field, .. })
+                    if plan.fields.iter().any(|candidate| candidate.field == field)
+            ));
+
+            if expected_fields.len() > 1 {
+                let class_index = unit
+                    .classes
+                    .iter()
+                    .position(|candidate| candidate.class == class)
+                    .expect("source class has a mutable plan");
+                unit.classes[class_index].fields.swap(0, 1);
+                assert!(matches!(
+                    unit.validate(),
+                    Err(JvmCodegenError::OutOfOrderPublicBodyFieldPlan {
+                        class: found_class,
+                        ..
+                    }) if found_class == class
+                ));
+                unit.classes[class_index].fields.swap(0, 1);
+                unit.validate()
+                    .expect("restoring source order restores the validated plan");
+            }
+
+            if class_name == "PublicFields" {
+                let current_plan = unit
+                    .classes
+                    .iter()
+                    .find(|candidate| candidate.class == class)
+                    .expect("source class has a plan after order validation");
+                let first_field = current_plan.fields[0];
+                let second_field = current_plan.fields[1];
+                let JvmFieldSourceVisibility::PlainPublic(first_proof) =
+                    first_field.source_visibility
+                else {
+                    panic!("the first public field carries checked source evidence");
+                };
+                let JvmFieldSourceVisibility::PlainPublic(second_proof) =
+                    second_field.source_visibility
+                else {
+                    panic!("the second public field carries checked source evidence");
+                };
+                let mut forged_index = dotty_core::SourceTypedIndex::new();
+                forged_index
+                    .insert(
+                        first_proof.source(),
+                        first_proof.rhs(),
+                        second_proof.initializer(),
+                    )
+                    .expect("the fresh source map can hold the fabricated binding");
+                assert!(matches!(
+                    JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        first_field.field,
+                        first_proof.source(),
+                        first_proof.declaration(),
+                        second_proof.initializer(),
+                        ast,
+                        index,
+                        &forged_index,
+                        unit.typed_ast,
+                        unit.store,
+                    ),
+                    Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof { field })
+                        if field == first_field.field
+                ));
+                assert!(matches!(
+                    JvmPublicBodyFieldSourceProof::from_source(
+                        class,
+                        first_field.field,
+                        first_proof.source(),
+                        first_proof.declaration(),
+                        first_proof.initializer(),
+                        ast,
+                        index,
+                        &dotty_core::SourceTypedIndex::new(),
+                        unit.typed_ast,
+                        unit.store,
+                    ),
+                    Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof { field })
+                        if field == first_field.field
+                ));
+            }
+        }
+    };
+
+    let error = compile_source_batch_with_source_observer(
+        source_text,
+        "PublicBodyFields.scala",
+        output.path(),
+        SourceId::from_index(1479),
+        SourceUnitCardinality::AtLeastTwo,
+        &mut observe,
+    )
+    .expect_err("public class-body backing fields remain outside emission in this increment");
+    assert!(matches!(
+        error,
+        PipelineFailure::Codegen(JvmCodegenError::FieldEmissionUnsupported { .. })
+    ));
+    assert!(
+        observed,
+        "plan validation runs before the emission boundary"
     );
+    assert!(output.class_files().is_empty());
 }
 
 #[test]
