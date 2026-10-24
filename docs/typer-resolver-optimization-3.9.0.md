@@ -61,18 +61,28 @@ python3 tools/typer-classpath-corpus-audit/sequential_profile.py \
 ```
 
 The baseline and optimized profiles use sequential warm runs, identical
-selected probes, and the same Cargo target. Comparison must include total wall
-and child CPU time, peak RSS, member lookup inclusive/exclusive time, classpath
+selected probes, and the same Cargo target. Comparison includes total wall and
+child CPU time, peak RSS, member lookup inclusive/exclusive time, classpath
 requests, ZIP reads, cache hits/misses/evictions, and exact selected identities,
 outcomes, and blockers. Measurements and a per-variant comparison are recorded
 below. The baseline profile used repository base
 `8c72ec83222aeb75ef597b2d396ef4db20bab123` with the profiling counters present
-and the cache disabled. The cached profile changed only the per-JAR resource
-cache behavior. The branch later rebased onto `91904f2f7f`; the commits
-between these bases touched only `dotty-jvm`, so the profiled typer and
-classloader paths remained identical. Each profile selected six methods and
-three match probes; all method identities/outcomes and all match-probe
-identities/outcomes are equal.
+and the cache disabled. The exact instrumentation-only change is preserved in
+[`baseline/instrumented-no-cache.patch`](typer-resolver-optimization-profile-3.9.0/baseline/instrumented-no-cache.patch).
+To reconstruct the measured baseline from a checkout of this PR, apply it to
+that base revision before running the baseline command:
+
+```sh
+git show 4ffa7d0a384bb4b2ad6d1744d38efa2c5cad92f5:docs/typer-resolver-optimization-profile-3.9.0/baseline/instrumented-no-cache.patch > /tmp/issue-1526-instrumented-no-cache.patch
+git switch --detach 8c72ec83222aeb75ef597b2d396ef4db20bab123
+git apply /tmp/issue-1526-instrumented-no-cache.patch
+```
+
+The cached profile changed only the per-JAR resource-cache behavior. The branch
+later rebased onto `91904f2f7f`; the commits between these bases touched only
+`dotty-jvm`, so the profiled typer and classloader paths remained identical.
+Each profile selected six methods and three match probes; all method
+identities/outcomes and all match-probe identities/outcomes are equal.
 
 ## Measurements
 
