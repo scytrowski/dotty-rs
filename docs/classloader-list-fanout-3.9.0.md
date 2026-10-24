@@ -40,10 +40,10 @@ and
 | `TrieMap.scala#tree=2721::scala.collection.concurrent.LNode.inserted` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 |
 | `TrieMap.scala#tree=2780::scala.collection.concurrent.LNode.removed` | `scala/collection/immutable/List` | 3 | 29 | 63 | 7 | 81 | 435 / 300 | 53 |
 
-The three complete profile runs took 871, 889, and 877 ms for the selected
+The three complete profile runs took 882, 885, and 915 ms for the selected
 three-file audit. Across the same samples, the four exact methods averaged
-106.3 ms (`ListMap.addOne`), 106.0 ms (`ListBuffer.removeAfter`), 110.0 ms
-(`LNode.inserted`), and 106.7 ms (`LNode.removed`). These are bounded audit
+108.3 ms (`ListMap.addOne`), 109.7 ms (`ListBuffer.removeAfter`), 110.3 ms
+(`LNode.inserted`), and 107.0 ms (`LNode.removed`). These are bounded audit
 timings, not a full-corpus performance estimate. The source method outcome
 sidecar was byte-for-byte identical before and after adding opt-in edge
 telemetry.
