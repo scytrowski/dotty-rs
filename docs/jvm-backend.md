@@ -1027,6 +1027,22 @@ planned reference type. Each setter loads its exact typed argument, writes the
 validated private field once, and returns JVM `void`; no source `Method`
 symbols are synthesized for either generated method.
 
+Typed reads and writes of these canonical accessor fields lower to
+`invokevirtual` calls using the checked owner, name, and descriptor above.
+Supported source receivers are the current instance, a parameter, or a stable
+local `val`; an assignment evaluates that receiver once before evaluating its
+right-hand side once. The backend validates the accessor binding, field type,
+mutability, backing-field flags, and getter/setter signatures at each use.
+Ordinary source fields continue to use `getfield`/`putfield`; accessor call
+sites never reference another class's private backing field. Mutable local
+`var` receivers and accessor-bearing inheritance remain unsupported.
+
+The root integration test
+`real_source_accessor_calls_dispatch_through_validated_getters_and_setters`
+checks exact call owners and descriptors, absence of external accessor
+`Fieldref`s, ordinary private-field access, deterministic output, evaluation
+order, and JDK 21 verification and execution with Long values.
+
 The root integration test
 `constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends`
 drives the real test lexer/parser/namer/typer assembler for `Measurement`,
