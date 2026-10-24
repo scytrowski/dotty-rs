@@ -9,7 +9,7 @@ use dotty_classfile::access_flags::{
 use dotty_core::definitions::Definitions;
 use dotty_core::names::Namespace;
 use dotty_core::store::SemanticStore;
-use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, Visibility};
+use dotty_core::symbols::{SymbolFlags, SymbolInfo, SymbolKind, SymbolOrigin, Visibility};
 use dotty_core::types::{Type, TypeRefTarget};
 
 use crate::{
@@ -494,6 +494,8 @@ pub(super) fn class_metadata(
 ) -> Result<JvmClassMetadata, JvmCodegenError> {
     let identity = class_identity(store, plan.class)?;
     let mut fields = Vec::with_capacity(plan.fields.len());
+    let mut body_accessors = Vec::new();
+    let mut previous_body_position = None;
     let mut field_names = HashMap::<String, dotty_core::SymbolId>::new();
     let mut field_symbols = HashSet::new();
     let typed_ast = if plan.fields.is_empty() {
@@ -519,15 +521,32 @@ pub(super) fn class_metadata(
                 unit,
             },
         )?;
-        if let Some(previous) = field_names.insert(field.name().to_owned(), field.symbol()) {
-            return Err(JvmCodegenError::DuplicateJvmFieldName {
-                class: plan.class,
-                field: field.symbol(),
-                previous,
-                name: field.name().to_owned(),
-            });
+        match field_plan.source_visibility {
+            crate::JvmFieldSourceVisibility::PlainPublic(proof) => {
+                if previous_body_position
+                    .is_some_and(|position| position >= proof.template_position())
+                {
+                    return Err(JvmCodegenError::OutOfOrderPublicBodyFieldPlan {
+                        class: plan.class,
+                        field: field.symbol(),
+                    });
+                }
+                previous_body_position = Some(proof.template_position());
+                body_accessors.push(body_accessor_metadata(&field, proof)?);
+            }
+            _ => {
+                if let Some(previous) = field_names.insert(field.name().to_owned(), field.symbol())
+                {
+                    return Err(JvmCodegenError::DuplicateJvmFieldName {
+                        class: plan.class,
+                        field: field.symbol(),
+                        previous,
+                        name: field.name().to_owned(),
+                    });
+                }
+                fields.push(field);
+            }
         }
-        fields.push(field);
     }
 
     let (constructor, accessor_bindings) = match &plan.initialization {
@@ -546,7 +565,7 @@ pub(super) fn class_metadata(
         _ => (None, Vec::new()),
     };
     let mut identities = HashMap::<(String, String), dotty_core::SymbolId>::new();
-    let mut accessors = Vec::with_capacity(accessor_bindings.len());
+    let mut accessors = Vec::with_capacity(accessor_bindings.len() + body_accessors.len());
     for binding in accessor_bindings.iter().copied() {
         let accessor = accessor_metadata(
             binding,
@@ -555,6 +574,34 @@ pub(super) fn class_metadata(
             descriptor_context.map(|(_, identities)| identities),
             unit,
         )?;
+        if let Some(previous) =
+            field_names.insert(accessor.field_name().to_owned(), accessor.source_field())
+        {
+            return Err(JvmCodegenError::DuplicateJvmFieldName {
+                class: plan.class,
+                field: accessor.source_field(),
+                previous,
+                name: accessor.field_name().to_owned(),
+            });
+        }
+        for method in std::iter::once(accessor.getter()).chain(accessor.setter()) {
+            let key = (
+                method.name().to_owned(),
+                method.descriptor().as_str().to_owned(),
+            );
+            if let Some(previous) = identities.insert(key.clone(), accessor.source_field()) {
+                return Err(JvmCodegenError::DuplicateJvmAccessorMethodIdentity {
+                    class: plan.class,
+                    field: accessor.source_field(),
+                    previous,
+                    name: key.0,
+                    descriptor: key.1,
+                });
+            }
+        }
+        accessors.push(accessor);
+    }
+    for accessor in body_accessors {
         if let Some(previous) =
             field_names.insert(accessor.field_name().to_owned(), accessor.source_field())
         {
@@ -751,11 +798,53 @@ fn accessor_metadata(
         None
     };
     Ok(JvmAccessorMetadata {
-        binding,
+        origin: crate::JvmAccessorOrigin::ConstructorParameter(binding),
         value_type,
         field_name: source_name.to_owned(),
         field_descriptor,
         field_access_flags,
+        getter,
+        setter,
+    })
+}
+
+fn body_accessor_metadata(
+    field: &JvmFieldMetadata,
+    proof: crate::JvmPublicBodyFieldSourceProof,
+) -> Result<JvmAccessorMetadata, JvmCodegenError> {
+    let value_type = field.value_type();
+    let field_name = field.name().to_owned();
+    let descriptor = field.descriptor().to_owned();
+    let getter = JvmAccessorMethodMetadata {
+        name: field_name.clone(),
+        descriptor: accessor_method_descriptor(
+            field.symbol(),
+            &format!("(){descriptor}"),
+            Vec::new(),
+            JvmReturnType::Value(value_type),
+        )?,
+        access_flags: MethodAccessFlags(ACC_PUBLIC),
+    };
+    let setter = if proof.mutable() {
+        Some(JvmAccessorMethodMetadata {
+            name: format!("{field_name}_$eq"),
+            descriptor: accessor_method_descriptor(
+                field.symbol(),
+                &format!("({descriptor})V"),
+                vec![value_type],
+                JvmReturnType::Void,
+            )?,
+            access_flags: MethodAccessFlags(ACC_PUBLIC),
+        })
+    } else {
+        None
+    };
+    Ok(JvmAccessorMetadata {
+        origin: crate::JvmAccessorOrigin::ClassBodyField(proof),
+        value_type,
+        field_name,
+        field_descriptor: descriptor,
+        field_access_flags: field.access_flags(),
         getter,
         setter,
     })
@@ -828,6 +917,11 @@ fn field_metadata(
             symbol: plan.field,
             visibility: field.visibility,
         });
+    }
+    if let crate::JvmFieldSourceVisibility::PlainPublic(proof) = plan.source_visibility
+        && field.origin != SymbolOrigin::Source(proof.source())
+    {
+        return Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof { field: plan.field });
     }
     match plan.source_visibility {
         crate::JvmFieldSourceVisibility::PlainPrivate => {}
