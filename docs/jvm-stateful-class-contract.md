@@ -37,6 +37,17 @@ deterministic bytes. Its Java 21 harness invokes getters and mutates primitive
 and planned-reference `var`s under `java -Xverify:all`; a `val` has no setter,
 and a plain constructor parameter has no generated field or accessor method.
 
+The separate
+[`jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs)
+acceptance regression `constructor_accessor_source_batch_matches_the_jvm_abi_across_fresh_frontends`
+builds complete `Measurement`, `Mixed`, and `LongBox` class batches from two
+fresh frontend sessions. It inspects the canonical source field/formal
+bindings before emission, compares every ordered classfile byte, decodes the
+constructor/getter/setter instructions and field references, checks `javap`
+output, and runs a Java 21 harness with `-Xverify:all`. Its batch failure
+companion asserts that a later invalid class leaves the output directory
+without partially published accessor artifacts.
+
 The combined `FloatingPointCategory2.scala` acceptance batch contains both
 stateful classes and the calling `Runner` in one source session. It checks the
 `(FD)V` constructor's receiver/parameter slots and source-ordered field stores,
