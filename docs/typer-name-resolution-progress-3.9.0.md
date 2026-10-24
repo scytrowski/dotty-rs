@@ -53,11 +53,8 @@ first-blocker distribution is:
 The change removes an early name-resolution failure but exposes later
 unsupported steps. Thirteen method rows in `CommandLineParser.scala` now stop at
 `LocalValueConformanceUnsupported` for inferred local `accum`; two rows in
-`InlinerHeuristics.scala` stop at `ExplicitTypeApplicationCalleeNotPoly`.
-`CommandLineParser.scala#tree=498` (`expandArg`) still cannot resolve `paths`,
-and `BTypeLoader.scala#tree=1079` (`dropModule`) is the other remaining
-`TermNameNotFound` row. These are next blockers, not a complete trace of every
-error later in each method.
+`InlinerHeuristics.scala` stop at `ExplicitTypeApplicationCalleeNotPoly`. These
+are next blockers, not a complete trace of every error later in each method.
 
 The exact method identities and next blockers are in
 [`typer-name-resolution-progress-3.9.0.tsv`](typer-name-resolution-progress-3.9.0.tsv).
