@@ -138,10 +138,12 @@ mutability, visibility, and explicit source order. A malformed or stale
 identity must be a typed rejection. Generated JVM signatures must be checked
 for collisions against user-declared and other generated members; the policy
 must reject ambiguity before artifact publication rather than silently
-shadowing either member. Accessor metadata performs these checks. The current
-emitter uses constructor accessor metadata for checked backing fields, stores,
-getters, and setters. Class-body accessor metadata is signature-only in #1580;
-body initialization and generated accessor code remain a later increment.
+shadowing either member. Accessor metadata performs these checks. The emitter
+uses constructor accessor metadata for checked backing fields, stores,
+getters, and setters. #1581 also installs and initializes ordinary public
+class-body backing fields in source order, including through a validated
+implicit no-argument constructor. Body-field getter and setter method emission
+and source call lowering remain later increments.
 
 ## Scope matrix
 
@@ -152,7 +154,7 @@ body initialization and generated accessor code remain a later increment.
 | `Ref(val item: Measurement)` | Emits private-final planned reference storage, copies the exact reference formal after direct-super initialization, and emits `item()LMeasurement;`. |
 | Plain constructor parameter | Existing distinct class-owned and constructor-owned parameter identities remain; it does not gain an accessor by implication. |
 | Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
-| Ordinary class-body public `val`/`var` | Metadata projection is covered by #1580 using the #1578 Scala 3.9.0 ABI audit and #1579 exact source/RHS proof. Backing fields are private (final for `val`); getters are public and vars also have public `_$eq` setters. This is signature metadata only: no body-field initialization or generated accessor code is emitted by this increment. |
+| Ordinary class-body public `val`/`var` | Metadata projection is covered by #1580 using the #1578 Scala 3.9.0 ABI audit and #1579 exact source/RHS proof. Backing fields are private (final for `val`); getters are public and vars also have public `_$eq` setters. #1581 stores the exact typed RHS into that private storage after the direct-super call; body-field getter/setter methods and call lowering are still deferred. |
 | `private[this]`, `lazy`, other visibility variants | Deferred; no ABI claim is made by this audit. |
 | Secondary, defaulted, multiple-clause, or `using` constructors | Deferred. |
 | Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. Accessor metadata is rejected on non-Object subclasses and across planned accessor-inheritance edges until generated signatures participate in override/bridge validation. |

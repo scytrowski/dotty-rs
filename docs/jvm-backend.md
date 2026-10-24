@@ -526,9 +526,10 @@ produce `I`, `Z`, `F`, `D`, and `J`. Immutable
 fields produce `ACC_PRIVATE | ACC_FINAL`; mutable fields produce
 `ACC_PRIVATE` without `ACC_FINAL`. Metadata preserves the caller's field plan
 order and rejects repeated field symbols and duplicate JVM field names. Whole
-class emission installs these fields only when a validated primary constructor
-plan proves their initialization. `ImplicitNoArg` remains restricted to
-empty-field classes and preserves the previous public `<init>()V` shape.
+class emission installs these fields only when a validated constructor plan
+proves their initialization. `ImplicitNoArg` may initialize supported ordered
+body fields after its checked direct-parent call and preserves the public
+`<init>()V` shape.
 
 Method-body lowering accepts assignments to planned mutable primitive and
 exact-reference fields
@@ -699,14 +700,17 @@ forms must be handled by a separate contract before they can be emitted.
 `JVM_CLASSFILE_MAJOR_VERSION` (65). The artifact contains an ordinary class
 with the direct parent from its validated unit proof, validated fields in
 frontend source order, one constructor, and planned instance methods in plan
-order. `ImplicitNoArg` emits the public `<init>()V` and accepts no fields.
-`PrimaryConstructor` emits the exact validated descriptor and public/private
-access from canonical constructor metadata. Both constructor forms begin with
-one `aload_0; invokespecial <direct-parent>.<init>()V`; primary constructors
-then append each source-ordered field initializer and return. No parameterized
-class gets an extra `()V`. Method bodies use the same typed lowering path as
-before. The file is encoded into an owned `GeneratedClass` only after every
-method and class-file structure has been built successfully.
+order. `ImplicitNoArg` emits the validated public `<init>()V` followed by
+approved source-ordered field initializers. `PrimaryConstructor` emits the
+exact validated descriptor and public/private access from canonical
+constructor metadata. Both constructor forms begin with one
+`aload_0; invokespecial <direct-parent>.<init>()V`; primary constructors then
+store constructor accessors in parameter order, followed by source-ordered
+private and public-body fields. No parameterized class gets an extra `()V`.
+Body accessor backing fields are emitted without body getter/setter methods in
+this increment. Method bodies use the same typed lowering path as before. The
+file is encoded into an owned `GeneratedClass` only after every method and
+class-file structure has been built successfully.
 
 The frontend must set `JvmClassInitializationPlan::ImplicitNoArg` only after
 proving the source class has no constructor parameters or body, superclass
@@ -1094,8 +1098,8 @@ rejected.
 ### Constructor field initializer fragments
 
 `JvmCompilationUnit::lower_constructor_field_initializers` consumes the
-validated `PrimaryConstructor` metadata, accessor metadata, and ordered
-`JvmFieldPlan` list.
+validated constructor plan (or proven `ImplicitNoArg` shape), accessor
+metadata, and ordered `JvmFieldPlan` list.
 The frontend obtains each field's source RHS from its canonical source
 declaration, calls `field_initializer_context_for(field)`, types that RHS once,
 and supplies the exact `TreeId<Typed>` retained in `SourceTypedIndex`. It
@@ -1104,17 +1108,17 @@ collects fields by source template order and constructor parameters through
 not substitute one identity for another.
 
 The result is a checked instruction plan, not a complete constructor. Each
-field fragment starts with `aload_0`, lowers one value, and ends with `putfield`
-for that canonical field. Supported RHS forms are Int/Boolean/Long literals,
-constructor-owned primitive parameters (including two-slot Long parameters),
-an exact planned-reference constructor parameter, canonical `Int.+`,
-canonical Boolean negation, empty-statement blocks, and reads of earlier
-initialized primitive fields. The reference
-parameter is matched by its canonical `SymbolId`, constructor owner, exact
-class identity, and validated local slot; its load uses `aload`. Self and
-forward field reads, reference field reads, user method calls, `this` escape,
-control-flow expressions, and other unsupported typed nodes fail with
-contextual `JvmCodegenError`s.
+source-ordered field fragment starts with `aload_0`, lowers one value, and ends
+with `putfield` for that canonical field. Supported RHS forms include
+Int/Boolean/Long/Float/Double literals, constructor-owned primitive parameters
+(including two-slot Long/Double parameters), approved planned-reference
+constructor parameters and direct allocations, canonical `Int.+`, canonical
+Boolean negation, empty-statement blocks, and reads of earlier initialized
+primitive or planned-reference fields. A body accessor field uses its exact
+class-body source proof and typed RHS; it never borrows a constructor formal.
+Self and forward field reads, user method calls, `this` escape, control-flow
+expressions, and other unsupported typed nodes fail with contextual
+`JvmCodegenError`s.
 
 The plan stores constructor accessor copies separately as
 `JvmConstructorAccessorInitializer` records because they have no source RHS.
@@ -1122,11 +1126,13 @@ Each record retains the canonical source field and constructor-owned parameter
 IDs, source ordinal, exact local slot/width, type, field name, and descriptor.
 Lowering matches the formal by identity and ordinal, then checks type and
 category width. `append_to` emits accessor stores in constructor parameter
-order before ordinary class-body field initializer fragments. `emit_class`
-emits `aload_0; invokespecial <direct-parent>.<init>()V` before the plan and
-appends `return` afterward. It installs both validated accessor backing
-field_info entries and ordinary private field entries and uses the exact
-constructor descriptor and access flags from metadata. The pinned Scala 3.9.0
+order before ordinary public and private body-field initializer fragments.
+`emit_class` emits `aload_0; invokespecial <direct-parent>.<init>()V` before the
+plan and appends `return` afterward. `ImplicitNoArg` uses the same checked
+field plan after its validated no-argument parent call. Emission installs both
+validated accessor backing field_info entries and ordinary private field
+entries. It does not emit body-field getter/setter methods in this increment.
+The pinned Scala 3.9.0
 oracle stores simple constructor accessors before `Object.<init>`; this backend
 follows #1556's stricter initialized-`this` ordering, so constructor bytes are
 not identical to the oracle's instruction order.
