@@ -130,6 +130,7 @@ jobs:
       - name: Run deterministic focused audit and compare baseline
         shell: bash
         env:
+          COURSIER_MAVEN_ROOT: ${{ runner.temp }}/coursier/v1/https/repo1.maven.org/maven2
           DOTTY_AUDIT_TMP_ROOT: ${{ runner.temp }}/typer-focused-intermediates
           DOTTY_AUDIT_REPORT_DIR: ${{ runner.temp }}/typer-focused-report
         run: |
