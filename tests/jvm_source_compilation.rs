@@ -2228,40 +2228,161 @@ class NumericMetadata(initialF: Float, initialD: Double):
 }
 
 #[test]
-fn unsupported_float_double_control_flow_fails_without_artifacts() {
-    for (label, source) in [
-        (
-            "FloatBranch",
-            "class Runner:\n  def choose(flag: Boolean, a: Float, b: Float): Float =\n    if flag then a else b\n",
-        ),
-        (
-            "DoubleLoop",
-            "class Runner:\n  def repeat(n: Int, first: Double, second: Double): Double =\n    var current: Double = first\n    var i = 0\n    while i < n do\n      current = second\n      i = i + 1\n    current\n",
-        ),
-    ] {
-        let output = TestOutputDirectory::new(label);
-        let error = compile_source(source, &format!("{label}.scala"), output.path())
-            .expect_err("Float and Double operations remain outside bounded JVM codegen");
-        assert!(
-            matches!(&error, PipelineFailure::Codegen(_)),
-            "{label} must be rejected at the backend without partial artifacts: {error:?}"
-        );
-        if matches!(label, "FloatBranch" | "DoubleLoop") {
-            assert!(
-                matches!(
-                    &error,
-                    PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
-                        node: "floating-point control-flow lowering is deferred",
-                        ..
-                    })
-                ),
-                "{label} is rejected with the deferred-control-flow error: {error:?}"
-            );
-        }
-        assert!(
-            output.class_files().is_empty(),
-            "{label} failure publishes no class files"
-        );
+fn float_double_calls_and_control_flow_verify_and_execute() {
+    let first_output = TestOutputDirectory::new("float-double-calls-first");
+    let second_output = TestOutputDirectory::new("float-double-calls-second");
+    let first = compile_fixture_classes("FloatDoubleCalls.scala", first_output.path()).unwrap();
+    let second = compile_fixture_classes("FloatDoubleCalls.scala", second_output.path()).unwrap();
+    assert_eq!(
+        first
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name(),
+                artifact.class.bytes().to_vec()
+            ))
+            .collect::<Vec<_>>(),
+        second
+            .iter()
+            .map(|artifact| (
+                artifact.class.internal_name(),
+                artifact.class.bytes().to_vec()
+            ))
+            .collect::<Vec<_>>()
+    );
+
+    let decode = |name: &str| {
+        let artifact = first
+            .iter()
+            .find(|artifact| artifact.class.internal_name() == name)
+            .unwrap_or_else(|| panic!("missing emitted class {name}"));
+        decode_emitted_class(artifact)
+    };
+    let runner = decode("Runner");
+    assert_eq!(
+        methods_with_descriptors(&runner),
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("identityF".to_owned(), "(F)F".to_owned()),
+            ("identityD".to_owned(), "(D)D".to_owned()),
+            ("pickF".to_owned(), "(ZFF)F".to_owned()),
+            ("pickD".to_owned(), "(ZDD)D".to_owned()),
+            ("loop".to_owned(), "(IDD)D".to_owned()),
+            ("forward".to_owned(), "(LNumericBox;)D".to_owned()),
+            ("construct".to_owned(), "(FD)D".to_owned()),
+            ("constructNested".to_owned(), "(FD)D".to_owned()),
+            ("mixed".to_owned(), "(IFDJ)D".to_owned()),
+        ]
+    );
+    let numeric_child = decode("NumericChild");
+    assert_eq!(
+        methods_with_descriptors(&numeric_child),
+        [("<init>".to_owned(), "(FD)V".to_owned())]
+    );
+    let child_constructor = emitted_method_code(&numeric_child, "<init>");
+    assert_opcode_sequence(child_constructor, &[0x2a, 0x23, 0x28, 0xb7, 0xb1]);
+    assert_method_reference(
+        &numeric_child,
+        child_constructor,
+        0xb7,
+        "NumericBox",
+        "<init>",
+        "(FD)V",
+    );
+    assert_opcode_sequence(
+        emitted_method_code(&runner, "pickF"),
+        &[0x1b, 0x99, 0x24, 0xa7, 0x25, 0xae],
+    );
+    assert_eq!(code_max_locals(&runner, "pickD"), 6);
+    assert_eq!(code_max_stack(&runner, "pickD"), 2);
+    assert_eq!(code_max_locals(&runner, "loop"), 9);
+    assert_eq!(code_max_stack(&runner, "loop"), 2);
+    assert!(
+        stack_map_frames(&runner, "pickF")
+            .iter()
+            .any(|frame| frame.stack == [StackMapVerificationType::Float])
+    );
+    assert!(
+        stack_map_frames(&runner, "pickD")
+            .iter()
+            .any(|frame| frame.stack == [StackMapVerificationType::Double])
+    );
+    assert!(stack_map_frames(&runner, "loop").iter().any(|frame| {
+        frame.locals
+            == [
+                StackMapVerificationType::Object("Runner".to_owned()),
+                StackMapVerificationType::Integer,
+                StackMapVerificationType::Double,
+                StackMapVerificationType::Double,
+                StackMapVerificationType::Double,
+                StackMapVerificationType::Integer,
+            ]
+    }));
+    assert_method_reference(
+        &runner,
+        emitted_method_code(&runner, "forward"),
+        0xb6,
+        "NumericBox",
+        "getD",
+        "()D",
+    );
+    assert_method_reference(
+        &runner,
+        emitted_method_code(&runner, "construct"),
+        0xb7,
+        "NumericBox",
+        "<init>",
+        "(FD)V",
+    );
+    assert_method_reference(
+        &runner,
+        emitted_method_code(&runner, "constructNested"),
+        0xb7,
+        "NumericBox",
+        "<init>",
+        "(FD)V",
+    );
+    assert_eq!(code_max_locals(&runner, "mixed"), 7);
+
+    if require_jdk_or_skip() {
+        let harness_path = first_output.path().join("FloatDoubleCallsHarness.java");
+        fs::write(
+            &harness_path,
+            r#"public final class FloatDoubleCallsHarness {
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    if (runner.identityF(-0.0f) != 0.0f || Float.floatToRawIntBits(runner.identityF(-0.0f)) != 0x80000000) throw new AssertionError("Float call");
+    if (runner.identityD(-0.0d) != 0.0d || Double.doubleToRawLongBits(runner.identityD(-0.0d)) != 0x8000000000000000L) throw new AssertionError("Double call");
+    if (!Float.isNaN(runner.identityF(Float.NaN)) || !Double.isNaN(runner.identityD(Double.NaN))) throw new AssertionError("NaN calls");
+    if (runner.pickF(true, 1.25f, 2.5f) != 1.25f || runner.pickF(false, 1.25f, 2.5f) != 2.5f) throw new AssertionError("Float branches");
+    if (runner.pickD(true, 1.25d, 2.5d) != 1.25d || runner.pickD(false, 1.25d, 2.5d) != 2.5d) throw new AssertionError("Double branches");
+    if (runner.loop(0, 11.0d, 22.0d) != 11.0d || runner.loop(1, 11.0d, 22.0d) != 22.0d || runner.loop(3, 11.0d, 22.0d) != 22.0d || runner.loop(-1, 11.0d, 22.0d) != 11.0d) throw new AssertionError("Double loop");
+    NumericBox box = new NumericBox(3.0f, 4.0d);
+    if (runner.forward(box) != 4.0d || runner.construct(1.5f, 3.5d) != 3.5d || runner.mixed(7, 1.5f, 3.5d, 9000000000L) != 3.5d) throw new AssertionError("mixed calls");
+    if (runner.constructNested(2.5f, 6.5d) != 6.5d) throw new AssertionError("nested floating calls");
+    NumericChild child = new NumericChild(3.5f, 7.5d);
+    if (child.getF() != 3.5f || child.getD() != 7.5d) throw new AssertionError("direct superclass forwarding");
+  }
+}
+"#,
+        )
+        .expect("write FloatDoubleCallsHarness.java");
+        let javac = Command::new("javac")
+            .args(["-classpath", first_output.path().to_str().unwrap(), "-d"])
+            .arg(first_output.path())
+            .arg(&harness_path)
+            .output()
+            .expect("start javac");
+        assert!(javac.status.success(), "javac failed: {javac:?}");
+        let java = Command::new("java")
+            .args([
+                "-Xverify:all",
+                "-classpath",
+                first_output.path().to_str().unwrap(),
+                "FloatDoubleCallsHarness",
+            ])
+            .output()
+            .expect("start java");
+        assert!(java.status.success(), "java verification failed: {java:?}");
     }
 }
 
@@ -11226,6 +11347,24 @@ fn reference_constructor_arguments_lower_in_order_and_verify_initialized_values(
             String::from_utf8_lossy(&java.stderr)
         );
     }
+}
+
+#[test]
+fn reference_factory_subtype_can_feed_constructor_argument() {
+    let output = TestOutputDirectory::new("reference-factory-subtype-constructor-argument");
+    let artifacts = compile_planned_constructor_source(
+        "class Base()\nclass Child() extends Base()\nclass Holder(value: Base)\nclass Runner:\n  def makeChild(): Child = new Child()\n  def makeHolder(): Holder = new Holder(makeChild())\n",
+        output.path(),
+    )
+    .expect("a subtype returned by a factory is assignable to the constructor parameter");
+    let runner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner class is emitted");
+    let runner = decode_emitted_class(runner_artifact);
+    let method = emitted_method_code(&runner, "makeHolder");
+    assert_method_reference(&runner, method, 0xb6, "Runner", "makeChild", "()LChild;");
+    assert_method_reference(&runner, method, 0xb7, "Holder", "<init>", "(LBase;)V");
 }
 
 #[test]

@@ -77,12 +77,15 @@ The current source backend boundary is:
 | Private Float/Double mutable instance fields | `F` and `D` fields initialize from exact constructor parameters; reads and mutable writes use checked instance field plans |
 | Private Float/Double immutable literal fields | `FloatBits` and `DoubleBits` lower to exact raw constant-pool values before `putfield` |
 | Getter-shaped Float/Double methods and setters | Exact `()F`, `()D`, `(F)V`, and `(D)V` methods lower with `getfield`/`putfield`; no synthetic Scala accessors are generated |
-| Float `if` join | Unsupported with no class artifacts |
-| Double mutable local across an Int-controlled loop | Unsupported with no class artifacts |
+| Float/Double method and constructor calls | Planned instance calls and constructors preserve canonical targets, exact `(FD)`/`(IFDJ)` descriptors, source argument order, and category widths |
+| Float/Double `if` value | Equal exact Float or Double branch values join with verifier frames carrying tag 2 or tag 3 |
+| Double mutable local across an Int-controlled loop | Preheader/backedge joins retain the initialized Double head/tail and emit one Double frame entry |
 
-The fixture matrix is covered by `FloatDoubleFields.scala` and
-`FloatDoubleValues.scala`; fresh frontend sessions must emit identical bytes,
-and the JDK 21 gate verifies and executes both classes.
+The field and value matrix is covered by `FloatDoubleFields.scala` and
+`FloatDoubleValues.scala`. #1538 adds `FloatDoubleCalls.scala` for virtual and
+constructor calls, direct-parent `(FD)V` forwarding, Float/Double `if` joins,
+and a Double local across an Int-controlled loop. Fresh frontend sessions must
+emit identical bytes, and the JDK 21 gate verifies and executes the fixtures.
 
 ## Bounded source lowering in #1536
 
@@ -111,8 +114,23 @@ Literal initializers preserve their raw bits through `fconst_bits` and
 field identity and exact descriptor. Setters evaluate the RHS once and spill
 the receiver and value to correctly sized locals before `putfield`. The
 class-aware CFG verifier accepts exact Float/Double instance field transfers
-and rejects category mismatches. Static fields, control flow, arithmetic,
-conversions, and floating-point calls remain unsupported.
+and rejects category mismatches. The same verifier checks Float/Double method
+arguments/results, constructor arguments, and direct-parent constructor
+forwarding. Static fields, arithmetic, conversions, and mixed-category branch
+joins remain unsupported.
+
+## Calls and control flow in #1538
+
+Planned virtual calls and constructors accept only exact, source-ordered
+Float/Double arguments and results from validated metadata. The class-aware
+analyzer pops arguments by descriptor in reverse stack order, checks exact
+Float versus Double kinds and category widths, validates the initialized
+receiver, and pushes the declared result. Constructor prologues can forward
+Float/Double parameters or bit-exact literals to an approved direct parent.
+`If` joins require matching branch types; Boolean conditions select the exact
+Float or Double result, and `While` retains the pre-loop initialized-local set
+while merging the Double value through its backedge. No floating-point
+arithmetic, comparisons, widening, or conversion is added.
 
 ## JVMS 21 contract for follow-up implementation
 
@@ -207,7 +225,7 @@ and invocation transfers must check exact descriptor kinds. No fallback to
 
 | Boundary | Current/audit rejection to preserve |
 | --- | --- |
-| Source backend | Canonical Float/Double metadata projection succeeds; unsupported body lowering fails before artifact publication. |
+| Source backend | Mismatched Float/Double arguments, returns, and branch kinds remain typed failures before artifact publication; arithmetic and conversion are unsupported. |
 | CFG | Float/Int and Double/Long stack joins fail with typed errors. Local category mismatches and maybe-initialized Double pairs become unusable `Top`; wrong Double tails and loads fail before frame publication. |
 | Instruction encoding/analysis | Arithmetic, conversions and comparisons remain unsupported. Wrong return kinds, wrong constant tags, and category mismatches fail with typed errors. |
 | Class-file pool | A category-one load rejects Double; `ldc2_w` rejects Float, Long and the reserved second slot. Float bits and Double bits (including NaN payloads) remain exact. |

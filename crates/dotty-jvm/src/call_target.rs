@@ -387,21 +387,6 @@ fn resolve_instance_call_body(
             class: method_owner,
             method,
         })?;
-    let descriptor = method_metadata.descriptor();
-    if descriptor
-        .parameters()
-        .iter()
-        .any(|ty| matches!(ty, JvmType::Float | JvmType::Double))
-        || matches!(
-            descriptor.result(),
-            JvmReturnType::Value(JvmType::Float | JvmType::Double)
-        )
-    {
-        return Err(unsupported_call(
-            call,
-            UnsupportedJvmCallShapeKind::FloatingPointNotLowered,
-        ));
-    }
     if method_owner != receiver_class && direct_super_parent.is_none() {
         let is_effective_inherited_method =
             receiver_metadata.dispatch_methods().iter().any(|entry| {
@@ -925,7 +910,9 @@ fn project_result_type(
     match store.types.try_get(ty)? {
         Type::Constant(Constant::Int(_)) => Some(JvmReturnType::Value(JvmType::Int)),
         Type::Constant(Constant::Boolean(_)) => Some(JvmReturnType::Value(JvmType::Boolean)),
+        Type::Constant(Constant::FloatBits(_)) => Some(JvmReturnType::Value(JvmType::Float)),
         Type::Constant(Constant::Long(_)) => Some(JvmReturnType::Value(JvmType::Long)),
+        Type::Constant(Constant::DoubleBits(_)) => Some(JvmReturnType::Value(JvmType::Double)),
         Type::Constant(Constant::Unit) => Some(JvmReturnType::Void),
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
@@ -944,6 +931,18 @@ fn project_result_type(
             ..
         } if Some(*symbol) == type_symbol(store, definitions.long) => {
             Some(JvmReturnType::Value(JvmType::Long))
+        }
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } if Some(*symbol) == type_symbol(store, definitions.float) => {
+            Some(JvmReturnType::Value(JvmType::Float))
+        }
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } if Some(*symbol) == type_symbol(store, definitions.double) => {
+            Some(JvmReturnType::Value(JvmType::Double))
         }
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),

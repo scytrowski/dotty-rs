@@ -112,11 +112,12 @@ invalidate overlapping pairs on stores. A join retains a Double only when
 both the head and matching tail agree on every reachable predecessor; an
 uncertain pair becomes `Top`. Frame projection emits one Float entry or one
 Double entry and skips Double's tail while preserving genuine Top holes.
-Class-aware instance Long field
-transfer and exact virtual/approved constructor transfer are supported for
-descriptor `J`. Long arithmetic, `lcmp`, `dup2`/`pop2`, conversions, static
-Long calls, Float/Double field or call transfers, floating-point arithmetic,
-`dup2`/`pop2`, conversions, and branched constructors remain unsupported.
+Class-aware instance Long field and exact virtual/approved constructor
+transfers are supported for descriptor `J`. Float/Double instance field,
+virtual method, approved constructor, and direct-parent constructor transfers
+preserve their exact verifier kinds and slot widths. Long arithmetic, `lcmp`,
+`dup2`/`pop2`, conversions, static calls, floating-point arithmetic and
+conversions, and branched constructors remain unsupported.
 
 For an ordinary non-static, non-constructor method, the initial local 0 is
 `Initialized(emitting_class)`. Static methods start with descriptor-derived
@@ -201,12 +202,12 @@ deriving a reference type from `ValueKind` or opcode category alone.
 | `aload` / `astore` | Load only an initialized exact-class local. Stores preserve the exact initialized class; reject unusable or uninitialized values. |
 | `dup` / `pop` | Preserve or discard the same abstract value; `dup` retains its allocation-site identity without initializing it. |
 | `getfield` / `putfield` | Validate the fieldref and descriptor. Receiver must be initialized and assignable to the field owner using the explicit hierarchy; a reference value must be assignable to the declared field class. |
-| `invokevirtual` | Validate methodref and descriptor. Pop supported arguments right-to-left; each object argument and receiver must be initialized and assignable to its declared class/owner using the explicit hierarchy. This call may execute while a distinct allocation remains pending lower on the stack. Push the exact initialized object result or int-like result. Arrays and category-two types remain unsupported. |
+| `invokevirtual` | Validate methodref and descriptor. Pop supported arguments right-to-left; each object argument and receiver must be initialized and assignable to its declared class/owner using the explicit hierarchy. Float/Double arguments and results require exact kinds and use one/two slots. This call may execute while a distinct allocation remains pending lower on the stack. Arrays remain unsupported. |
 | `new` | Validate the `CONSTANT_Class`; push a fresh instruction-site identity. Keep at most two live sites. A third `new` before an earlier constructor completes fails with `TooManyLiveAllocations`. |
 | `invokespecial <init>` | The top active uninitialized receiver's site and class must match the constructor owner; constructor arguments use explicit hierarchy assignability and must be initialized. Initialize in last-in, first-out order and rewrite only aliases of that site to `Initialized(owner)`. |
-| `invokespecial DirectParent.method` | Require the `Methodref` owner to equal the validated direct parent and the receiver to be exactly the initialized emitting class. Validate the supported descriptor arguments, then push its exact reference or int-like result. The class-file builder requires `ACC_SUPER`; constructors keep their separate allocation transfer. |
+| `invokespecial DirectParent.method` | Require the `Methodref` owner to equal the validated direct parent and the receiver to be exactly the initialized emitting class. Validate the supported descriptor arguments, then push its exact reference or primitive result, including Float/Double. The class-file builder requires `ACC_SUPER`; constructors keep their separate allocation transfer. |
 | Conditional branches | `ifeq`/`ifne` pop one integer; `if_icmp*` pop two integers; `if_acmpeq`/`if_acmpne` pop two initialized references or nulls; `ifnull`/`ifnonnull` pop one initialized reference or null. Branches do not push a result. Uninitialized allocations are rejected as ordinary branch operands. |
-| Float/Double | Accept `fconst`/`dconst`, tag-checked `ldc`/`ldc2_w`, exact `fload`/`dload` and `fstore`/`dstore`, and matching `freturn`/`dreturn`. Arithmetic, conversion, fields, and method-call transfers remain unsupported. |
+| Float/Double | Accept `fconst`/`dconst`, tag-checked `ldc`/`ldc2_w`, exact `fload`/`dload` and `fstore`/`dstore`, matching `freturn`/`dreturn`, exact instance field transfers, virtual/approved constructor calls, and same-kind `If`/`While` CFG values. Arithmetic and conversion remain unsupported. |
 | Returns | Preserve primitive/void checks; `freturn` and `dreturn` require their exact descriptor kinds; `areturn` requires an initialized reference assignable to the planned result class using the explicit hierarchy. |
 
 Field and method constant-pool operands must be resolved to validated entry

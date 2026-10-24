@@ -1376,11 +1376,12 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
             | FieldType::Short
             | FieldType::Int => ConstructorParameterLocal::Int,
             FieldType::Long => ConstructorParameterLocal::Long,
+            FieldType::Float => ConstructorParameterLocal::Float,
+            FieldType::Double => ConstructorParameterLocal::Double,
             FieldType::Object(name) => {
                 ConstructorParameterLocal::Reference(ClassIdentity(Arc::from(name.as_str())))
             }
             FieldType::Array(_) => ConstructorParameterLocal::Unsupported,
-            FieldType::Float | FieldType::Double => ConstructorParameterLocal::Unsupported,
         };
         parameter_locals.push(local);
         if value_kind(parameter).slots() == 2 {
@@ -1413,15 +1414,20 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                 resolver.ldc_kind(instruction_index, constant, constant_pool)?;
                 ConstructorPrologueValue::Int
             }
+            Instruction::Ldc(constant @ LdcConstant::Float(_)) => {
+                resolver.ldc_kind(instruction_index, constant, constant_pool)?;
+                ConstructorPrologueValue::Float
+            }
             Instruction::LConst(_) => ConstructorPrologueValue::Long,
+            Instruction::FConst(_) => ConstructorPrologueValue::Float,
+            Instruction::DConst(_) => ConstructorPrologueValue::Double,
             Instruction::Ldc2(constant @ Ldc2Constant::Long(_)) => {
                 resolver.validate_ldc2(instruction_index, constant, constant_pool)?;
                 ConstructorPrologueValue::Long
             }
-            Instruction::Ldc2(Ldc2Constant::Double(_)) => {
-                return Err(AnalysisError::InvalidConstructorSuperCall {
-                    instruction: instruction_index,
-                });
+            Instruction::Ldc2(constant @ Ldc2Constant::Double(_)) => {
+                resolver.validate_ldc2(instruction_index, constant, constant_pool)?;
+                ConstructorPrologueValue::Double
             }
             Instruction::ILoad(index) => match parameter_locals.get(usize::from(index.get())) {
                 Some(ConstructorParameterLocal::Int) => ConstructorPrologueValue::Int,
@@ -1433,6 +1439,22 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
             },
             Instruction::LLoad(index) => match parameter_locals.get(usize::from(index.get())) {
                 Some(ConstructorParameterLocal::Long) => ConstructorPrologueValue::Long,
+                _ => {
+                    return Err(AnalysisError::InvalidConstructorSuperCall {
+                        instruction: instruction_index,
+                    });
+                }
+            },
+            Instruction::FLoad(index) => match parameter_locals.get(usize::from(index.get())) {
+                Some(ConstructorParameterLocal::Float) => ConstructorPrologueValue::Float,
+                _ => {
+                    return Err(AnalysisError::InvalidConstructorSuperCall {
+                        instruction: instruction_index,
+                    });
+                }
+            },
+            Instruction::DLoad(index) => match parameter_locals.get(usize::from(index.get())) {
+                Some(ConstructorParameterLocal::Double) => ConstructorPrologueValue::Double,
                 _ => {
                     return Err(AnalysisError::InvalidConstructorSuperCall {
                         instruction: instruction_index,
@@ -1505,6 +1527,8 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                 ConstructorPrologueValue::Int,
             ) => {}
             (FieldType::Long, ConstructorPrologueValue::Long) => {}
+            (FieldType::Float, ConstructorPrologueValue::Float) => {}
+            (FieldType::Double, ConstructorPrologueValue::Double) => {}
             (
                 FieldType::Object(expected_name),
                 ConstructorPrologueValue::Reference(actual_class),
@@ -1519,7 +1543,7 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                     });
                 }
             }
-            (FieldType::Array(_) | FieldType::Float | FieldType::Double, _) => {
+            (FieldType::Array(_), _) => {
                 return Err(AnalysisError::UnsupportedConstructorSuperArgumentType {
                     instruction: instruction_index,
                     parameter: parameter_index,
@@ -1532,11 +1556,15 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
                     expected: match expected {
                         FieldType::Object(_) | FieldType::Array(_) => ValueKind::Reference,
                         FieldType::Long => ValueKind::Long,
+                        FieldType::Float => ValueKind::Float,
+                        FieldType::Double => ValueKind::Double,
                         _ => ValueKind::Int,
                     },
                     actual: match actual {
                         ConstructorPrologueValue::Int => ValueKind::Int,
+                        ConstructorPrologueValue::Float => ValueKind::Float,
                         ConstructorPrologueValue::Long => ValueKind::Long,
+                        ConstructorPrologueValue::Double => ValueKind::Double,
                         ConstructorPrologueValue::Reference(_)
                         | ConstructorPrologueValue::UninitializedThis => ValueKind::Reference,
                     },
@@ -1573,7 +1601,9 @@ pub(crate) fn analyze_validated_constructor_body_with_hierarchy(
 enum ConstructorParameterLocal {
     UninitializedThis,
     Int,
+    Float,
     Long,
+    Double,
     Reference(ClassIdentity),
     Unsupported,
 }
@@ -1582,15 +1612,17 @@ enum ConstructorParameterLocal {
 enum ConstructorPrologueValue {
     UninitializedThis,
     Int,
+    Float,
     Long,
+    Double,
     Reference(ClassIdentity),
 }
 
 impl ConstructorPrologueValue {
     const fn slot_count(&self) -> usize {
         match self {
-            Self::Long => 2,
-            Self::UninitializedThis | Self::Int | Self::Reference(_) => 1,
+            Self::Long | Self::Double => 2,
+            Self::UninitializedThis | Self::Int | Self::Float | Self::Reference(_) => 1,
         }
     }
 }
@@ -1730,7 +1762,10 @@ fn validate_bounded_reference_descriptor(
 
     for (parameter, ty) in descriptor.parameters.iter().enumerate() {
         if !matches!(ty, FieldType::Object(_))
-            && !matches!(value_kind(ty), ValueKind::Int | ValueKind::Long)
+            && !matches!(
+                value_kind(ty),
+                ValueKind::Int | ValueKind::Float | ValueKind::Long | ValueKind::Double
+            )
         {
             return Err(AnalysisError::UnsupportedMethodDescriptorType {
                 parameter: Some(parameter),
@@ -1740,7 +1775,10 @@ fn validate_bounded_reference_descriptor(
     }
     if let Some(result) = &descriptor.return_type
         && !matches!(result, FieldType::Object(_))
-        && !matches!(value_kind(result), ValueKind::Int | ValueKind::Long)
+        && !matches!(
+            value_kind(result),
+            ValueKind::Int | ValueKind::Float | ValueKind::Long | ValueKind::Double
+        )
     {
         return Err(AnalysisError::UnsupportedMethodDescriptorType {
             parameter: None,
@@ -2898,6 +2936,12 @@ impl Frame {
                 FieldType::Long => {
                     self.pop_expected(instruction, ValueKind::Long)?;
                 }
+                FieldType::Float => {
+                    self.pop_expected(instruction, ValueKind::Float)?;
+                }
+                FieldType::Double => {
+                    self.pop_expected(instruction, ValueKind::Double)?;
+                }
                 FieldType::Object(name) if is_valid_internal_name(name) => {
                     let (_, actual, is_null) =
                         self.pop_typed_with_null(instruction, ValueKind::Reference)?;
@@ -3020,6 +3064,12 @@ impl Frame {
                 FieldType::Long => {
                     self.pop_expected(instruction, ValueKind::Long)?;
                 }
+                FieldType::Float => {
+                    self.pop_expected(instruction, ValueKind::Float)?;
+                }
+                FieldType::Double => {
+                    self.pop_expected(instruction, ValueKind::Double)?;
+                }
                 FieldType::Object(name) => {
                     let (_, actual, is_null) =
                         self.pop_typed_with_null(instruction, ValueKind::Reference)?;
@@ -3060,6 +3110,12 @@ impl Frame {
             }
             Some(FieldType::Long) => {
                 self.push(instruction, ValueKind::Long)?;
+            }
+            Some(FieldType::Float) => {
+                self.push(instruction, ValueKind::Float)?;
+            }
+            Some(FieldType::Double) => {
+                self.push(instruction, ValueKind::Double)?;
             }
             Some(FieldType::Object(name)) => {
                 self.push_object(instruction, ClassIdentity(Arc::from(name.as_str())))?;
@@ -3110,6 +3166,12 @@ impl Frame {
                 }
                 FieldType::Long => {
                     self.pop_expected(instruction, ValueKind::Long)?;
+                }
+                FieldType::Float => {
+                    self.pop_expected(instruction, ValueKind::Float)?;
+                }
+                FieldType::Double => {
+                    self.pop_expected(instruction, ValueKind::Double)?;
                 }
                 FieldType::Object(name) => {
                     let (_, actual, is_null) =
@@ -3163,6 +3225,12 @@ impl Frame {
             }
             Some(FieldType::Long) => {
                 self.push(instruction, ValueKind::Long)?;
+            }
+            Some(FieldType::Float) => {
+                self.push(instruction, ValueKind::Float)?;
+            }
+            Some(FieldType::Double) => {
+                self.push(instruction, ValueKind::Double)?;
             }
             Some(FieldType::Object(name)) => {
                 self.push_object(instruction, ClassIdentity(Arc::from(name.as_str())))?;
@@ -4083,7 +4151,11 @@ fn validate_flow_virtual_signature(
     }
     for (parameter, ty) in descriptor.parameters.iter().enumerate() {
         match ty {
-            FieldType::Int | FieldType::Boolean | FieldType::Long => {}
+            FieldType::Int
+            | FieldType::Boolean
+            | FieldType::Float
+            | FieldType::Long
+            | FieldType::Double => {}
             FieldType::Object(name) if is_valid_internal_name(name) => {}
             FieldType::Object(name) => {
                 return Err(AnalysisError::InvalidReferencedMethodClassName {
@@ -4103,7 +4175,14 @@ fn validate_flow_virtual_signature(
         }
     }
     match descriptor.return_type.as_ref() {
-        None | Some(FieldType::Int | FieldType::Boolean | FieldType::Long) => {}
+        None
+        | Some(
+            FieldType::Int
+            | FieldType::Boolean
+            | FieldType::Float
+            | FieldType::Long
+            | FieldType::Double,
+        ) => {}
         Some(FieldType::Object(name)) if is_valid_internal_name(name) => {}
         Some(FieldType::Object(name)) => {
             return Err(AnalysisError::InvalidReferencedMethodClassName {
@@ -5054,6 +5133,91 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn verifies_float_double_virtual_and_constructor_call_transfers() {
+        let mut builder = ConstantPoolBuilder::new();
+        let class_index = builder.class("example/NumericBox").unwrap();
+        let mix = builder
+            .method_ref("example/NumericBox", "mix", "(FD)D")
+            .unwrap();
+        let constructor = builder
+            .method_ref("example/NumericBox", "<init>", "(FD)V")
+            .unwrap();
+        let pool = builder.finish().unwrap();
+
+        let mut virtual_call = CodeSequence::new();
+        virtual_call
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::FLoad(LocalIndex::new(1)))
+            .instruction(Instruction::DLoad(LocalIndex::new(2)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(mix),
+            )))
+            .instruction(Instruction::DReturn);
+        let virtual_graph = ControlFlowGraph::build(&virtual_call).unwrap();
+        let virtual_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &virtual_graph,
+            "mix",
+            "(FD)D",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(virtual_flow.max_stack, 4);
+        assert_eq!(virtual_flow.max_locals, 4);
+
+        let mut wrong_argument = CodeSequence::new();
+        wrong_argument
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::DLoad(LocalIndex::new(1)))
+            .instruction(Instruction::DLoad(LocalIndex::new(3)))
+            .instruction(Instruction::InvokeVirtual(VirtualMethodReference::new(
+                operand(mix),
+            )))
+            .instruction(Instruction::DReturn);
+        let wrong_graph = ControlFlowGraph::build(&wrong_argument).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_graph,
+                "wrongFloatArgument",
+                "(DD)D",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 3,
+                expected: ValueKind::Float,
+                actual: ValueKind::Double,
+            })
+        );
+
+        let mut constructor_call = CodeSequence::new();
+        constructor_call
+            .instruction(Instruction::New(ClassReference::new(operand(class_index))))
+            .instruction(Instruction::Dup)
+            .instruction(Instruction::FLoad(LocalIndex::new(1)))
+            .instruction(Instruction::DLoad(LocalIndex::new(2)))
+            .instruction(Instruction::InvokeSpecial(SpecialMethodReference::new(
+                operand(constructor),
+            )))
+            .instruction(Instruction::Pop)
+            .instruction(Instruction::Return);
+        let constructor_graph = ControlFlowGraph::build(&constructor_call).unwrap();
+        let constructor_flow = CfgCodeAnalyzer::analyze_with_current_class(
+            &constructor_graph,
+            "construct",
+            "(FD)V",
+            false,
+            &pool,
+            class_index,
+        )
+        .unwrap();
+        assert_eq!(constructor_flow.max_stack, 5);
+        assert_eq!(constructor_flow.max_locals, 4);
     }
 
     #[test]
