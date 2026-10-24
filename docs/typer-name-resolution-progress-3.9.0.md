@@ -2,40 +2,62 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
-## Baseline and selected increment
+## Baselines and increments
 
-The prior implementation comparison started from `main` at
-`e06c4eeea02471f674c6b4c0263eaf69f3bc1f60`, before #1577 was merged. Its
-selected increment handled an imported Java class used as a qualifier for
-static members. The fresh post-merge baseline is now `main` at
+The cumulative comparison starts from `main` at
+`e06c4eeea02471f674c6b4c0263eaf69f3bc1f60`, before #1577 was merged. PR #1577
+added the Java static-qualifier increment, handling an imported Java class
+used as a qualifier for static members. Its historical Scala 3.9 oracle check
+accepted `Paths.get("input.txt")` after importing `java.nio.file.Paths`, and rejected
+`Paths` as a value and instance-method selection through the class. Those
+results describe that earlier increment, not this PR.
+
+The fresh pre-increment baseline for this PR is `main` at
 `bfc4759ea7d4eca10767ef5021ffc8386178c4a5`; it includes #1586, #1577, #1571,
-and #1574. The pinned inputs are Scala revision
+and #1574. This PR adds a bounded fallback for `+=` on a mutable local `Int`:
+if direct `+=` member lookup misses and no visible extension candidate takes
+precedence, it types `value + rhs` and lowers that result to assignment while
+preserving the local symbol identity. The pinned inputs are Scala revision
 `777528f19a58e794c9954a42f433373472ec57f8`, Scala 3.9.0 artifacts, and JDK
 21.0.8.
-
-This increment handles an imported Java class used as a qualifier for static
-members. The Typer preserves the class's canonical symbol and type identity,
-allows only members marked `STATIC`, and applies the same rule in ordinary
-selection and overloaded method application. The class remains invalid as a
-standalone value. It does not synthesize a Java companion or infer staticness
-from spelling.
-
-The Scala 3.9 oracle accepts `Paths.get("input.txt")` after importing
-`java.nio.file.Paths` and rejects both `Paths` as a value and an instance-method
-selection through the class. Typer regression tests cover successful selection
-of a static method and rejection of an instance method.
 
 ## Frozen-cohort result
 
 The pinned `package-term` cohort covers 60 files and 369 real methods. The
-baseline and final run each attempted all 369 methods; both typed zero methods.
-One method row advanced, with no first-blocker regressions. The normalized
-cohort reports and detailed resolver sidecars matched byte-for-byte across two
-final runs. The 3-file focused smoke (31 methods) and the 77-file `object-module`
-cohort (576 methods) also completed twice with byte-identical normalized output;
-neither audit had parser or namer failures.
+fresh pre-increment baseline and latest run each attempted all 369 methods;
+both typed zero methods. This PR advances three rows with no first-blocker
+regressions. The normalized reports and resolver sidecars for the latest run
+matched byte-for-byte across two runs; neither run had parser or namer
+failures.
 
-| First blocker | Baseline rows | Final rows |
+### This PR: `bfc4759` to current
+
+| First blocker | Pre-increment rows | Current rows |
+| --- | ---: | ---: |
+| `TermNameNotFound` | 1 | 1 |
+| `MemberNotFound` | 6 | 3 |
+| `SymbolResolution` | 97 | 100 |
+| All other first blockers | 265 | 265 |
+| Fully typed methods | 0 | 0 |
+
+| Source method | Pre-increment blocker | Current blocker | Attempt |
+| --- | --- | --- | --- |
+| `InlineInfoAttribute.scala#tree=212` (`nextByte`) | `MemberNotFound(+=)` | `SymbolResolution` (`scala.Array` parent) | `#tree=420` |
+| `InlineInfoAttribute.scala#tree=226` (`nextUTF8`) | `MemberNotFound(+=)` | `SymbolResolution` (`scala.Array` parent) | `#tree=420` |
+| `InlineInfoAttribute.scala#tree=239` (`nextShort`) | `MemberNotFound(+=)` | `SymbolResolution` (`scala.Array` parent) | `#tree=420` |
+
+The rewrite types the mutable local integer update in each method. Their next
+failure is loading `scala.Array`, whose TASTy parent `java.io.Serializable`
+remains unresolved. The methods are still blocked, so the issue's stretch goal
+of fully typing one previously blocked real method remains unmet.
+
+### Cumulative: historical `e06c4ee` to current
+
+Four rows advance across all increments captured in the compact TSV: one in
+merged #1577 and three in this PR. This table compares the historical baseline
+with the latest result; it is not the `bfc4759` pre-increment comparison above.
+
+| First blocker | Historical baseline rows | Current rows |
 | --- | ---: | ---: |
 | `TermNameNotFound` | 2 | 1 |
 | `MemberNotFound` | 5 | 3 |
@@ -43,19 +65,10 @@ neither audit had parser or namer failures.
 | All other first blockers | 265 | 265 |
 | Fully typed methods | 0 | 0 |
 
-The changes are `InlineInfoAttribute.scala#tree=212`, `#tree=226`, and `#tree=239`
-(`nextByte`, `nextUTF8`, and `nextShort`), all attempted at `#tree=420`. They
-previously stopped at `MemberNotFound(+=)` and now type the mutable local
-integer update through `+=`'s addition-and-assignment fallback. Each advances
-to `SymbolResolution` while loading `scala.Array`, whose TASTy parent
-`java.io.Serializable` is currently unresolved. This demonstrates the new
-rewrite on three real methods, but none is fully typed. The older Java static
-qualifier change and merged #1577 also remain represented in the cumulative
-reconciliation. The issue's stretch goal of fully typing one previously
-blocked real method remains unmet.
-
 The complete per-method before/after reconciliation is in
 [`typer-name-resolution-1566-cohort-3.9.0.tsv`](typer-name-resolution-1566-cohort-3.9.0.tsv).
+Its `before_*` columns refer to the historical `e06c4ee` baseline; its
+`after_*` columns refer to the current implementation.
 The earlier default Scala package-term increment remains recorded in
 [`typer-name-resolution-progress-3.9.0.tsv`](typer-name-resolution-progress-3.9.0.tsv).
 
@@ -88,8 +101,9 @@ No full-corpus result is claimed.
 
 ## Reproduction
 
-Run the Scala oracle with the pinned artifacts by setting `JAVA_HOME` and
-`SCALA39_CLASSPATH`, then:
+The Scala oracle command below validates the earlier Java static-qualifier
+increment, not this PR. Run it with the pinned artifacts by setting `JAVA_HOME`
+and `SCALA39_CLASSPATH`, then:
 
 ```sh
 python3 tools/typer-classpath-corpus-audit/scala39_import_oracle.py
