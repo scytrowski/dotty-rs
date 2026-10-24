@@ -19,7 +19,7 @@ class FocusedAuditWorkflowTests(unittest.TestCase):
 
         self.assertIn("pull_request:", workflow)
         self.assertIn("timeout-minutes: 30", workflow)
-        self.assertIn("java-version: '21.0.8+9'", workflow)
+        self.assertIn("java-version: '21.0.8+9.0.LTS'", workflow)
         self.assertIn("777528f19a58e794c9954a42f433373472ec57f8", workflow)
         self.assertIn("--focused-manifest docs/typer-focused-smoke-manifest-3.9.0.tsv", workflow)
         self.assertIn("--verify-determinism", workflow)
