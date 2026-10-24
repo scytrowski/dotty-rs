@@ -1235,24 +1235,31 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
                     .contains(&identity.object_name);
             let snapshot_started = self.collect_resolver_profile.then(Instant::now);
             let mut snapshot_lookup_calls = 0_u64;
-            let resource_lookup_started = self.collect_resolver_profile.then(Instant::now);
+            let mut snapshot_resource_ns = 0_u128;
             let cache_is_current = if has_cached_evidence {
                 let class_path = self
                     .class_path
                     .as_ref()
                     .expect("resolver operation is exclusive");
-                let mut is_current = self
+                let mut is_current = false;
+                if let Some(resources) = self
                     .validated_module_resources
                     .get(&identity.object_name)
-                    .is_some_and(|resources| {
-                        !resources.is_empty()
-                            && resources.iter().all(|(name, previous)| {
-                                snapshot_lookup_calls += 1;
-                                class_path
-                                    .find_class(name)
-                                    .is_ok_and(|current| current.as_ref() == Some(previous))
-                            })
-                    });
+                    .filter(|resources| !resources.is_empty())
+                {
+                    is_current = true;
+                    for (name, previous) in resources {
+                        snapshot_lookup_calls += 1;
+                        let lookup_started = self.collect_resolver_profile.then(Instant::now);
+                        let current = class_path.find_class(name);
+                        snapshot_resource_ns +=
+                            lookup_started.map_or(0, |started| started.elapsed().as_nanos());
+                        if !current.is_ok_and(|current| current.as_ref() == Some(previous)) {
+                            is_current = false;
+                            break;
+                        }
+                    }
+                }
                 // Keep the decoded root snapshot check explicit: a module can
                 // have been decoded before its hierarchy was successfully
                 // completed, so only the validated proof makes it reusable.
@@ -1278,18 +1285,14 @@ impl<E: ClassPathEntry> ClasspathSymbolResolver<E> {
             } else {
                 false
             };
-            let snapshot_resource_ns = if let Some(started) = resource_lookup_started {
-                let elapsed_ns = started.elapsed().as_nanos();
+            if self.collect_resolver_profile {
                 self.resolver_profile.record_elapsed(
                     ResolverProfilePhase::ClasspathResourceLookup,
                     snapshot_lookup_calls,
-                    elapsed_ns,
-                    elapsed_ns,
+                    snapshot_resource_ns,
+                    snapshot_resource_ns,
                 );
-                elapsed_ns
-            } else {
-                0
-            };
+            }
             snapshot_elapsed_ns = self.record_resolver_phase_with_children(
                 ResolverProfilePhase::ModuleSnapshotValidation,
                 snapshot_started,
@@ -3749,7 +3752,8 @@ mod tests {
             definitions,
             LoadingSession::new(),
         )
-        .with_module_resolution_profile_collection();
+        .with_module_resolution_profile_collection()
+        .with_resolver_profile_collection();
         let package = resolver
             .resolve_package(
                 &mut store,
@@ -3835,6 +3839,13 @@ mod tests {
         );
         assert_eq!(store.checkpoint(), store_mark);
         assert_eq!(resolver.session.checkpoint(), session_mark);
+        let resolver_profile = resolver.take_resolver_profile();
+        assert!(resolver_profile.module_snapshot_validation.calls >= 1);
+        assert!(resolver_profile.classpath_resource_lookup.calls > 0);
+        assert!(
+            resolver_profile.module_snapshot_validation.exclusive_ns
+                <= resolver_profile.module_snapshot_validation.elapsed_ns
+        );
         let profile = resolver.take_module_resolution_profile();
         assert_eq!(profile.module_decode_cache_misses, 1);
         assert_eq!(profile.module_decode_cache_hits, 0);
@@ -3931,6 +3942,68 @@ mod tests {
             resolver.resolve_member(&mut store, &absent_request),
             Err(ResolutionError::Ambiguous { candidates: 2 })
         );
+    }
+
+    #[test]
+    fn failed_module_tasty_decode_is_included_in_load_profile() {
+        let mut store = SemanticStore::new();
+        let definitions = Definitions::bootstrap(&mut store);
+        let path = ModuleTastyPath::both_fixture();
+        let mut resolver =
+            ClasspathSymbolResolver::new(path.clone(), definitions, LoadingSession::new())
+                .with_resolver_profile_collection();
+        let package = resolver
+            .resolve_package(
+                &mut store,
+                &["me", "cytrowski", "tastyfixtures", "semantic"],
+            )
+            .unwrap()
+            .unwrap();
+        let package_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, package));
+        let both_name = Name::new(store.names.intern("Both"), Namespace::Term);
+        let object = resolver
+            .resolve_member(
+                &mut store,
+                &MemberRequest {
+                    prefix: package_prefix,
+                    name: both_name,
+                    selector: MemberSelector::Unique,
+                    space: MemberSpace::Prefix,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        path.entries.lock().unwrap().insert(
+            BinaryName::from_internal("me/cytrowski/tastyfixtures/semantic/Both"),
+            vec![0],
+        );
+        let object_ref = store.types.alloc(Type::TermRef {
+            prefix: package_prefix,
+            target: dotty_core::TermRefTarget::Symbol(object),
+        });
+        let absent_name = Name::new(store.names.intern("absent"), Namespace::Term);
+
+        let result = resolver.resolve_member(
+            &mut store,
+            &MemberRequest {
+                prefix: object_ref,
+                name: absent_name,
+                selector: MemberSelector::Unique,
+                space: MemberSpace::Prefix,
+            },
+        );
+        assert!(matches!(result, Err(ResolutionError::Malformed { .. })));
+        let profile = resolver
+            .take_load_profiles()
+            .into_iter()
+            .find(|profile| profile.root == "me/cytrowski/tastyfixtures/semantic/Both")
+            .expect("failed module completion should publish its load profile");
+        assert_eq!(profile.tasty_decode_calls, 1);
+        assert!(profile.tasty_decode_ns > 0);
+        assert_eq!(profile.module_completion_errors, 1);
+        assert_eq!(profile.module_completion_successes, 0);
     }
 
     #[test]

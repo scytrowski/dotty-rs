@@ -954,13 +954,13 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                     }
                 },
             );
+            self.record_tasty_decode(decode_started, resource_before_decode);
             if let Some(error) = alias_error.into_inner() {
                 return Err(error.into_class_load_error().0);
             }
             let decoded = decoded.map_err(|error| {
                 ClassLoadError::InvalidTastyFile(identity.module_class_name.clone(), error)
             })?;
-            self.record_tasty_decode(decode_started, resource_before_decode);
             decoded_cache.insert(
                 name.clone(),
                 CachedDecodedModule {
