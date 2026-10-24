@@ -2223,10 +2223,7 @@ class NumericMetadata(initialF: Float, initialD: Double):
         &mut observe,
     );
     assert!(observed, "real source typing reached the metadata observer");
-    assert!(
-        matches!(result, Ok(_)),
-        "FP field reads now lower: {result:?}"
-    );
+    assert!(result.is_ok(), "FP field reads now lower: {result:?}");
     assert_eq!(output.class_files().len(), 1);
 }
 

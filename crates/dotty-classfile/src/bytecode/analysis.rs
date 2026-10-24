@@ -2042,31 +2042,29 @@ impl Frame {
             }
             Instruction::GetStatic(reference) => {
                 let ty = self.field_type(instruction_index, reference, pool)?;
-                if flow_current_class.is_some() {
-                    if validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
+                if flow_current_class.is_some()
+                    && (validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
                         .is_some()
-                        || matches!(ty, FieldType::Float | FieldType::Double)
-                    {
-                        return Err(AnalysisError::UnsupportedFlowFieldType {
-                            instruction: instruction_index,
-                            index: reference.index().get(),
-                        });
-                    }
+                        || matches!(ty, FieldType::Float | FieldType::Double))
+                {
+                    return Err(AnalysisError::UnsupportedFlowFieldType {
+                        instruction: instruction_index,
+                        index: reference.index().get(),
+                    });
                 }
                 self.push(instruction_index, value_kind(&ty))?;
             }
             Instruction::PutStatic(reference) => {
                 let ty = self.field_type(instruction_index, reference, pool)?;
-                if flow_current_class.is_some() {
-                    if validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
+                if flow_current_class.is_some()
+                    && (validate_flow_field_type(instruction_index, reference.index().get(), &ty)?
                         .is_some()
-                        || matches!(ty, FieldType::Float | FieldType::Double)
-                    {
-                        return Err(AnalysisError::UnsupportedFlowFieldType {
-                            instruction: instruction_index,
-                            index: reference.index().get(),
-                        });
-                    }
+                        || matches!(ty, FieldType::Float | FieldType::Double))
+                {
+                    return Err(AnalysisError::UnsupportedFlowFieldType {
+                        instruction: instruction_index,
+                        index: reference.index().get(),
+                    });
                 }
                 self.pop_expected(instruction_index, value_kind(&ty))?;
             }
@@ -6365,8 +6363,10 @@ mod tests {
     fn analyzes_float_double_instance_field_transfers_with_exact_categories() {
         let mut builder = ConstantPoolBuilder::new();
         let class_index = builder.class("example/NumericBox").unwrap();
+        let int_field = builder.field_ref("example/NumericBox", "i", "I").unwrap();
         let float_field = builder.field_ref("example/NumericBox", "f", "F").unwrap();
         let double_field = builder.field_ref("example/NumericBox", "d", "D").unwrap();
+        let long_field = builder.field_ref("example/NumericBox", "j", "J").unwrap();
         let pool = builder.finish().unwrap();
 
         let mut read_float = CodeSequence::new();
@@ -6498,6 +6498,56 @@ mod tests {
                 instruction: 2,
                 expected: ValueKind::Double,
                 actual: ValueKind::Float,
+            })
+        );
+
+        let mut wrong_int_store = CodeSequence::new();
+        wrong_int_store
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::FLoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                int_field,
+            ))))
+            .instruction(Instruction::Return);
+        let wrong_int_store_graph = ControlFlowGraph::build(&wrong_int_store).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_int_store_graph,
+                "setWrongI",
+                "(F)V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Int,
+                actual: ValueKind::Float,
+            })
+        );
+
+        let mut wrong_long_store = CodeSequence::new();
+        wrong_long_store
+            .instruction(Instruction::ALoad(LocalIndex::new(0)))
+            .instruction(Instruction::DLoad(LocalIndex::new(1)))
+            .instruction(Instruction::PutField(FieldReference::new(operand(
+                long_field,
+            ))))
+            .instruction(Instruction::Return);
+        let wrong_long_store_graph = ControlFlowGraph::build(&wrong_long_store).unwrap();
+        assert_eq!(
+            CfgCodeAnalyzer::analyze_with_current_class(
+                &wrong_long_store_graph,
+                "setWrongJ",
+                "(D)V",
+                false,
+                &pool,
+                class_index,
+            ),
+            Err(AnalysisError::StackTypeMismatch {
+                instruction: 2,
+                expected: ValueKind::Long,
+                actual: ValueKind::Double,
             })
         );
 
