@@ -17,15 +17,11 @@ later introduces private storage for these methods. This source-level phase
 description is useful for locating responsibilities, but it does **not** prove
 the final class-file names, flags, descriptors, or instruction layout.
 
-The current development environment has no `scalac`, `scala`, `java`,
-`javac`, or `javap` on `PATH`, and no cached Scala 3.9.0 compiler artifact was
-found in the checked local compiler caches. Consequently this audit does not
-claim observed `javap` output and deliberately leaves exact ABI fields below
-unfrozen. The pinned compiler source is evidence about the intended
-transformation, not a substitute for the required compiler-generated class.
-
-To close this evidence gap, compile this source with the pinned compiler and
-record the output of `javap -c -v -p` for all three classes:
+The pinned compiler was built from the exact checkout revision above and
+reported `3.9.0-bin-SNAPSHOT-git-777528f`. The three declarations below were
+compiled with that compiler and inspected with `javap -c -v -p`. This freezes
+the bounded ABI used by the metadata projection; it does not claim support for
+other Scala releases or accessor bytecode in `dotty-jvm`.
 
 ```scala
 class Measurement(val id: Int, var value: Double)
@@ -33,17 +29,20 @@ class Mixed(val enabled: Boolean, var count: Long)
 class Ref(val item: Measurement)
 ```
 
-```sh
-scalac -d out AccessorAudit.scala
-javap -classpath out -c -v -p Measurement Mixed Ref
-```
+Observed class-file members:
 
-The captured output must identify backing fields and their exact access flags,
-getter and setter names/flags/descriptors, setter return type, constructor
-descriptor and initialization order, category-two local slots for `Double`
-and `Long`, and any bridges. In particular, the setter name encoding (often
-written in Scala source notation with `_=`) must be read from the compiled
-class; this document does not assume its JVM spelling.
+| Class | Backing storage | Accessor methods | Constructor evidence |
+| --- | --- | --- | --- |
+| `Measurement` | `id:I` private final; `value:D` private | `id()I` public; `value()D` public; `value_$eq(D)V` public | `<init>(ID)V`; `id` loads from slot 1 and `value` from slots 2–3; both stores precede `Object.<init>()V`. |
+| `Mixed` | `enabled:Z` private final; `count:J` private | `enabled()Z` public; `count()J` public; `count_$eq(J)V` public | `<init>(ZJ)V`; `enabled` loads from slot 1 and `count` from slots 2–3; both stores precede `Object.<init>()V`. |
+| `Ref` | `item:LMeasurement;` private final | `item()LMeasurement;` public | `<init>(LMeasurement;)V`; `item` loads from slot 1 and its store precedes `Object.<init>()V`. |
+
+No bridge methods were present in these shapes. A `val` has no setter; a `var`
+setter returns `void`. Scala source `value_=` encodes to JVM name `value_$eq`.
+Constructor store ordering is recorded as compiler evidence for follow-up work;
+this issue only plans metadata and does not lower constructors. The oracle
+class files use major version 61 by default; this observation does not change
+the backend's independent Java 21 class-file target (major 65).
 
 ## Source identities and current Typer behavior
 
@@ -87,7 +86,7 @@ private, or otherwise modified parameters remain rejected.
 | --- | --- | --- |
 | Constructor parameter, source field, and source selection identity | `dotty-core` / namer / typer | Preserve canonical IDs and source mappings. Never invent source methods for generated JVM accessors or reconstruct identity from spelling. |
 | Source field to derived constructor formal binding | `dotty-jvm` constructor plan | Preserve exact class/constructor IDs, source `TreeId`, class-owned `Field`, distinct constructor-owned `Parameter`, source ordinal, and mutability. Revalidate symbol kinds/owners/origins, class-scope membership, uniqueness, and completed type agreement before exposing the checked binding through `JvmClassMetadata`. |
-| Getter/setter JVM names, descriptors, flags, backing storage, and slot layout | JVM-only ABI projection in `dotty-jvm` | Derive from the pinned compiler oracle and canonical source metadata. Keep JVM names out of frontend contracts. The exact projection is pending the oracle output above. |
+| Getter/setter JVM names, descriptors, flags, backing storage, and slot layout | JVM-only ABI projection in `dotty-jvm` | Derive from the pinned compiler oracle and canonical source metadata. Keep JVM names out of frontend contracts. `JvmAccessorMetadata` records checked backing-field and getter / optional setter signatures without source symbols or bytecode. |
 | Encoding and verification of generated members | `dotty-classfile` | Receive already validated field/method plans; keep byte-level encoding separate from source semantics. |
 | Source call-site support where current Typer behavior changes | Separate frontend/Typer issue | This audit records current successes and does not authorize Typer changes or accessor-specific call lowering. |
 
@@ -97,22 +96,23 @@ mutability, visibility, and explicit source order. A malformed or stale
 identity must be a typed rejection. Generated JVM signatures must be checked
 for collisions against user-declared and other generated members; the policy
 must reject ambiguity before artifact publication rather than silently
-shadowing either member. Until the oracle fixes the exact ABI, no accessor
-classfile is an accepted backend output.
+shadowing either member. Accessor metadata now performs these checks; no
+accessor classfile is an accepted backend output yet.
 
 ## Scope matrix
 
 | Shape | Audit result / disposition |
 | --- | --- |
-| `Measurement(val id: Int, var value: Double)` | Source identity and source selections characterized. Exact JVM ABI awaits pinned compile and `javap`. |
-| `Mixed(val enabled: Boolean, var count: Long)` | Source identity and category-two type identity characterized. Exact JVM slots and class-file layout await oracle output. |
-| `Ref(val item: Measurement)` | Source identity and referenced class type characterized. Exact reference descriptor and storage flags await oracle output. |
+| `Measurement(val id: Int, var value: Double)` | Exact backing field/getter/setter names, descriptors, flags, and `D` slot width recorded above and projected in metadata. No accessor bytecode. |
+| `Mixed(val enabled: Boolean, var count: Long)` | Exact `Z`/`J` field and accessor descriptors recorded above; `Long` uses two constructor local slots. No accessor bytecode. |
+| `Ref(val item: Measurement)` | Exact planned reference descriptor and private-final storage recorded above. No accessor bytecode. |
 | Plain constructor parameter | Existing distinct class-owned and constructor-owned parameter identities remain; it does not gain an accessor by implication. |
-| Immutable `val` | A setter is not part of the source contract. Exact generated getter/storage details await oracle output. |
+| Immutable `val` | Oracle confirms private-final storage and public getter with no setter. |
 | `private[this]`, class-body public fields, `lazy`, visibility variants | Deferred; no ABI claim is made by this audit. |
 | Secondary, defaulted, multiple-clause, or `using` constructors | Deferred. |
-| Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. |
-| Malformed owner/derived IDs, stale typed IDs, generated signature collisions | Future backend projection must reject before bytes are published; codegen is not implemented here. |
+| Trait, case, generic, or externally compiled classes; inheritance bridges | Deferred. Accessor metadata is rejected on non-Object subclasses and across planned accessor-inheritance edges until generated signatures participate in override/bridge validation. |
+| Accessor-bearing class with a planned non-Object parent | Rejected with `UnsupportedJvmAccessorInheritance`, before accessor metadata is returned. This prevents generated getter/setter signatures from bypassing inherited final-method and override checks. |
+| Malformed owner/derived IDs, stale typed IDs, generated signature collisions | Metadata validation rejects invalid bindings and binary collisions before bytes are published; codegen is not implemented here. |
 | Unsupported source calls or assignments | Keep the actual Typer/backend error observable; do not guess or bypass it. |
 
 ## Future acceptance gate
