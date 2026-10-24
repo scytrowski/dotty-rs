@@ -71,9 +71,10 @@ The local launcher reported `3.9.0-bin-SNAPSHOT-git-777528f` on JDK 21.0.8.
 The positive `Counter`/`Reader` fixture compiled successfully and `javap`
 showed calls to `Counter.id()I`, `Counter.count()J`, and
 `Counter.count_$eq(J)V` for `this`, parameter, stable local `val`, and mutable
-local `var` receivers. Negative oracle controls reported `Reassignment to val
-id`, `Found: Boolean / Required: Long`, and `value count is not a member of
-Other` for the corresponding invalid sources.
+local `var` receivers, including `val c` reads and writes of `count`. Negative
+oracle controls reported `Reassignment to val id`,
+`Found: Boolean / Required: Long`, and `value count is not a member of Other`
+for the corresponding invalid sources.
 
 | Source form | Pinned Scala 3.9.0 | Current Typer | Identity / first failure | Backend status |
 | --- | --- | --- | --- | --- |
@@ -82,6 +83,8 @@ Other` for the corresponding invalid sources.
 | `this.count = next`, `c.count = next` | Accepted; setter call | Accepted | Canonical mutable `Counter.count`; typed assignment is `Unit`, RHS is `Long` | #1562 must dispatch through the setter metadata. |
 | Unqualified `count` in `Counter` | Accepted | Accepted | `Ident` resolves to the same canonical `count` field | No source accessor method is synthesized. |
 | `val c = new Counter(...); c.id` | Accepted | Accepted | Selection keeps the local receiver and canonical `Counter.id` field | Requires the same getter dispatch as parameter receivers. |
+| `val c = new Counter(...); c.count` | Accepted; getter call | Accepted | Selection retains the exact mapped local receiver and canonical mutable `Counter.count` field | Requires getter dispatch through #1555 metadata. |
+| `val c = new Counter(...); c.count = next` | Accepted; setter call | Accepted | Typed `Assign` keeps the local receiver and canonical `count` field; result is `Unit`, RHS is `Long` | Requires setter dispatch through #1555 metadata. |
 | `var c = new Counter(...); c.id` | Accepted | Rejected | `UnstableSelectionPrefix` at `c.id`; nested mappings roll back | Do not include until a Typer-owned change supports it. |
 | `this.id = 2`, `c.id = 2` | Rejected: `Reassignment to val id` | Rejected: `AssignmentTargetImmutable` for canonical `id` | Error points to the assignment; no typed mappings survive | No setter exists for `val`. |
 | `c.count = true` | Rejected: Boolean required to be Long | Rejected: `ExpectedExpressionTypeMismatch` (Boolean / Long) | Error points to RHS; nested mappings roll back | Invalid typed shape never reaches the backend. |

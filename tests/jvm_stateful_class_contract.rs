@@ -3069,6 +3069,8 @@ class Reader {
   def readCount(c: Counter): Long = c.count
   def write(c: Counter, next: Long): Unit = c.count = next
   def readLocalVal: Int = { val c = new Counter(7, 9L); c.id }
+  def readLocalCount: Long = { val c = new Counter(7, 9L); c.count }
+  def writeLocalVal: Unit = { val c = new Counter(7, 9L); c.count = 11L }
 }
 class Other {}
 "#;
@@ -3126,6 +3128,8 @@ class Other {}
             (reader, "readCount"),
             (reader, "write"),
             (reader, "readLocalVal"),
+            (reader, "readLocalCount"),
+            (reader, "writeLocalVal"),
         ] {
             let (method, _, rhs) = method_tree_and_rhs(ast, index, source, typer, owner, name);
             typer.complete_symbol(method).unwrap();
@@ -3202,6 +3206,11 @@ class Other {}
                     .is_some(),
                 "receiver has its own source-to-typed mapping"
             );
+            assert_eq!(
+                typer.source_typed_index().get(source, selection.qualifier),
+                Some(typed_qualifier),
+                "typed selection keeps the exact mapped source receiver"
+            );
             match &typer.typed_ast().get(typed_qualifier).kind {
                 TreeKind::This(_) => assert!(matches!(
                     typer
@@ -3212,22 +3221,48 @@ class Other {}
                 )),
                 TreeKind::Ident(_) => {
                     let receiver_type = typer.typed_ast().get(typed_qualifier).ty;
+                    let Type::TermRef {
+                        target: TermRefTarget::Symbol(receiver),
+                        ..
+                    } = typer.store().types.get(receiver_type)
+                    else {
+                        panic!("identifier receiver retains a canonical term symbol")
+                    };
                     assert!(matches!(
-                        typer.store().types.get(receiver_type),
-                        Type::TermRef {
-                            target: TermRefTarget::Symbol(receiver),
-                            ..
-                        } if matches!(
-                            typer.store().symbols.get(*receiver).kind,
-                            SymbolKind::Parameter | SymbolKind::Local | SymbolKind::Variable
-                        )
+                        typer.store().symbols.get(*receiver).kind,
+                        SymbolKind::Parameter | SymbolKind::Local | SymbolKind::Variable
                     ));
+                    let source_name = match &ast.get(selection.qualifier).kind {
+                        TreeKind::Ident(identifier) => {
+                            typer.store().names.resolve(identifier.name.text())
+                        }
+                        kind => panic!("identifier receiver remains source-shaped: {kind:?}"),
+                    };
+                    assert_eq!(
+                        typer
+                            .store()
+                            .names
+                            .resolve(typer.store().symbols.get(*receiver).name.text()),
+                        source_name,
+                        "typed receiver symbol matches the exact source identifier"
+                    );
+                    if typer.store().symbols.get(*receiver).kind == SymbolKind::Local {
+                        assert!(
+                            !typer
+                                .store()
+                                .symbols
+                                .get(*receiver)
+                                .flags
+                                .contains(SymbolFlags::MUTABLE),
+                            "the accepted local receiver is the immutable val form"
+                        );
+                    }
                     typer.widen_expression_type(receiver_type).unwrap();
                 }
                 kind => panic!("accessor receiver must remain a real expression, got {kind:?}"),
             }
         }
-        assert_eq!(selection_counts, [("id", 3), ("count", 4)]);
+        assert_eq!(selection_counts, [("id", 3), ("count", 6)]);
 
         let unqualified_count = ast
             .iter()
@@ -3255,15 +3290,24 @@ class Other {}
             } if *symbol == count_field
         ));
 
-        for (owner, name) in [(counter, "ownWrite"), (reader, "write")] {
+        for (owner, name) in [
+            (counter, "ownWrite"),
+            (reader, "write"),
+            (reader, "writeLocalVal"),
+        ] {
             let (method, _, source_rhs) =
                 method_tree_and_rhs(ast, index, source, typer, owner, name);
-            let TreeKind::Assign(source_assign) = &ast.get(source_rhs).kind else {
-                panic!("{name} source body is an assignment");
+            let source_assign_tree = match &ast.get(source_rhs).kind {
+                TreeKind::Assign(_) => source_rhs,
+                TreeKind::Block(block) => block.expr,
+                _ => panic!("{name} source body contains an assignment"),
+            };
+            let TreeKind::Assign(source_assign) = &ast.get(source_assign_tree).kind else {
+                panic!("{name} source body ends in an assignment");
             };
             let typed_assign = typer
                 .source_typed_index()
-                .get(source, source_rhs)
+                .get(source, source_assign_tree)
                 .expect("successful assignment retains its source mapping");
             let (typed_lhs, typed_rhs) = match &typer.typed_ast().get(typed_assign).kind {
                 TreeKind::Assign(typed_assignment) => (typed_assignment.lhs, typed_assignment.rhs),
