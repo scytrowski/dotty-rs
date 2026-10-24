@@ -13,9 +13,10 @@ symbols whose `scala` package is absent from the source package registry.
 Unrelated classes named `Array` do not receive this relation.
 
 Focused unit controls cover `Array[Char]` against `char[]`, reject mismatched
-element types, and reject `custom.Array[Char]`. A Scala 3.9.0 compiler oracle
-accepts passing `Array[Char]` to a Java `char[]` parameter and rejects
-`Array[Byte]` at that call site.
+element types and `custom.Array[Char]`, preserve `Array[Char] <: Object`, and
+reject a `scala.Array` symbol with a noncanonical package prefix. A Scala 3.9.0
+compiler oracle accepts passing `Array[Char]` to a Java `char[]` parameter and
+rejects `Array[Byte]` at that call site.
 
 The deterministic `package-term` comparison uses the same 60 files and 369
 methods before and after this change. Both runs typed zero complete methods and
@@ -162,7 +163,7 @@ tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
 ```
 
 The deterministic latest audit for the array-conformance increment used the
-same command with `target/issue-1566-array-audit.md` as the output and
-`target/issue-1566-array-audit-runs` as `DOTTY_AUDIT_TMP_ROOT`. It ran after
-removing temporary diagnostics; the normalized reports and resolver sidecars
-matched across runs.
+same command with `target/issue-1566-array-audit-final.md` as the output and
+`target/issue-1566-array-audit-final-runs` as `DOTTY_AUDIT_TMP_ROOT`. It ran
+after removing temporary diagnostics and incorporating the reviewer fixes; the
+normalized reports and resolver sidecars matched across runs.

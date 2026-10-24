@@ -198,11 +198,11 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
 
         let found_array_element = self.array_element(found)?;
         let expected_array_element = self.array_element(expected)?;
-        if found_array_element.is_some() || expected_array_element.is_some() {
-            return match (found_array_element, expected_array_element) {
-                (Some(found), Some(expected)) => self.equivalent(found, expected, 0),
-                _ => Ok(false),
-            };
+        if let (Some(found), Some(expected)) = (found_array_element, expected_array_element) {
+            return self.equivalent(found, expected, 0);
+        }
+        if matches!(expected_node, Type::JavaArray { .. }) {
+            return Ok(false);
         }
 
         match (&found_node, &expected_node) {
@@ -452,14 +452,17 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             Type::Applied { tycon, args } if args.len() == 1 => {
                 let tycon = self.normalize(tycon)?;
                 let Type::TypeRef {
+                    prefix,
                     target: TypeRefTarget::Symbol(class),
-                    ..
                 } = self.type_at(tycon)?
                 else {
                     return Ok(None);
                 };
                 if !self.typer.store.symbols.contains(*class) {
                     return Err(TypeRelationError::UnknownClassSymbol { symbol: *class });
+                }
+                if !self.is_canonical_top_level_class_prefix(*class, *prefix)? {
+                    return Ok(None);
                 }
                 Ok(self.is_scala_array_class(*class).then_some(args[0]))
             }

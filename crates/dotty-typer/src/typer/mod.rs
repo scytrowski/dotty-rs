@@ -2361,6 +2361,30 @@ mod tests {
     }
 
     #[test]
+    fn scala_array_keeps_its_nominal_supertype_conformance() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package scala; class Array[A] extends Object");
+        let array_class = class_symbol(&parsed, &store, &index, source, "Array");
+        let char_array =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.char]);
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        typer.complete_symbol(array_class).unwrap();
+        assert!(
+            typer
+                .is_subtype(char_array, definitions.object_type)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn a_same_named_array_outside_scala_does_not_conform_to_a_java_array() {
         let (parsed, mut store, packages, definitions, index, source) =
             parse_and_name("package custom; class Array[A]");
@@ -2380,6 +2404,42 @@ mod tests {
         );
 
         assert!(!typer.conforms(array_type, java_char_array).unwrap());
+    }
+
+    #[test]
+    fn malformed_package_prefix_does_not_make_scala_array_a_java_array() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package scala { class Array[A] }; package other { class Marker }");
+        let array_class = class_symbol(&parsed, &store, &index, source, "Array");
+        let other_package = packages.symbol(&["other"]).unwrap();
+        let incorrect_prefix = store
+            .types
+            .alloc(Type::type_ref(definitions.no_prefix, other_package));
+        let malformed_array = applied_class_type_with_prefix(
+            &mut store,
+            array_class,
+            incorrect_prefix,
+            &[definitions.char],
+        );
+        let canonical_array =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.char]);
+        let java_char_array = store.types.alloc(Type::JavaArray {
+            element: definitions.char,
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(!typer.conforms(malformed_array, canonical_array).unwrap());
+        assert!(matches!(
+            typer.conforms(java_char_array, malformed_array),
+            Err(TypeRelationError::UnsupportedType { .. })
+        ));
     }
 
     #[test]
