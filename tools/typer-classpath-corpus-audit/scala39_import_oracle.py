@@ -69,6 +69,7 @@ def main() -> int:
             "ImportDefaultScalaCollection.scala": "package fixture1336\nobject ImportDefaultScalaCollection { val value: collection.concurrent.TrieMap[Int, Int] = collection.concurrent.TrieMap.empty }\n",
             "ImportDefaultScalaTypes.scala": "package fixture1336\nobject ImportDefaultScalaTypes { val list: List[Int] = Nil; val option: Option[String] = None; val qualified: scala.List[Int] = list }\nobject ImportDefaultTypeShadow { class List; val value: List = new List }\n",
             "ImportDefaultScalaTerms.scala": "package fixture1566\nobject ImportDefaultScalaTerms { val empty: List[Int] = Nil; val absent: Option[String] = None }\nobject ImportDefaultScalaTermShadow { object Nil; val value: Nil.type = Nil }\n",
+            "ImportJavaStaticClassQualifier.scala": "package fixture1566\nimport java.nio.file.Paths\nobject ImportJavaStaticClassQualifier { val value = Paths.get(\"input.txt\") }\n",
             "ImportPackageLevelQuotes.scala": "package fixture1336\nimport scala.quoted.{Quotes, quotes}\nobject ImportPackageLevelQuotes { def value(using q: Quotes): q.type = quotes }\n",
         }
         files = []
@@ -104,6 +105,56 @@ def main() -> int:
         ):
             raise SystemExit(
                 "Scala 3.9 class-only import diagnostic changed:\n" + class_as_term_diagnostic
+            )
+
+        java_class_as_term = source / "ImportJavaClassAsTerm.scala"
+        java_class_as_term.write_text(
+            "package fixture1566\nimport java.nio.file.Paths\n"
+            "object ImportJavaClassAsTerm { val value = Paths }\n",
+            encoding="utf-8",
+        )
+        java_class_as_term_result = compile_sources(
+            java_home,
+            classpath + os.pathsep + str(output),
+            root / "java-class-as-term",
+            [java_class_as_term],
+        )
+        java_class_as_term_diagnostic = re.sub(
+            r"\x1b\[[0-9;]*m",
+            "",
+            java_class_as_term_result.stdout + java_class_as_term_result.stderr,
+        )
+        if java_class_as_term_result.returncode == 0 or not all(
+            fragment in java_class_as_term_diagnostic
+            for fragment in ("Java defined class Paths", "is not a value")
+        ):
+            raise SystemExit(
+                "Scala 3.9 Java class-as-term diagnostic changed:\n"
+                + java_class_as_term_diagnostic
+            )
+
+        java_instance_member = source / "ImportJavaClassInstanceMember.scala"
+        java_instance_member.write_text(
+            "package fixture1566\nimport java.nio.file.Paths\n"
+            "object ImportJavaClassInstanceMember { val value = Paths.toString() }\n",
+            encoding="utf-8",
+        )
+        java_instance_result = compile_sources(
+            java_home,
+            classpath + os.pathsep + str(output),
+            root / "java-class-instance-member",
+            [java_instance_member],
+        )
+        java_instance_diagnostic = re.sub(
+            r"\x1b\[[0-9;]*m", "", java_instance_result.stdout + java_instance_result.stderr
+        )
+        if java_instance_result.returncode == 0 or not all(
+            fragment in java_instance_diagnostic
+            for fragment in ("Java defined class Paths", "is not a value")
+        ):
+            raise SystemExit(
+                "Scala 3.9 rejected Java class instance-member selection differently:\n"
+                + java_instance_diagnostic
             )
 
         dotted_package = source / "ImportDottedPackage.scala"
