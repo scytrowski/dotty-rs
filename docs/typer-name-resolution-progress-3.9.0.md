@@ -9,11 +9,13 @@ pinned Scala revision `777528f19a58e794c9954a42f433373472ec57f8`, and JDK 21.0.8
 The frozen `package-term` cohort covered 60 files and 369 methods: 0 methods
 typed, 369 first-blocker rows, and 17 `TermNameNotFound` blockers.
 
-The implementation resolves a direct Scala package value alias through
-`scala/package.tasty`, validates that its target exists, then returns the
-target's canonical module identity from the classpath resolver. It does not
-infer a term from its spelling. The Scala 3.9 oracle compiles `Nil` and `None`,
-checks a local `Nil` shadow, and rejects an unknown default term.
+The implementation resolves a public value alias declared directly in the
+`scala.package` object through `scala/package.tasty`, validates that its target
+exists, verifies that the declared type names that same singleton target, then
+returns the target's canonical module identity from the classpath resolver.
+Nested, inaccessible, mutable, widened, and constructed values are excluded;
+it does not infer a term from its spelling. The Scala 3.9 oracle compiles `Nil`
+and `None`, checks a local `Nil` shadow, and rejects an unknown default term.
 
 ## Frozen-cohort result
 
