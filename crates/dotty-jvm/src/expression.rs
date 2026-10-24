@@ -2853,7 +2853,13 @@ fn validate_constructor_reference_factory_call(
     let JvmReturnType::Value(result) = target.result() else {
         return Err(unsupported());
     };
-    if target.invocation_kind() != JvmInvocationKind::Virtual || Some(result) != expected {
+    let assignable = match expected {
+        Some(expected) => {
+            crate::reference::is_assignable(Some(unit), result, expected, context.definitions)?
+        }
+        None => false,
+    };
+    if target.invocation_kind() != JvmInvocationKind::Virtual || !assignable {
         return Err(unsupported());
     }
     if let Some(receiver) = target.receiver_tree()

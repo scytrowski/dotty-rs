@@ -11350,6 +11350,24 @@ fn reference_constructor_arguments_lower_in_order_and_verify_initialized_values(
 }
 
 #[test]
+fn reference_factory_subtype_can_feed_constructor_argument() {
+    let output = TestOutputDirectory::new("reference-factory-subtype-constructor-argument");
+    let artifacts = compile_planned_constructor_source(
+        "class Base()\nclass Child() extends Base()\nclass Holder(value: Base)\nclass Runner:\n  def makeChild(): Child = new Child()\n  def makeHolder(): Holder = new Holder(makeChild())\n",
+        output.path(),
+    )
+    .expect("a subtype returned by a factory is assignable to the constructor parameter");
+    let runner_artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.class.internal_name() == "Runner")
+        .expect("Runner class is emitted");
+    let runner = decode_emitted_class(runner_artifact);
+    let method = emitted_method_code(&runner, "makeHolder");
+    assert_method_reference(&runner, method, 0xb6, "Runner", "makeChild", "()LChild;");
+    assert_method_reference(&runner, method, 0xb7, "Holder", "<init>", "(LBase;)V");
+}
+
+#[test]
 fn nested_new_constructor_arguments_lower_lifo_and_verify_initialized_values() {
     let output = TestOutputDirectory::new("nested-new-constructor-arguments");
     let source = "class Counter(seed: Int):\n  private val value: Int = seed\n  def get(): Int = value\nclass Holder(counter: Counter):\n  private val saved: Counter = counter\n  def get(): Int = saved.get()\nclass Pair(first: Counter, second: Counter):\n  private val savedFirst: Counter = first\n  private val savedSecond: Counter = second\n  def firstValue(): Int = savedFirst.get()\n  def secondValue(): Int = savedSecond.get()\n  def firstCounter(): Counter = savedFirst\n  def secondCounter(): Counter = savedSecond\nclass Node(next: Node):\n  private val saved: Node = next\n  def nextNode(): Node = saved\nclass Client:\n  def create(seed: Int): Holder = new Holder(new Counter(seed))\n  def pair(first: Int, second: Int): Pair = new Pair(new Counter(first), new Counter(second))\n  def sameClass(): Node = new Node(new Node(null))\n";
