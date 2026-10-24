@@ -2240,13 +2240,13 @@ class NumericMetadata(initialF: Float, initialD: Double):
     assert!(observed, "real source typing reached the metadata observer");
     assert!(
         matches!(result, Err(PipelineFailure::Codegen(_))),
-        "FP metadata is available while FP bytecode lowering remains unsupported: {result:?}"
+        "FP metadata is available while unsupported field reads remain rejected: {result:?}"
     );
     assert!(output.class_files().is_empty());
 }
 
 #[test]
-fn float_and_double_source_matrix_fails_at_backend_without_artifacts() {
+fn unsupported_float_double_fields_and_constructors_fail_without_artifacts() {
     for (label, source) in [
         (
             "FloatField",
@@ -2257,32 +2257,8 @@ fn float_and_double_source_matrix_fails_at_backend_without_artifacts() {
             "class DoubleField:\n  private var value: Double = 0.0\n",
         ),
         (
-            "FloatGetterSignature",
-            "class FloatGetterSignature:\n  def get(value: Float): Float = value\n",
-        ),
-        (
             "FloatFieldsAndConstructor",
             "class NumericBox(initialF: Float, initialD: Double):\n  private var f: Float = initialF\n  private var d: Double = initialD\n  def getF(): Float = f\n  def getD(): Double = d\n  def setD(value: Double): Unit = d = value\n",
-        ),
-        (
-            "FloatConstant",
-            "class Runner:\n  def floatValue(): Float = 1.5f\n",
-        ),
-        (
-            "DoubleConstant",
-            "class Runner:\n  def doubleValue(): Double = 3.5\n",
-        ),
-        (
-            "DoubleLocal",
-            "class Runner:\n  def roundTrip(value: Double): Double =\n    val saved: Double = value\n    saved\n",
-        ),
-        (
-            "FloatBranch",
-            "class Runner:\n  def choose(flag: Boolean, a: Float, b: Float): Float =\n    if flag then a else b\n",
-        ),
-        (
-            "DoubleLoop",
-            "class Runner:\n  def repeat(n: Int, first: Double, second: Double): Double =\n    var current: Double = first\n    var i = 0\n    while i < n do\n      current = second\n      i = i + 1\n    current\n",
         ),
     ] {
         let output = TestOutputDirectory::new(label);

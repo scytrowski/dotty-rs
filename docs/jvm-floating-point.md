@@ -69,9 +69,9 @@ an executable pinned compiler oracle.
 | StackMapTable projection | Branch frames emit `Float_variable_info` for Float and one `Double_variable_info` for each Double head/tail pair. Regression checks preserve real Top holes and omit the Double tail; a JDK 21 gate verifies and executes generated branch/loop methods, including mixed Long/Double and Float/Int locals. |
 | JVM source backend before #1536 | Canonical Float/Double types and bit-preserving literal constants project to `F`/`D` metadata, fields, method results, and parameter slots. The source integration test checks constructor `(FD)V`, methods `()F`, `()D`, `(IFDJ)D`, `(JDFZ)V`, and `(FDD)F`, including exact receiver-aware local slots. |
 
-The source integration test covers these isolated shapes so the current first
-failure is observable per shape rather than inferred from a partially emitted
-class:
+Before #1536, the source integration test covered these isolated shapes so the
+first failure was observable per shape rather than inferred from a partially
+emitted class:
 
 | Source shape | Current first failure |
 | --- | --- |
