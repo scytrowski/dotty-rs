@@ -1168,7 +1168,7 @@ fn resolve_accessor(
         for accessor in owner
             .accessors()
             .iter()
-            .filter(|candidate| candidate.source_field() == field && candidate.binding().is_some())
+            .filter(|candidate| candidate.source_field() == field)
         {
             if found.is_some() {
                 return Err(JvmCodegenError::InvalidJvmAccessorCallMetadata {
@@ -1194,11 +1194,35 @@ fn resolve_accessor(
     if symbol.owner != Some(accessor.owner()) || owner.identity().symbol() != accessor.owner() {
         return Err(issue(crate::JvmAccessorCallMetadataIssue::OwnerMismatch));
     }
-    let Some(binding) = accessor.binding() else {
-        return Ok(None);
-    };
-    if !owner.accessor_bindings().contains(&binding) {
-        return Err(issue(crate::JvmAccessorCallMetadataIssue::BindingMissing));
+    match accessor.origin() {
+        crate::JvmAccessorOrigin::ConstructorParameter(binding) => {
+            if !owner.accessor_bindings().contains(&binding) {
+                return Err(issue(crate::JvmAccessorCallMetadataIssue::BindingMissing));
+            }
+        }
+        crate::JvmAccessorOrigin::ClassBodyField(proof) => {
+            let planned_proof = unit
+                .classes
+                .iter()
+                .find(|plan| plan.class == accessor.owner())
+                .and_then(|plan| plan.fields.iter().find(|plan| plan.field == field))
+                .and_then(|plan| match plan.source_visibility {
+                    crate::JvmFieldSourceVisibility::PlainPublic(proof) => Some(proof),
+                    crate::JvmFieldSourceVisibility::PlainPrivate
+                    | crate::JvmFieldSourceVisibility::PrivateThis => None,
+                });
+            if proof.field() != field
+                || proof.class() != accessor.owner()
+                || proof.mutable() != accessor.is_mutable()
+                || symbol.origin != dotty_core::SymbolOrigin::Source(proof.source())
+                || symbol.visibility != dotty_core::symbols::Visibility::Public
+                || planned_proof != Some(proof)
+            {
+                return Err(issue(
+                    crate::JvmAccessorCallMetadataIssue::BodyFieldProofMismatch,
+                ));
+            }
+        }
     }
     let source_ty = match unit.store.symbols.info(field) {
         SymbolInfo::Complete(ty) => *ty,
