@@ -6740,6 +6740,24 @@ fn assert_source_failure(
     );
 }
 
+fn assert_source_batch_failure(
+    label: &str,
+    source: &str,
+    expected_stage: impl FnOnce(&PipelineFailure) -> bool,
+) {
+    let output = TestOutputDirectory::new(label);
+    let error = compile_planned_constructor_source(source, output.path())
+        .expect_err("unsupported source batch must fail before publishing classes");
+    assert!(
+        expected_stage(&error),
+        "{label} failed at an unexpected pipeline stage: {error:?}"
+    );
+    assert!(
+        output.class_files().is_empty(),
+        "{label} failure must not leave a partial class artifact"
+    );
+}
+
 #[test]
 fn resolves_real_source_constructor_calls_with_package_and_primitive_references() {
     let descriptors = resolve_source_constructor_calls(
@@ -16386,6 +16404,81 @@ fn discarded_double_values_fail_without_publishing_artifacts() {
             )
         },
     );
+}
+
+#[test]
+fn unsupported_float_double_source_cases_fail_at_their_first_stage_without_batch_artifacts() {
+    enum ExpectedFailure {
+        MethodBodyTypeMismatch,
+        UninitializedLocal,
+        MemberLookup,
+    }
+
+    let cases = [
+        (
+            "float-to-int",
+            "class Rejected { def narrow(value: Float): Int = value }",
+            ExpectedFailure::MethodBodyTypeMismatch,
+        ),
+        (
+            "float-to-double",
+            "class Rejected { def widen(value: Float): Double = value }",
+            ExpectedFailure::MethodBodyTypeMismatch,
+        ),
+        (
+            "double-to-long",
+            "class Rejected { def narrow(value: Double): Long = value }",
+            ExpectedFailure::MethodBodyTypeMismatch,
+        ),
+        (
+            "double-literal-to-float-return",
+            "class Rejected { def wrongTarget(): Float = 3.5 }",
+            ExpectedFailure::MethodBodyTypeMismatch,
+        ),
+        (
+            "uninitialized-double-local",
+            "class Rejected:\n  def missing(): Double =\n    var result: Double\n    result\n",
+            ExpectedFailure::UninitializedLocal,
+        ),
+        (
+            "float-addition",
+            "class Rejected { def add(left: Float, right: Float): Float = left + right }",
+            ExpectedFailure::MemberLookup,
+        ),
+        (
+            "float-comparison",
+            "class Rejected { def less(left: Float, right: Float): Boolean = left < right }",
+            ExpectedFailure::MemberLookup,
+        ),
+        (
+            "double-addition",
+            "class Rejected { def add(left: Double, right: Double): Double = left + right }",
+            ExpectedFailure::MemberLookup,
+        ),
+        (
+            "double-comparison",
+            "class Rejected { def less(left: Double, right: Double): Boolean = left < right }",
+            ExpectedFailure::MemberLookup,
+        ),
+    ];
+
+    for (label, invalid_class, expected_failure) in cases {
+        let source =
+            format!("class ValidBeforeFailure {{ def value(): Int = 1 }}\n{invalid_class}\n");
+        assert_source_batch_failure(label, &source, |failure| match expected_failure {
+            ExpectedFailure::MethodBodyTypeMismatch => matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::MethodBodyTypeMismatch { .. })
+            ),
+            ExpectedFailure::UninitializedLocal => matches!(
+                failure,
+                PipelineFailure::Typer(TyperError::LocalValueRightHandSideMissing { .. })
+            ),
+            ExpectedFailure::MemberLookup => {
+                matches!(failure, PipelineFailure::Typer(TyperError::MemberLookup(_)))
+            }
+        });
+    }
 }
 
 fn assert_method_reference(
