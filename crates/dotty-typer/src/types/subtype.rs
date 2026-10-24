@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use dotty_core::Namespace;
 use dotty_core::types::{ClassInfo, Type, TypeRefTarget};
 use dotty_core::{Constant, ScopeId, SymbolId, SymbolInfo, SymbolKind, SymbolOrigin, TypeId};
 
@@ -193,6 +194,15 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
         }
         if self.is_builtin_class(found) && self.is_builtin_class(expected) {
             return Ok(false);
+        }
+
+        let found_array_element = self.array_element(found)?;
+        let expected_array_element = self.array_element(expected)?;
+        if found_array_element.is_some() || expected_array_element.is_some() {
+            return match (found_array_element, expected_array_element) {
+                (Some(found), Some(expected)) => self.equivalent(found, expected, 0),
+                _ => Ok(false),
+            };
         }
 
         match (&found_node, &expected_node) {
@@ -429,6 +439,70 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 TypeRelationError::Normalization(TypeNormalizeError::InvalidType { ty })
             }
         })
+    }
+
+    /// Returns the element type for the JVM-array representation and the
+    /// canonical Scala `Array[T]` type. Scala's `Array` is invariant and maps
+    /// to JVM arrays, so the two representations conform only when their
+    /// element types are equivalent.
+    fn array_element(&mut self, ty: TypeId) -> Result<Option<TypeId>, TypeRelationError> {
+        let ty = self.normalize(ty)?;
+        match self.type_at(ty)?.clone() {
+            Type::JavaArray { element } => Ok(Some(element)),
+            Type::Applied { tycon, args } if args.len() == 1 => {
+                let tycon = self.normalize(tycon)?;
+                let Type::TypeRef {
+                    target: TypeRefTarget::Symbol(class),
+                    ..
+                } = self.type_at(tycon)?
+                else {
+                    return Ok(None);
+                };
+                if !self.typer.store.symbols.contains(*class) {
+                    return Err(TypeRelationError::UnknownClassSymbol { symbol: *class });
+                }
+                Ok(self.is_scala_array_class(*class).then_some(args[0]))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn is_scala_array_class(&self, class: SymbolId) -> bool {
+        let symbols = &self.typer.store.symbols;
+        if !symbols.contains(class) {
+            return false;
+        }
+        let declaration = symbols.get(class);
+        if declaration.kind != SymbolKind::Class
+            || declaration.name.namespace() != Namespace::Type
+            || self.typer.store.names.resolve(declaration.name.text()) != "Array"
+        {
+            return false;
+        }
+        let Some(package_id) = declaration.owner else {
+            return false;
+        };
+        if !symbols.contains(package_id) {
+            return false;
+        }
+        let package = symbols.get(package_id);
+        if package.kind != SymbolKind::Package
+            || package.name.namespace() != Namespace::Term
+            || self.typer.store.names.resolve(package.name.text()) != "scala"
+        {
+            return false;
+        }
+        let Some(root_id) = package.owner else {
+            return false;
+        };
+        if !symbols.contains(root_id) {
+            return false;
+        }
+        let root = symbols.get(root_id);
+        root.kind == SymbolKind::Package
+            && root.name.namespace() == Namespace::Term
+            && self.typer.store.names.resolve(root.name.text()).is_empty()
+            && root.owner.is_none()
     }
 
     fn is_class(&self, ty: TypeId, symbol: SymbolId) -> bool {
@@ -728,6 +802,7 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
                 children.push((tycon, true));
                 children.extend(args.into_iter().map(|argument| (argument, true)));
             }
+            Type::JavaArray { element } => children.push((element, true)),
             Type::Constant(
                 Constant::Unit
                 | Constant::Boolean(_)
@@ -841,6 +916,9 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             }
             (Type::ThisType { class: left }, Type::ThisType { class: right }) => Ok(left == right),
             (Type::Constant(left), Type::Constant(right)) => Ok(left == right),
+            (Type::JavaArray { element: left }, Type::JavaArray { element: right }) => {
+                self.equivalent(left, right, depth + 1)
+            }
             (
                 Type::Applied {
                     tycon: left_tycon,
@@ -880,7 +958,14 @@ impl<'typer, 'store> TypeRelation<'typer, 'store> {
             (Type::ByName { result: left }, Type::ByName { result: right }) => {
                 self.equivalent(left, right, depth + 1)
             }
-            _ => Ok(false),
+            _ => {
+                let left_array = self.array_element(left)?;
+                let right_array = self.array_element(right)?;
+                match (left_array, right_array) {
+                    (Some(left), Some(right)) => self.equivalent(left, right, depth + 1),
+                    _ => Ok(false),
+                }
+            }
         })();
         self.active_equivalent_pairs.remove(&pair);
         if let Ok(equivalent) = result {

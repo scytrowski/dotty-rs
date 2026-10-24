@@ -2329,6 +2329,60 @@ mod tests {
     }
 
     #[test]
+    fn canonical_scala_array_conforms_to_java_array_with_invariant_elements() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package scala; class Array[A]");
+        let array_class = class_symbol(&parsed, &store, &index, source, "Array");
+        let scala_package = packages.symbol(&["scala"]).unwrap();
+        assert_eq!(store.symbols.get(array_class).owner, Some(scala_package));
+
+        let char_array =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.char]);
+        let byte_array =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.byte]);
+        let java_char_array = store.types.alloc(Type::JavaArray {
+            element: definitions.char,
+        });
+        let java_byte_array = store.types.alloc(Type::JavaArray {
+            element: definitions.byte,
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(typer.conforms(char_array, java_char_array).unwrap());
+        assert!(!typer.conforms(char_array, java_byte_array).unwrap());
+        assert!(!typer.conforms(byte_array, java_char_array).unwrap());
+    }
+
+    #[test]
+    fn a_same_named_array_outside_scala_does_not_conform_to_a_java_array() {
+        let (parsed, mut store, packages, definitions, index, source) =
+            parse_and_name("package custom; class Array[A]");
+        let array_class = class_symbol(&parsed, &store, &index, source, "Array");
+        let array_type =
+            applied_class_type(&mut store, definitions, array_class, &[definitions.char]);
+        let java_char_array = store.types.alloc(Type::JavaArray {
+            element: definitions.char,
+        });
+        let mut typer = SourceTyper::new(
+            &parsed.ast,
+            source,
+            &index,
+            &mut store,
+            definitions,
+            &packages,
+        );
+
+        assert!(!typer.conforms(array_type, java_char_array).unwrap());
+    }
+
+    #[test]
     fn external_applied_generic_subtyping_is_explicitly_deferred() {
         let (arena, mut store, packages, definitions) = setup();
         let external = symbol(&mut store, SymbolKind::Class, SymbolInfo::Missing);

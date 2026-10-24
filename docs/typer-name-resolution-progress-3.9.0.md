@@ -2,6 +2,43 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Latest increment: Scala and JVM array conformance
+
+This increment starts from `main` at `844c8f4965992504cfa21598309d6650c90d2b9d`,
+after #1591. It allows the canonical `scala.Array[T]` and `Type::JavaArray`
+representations to conform when their element types are equivalent. Element
+types remain invariant. The matcher verifies the canonical `scala.Array` class
+by its type namespace and package owner chain, including classpath-loaded
+symbols whose `scala` package is absent from the source package registry.
+Unrelated classes named `Array` do not receive this relation.
+
+Focused unit controls cover `Array[Char]` against `char[]`, reject mismatched
+element types, and reject `custom.Array[Char]`. A Scala 3.9.0 compiler oracle
+accepts passing `Array[Char]` to a Java `char[]` parameter and rejects
+`Array[Byte]` at that call site.
+
+The deterministic `package-term` comparison uses the same 60 files and 369
+methods before and after this change. Both runs typed zero complete methods and
+had no parser or namer failures. Three rows move forward without regressions:
+
+| First blocker | Before (`844c8f`) | After this increment |
+| --- | ---: | ---: |
+| `ApplicationArgumentConformanceUnsupported` | 4 | 1 |
+| `MemberNotFound` | 3 | 6 |
+| `SymbolResolution` | 91 | 91 |
+| All other first blockers | 271 | 271 |
+| Fully typed methods | 0 | 0 |
+
+`InlineInfoAttribute.scala#tree=212` (`nextByte`), `#tree=226` (`nextUTF8`),
+and `#tree=239` (`nextShort`) now pass the array argument check. Their enclosing
+`read` attempt next stops at `MemberNotFound` for `==` in `version == 1`.
+This increment does not claim a fully typed real method. Per-row results are in
+[`typer-name-resolution-1566-array-conformance-3.9.0.tsv`](typer-name-resolution-1566-array-conformance-3.9.0.tsv).
+
+The report below records earlier #1566 increments and their historical
+baselines; its “current” labels refer to those recorded runs, not this latest
+array-conformance result.
+
 ## Baselines and increments
 
 The cumulative comparison starts from `main` at
@@ -12,9 +49,10 @@ accepted `Paths.get("input.txt")` after importing `java.nio.file.Paths`, and rej
 `Paths` as a value and instance-method selection through the class. Those
 results describe that earlier increment, not this PR.
 
-The fresh pre-increment baseline for this PR is `main` at
+The historical pre-increment baseline for the mutable-local `+=` change is
+`main` at
 `bfc4759ea7d4eca10767ef5021ffc8386178c4a5`; it includes #1586, #1577, #1571,
-and #1574. This PR adds a bounded fallback for `+=` on a mutable local `Int`:
+and #1574. That increment added a bounded fallback for `+=` on a mutable local `Int`:
 if direct `+=` member lookup misses and no visible extension candidate takes
 precedence, it types `value + rhs` and lowers that result to assignment while
 preserving the local symbol identity. The pinned inputs are Scala revision
@@ -25,12 +63,12 @@ preserving the local symbol identity. The pinned inputs are Scala revision
 
 The pinned `package-term` cohort covers 60 files and 369 real methods. The
 fresh pre-increment baseline and latest run each attempted all 369 methods;
-both typed zero methods. This PR advances three rows with no first-blocker
-regressions. The normalized reports and resolver sidecars for the latest run
+both typed zero methods. That earlier increment advanced three rows with no
+first-blocker regressions. The normalized reports and resolver sidecars for that run
 matched byte-for-byte across two runs; neither run had parser or namer
 failures.
 
-### This PR: `bfc4759` to current
+### Historical `+=` comparison: `bfc4759` to that increment
 
 | First blocker | Pre-increment rows | Current rows |
 | --- | ---: | ---: |
@@ -46,16 +84,17 @@ failures.
 | `InlineInfoAttribute.scala#tree=226` (`nextUTF8`) | `MemberNotFound(+=)` | `SymbolResolution` (`scala.Array` parent) | `#tree=420` |
 | `InlineInfoAttribute.scala#tree=239` (`nextShort`) | `MemberNotFound(+=)` | `SymbolResolution` (`scala.Array` parent) | `#tree=420` |
 
-The rewrite types the mutable local integer update in each method. Their next
-failure is loading `scala.Array`, whose TASTy parent `java.io.Serializable`
-remains unresolved. The methods are still blocked, so the issue's stretch goal
-of fully typing one previously blocked real method remains unmet.
+The rewrite types the mutable local integer update in each method. At that
+point, their next failure was loading `scala.Array`, whose TASTy parent
+`java.io.Serializable` remained unresolved. The latest increment above moves
+past that boundary but still does not fully type these methods.
 
-### Cumulative: historical `e06c4ee` to current
+### Historical cumulative snapshot: `e06c4ee` to the `bfc4759` increment
 
-Four rows advance across all increments captured in the compact TSV: one in
-merged #1577 and three in this PR. This table compares the historical baseline
-with the latest result; it is not the `bfc4759` pre-increment comparison above.
+Four rows advanced across the earlier increments captured in the compact TSV:
+one in merged #1577 and three in the mutable-local `+=` change. This table
+compares the historical baseline with the result at that earlier increment;
+it is not the `bfc4759` pre-increment comparison above.
 
 | First blocker | Historical baseline rows | Current rows |
 | --- | ---: | ---: |
@@ -65,14 +104,15 @@ with the latest result; it is not the `bfc4759` pre-increment comparison above.
 | All other first blockers | 265 | 265 |
 | Fully typed methods | 0 | 0 |
 
-The complete per-method before/after reconciliation is in
+The complete per-method before/after reconciliation for that historical
+snapshot is in
 [`typer-name-resolution-1566-cohort-3.9.0.tsv`](typer-name-resolution-1566-cohort-3.9.0.tsv).
 Its `before_*` columns refer to the historical `e06c4ee` baseline; its
 `after_*` columns refer to the current implementation.
 The earlier default Scala package-term increment remains recorded in
 [`typer-name-resolution-progress-3.9.0.tsv`](typer-name-resolution-progress-3.9.0.tsv).
 
-## Next bounded blocker
+## Previously recorded bounded blockers
 
 The next failure in `expandArg` is Scala's `String.stripPrefix` extension
 method. The pinned Scala source defines `Predef.augmentString` with the alias
@@ -85,7 +125,7 @@ scala/Predef$String`. Replacing that error with `java.lang.String` by spelling
 would manufacture a type instead of resolving the alias, so no implicit-view
 call is synthesized. Correct support needs alias-aware TASTy member-type
 resolution; general implicit search remains outside this bounded increment.
-The three newly advanced methods encounter a separate classpath boundary:
+At that time, the three advanced methods encountered a separate classpath boundary:
 decoding `scala.Array` fails on its selected-qualified `java.io.Serializable`
 supertype reference. The loader leaves semantic references unresolved when it
 cannot prove their owner path; this increment does not add a spelling-based
@@ -121,6 +161,8 @@ tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
   --verify-determinism target/issue-1566-latest-baseline.md
 ```
 
-The deterministic latest implementation audit used the same command with
-`target/issue-1566-next.md` as the output and
-`target/issue-1566-next-runs` as `DOTTY_AUDIT_TMP_ROOT`.
+The deterministic latest audit for the array-conformance increment used the
+same command with `target/issue-1566-array-audit.md` as the output and
+`target/issue-1566-array-audit-runs` as `DOTTY_AUDIT_TMP_ROOT`. It ran after
+removing temporary diagnostics; the normalized reports and resolver sidecars
+matched across runs.
