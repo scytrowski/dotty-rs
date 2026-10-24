@@ -2950,8 +2950,8 @@ fn constructor_accessor_getters_and_setters_emit_verified_abi_methods() {
 
 #[test]
 fn constructor_accessor_source_selections_record_current_typer_boundary() {
-    let source_text = "class Measurement(val id: Int, var value: Double) { def externalId(m: Measurement): Int = m.id; def externalValue(m: Measurement): Double = m.value; def externalSet(m: Measurement): Unit = m.value = 42.0; def ownId: Int = this.id; def ownValue: Double = this.value; def forwarded(m: Measurement): Int = accept(m.id); def accept(value: Int): Int = value }";
-    with_source(source_text, |ast, source, index, _, typer| {
+    let source_text = "class Measurement(val id: Int, var value: Double) { def externalId(m: Measurement): Int = m.id; def externalValue(m: Measurement): Double = m.value; def externalSet(m: Measurement): Unit = m.value = 42.0; def ownId: Int = this.id; def ownValue: Double = this.value; def unqualifiedValue: Double = value; def ownSet(next: Double): Unit = value = next; def stableReceiverSet(next: Double): Unit = { val m = this; m.value = next }; def immutableSet(next: Int): Unit = this.id = next; def forwarded(m: Measurement): Int = accept(m.id); def accept(value: Int): Int = value }";
+    with_source(source_text, |ast, source, index, definitions, typer| {
         let class = symbol_named(ast, index, source, typer, "Measurement");
         let methods = [
             "externalId",
@@ -2959,6 +2959,9 @@ fn constructor_accessor_source_selections_record_current_typer_boundary() {
             "externalSet",
             "ownId",
             "ownValue",
+            "unqualifiedValue",
+            "ownSet",
+            "stableReceiverSet",
             "forwarded",
         ];
         for name in methods {
@@ -3016,7 +3019,17 @@ fn constructor_accessor_source_selections_record_current_typer_boundary() {
                 .unwrap_or_else(|| panic!("missing source field {name}"));
             index.symbol_at(source, source_tree).unwrap()
         };
-        let expected_selections = [("id", 3), ("value", 3)];
+        for (name, mutable) in [("id", false), ("value", true)] {
+            let field = field_for(name);
+            let field_info = typer.store().symbols.get(field);
+            assert_eq!(field_info.owner, Some(class), "{name} field owner");
+            assert_eq!(
+                field_info.flags.contains(SymbolFlags::MUTABLE),
+                mutable,
+                "{name} source mutability"
+            );
+        }
+        let expected_selections = [("id", 4), ("value", 4)];
         for (name, expected_count) in expected_selections {
             let expected_field = field_for(name);
             let selections = ast
@@ -3035,13 +3048,16 @@ fn constructor_accessor_source_selections_record_current_typer_boundary() {
                 expected_count,
                 "source selection count for {name}"
             );
+            let mut typed_selection_count = 0;
             for selection in selections {
-                let typed = typer
-                    .source_typed_index()
-                    .get(source, selection)
-                    .unwrap_or_else(|| {
-                        panic!("source selection {name} should have typed identity")
-                    });
+                let Some(typed) = typer.source_typed_index().get(source, selection) else {
+                    assert_eq!(
+                        name, "id",
+                        "only the rejected immutable assignment is untyped"
+                    );
+                    continue;
+                };
+                typed_selection_count += 1;
                 assert!(
                     matches!(
                         typer.store().types.get(typer.typed_ast().get(typed).ty),
@@ -3050,8 +3066,96 @@ fn constructor_accessor_source_selections_record_current_typer_boundary() {
                     ),
                     "source selection {name} must designate the canonical field symbol"
                 );
+                let TreeKind::Select(source_selection) = &ast.get(selection).kind else {
+                    unreachable!()
+                };
+                assert!(
+                    typer
+                        .source_typed_index()
+                        .get(source, source_selection.qualifier)
+                        .is_some(),
+                    "source receiver for {name} must retain its typed-tree mapping"
+                );
             }
+            assert_eq!(
+                typed_selection_count,
+                if name == "id" {
+                    expected_count - 1
+                } else {
+                    expected_count
+                },
+                "number of successfully typed source selections for {name}"
+            );
         }
+
+        let (_, _, unqualified_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, class, "unqualifiedValue");
+        let unqualified_typed = typer
+            .source_typed_index()
+            .get(source, unqualified_rhs)
+            .expect("unqualified field read must retain a typed-tree mapping");
+        let expected_value_field = field_for("value");
+        assert!(
+            matches!(
+                typer.store().types.get(typer.typed_ast().get(unqualified_typed).ty),
+                Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                    if *symbol == expected_value_field
+            ),
+            "unqualified field read must designate the canonical field symbol"
+        );
+
+        for (method_name, target_name) in [
+            ("externalSet", "value"),
+            ("ownSet", "value"),
+            ("stableReceiverSet", "value"),
+        ] {
+            let (_, _, rhs) = method_tree_and_rhs(ast, index, source, typer, class, method_name);
+            let assignment_source = match &ast.get(rhs).kind {
+                TreeKind::Block(block) => block.expr,
+                _ => rhs,
+            };
+            let typed_rhs = typer
+                .source_typed_index()
+                .get(source, assignment_source)
+                .unwrap_or_else(|| panic!("{method_name} assignment must have a typed mapping"));
+            let TreeKind::Assign(assign) = &typer.typed_ast().get(typed_rhs).kind else {
+                panic!("{method_name} must produce a typed assignment")
+            };
+            let expected_field = field_for(target_name);
+            let lhs_type = typer.typed_ast().get(assign.lhs).ty;
+            assert!(
+                matches!(
+                    typer.store().types.get(lhs_type),
+                    Type::TermRef { target: TermRefTarget::Symbol(symbol), .. }
+                        if *symbol == expected_field
+                ),
+                "{method_name} assignment must target the canonical var field"
+            );
+            assert_eq!(
+                typer.typed_ast().get(typed_rhs).ty,
+                definitions.unit,
+                "{method_name} assignment result must be Unit"
+            );
+        }
+
+        let (_, _, immutable_rhs) =
+            method_tree_and_rhs(ast, index, source, typer, class, "immutableSet");
+        if !matches!(ast.get(immutable_rhs).kind, TreeKind::Assign(_)) {
+            panic!("immutableSet must contain a source assignment")
+        }
+        let immutable_field = field_for("id");
+        let (immutable_method, _, _) =
+            method_tree_and_rhs(ast, index, source, typer, class, "immutableSet");
+        typer.complete_symbol(immutable_method).unwrap();
+        let context = typer.expression_context_for(immutable_method).unwrap();
+        assert!(
+            matches!(
+                typer.type_expression(immutable_rhs, context),
+                Err(dotty_typer::TyperError::AssignmentTargetImmutable { target, .. })
+                    if target == immutable_field
+            ),
+            "assigning to the immutable accessor must stop at AssignmentTargetImmutable"
+        );
     });
 }
 
