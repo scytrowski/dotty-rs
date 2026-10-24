@@ -67,7 +67,7 @@ an executable pinned compiler oracle.
 | Linear bytecode analysis | Typed `fconst`/`dconst`, Float `ldc`, Double `ldc2_w`, F/D locals, and F/D returns are modeled and analyzed. Descriptor-derived parameter/local sizes, stack slots, exact kinds, Double heads/tails, overlapping stores, and typed wrong-return errors have focused regression tests. |
 | CFG analysis | CFG states now keep Float separate from Integer and Double separate from Long. Tests cover `(ZFF)F` and `(ZDD)D` branch joins, exact parameter slots, Double pair-aware locals and overlaps, Float/Int and Double/Long stack rejection, and an Int-controlled Double local loop backedge. |
 | StackMapTable projection | Branch frames emit `Float_variable_info` for Float and one `Double_variable_info` for each Double head/tail pair. Regression checks preserve real Top holes and omit the Double tail; a JDK 21 gate verifies and executes generated branch/loop methods, including mixed Long/Double and Float/Int locals. |
-| JVM source backend | Canonical Float/Double types and bit-preserving literal constants project to `F`/`D` metadata, fields, method results, and parameter slots. The source integration test checks constructor `(FD)V`, methods `()F`, `()D`, `(IFDJ)D`, `(JDFZ)V`, and `(FDD)F`, including exact receiver-aware local slots. Float/Double bodies remain unsupported and fail with typed errors before artifacts are published. |
+| JVM source backend before #1536 | Canonical Float/Double types and bit-preserving literal constants project to `F`/`D` metadata, fields, method results, and parameter slots. The source integration test checks constructor `(FD)V`, methods `()F`, `()D`, `(IFDJ)D`, `(JDFZ)V`, and `(FDD)F`, including exact receiver-aware local slots. |
 
 The source integration test covers these isolated shapes so the current first
 failure is observable per shape rather than inferred from a partially emitted
@@ -84,12 +84,26 @@ class:
 | Float `if` join | Method signature projects; Float CFG/source lowering remains unsupported with no class artifact |
 | Double mutable local across an Int-controlled loop | Method signature projects; Double local/loop lowering remains unsupported with no class artifact |
 
-The fixture matrix checks metadata projection before confirming that actual
-Float/Double body operations fail without partial artifacts. The separate
-Typer test checks only the six literal values and canonical widened types
-listed above. Together these tests pin source literal semantics, canonical
-metadata identity, descriptors, and local slots without claiming successful
-Float/Double body code generation.
+The fixture matrix above records the pre-#1536 boundary. Issue #1536 adds the
+bounded straight-line source lowering described below; it does not add fields,
+constructors, calls, arithmetic, conversions, or CFG expansion.
+
+## Bounded source lowering in #1536
+
+The source backend lowers Float and Double literals, canonical method
+parameters, initialized local values, mutable local assignments, and implicit
+or explicit method returns. Literal emission preserves `Constant::FloatBits`
+and `Constant::DoubleBits`, including signed zero, through the class-file
+constant pool. Float locals use one slot and Double locals use a checked
+head/tail pair. Discarded Float block values use category-one `pop`; discarded
+Double values fail with a typed error because category-two stack popping is
+outside this increment. Unsupported shapes fail before class artifacts are
+published. The end-to-end `FloatDoubleValues.scala` regression checks exact
+descriptors, opcodes, raw constant-pool bits, Double local widths, deterministic
+class bytes across fresh sessions, and Java execution under `-Xverify:all` when
+the JDK 21 gate is available. Runtime checks cover signed zero through
+parameters/locals/assignments and NaN classification without promising that
+the JVM preserves a NaN payload through arbitrary execution.
 
 ## JVMS 21 contract for follow-up implementation
 

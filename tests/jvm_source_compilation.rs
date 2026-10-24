@@ -1720,6 +1720,218 @@ fn long_literals_parameters_locals_and_returns_verify_and_execute() {
 }
 
 #[test]
+fn float_double_literals_parameters_locals_and_returns_verify_and_execute() {
+    let first_output = TestOutputDirectory::new("float-double-values-first");
+    let second_output = TestOutputDirectory::new("float-double-values-second");
+    let first = compile_fixture("FloatDoubleValues.scala", first_output.path()).unwrap();
+    let second = compile_fixture("FloatDoubleValues.scala", second_output.path()).unwrap();
+
+    assert_eq!(first.class.internal_name(), "Runner");
+    assert_eq!(first.class.bytes(), second.class.bytes());
+    let mut reader = Reader::new(first.class.bytes());
+    let class = ClassFile::decode(&mut reader).expect("Runner should decode completely");
+    assert!(reader.is_at_end());
+    class
+        .validate_references()
+        .expect("Float/Double constant-pool references are valid");
+    let methods = methods_with_descriptors(&class);
+    assert_eq!(
+        methods,
+        [
+            ("<init>".to_owned(), "()V".to_owned()),
+            ("floatZero".to_owned(), "()F".to_owned()),
+            ("floatOne".to_owned(), "()F".to_owned()),
+            ("floatTwo".to_owned(), "()F".to_owned()),
+            ("doubleZero".to_owned(), "()D".to_owned()),
+            ("doubleOne".to_owned(), "()D".to_owned()),
+            ("floatConstant".to_owned(), "()F".to_owned()),
+            ("doubleConstant".to_owned(), "()D".to_owned()),
+            ("identityFloat".to_owned(), "(F)F".to_owned()),
+            ("identityDouble".to_owned(), "(D)D".to_owned()),
+            ("roundTripFloat".to_owned(), "(F)F".to_owned()),
+            ("roundTripDouble".to_owned(), "(D)D".to_owned()),
+            ("reassignedFloat".to_owned(), "(FF)F".to_owned()),
+            ("reassignedDouble".to_owned(), "(DD)D".to_owned()),
+            ("mixed".to_owned(), "(FDJ)D".to_owned()),
+            ("explicitFloat".to_owned(), "(F)F".to_owned()),
+            ("explicitDouble".to_owned(), "(D)D".to_owned()),
+            ("discardedFloat".to_owned(), "(F)F".to_owned()),
+        ]
+    );
+
+    assert_eq!(emitted_method_code(&class, "floatZero"), [0x0b, 0xae]);
+    assert_eq!(emitted_method_code(&class, "floatOne"), [0x0c, 0xae]);
+    assert_eq!(emitted_method_code(&class, "floatTwo"), [0x0d, 0xae]);
+    assert_eq!(emitted_method_code(&class, "doubleZero"), [0x0e, 0xaf]);
+    assert_eq!(emitted_method_code(&class, "doubleOne"), [0x0f, 0xaf]);
+    for (name, tag, expected_bits) in [
+        ("floatConstant", 4, 0x3fc0_0000u64),
+        ("doubleConstant", 6, 0x400c_0000_0000_0000u64),
+    ] {
+        let code = emitted_method_code(&class, name);
+        let index = match (tag, code[0]) {
+            (4, 0x12) => u16::from(code[1]),
+            (4, 0x13) | (6, 0x14) => u16::from_be_bytes([code[1], code[2]]),
+            _ => panic!("{name} must use the correct category-specific constant load: {code:?}"),
+        };
+        match class.constant_pool.get(ConstantPoolIndex(index)) {
+            Some(ConstantPoolEntry::Float(value)) if tag == 4 => {
+                assert_eq!(u64::from(value.to_bits()), expected_bits, "{name} raw bits");
+            }
+            Some(ConstantPoolEntry::Double(value)) if tag == 6 => {
+                assert_eq!(value.to_bits(), expected_bits, "{name} raw bits");
+            }
+            found => panic!("{name} resolves to the wrong constant-pool entry: {found:?}"),
+        }
+        assert_eq!(*code.last().unwrap(), if tag == 4 { 0xae } else { 0xaf });
+    }
+    assert_eq!(emitted_method_code(&class, "identityFloat"), [0x23, 0xae]);
+    assert_eq!(emitted_method_code(&class, "identityDouble"), [0x27, 0xaf]);
+    assert_eq!(
+        emitted_method_code(&class, "roundTripFloat"),
+        [0x23, 0x45, 0x24, 0xae]
+    );
+    assert_eq!(
+        emitted_method_code(&class, "roundTripDouble"),
+        [0x27, 0x4a, 0x29, 0xaf]
+    );
+    assert_eq!(
+        emitted_method_code(&class, "reassignedFloat"),
+        [0x23, 0x46, 0x24, 0x46, 0x25, 0xae]
+    );
+    assert_eq!(
+        emitted_method_code(&class, "reassignedDouble"),
+        [0x27, 0x39, 5, 0x29, 0x39, 5, 0x18, 5, 0xaf]
+    );
+    assert_eq!(emitted_method_code(&class, "explicitFloat"), [0x23, 0xae]);
+    assert_eq!(emitted_method_code(&class, "explicitDouble"), [0x27, 0xaf]);
+    let discarded_float = emitted_method_code(&class, "discardedFloat");
+    assert!(
+        discarded_float.contains(&0x57),
+        "Float discard uses category-one pop"
+    );
+    assert_eq!(*discarded_float.last().unwrap(), 0xae);
+
+    for (name, max_stack, max_locals) in [
+        ("identityFloat", 1, 2),
+        ("identityDouble", 2, 3),
+        ("roundTripFloat", 1, 3),
+        ("roundTripDouble", 2, 5),
+        ("reassignedFloat", 1, 4),
+        ("reassignedDouble", 2, 7),
+        ("mixed", 2, 10),
+    ] {
+        assert_eq!(code_max_stack(&class, name), max_stack, "{name} max_stack");
+        assert_eq!(
+            code_max_locals(&class, name),
+            max_locals,
+            "{name} max_locals"
+        );
+    }
+
+    if !require_jdk_or_skip() {
+        return;
+    }
+    let classpath = first_output.path().to_str().expect("UTF-8 output path");
+    let javap = Command::new("javap")
+        .args(["-v", "-c", "-classpath", classpath, "Runner"])
+        .output()
+        .expect("start javap");
+    assert!(
+        javap.status.success(),
+        "javap rejected Float/Double Runner\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for expected in [
+        "descriptor: ()F",
+        "descriptor: ()D",
+        "descriptor: (F)F",
+        "descriptor: (D)D",
+        "descriptor: (FF)F",
+        "descriptor: (DD)D",
+        "fload",
+        "dload",
+        "fstore",
+        "dstore",
+        "freturn",
+        "dreturn",
+        "ldc",
+        "ldc2_w",
+    ] {
+        assert!(
+            javap_output.contains(expected),
+            "javap omitted {expected:?}:\n{javap_output}"
+        );
+    }
+    let harness = first_output.path().join("FloatDoubleValuesHarness.java");
+    fs::write(
+        &harness,
+        r#"public final class FloatDoubleValuesHarness {
+  private static void check(boolean ok, String label) {
+    if (!ok) throw new AssertionError(label);
+  }
+  public static void main(String[] args) {
+    Runner runner = new Runner();
+    check(Float.floatToRawIntBits(runner.floatZero()) == 0x00000000, "float +0");
+    check(Float.floatToRawIntBits(runner.floatOne()) == 0x3f800000, "float 1");
+    check(Float.floatToRawIntBits(runner.floatTwo()) == 0x40000000, "float 2");
+    check(Double.doubleToRawLongBits(runner.doubleZero()) == 0L, "double +0");
+    check(Double.doubleToRawLongBits(runner.doubleOne()) == 0x3ff0000000000000L, "double 1");
+    check(Float.floatToRawIntBits(runner.floatConstant()) == 0x3fc00000, "float CP bits");
+    check(Double.doubleToRawLongBits(runner.doubleConstant()) == 0x400c000000000000L, "double CP bits");
+    float negativeZeroF = Float.intBitsToFloat(0x80000000);
+    double negativeZeroD = Double.longBitsToDouble(0x8000000000000000L);
+    check(Float.floatToRawIntBits(runner.roundTripFloat(negativeZeroF)) == 0x80000000, "float -0 local");
+    check(Float.floatToRawIntBits(runner.reassignedFloat(1.5f, negativeZeroF)) == 0x80000000, "float -0 assignment");
+    check(Double.doubleToRawLongBits(runner.roundTripDouble(negativeZeroD)) == 0x8000000000000000L, "double -0 local");
+    check(Double.doubleToRawLongBits(runner.reassignedDouble(3.5d, negativeZeroD)) == 0x8000000000000000L, "double -0 assignment");
+    check(Float.isNaN(runner.roundTripFloat(Float.intBitsToFloat(0x7fc00042))), "float NaN");
+    check(Double.isNaN(runner.roundTripDouble(Double.longBitsToDouble(0x7ff8000000000042L))), "double NaN");
+    check(runner.identityFloat(-17.25f) == -17.25f && runner.identityDouble(-19.5d) == -19.5d, "parameters");
+    check(runner.mixed(1.5f, 3.5d, Long.MIN_VALUE) == 3.5d, "mixed slots");
+    check(runner.explicitFloat(-2.5f) == -2.5f && runner.explicitDouble(-4.25d) == -4.25d, "explicit returns");
+    check(runner.discardedFloat(8.0f) == 1.5f, "discarded Float");
+    System.out.println("Float/Double values ok");
+  }
+}
+"#,
+    )
+    .expect("write FloatDoubleValuesHarness.java");
+    let javac = Command::new("javac")
+        .args(["-classpath", classpath, "-d", classpath])
+        .arg(&harness)
+        .output()
+        .expect("start javac");
+    assert!(
+        javac.status.success(),
+        "javac rejected FloatDoubleValuesHarness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let java = Command::new("java")
+        .args([
+            "-Xverify:all",
+            "-classpath",
+            classpath,
+            "FloatDoubleValuesHarness",
+        ])
+        .output()
+        .expect("start JVM verifier");
+    assert!(
+        java.status.success(),
+        "java -Xverify:all rejected Float/Double Runner\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&java.stdout),
+        String::from_utf8_lossy(&java.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&java.stdout).trim(),
+        "Float/Double values ok"
+    );
+}
+
+#[test]
 fn discarded_long_values_remain_unsupported_and_arithmetic_fails_in_typer() {
     let output = TestOutputDirectory::new("LongDiscard.scala");
     let error = compile_source(
@@ -15450,6 +15662,23 @@ fn unsupported_real_field_and_constructor_sources_fail_without_artifacts() {
             )
         });
     }
+}
+
+#[test]
+fn discarded_double_values_fail_without_publishing_artifacts() {
+    assert_source_failure(
+        "discarded-double-value",
+        "class DoubleDiscard { def twice(value: Double): Double = { value; value } }",
+        |failure| {
+            matches!(
+                failure,
+                PipelineFailure::Codegen(JvmCodegenError::UnsupportedTypedExpression {
+                    node: "discarded category-two value requires category-two stack operation",
+                    ..
+                })
+            )
+        },
+    );
 }
 
 fn assert_method_reference(

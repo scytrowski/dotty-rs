@@ -451,7 +451,7 @@ lexer, parser, namer, typer, JVM backend, and JDK 21+ runtime. Its Java harness
 checks arithmetic overflow, signed comparison boundaries, divide-by-zero
 exceptions, and repeated `sumTo` loop execution with `java -Xverify:all`.
 General Scala library lowering, Long arithmetic/comparison outside the bounded
-call and control-flow subset, Float/Double, Java classpath loading,
+call and control-flow subset, Float/Double fields, calls, and control flow, Java classpath loading,
 TASTy emission, the full Scala ABI, universal equality, and arbitrary
 reference-bearing calls remain outside this subset.
 
@@ -548,11 +548,17 @@ frontend dependency boundary while rejecting mixed source/typed roots.
 
 Formal parameter identities stay in the plan's explicit order and are checked
 against the canonical method owner, completed parameter info, and descriptor
-types. Instance local slot zero is reserved for `this`; `Int` and `Boolean`
-parameters occupy one slot and `Long` occupies two, beginning at slot one for
-instance methods. Long literals, parameters, locals, assignments, and returns
-use category-correct `lconst`/`ldc2_w`, `lload`, `lstore`, and `lreturn`
-instructions in straight-line method bodies. Private instance Long fields use
+types. Instance local slot zero is reserved for `this`; `Int`, `Boolean`, and
+`Float` parameters occupy one slot, while `Long` and `Double` occupy two,
+beginning at slot one for instance methods. Long literals, parameters, locals,
+assignments, and returns use category-correct `lconst`/`ldc2_w`, `lload`,
+`lstore`, and `lreturn` instructions in straight-line method bodies. Float and
+Double literals use raw-bit constants, and their parameters, initialized
+locals, mutable local assignments, and method returns use `fload`/`fstore`/
+`freturn` and `dload`/`dstore`/`dreturn`. Float is category one; Double uses
+two local/stack slots. Discarded Float expressions use `pop`; discarded Double
+expressions remain unsupported because this subset has no category-two pop.
+Private instance Long fields use
 descriptor `J`; constructor initializers, field reads, and mutable field writes
 preserve their two-slot stack and local behavior. Descriptor validation
 enforces the 255-unit JVM parameter limit including the instance receiver.
@@ -561,7 +567,7 @@ calls preserve source argument order and exact planned method owner/descriptor;
 Long results keep their two-slot stack width through returns and `If` joins.
 Long local updates may cross a loop backedge only when the initialized
 head/tail pair agrees at the header. Long arithmetic/comparisons, implicit
-conversions, and discarded Long expressions remain unsupported.
+conversions, and discarded Long or Double expressions remain unsupported.
 
 `JvmCompilationUnit::resolve_same_class_call` accepts a complete typed
 `Apply` tree plus the planned caller class and method. It resolves only a
