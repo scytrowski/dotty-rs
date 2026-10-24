@@ -61,14 +61,18 @@ error later in each method.
 
 The exact method identities and next blockers are in
 [`typer-name-resolution-progress-3.9.0.tsv`](typer-name-resolution-progress-3.9.0.tsv).
-For `CommandLineParser.scala#tree=397` (`tokenize`), the next blocker is
-`LocalValueConformanceUnsupported` at the inferred local `accum`. The other
-remaining `CommandLineParser.scala#tree=498` (`expandArg`) blocker is still
-`TermNameNotFound` at `paths`.
+At attempt root `CommandLineParser.scala#tree=397` (`tokenize`), 13 method rows
+now stop at `LocalValueConformanceUnsupported` for inferred local `accum`. One
+remaining method is `CommandLineParser.scala#tree=467` (`stripComment`); its
+attempt at outer root `tree=498` (`expandArg`) still reports
+`TermNameNotFound` for `paths`. The other remaining name blocker belongs to
+`BTypeLoader.scala#tree=1019` (`dropModule`) and occurs at attempt root
+`tree=1079`.
 
-In the separate three-file focused smoke audit, `StringParsers.scala#tree=129`
-now resolves `scala.None`. That method advances from `TermNameNotFound` to
-`MemberNotFound`, so it also remains untyped.
+In the separate three-file focused smoke audit, local method
+`StringParsers.scala#tree=123` (`rec`) now resolves `scala.None` at attempt root
+`tree=129`. The method advances from `TermNameNotFound` to `MemberNotFound`, so
+it also remains untyped.
 
 ## Oracle and audit commands
 
