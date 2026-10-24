@@ -260,17 +260,30 @@ impl SourceTyper<'_> {
                 )
             }
             TreeKind::Select(selection) if selection.name.is_term() => {
-                let qualifier = self.type_expression_inner(
+                let qualifier_candidate = self.type_selection_qualifier(
                     selection.qualifier,
                     context,
+                    function_tree.index(),
+                    function_node.position,
                     info_journal,
                     new_mappings,
                 )?;
+                let qualifier = if let Some(qualifier) = qualifier_candidate {
+                    qualifier
+                } else {
+                    self.type_expression_inner(
+                        selection.qualifier,
+                        context,
+                        info_journal,
+                        new_mappings,
+                    )?
+                };
                 let receiver_type = self.typed_arena.get(qualifier).ty;
                 let receiver =
                     self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
                 let receiver_view = self.this_type_receiver_view(receiver)?;
-                if self.any_ref_identity_operator_name(selection.name) {
+                let java_class_qualifier = self.is_java_class_qualifier(qualifier);
+                if !java_class_qualifier && self.any_ref_identity_operator_name(selection.name) {
                     let Some(symbol) =
                         self.any_ref_identity_symbol_for_receiver(receiver_view, selection.name)
                     else {
@@ -331,7 +344,7 @@ impl SourceTyper<'_> {
                         },
                     )
                 } else {
-                    let members = match self.lookup_overload_members_journaled(
+                    let mut members = match self.lookup_overload_members_journaled(
                         receiver_view,
                         selection.name,
                         info_journal,
@@ -341,7 +354,26 @@ impl SourceTyper<'_> {
                             return Err(TyperError::MemberLookup(Box::new(error)));
                         }
                     };
+                    if java_class_qualifier {
+                        members.retain(|member| {
+                            self.store.symbols.contains(member.symbol)
+                                && self
+                                    .store
+                                    .symbols
+                                    .get(member.symbol)
+                                    .flags
+                                    .contains(SymbolFlags::STATIC)
+                        });
+                    }
                     if members.is_empty() {
+                        if java_class_qualifier {
+                            return Err(TyperError::MemberNotFound {
+                                source: self.source,
+                                tree_index: function_tree.index(),
+                                receiver: receiver_view,
+                                name: selection.name,
+                            });
+                        }
                         if let Some(resolved) = self.resolve_local_extension_application(
                             selection,
                             qualifier,
@@ -401,7 +433,7 @@ impl SourceTyper<'_> {
                             } else {
                                 false
                             };
-                        if !mutable_local_method_call {
+                        if !mutable_local_method_call && !java_class_qualifier {
                             self.require_stable_application_selection_prefix(
                                 qualifier,
                                 receiver_type,
@@ -563,6 +595,7 @@ impl SourceTyper<'_> {
                     receiver_type,
                     ..
                 } = &function_shape
+                    && !self.is_java_class_qualifier(*qualifier)
                 {
                     self.require_stable_application_selection_prefix(
                         *qualifier,
@@ -578,6 +611,7 @@ impl SourceTyper<'_> {
                     receiver_type,
                     ..
                 } = &function_shape
+                    && !self.is_java_class_qualifier(*qualifier)
                 {
                     self.require_stable_application_selection_prefix(
                         *qualifier,
@@ -605,7 +639,7 @@ impl SourceTyper<'_> {
                 receiver_type,
                 allow_mutable_local_receiver,
             } => {
-                if !allow_mutable_local_receiver {
+                if !allow_mutable_local_receiver && !self.is_java_class_qualifier(qualifier) {
                     self.require_stable_application_selection_prefix(
                         qualifier,
                         receiver_type,

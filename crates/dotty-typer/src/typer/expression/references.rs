@@ -775,14 +775,15 @@ impl SourceTyper<'_> {
                 tree_index: tree.index(),
             });
         }
-        let qualifier = if let Some(qualifier) = self.type_selection_qualifier(
+        let qualifier_candidate = self.type_selection_qualifier(
             selection.qualifier,
             context,
             tree.index(),
             position,
             info_journal,
             new_mappings,
-        )? {
+        )?;
+        let qualifier = if let Some(qualifier) = qualifier_candidate {
             qualifier
         } else {
             self.type_expression_inner(selection.qualifier, context, info_journal, new_mappings)?
@@ -798,7 +799,14 @@ impl SourceTyper<'_> {
                 info_journal,
             );
         }
-        self.require_stable_application_selection_prefix(qualifier, receiver_type, tree.index())?;
+        let java_class_qualifier = self.is_java_class_qualifier(qualifier);
+        if !java_class_qualifier {
+            self.require_stable_application_selection_prefix(
+                qualifier,
+                receiver_type,
+                tree.index(),
+            )?;
+        }
         let package_receiver = matches!(
             self.store.types.try_get(receiver_type),
             Some(Type::TermRef {
@@ -981,12 +989,13 @@ impl SourceTyper<'_> {
         let receiver_type = self.typed_arena.get(qualifier).ty;
         let receiver = self.widen_expression_type_journaled(receiver_type, info_journal, 0)?;
         let receiver = self.this_type_receiver_view(receiver)?;
+        let java_class_qualifier = self.is_java_class_qualifier(qualifier);
 
         // `AnyRef.eq/ne` are compiler semantic members, not methods loaded
         // from the JVM Object class. Keep their selection narrower than
         // ordinary member lookup until the source model distinguishes those
         // owners and supports a complete reference hierarchy.
-        if self.any_ref_identity_operator_name(name) {
+        if !java_class_qualifier && self.any_ref_identity_operator_name(name) {
             if self
                 .any_ref_identity_symbol_for_receiver(receiver, name)
                 .is_some()
@@ -1015,9 +1024,20 @@ impl SourceTyper<'_> {
             });
         }
 
-        let candidates = self
+        let mut candidates = self
             .lookup_members_journaled(receiver, name, info_journal)
             .map_err(|error| TyperError::MemberLookup(Box::new(error)))?;
+        if java_class_qualifier {
+            candidates.retain(|candidate| {
+                self.store.symbols.contains(candidate.symbol)
+                    && self
+                        .store
+                        .symbols
+                        .get(candidate.symbol)
+                        .flags
+                        .contains(SymbolFlags::STATIC)
+            });
+        }
         let candidate = match candidates.as_slice() {
             [] => {
                 return Err(TyperError::MemberNotFound {
@@ -1169,7 +1189,7 @@ impl SourceTyper<'_> {
 
     /// Type a selection qualifier without treating a package path as a value.
     /// The resulting source mappings still retain every node in the path.
-    fn type_selection_qualifier(
+    pub(in crate::typer) fn type_selection_qualifier(
         &mut self,
         tree: TreeId<Untyped>,
         context: ExpressionContext,
@@ -1180,10 +1200,9 @@ impl SourceTyper<'_> {
     ) -> Result<Option<TreeId<Typed>>, TyperError> {
         if let Some(typed) = self.typed_index.get(self.source, tree) {
             self.validate_cached_parent_argument_receiver_access(tree, typed)?;
-            return Ok(self
-                .non_value_term_mapping_symbol(tree, typed)
-                .is_some()
-                .then_some(typed));
+            let is_class_qualifier = self.non_value_term_mapping_symbol(tree, typed).is_some()
+                || self.is_java_class_type(self.typed_arena.get(typed).ty);
+            return Ok(is_class_qualifier.then_some(typed));
         }
         let Some(node) = self.arena.try_get(tree) else {
             return Err(TyperError::TreeOutsideArena {
@@ -1213,15 +1232,28 @@ impl SourceTyper<'_> {
                 }
                 Err(error) => return Err(error),
             };
-        if !self.store.symbols.contains(symbol)
-            || self.store.symbols.get(symbol).kind != SymbolKind::Package
-        {
+        if !self.store.symbols.contains(symbol) {
             return Ok(None);
         }
-        let ty = self.store.types.alloc(Type::TermRef {
-            prefix: self.definitions.no_prefix,
-            target: TermRefTarget::Symbol(symbol),
-        });
+        let declaration = self.store.symbols.get(symbol);
+        let is_package = declaration.kind == SymbolKind::Package;
+        let is_java_class = declaration.kind == SymbolKind::Class
+            && declaration.flags.contains(SymbolFlags::JAVA_DEFINED);
+        if !is_package && !is_java_class {
+            return Ok(None);
+        }
+        let ty = if is_package {
+            self.store.types.alloc(Type::TermRef {
+                prefix: self.definitions.no_prefix,
+                target: TermRefTarget::Symbol(symbol),
+            })
+        } else {
+            let prefix = self.type_symbol_prefix(symbol);
+            self.store.types.alloc(Type::TypeRef {
+                prefix,
+                target: TypeRefTarget::Symbol(symbol),
+            })
+        };
         let typed = TypedAstBuilder::new(&mut self.typed_arena, &self.store.types)
             .ident_with_backquoted(ident.name, ident.backquoted, ty, node.position);
         self.typed_index
@@ -1234,6 +1266,57 @@ impl SourceTyper<'_> {
             })?;
         new_mappings.push((self.source, tree));
         Ok(Some(typed))
+    }
+
+    pub(in crate::typer) fn is_java_class_type(&self, ty: TypeId) -> bool {
+        let Some(Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        }) = self.store.types.try_get(ty)
+        else {
+            return false;
+        };
+        self.store.symbols.contains(*symbol)
+            && self.store.symbols.get(*symbol).kind == SymbolKind::Class
+            && self
+                .store
+                .symbols
+                .get(*symbol)
+                .flags
+                .contains(SymbolFlags::JAVA_DEFINED)
+    }
+
+    pub(in crate::typer) fn is_java_class_qualifier(&self, tree: TreeId<Typed>) -> bool {
+        let Some(node) = self.typed_arena.try_get(tree) else {
+            return false;
+        };
+        let symbol = match (&node.kind, self.store.types.try_get(node.ty)) {
+            (
+                TreeKind::Ident(_) | TreeKind::Select(_),
+                Some(Type::TypeRef {
+                    target: TypeRefTarget::Symbol(symbol),
+                    ..
+                }),
+            ) => Some(*symbol),
+            (
+                TreeKind::Select(_),
+                Some(Type::TermRef {
+                    target: TermRefTarget::Symbol(symbol),
+                    ..
+                }),
+            ) => Some(*symbol),
+            _ => None,
+        };
+        symbol.is_some_and(|symbol| {
+            self.store.symbols.contains(symbol)
+                && self.store.symbols.get(symbol).kind == SymbolKind::Class
+                && self
+                    .store
+                    .symbols
+                    .get(symbol)
+                    .flags
+                    .contains(SymbolFlags::JAVA_DEFINED)
+        })
     }
 }
 
