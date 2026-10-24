@@ -1,0 +1,4 @@
+path	role
+library/src/scala/collection/mutable/ListMap.scala	list-map
+library/src/scala/collection/mutable/ListBuffer.scala	list-buffer
+library/src/scala/collection/concurrent/TrieMap.scala	trie-map

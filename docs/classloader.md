@@ -574,8 +574,12 @@ identifies later on-demand root completion. Completions exclude cache hits;
 shell reuse counts incomplete external identities, not completed classes or
 builtins. Member references count successful descriptor/signature/annotation
 identity requests; hierarchy loads count superclass/interface requests,
-including cache hits or errors. Counts report work done even if the root later
-rolls it back. The corpus audit emits totals and per-request counts for #1023.
+including cache hits or errors. The opt-in `dependency_edges` groups directed
+owner-to-dependency requests by `Hierarchy`, `MemberTypeIdentity`,
+`EnclosingOwnerIdentity`, or `EnclosingOwnerCompletion`; edge request counts
+include repeated visits and failed requests. Counts report work done even if
+the root later rolls it back. The corpus audit emits totals and per-request
+counts for #1023.
 
 The classpath completion hook accepts only identities registered in the same
 `LoadingSession` and backed by classfile/TASTy origins. It recovers the canonical

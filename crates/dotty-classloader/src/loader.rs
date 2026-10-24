@@ -367,6 +367,30 @@ pub struct ClassLoadProfile {
     pub module_completion_inclusive_ns: u128,
     /// Direct module completion time outside its explicitly timed resource/decode intervals.
     pub module_completion_residual_ns: u128,
+    /// Dependency edges grouped by reason. Counts include repeated visits and cache hits.
+    pub dependency_edges: Vec<ClassLoadDependencyEdge>,
+}
+
+/// Why one class load or identity lookup referenced another class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ClassLoadDependencyReason {
+    /// A superclass or interface required by the completed `ClassInfo`.
+    Hierarchy,
+    /// A member, signature, or annotation type that needs identity but not completion.
+    MemberTypeIdentity,
+    /// An enclosing class identity read from JVM nesting metadata.
+    EnclosingOwnerIdentity,
+    /// An enclosing class declaration scope needed for captured type parameters.
+    EnclosingOwnerCompletion,
+}
+
+/// An aggregated directed edge in one profiled class-load request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClassLoadDependencyEdge {
+    pub owner: String,
+    pub dependency: String,
+    pub reason: ClassLoadDependencyReason,
+    pub requests: usize,
 }
 
 #[derive(Default)]
@@ -404,6 +428,7 @@ struct ActiveLoadProfile {
     module_completion_errors: usize,
     module_completion_inclusive_ns: u128,
     module_completion_residual_ns: u128,
+    dependency_edges: BTreeMap<(ClassLoadDependencyReason, String, String), usize>,
 }
 
 /// Reconstructs a [`ClassTypeSignature`]'s binary name (JVMS §4.2.1): its
@@ -626,7 +651,40 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             module_completion_errors: profile.module_completion_errors,
             module_completion_inclusive_ns: profile.module_completion_inclusive_ns,
             module_completion_residual_ns: profile.module_completion_residual_ns,
+            dependency_edges: profile
+                .dependency_edges
+                .into_iter()
+                .map(
+                    |((reason, owner, dependency), requests)| ClassLoadDependencyEdge {
+                        owner,
+                        dependency,
+                        reason,
+                        requests,
+                    },
+                )
+                .collect(),
         });
+    }
+
+    fn record_dependency_edge(
+        &mut self,
+        owner: &BinaryName,
+        dependency: &BinaryName,
+        reason: ClassLoadDependencyReason,
+    ) {
+        if !self.collect_load_profiles {
+            return;
+        }
+        if let Some(profile) = &mut self.active_load_profile {
+            *profile
+                .dependency_edges
+                .entry((
+                    reason,
+                    owner.as_internal().to_owned(),
+                    dependency.as_internal().to_owned(),
+                ))
+                .or_default() += 1;
+        }
     }
 
     fn record_resource_lookup<LookupError>(
@@ -1435,7 +1493,14 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
             })?;
 
         let semantic_owner = semantic_owner
-            .map(|owner| self.ensure_class_identity_inner(&owner, ancestry))
+            .map(|owner| {
+                self.record_dependency_edge(
+                    name,
+                    &owner,
+                    ClassLoadDependencyReason::EnclosingOwnerIdentity,
+                );
+                self.ensure_class_identity_inner(&owner, ancestry)
+            })
             .transpose()?;
         let package = self.session.packages.resolve(self.store, name);
         let text = self.store.names.intern(name.simple_name());
@@ -3192,6 +3257,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
                 if needs_outer_scope {
                     self.resolve_owner_class(name, &outer)
                 } else {
+                    self.record_dependency_edge(
+                        name,
+                        &outer,
+                        ClassLoadDependencyReason::EnclosingOwnerIdentity,
+                    );
                     self.ensure_class_identity(&outer).map_err(|source| {
                         ClassLoadError::DependencyFailure {
                             owner: name.clone(),
@@ -3331,6 +3401,7 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         dependency: BinaryName,
         inheritance_ancestry: &mut Vec<BinaryName>,
     ) -> Result<SymbolId, ClassLoadError> {
+        self.record_dependency_edge(owner, &dependency, ClassLoadDependencyReason::Hierarchy);
         if let Some(profile) = &mut self.active_load_profile {
             profile.hierarchy_loads += 1;
         }
@@ -3354,6 +3425,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         owner: &BinaryName,
         dependency: &BinaryName,
     ) -> Result<SymbolId, ClassLoadError> {
+        self.record_dependency_edge(
+            owner,
+            dependency,
+            ClassLoadDependencyReason::MemberTypeIdentity,
+        );
         let result = self.ensure_class_identity(dependency).map_err(|source| {
             ClassLoadError::DependencyFailure {
                 owner: owner.clone(),
@@ -3377,6 +3453,11 @@ impl<'store, E: ClassPathEntry> ClassLoader<'store, E> {
         owner: &BinaryName,
         dependency: &BinaryName,
     ) -> Result<SymbolId, ClassLoadError> {
+        self.record_dependency_edge(
+            owner,
+            dependency,
+            ClassLoadDependencyReason::EnclosingOwnerCompletion,
+        );
         let loading = match self.repository.get(dependency) {
             Some(ClassEntry::Loading(symbol)) => Some(*symbol),
             _ => None,
@@ -7533,12 +7614,71 @@ mod tests {
         let profile = loader.take_load_profiles().pop().unwrap();
         assert_eq!(profile.full_completions, 3);
         assert_eq!(profile.hierarchy_loads, 2);
+        assert_eq!(
+            profile
+                .dependency_edges
+                .iter()
+                .filter(|edge| edge.reason == ClassLoadDependencyReason::Hierarchy)
+                .map(|edge| edge.requests)
+                .sum::<usize>(),
+            2
+        );
+        assert!(profile.dependency_edges.iter().any(|edge| {
+            edge.owner == "Child"
+                && edge.dependency == "Parent"
+                && edge.reason == ClassLoadDependencyReason::Hierarchy
+                && edge.requests == 1
+        }));
         assert_eq!(profile.shells_created, 0);
         assert_eq!(profile.max_dependency_depth, 1);
         assert!(profile.resource_lookup_ns > 0);
         assert!(profile.classfile_decode_ns > 0);
         assert_eq!(profile.tasty_decode_ns, 0);
         assert!(profile.load_uncached_inclusive_ns > 0);
+    }
+
+    #[test]
+    fn hierarchy_profiles_resolve_parent_identities_in_each_store_and_session() {
+        let child_name = BinaryName::from_internal("sample/Child");
+        let parent_name = BinaryName::from_internal("sample/Parent");
+        let classes = || {
+            HashMap::from([
+                (
+                    child_name.clone(),
+                    signature_class("sample/Child", Some("sample/Parent"), &[], None, &[], &[]),
+                ),
+                (parent_name.clone(), synthetic_class("sample/Parent", None)),
+            ])
+        };
+
+        let mut first_store = SemanticStore::new();
+        let mut first = ClassLoader::new(InMemoryClassPath(classes()), &mut first_store);
+        let first_child = first.load_class(&child_name).unwrap();
+        let first_parent = first.session.identified[&parent_name];
+        assert_eq!(
+            parent_symbol(first.store, class_info(first.store, first_child).parents[0]),
+            first_parent
+        );
+        assert!(matches!(
+            first.store.symbols.get(first_parent).info,
+            SymbolInfo::Complete(_)
+        ));
+
+        let mut second_store = SemanticStore::new();
+        let mut second = ClassLoader::new(InMemoryClassPath(classes()), &mut second_store);
+        let second_child = second.load_class(&child_name).unwrap();
+        let second_parent = second.session.identified[&parent_name];
+        assert_eq!(
+            parent_symbol(
+                second.store,
+                class_info(second.store, second_child).parents[0]
+            ),
+            second_parent
+        );
+        assert!(matches!(
+            second.store.symbols.get(second_parent).info,
+            SymbolInfo::Complete(_)
+        ));
     }
 
     #[test]
@@ -7630,6 +7770,21 @@ mod tests {
         );
         assert_eq!(profile.shells_reused, 1);
         assert_eq!(profile.member_type_references, 21);
+        assert!(profile.dependency_edges.iter().any(|edge| {
+            edge.owner == "A"
+                && edge.dependency == "B1"
+                && edge.reason == ClassLoadDependencyReason::MemberTypeIdentity
+                && edge.requests == 2
+        }));
+        assert_eq!(
+            profile
+                .dependency_edges
+                .iter()
+                .filter(|edge| edge.reason == ClassLoadDependencyReason::MemberTypeIdentity)
+                .map(|edge| edge.requests)
+                .sum::<usize>(),
+            21
+        );
         assert_eq!(profile.hierarchy_loads, 0);
         assert_eq!(profile.max_dependency_depth, 0);
         assert_eq!(profile.classes.len(), 21);
@@ -9465,6 +9620,43 @@ mod tests {
             synthetic_class("java/lang/Comparable", None),
         );
         classes
+    }
+
+    #[test]
+    fn profiles_enclosing_owner_identity_reached_from_a_member_type() {
+        let mut classes = nested_sample_classpath();
+        classes.insert(
+            BinaryName::from_internal("UsesInner"),
+            signature_class(
+                "UsesInner",
+                Some("java/lang/Object"),
+                &[],
+                None,
+                &[("inner", "LNestedSample$Inner;", None)],
+                &[],
+            ),
+        );
+        let mut store = SemanticStore::new();
+        let mut loader = ClassLoader::new(InMemoryClassPath(classes), &mut store);
+        loader.set_load_profile_collection(true);
+
+        loader
+            .load_class(&BinaryName::from_internal("UsesInner"))
+            .expect("UsesInner should load through its nested member type");
+
+        let profile = loader.take_load_profiles().pop().unwrap();
+        assert!(profile.dependency_edges.iter().any(|edge| {
+            edge.owner == "UsesInner"
+                && edge.dependency == "NestedSample$Inner"
+                && edge.reason == ClassLoadDependencyReason::MemberTypeIdentity
+        }));
+        assert!(profile.dependency_edges.iter().any(|edge| {
+            edge.owner == "NestedSample$Inner"
+                && edge.dependency == "NestedSample"
+                && edge.reason == ClassLoadDependencyReason::EnclosingOwnerIdentity
+        }));
+        assert!(profile.classes.contains("NestedSample$Inner"));
+        assert!(profile.classes.contains("NestedSample"));
     }
 
     /// `NestedSample.max`'s real declaration is
