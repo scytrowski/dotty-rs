@@ -205,16 +205,6 @@ impl SourceTyper<'_> {
                 return Err(TyperError::UnknownSymbol { symbol });
             }
             let entry = self.store.symbols.get(symbol);
-            if entry.name != name {
-                return Err(TyperError::SymbolResolution {
-                    source: self.source,
-                    tree_index,
-                    error: ResolutionError::Malformed {
-                        reason: "default type import resolved a symbol with a different name"
-                            .to_owned(),
-                    },
-                });
-            }
             if !is_type_symbol(entry.kind) {
                 return Err(TyperError::WrongTypeNameKind {
                     source: self.source,

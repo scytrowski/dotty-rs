@@ -15,13 +15,14 @@ const NULL_REFERENCE_IDENTITY_SOURCE: &str =
     include_str!("../../../tests/fixtures/jvm/NullReferenceIdentity.scala");
 const NULL_TYPING_SOURCE: &str = include_str!("fixtures/null-typing/NullTyping.scala");
 
-struct ScalaListResolver {
+struct ScalaTypeResolver {
     package: dotty_core::SymbolId,
-    list: dotty_core::SymbolId,
+    requested_name: &'static str,
+    result: dotty_core::SymbolId,
     member_requests: Vec<Name>,
 }
 
-impl SymbolResolver for ScalaListResolver {
+impl SymbolResolver for ScalaTypeResolver {
     fn checkpoint(&self) -> ResolverCheckpoint {
         ResolverCheckpoint::new(0)
     }
@@ -34,7 +35,10 @@ impl SymbolResolver for ScalaListResolver {
         request: &MemberRequest,
     ) -> Result<Option<dotty_core::SymbolId>, ResolutionError> {
         self.member_requests.push(request.name);
-        Ok((store.names.resolve(request.name.text()) == "List").then_some(self.list))
+        Ok(
+            (store.names.resolve(request.name.text()) == self.requested_name)
+                .then_some(self.result),
+        )
     }
 
     fn resolve_package(
@@ -148,8 +152,8 @@ fn types_a_small_source_program_with_no_resolver_or_jdk_fixture() {
 }
 
 #[test]
-fn source_type_lookup_uses_default_scala_package_after_lexical_lookup() {
-    let text = "object C { def value: List }";
+fn source_type_lookup_accepts_default_scala_alias_with_a_canonical_target_name() {
+    let text = "object C { def value: Traversable }";
     let source = SourceId::from_index(0);
     let mut store = SemanticStore::new();
     let definitions = Definitions::bootstrap(&mut store);
@@ -184,9 +188,11 @@ fn source_type_lookup_uses_default_scala_package_after_lexical_lookup() {
         position: None,
         links: SymbolLinks::default(),
     });
-    let list_name = Name::new(store.names.intern("List"), Namespace::Type);
-    let list = store.symbols.alloc(Symbol {
-        name: list_name,
+    // Classpath resolvers may normalize a Scala package alias to its canonical
+    // target symbol, whose name need not match the source spelling.
+    let target_name = Name::new(store.names.intern("Iterable"), Namespace::Type);
+    let target = store.symbols.alloc(Symbol {
+        name: target_name,
         owner: Some(scala_package),
         kind: SymbolKind::Class,
         flags: SymbolFlags::EMPTY,
@@ -216,9 +222,10 @@ fn source_type_lookup_uses_default_scala_package_after_lexical_lookup() {
         definitions,
         &packages,
     )
-    .with_resolver(Box::new(ScalaListResolver {
+    .with_resolver(Box::new(ScalaTypeResolver {
         package: scala_package,
-        list,
+        requested_name: "Traversable",
+        result: target,
         member_requests: Vec::new(),
     }));
 
@@ -229,9 +236,9 @@ fn source_type_lookup_uses_default_scala_package_after_lexical_lookup() {
         Type::TypeRef {
             target: TypeRefTarget::Symbol(symbol),
             ..
-        } if *symbol == list
+        } if *symbol == target
     ));
-    assert_eq!(typer.store().symbols.get(list).owner, Some(scala_package));
+    assert_eq!(typer.store().symbols.get(target).owner, Some(scala_package));
 }
 
 #[test]
