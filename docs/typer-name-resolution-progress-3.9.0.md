@@ -2,6 +2,58 @@
 
 Issue: [#1566](https://github.com/scytrowski/dotty-rs/issues/1566)
 
+## Latest increment: bounded `Int.&`
+
+This increment starts from merged `main` at
+`a92dec87aaee0b0aa24098e01c18d811dfd0cbb8`, after #1595. The pinned Scala
+3.9.0 library declares `Int.&(x: Int): Int` in `library/src/scala/Int.scala`.
+The source typer now registers that one exact canonical method identity beside
+the existing bounded `Int` operators. It accepts `flags & 1` and `Int & Int`;
+the real typer fixture asserts the selected `SymbolId`, result types, and
+rejection of an unrelated source class. This increment does not add the
+adjacent Byte, Short, Char, Long, OR, XOR, or shift overloads. The positive and
+negative compiler oracle cases and reproduction command are recorded in
+[`IntBitwiseAnd.oracle.md`](../crates/dotty-typer/tests/fixtures/int-bitwise-and/IntBitwiseAnd.oracle.md).
+The implementation and focused regression fixtures were validated at
+`2fe24ca588f3d9b4093082a35a6f22b95ccbe89e`.
+
+The deterministic `package-term` comparison used the same 60 files and 369
+methods before and after this change. Both runs typed zero complete methods and
+had no parser or namer failures. Aggregate first-blocker counts changed only
+for the three selected rows: `MemberNotFound` moved from 6 to 3 and
+`IfBranchJoinUnsupported` moved from 0 to 3; all other counts stayed the same.
+`InlineInfoAttribute.scala#tree=212` (`nextByte`), `#tree=226` (`nextUTF8`),
+and `#tree=239` (`nextShort`) now type their `flags & 1` expressions and stop
+later in the enclosing `read#tree=420` attempt at `IfBranchJoinUnsupported`.
+This is verified first-blocker progress, not a fully typed real method. The
+remaining three-row movement is recorded in
+[`typer-name-resolution-1566-int-bitwise-and-3.9.0.tsv`](typer-name-resolution-1566-int-bitwise-and-3.9.0.tsv).
+
+The focused 3-file / 31-method smoke audit remained deterministic and matched
+its checked-in baseline exactly. Reproduce the `package-term` comparison with:
+
+```sh
+PYTHONUNBUFFERED=1 DOTTY_AUDIT_TMP_ROOT="$PWD/target/issue-1566-bit-and-final-runs" \
+SCALA39_ROOT="$PWD/target/dotty-scala39-1525" JAVA_HOME="$PWD/target/temurin21-1525" \
+SCALA39_JDK_RELEASE=21 COURSIER_MAVEN_ROOT="$PWD/target/scala39-maven" TMPDIR="$PWD/target/tmp" \
+CARGO_BUILD_JOBS=1 RUST_TEST_THREADS=1 \
+tools/typer-classpath-corpus-audit/run --focused-cohort package-term \
+  --verify-determinism target/issue-1566-bit-and-final.md
+```
+
+The smoke comparison uses the same environment with
+`--focused-manifest docs/typer-focused-smoke-manifest-3.9.0.tsv`, then runs
+`tools/typer-classpath-corpus-audit/verify_focused_gate.py` against the pinned
+baseline.
+
+The next bounded investigation is the `IfBranchJoinUnsupported` result on
+`InlineInfoAttribute.read#tree=420`. It is an `if version == 1` branch in the
+pinned source after the bitwise expressions type. Before implementing that
+family, record the exact branch result types and spans, check Scala 3.9 oracle
+behavior, and identify whether the failure belongs to expression joins or a
+dependency-loading boundary. Do not count these methods as typed until the
+whole body succeeds.
+
 ## Latest increment: universal equality
 
 This increment starts from `main` at

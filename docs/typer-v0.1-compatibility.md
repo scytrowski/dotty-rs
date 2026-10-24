@@ -497,6 +497,10 @@ Ordinary left-associative term infix calls lower through selected-member
 application, including overload selection and generic argument inference. Their
 typed shape is a `Select` followed by an `Apply`; the Scala 3.9.0 oracle fixture
 is `crates/dotty-typer/tests/fixtures/infix-expressions/InfixExpressions.scala`.
+For the real `InlineInfoAttribute.read` corpus path, the source typer also
+registers the exact canonical `Int.&(Int): Int` method. This bounded increment
+does not add the other bitwise overloads, and it does not extend the JVM
+backend's existing nine-operation intrinsic subset.
 The four supported prefix operators (`!`, `~`, `+`, `-`) select the corresponding
 `unary_` member on their operand. The typed shape is a `Select` for a parameterless
 method or value member; the operand may be a mutable local. This matches the

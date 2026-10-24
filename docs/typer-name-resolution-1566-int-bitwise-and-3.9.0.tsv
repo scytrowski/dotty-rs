@@ -1,0 +1,4 @@
+path#tree	method	span	before_first_blocker	after_first_blocker	fully_typed	next_attribution	implementation_sha
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=212	nextByte	InlineInfoAttribute.scala:98	MemberNotFound	IfBranchJoinUnsupported	false	read#tree=420	2fe24ca588f3d9b4093082a35a6f22b95ccbe89e
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=226	nextUTF8	InlineInfoAttribute.scala:99	MemberNotFound	IfBranchJoinUnsupported	false	read#tree=420	2fe24ca588f3d9b4093082a35a6f22b95ccbe89e
+compiler/src/dotty/tools/backend/jvm/opt/InlineInfoAttribute.scala#tree=239	nextShort	InlineInfoAttribute.scala:100	MemberNotFound	IfBranchJoinUnsupported	false	read#tree=420	2fe24ca588f3d9b4093082a35a6f22b95ccbe89e
