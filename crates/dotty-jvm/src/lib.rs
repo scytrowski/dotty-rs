@@ -1395,6 +1395,12 @@ pub enum JvmCodegenError {
         class: SymbolId,
         error: dotty_classfile::bytecode::CodeBuilderError,
     },
+    /// A generated constructor accessor getter could not be built symbolically.
+    AccessorMethodCodeBuilder {
+        class: SymbolId,
+        field: SymbolId,
+        error: dotty_classfile::bytecode::CodeBuilderError,
+    },
 }
 
 /// Why a constructor accessor cannot be copied into its checked backing field.

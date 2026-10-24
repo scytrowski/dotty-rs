@@ -2436,11 +2436,20 @@ fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
                     .iter()
                     .all(|(_, _, flags)| flags.is_private())
             );
-            assert_eq!(
-                class_file.methods.len(),
-                1,
-                "only the declared constructor is emitted"
-            );
+            let emitted_method_names = class_file
+                .methods
+                .iter()
+                .map(|method| class_file.constant_pool.utf8(method.name_index).unwrap())
+                .collect::<Vec<_>>();
+            let expected_method_names = std::iter::once("<init>")
+                .chain(
+                    class_metadata
+                        .accessors()
+                        .iter()
+                        .map(|accessor| accessor.getter().name()),
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(emitted_method_names, expected_method_names);
             let constructor = &class_file.methods[0];
             assert_eq!(
                 class_file
@@ -2582,6 +2591,267 @@ fn constructor_accessors_initialize_private_storage_from_exact_formal_slots() {
             assert!(
                 java.status.success(),
                 "java -Xverify:all rejected accessor initialization\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&java.stdout),
+                String::from_utf8_lossy(&java.stderr)
+            );
+            fs::remove_dir_all(output).unwrap();
+        }
+    });
+}
+
+#[test]
+fn constructor_accessor_getters_emit_verified_abi_methods() {
+    let source_text = "class Measurement(val id: Int, var value: Double) { def marker(): Int = 9 }; class Mixed(val enabled: Boolean, val count: Long, val ratio: Float); class Ref(val item: Measurement); class Plain(start: Int)";
+    with_source(source_text, |ast, source, index, definitions, typer| {
+        let mut classes = Vec::new();
+        let mut class_symbols = Vec::new();
+        for class_name in ["Measurement", "Mixed", "Ref", "Plain"] {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            class_symbols.push(class);
+            typer.complete_symbol(class).unwrap();
+            let class_tree = ast
+                .iter()
+                .find_map(|(tree, _)| {
+                    (index.symbol_at(source, tree) == Some(class)).then_some(tree)
+                })
+                .unwrap();
+            let TreeKind::TypeDef(class_definition) = &ast.get(class_tree).kind else {
+                panic!("{class_name} should be a type definition");
+            };
+            let TreeKind::Template(template) = &ast.get(class_definition.rhs).kind else {
+                panic!("{class_name} should have a template");
+            };
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(constructor_definition) = &ast.get(template.constructor).kind
+            else {
+                panic!("{class_name} constructor should be a definition");
+            };
+            let parameters = constructor_definition
+                .value_param_clauses
+                .iter()
+                .flatten()
+                .map(|tree| {
+                    let source_symbol = index.symbol_at(source, *tree).unwrap();
+                    typer.complete_symbol(source_symbol).unwrap();
+                    let parameter = index.derived_symbol_at(constructor, source, *tree).unwrap();
+                    typer.complete_symbol(parameter).unwrap();
+                    parameter
+                })
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let constructor_plan =
+                JvmPrimaryConstructorPlan::from_source(class, constructor, parameters, ast, index)
+                    .unwrap();
+
+            let mut methods = Vec::new();
+            for tree in template.body.iter().copied() {
+                let TreeKind::DefDef(definition) = &ast.get(tree).kind else {
+                    continue;
+                };
+                let method = index.symbol_at(source, tree).unwrap();
+                typer.complete_symbol(method).unwrap();
+                let body = definition.rhs.unwrap();
+                let context = typer.expression_context_for(method).unwrap();
+                let typed_body = typer.type_expression(body, context).unwrap();
+                methods.push(JvmMethodPlan {
+                    method,
+                    parameters: definition
+                        .value_param_clauses
+                        .iter()
+                        .flatten()
+                        .map(|tree| index.symbol_at(source, *tree).unwrap())
+                        .collect(),
+                    locals: Vec::new(),
+                    body: Some(typed_body),
+                });
+            }
+            classes.push(JvmClassPlan {
+                class,
+                methods,
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(constructor_plan),
+            });
+        }
+
+        let unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes,
+        };
+        let metadata = unit.metadata(definitions).unwrap();
+        let expected = [
+            (
+                "Measurement",
+                vec![("id", "()I", 0xac), ("value", "()D", 0xaf)],
+                vec!["<init>", "id", "value", "marker"],
+            ),
+            (
+                "Mixed",
+                vec![
+                    ("enabled", "()Z", 0xac),
+                    ("count", "()J", 0xad),
+                    ("ratio", "()F", 0xae),
+                ],
+                vec!["<init>", "enabled", "count", "ratio"],
+            ),
+            (
+                "Ref",
+                vec![("item", "()LMeasurement;", 0xb0)],
+                vec!["<init>", "item"],
+            ),
+            ("Plain", vec![], vec!["<init>"]),
+        ];
+        let mut generated_classes = Vec::new();
+        for (class_name, getters, expected_methods) in expected {
+            let class = symbol_named(ast, index, source, typer, class_name);
+            let class_metadata = metadata
+                .iter()
+                .find(|metadata| metadata.identity().symbol() == class)
+                .unwrap();
+            let generated = emit_class(&unit, class, definitions).unwrap();
+            assert_eq!(
+                generated.bytes(),
+                emit_class(&unit, class, definitions).unwrap().bytes(),
+                "getter emission is deterministic for {class_name}"
+            );
+            let mut reader = Reader::new(generated.bytes());
+            let class_file = dotty_classfile::class_file::ClassFile::decode(&mut reader).unwrap();
+            class_file.validate_references().unwrap();
+            let method_names = class_file
+                .methods
+                .iter()
+                .map(|method| class_file.constant_pool.utf8(method.name_index).unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                method_names, expected_methods,
+                "method order for {class_name}"
+            );
+            assert!(
+                !method_names.iter().any(|name| name.ends_with("_$eq")),
+                "this increment emits getters only"
+            );
+            for (accessor, (name, descriptor, return_opcode)) in class_metadata
+                .accessors()
+                .iter()
+                .zip(getters.iter().copied())
+            {
+                assert_eq!(accessor.getter().name(), name);
+                assert_eq!(accessor.getter().descriptor().as_str(), descriptor);
+                assert!(accessor.getter().access_flags().contains(ACC_PUBLIC));
+                let method = class_file
+                    .methods
+                    .iter()
+                    .find(|method| {
+                        class_file.constant_pool.utf8(method.name_index).unwrap() == name
+                            && class_file
+                                .constant_pool
+                                .utf8(method.descriptor_index)
+                                .unwrap()
+                                == descriptor
+                    })
+                    .unwrap();
+                assert!(method.access_flags.is_public());
+                let code = method
+                    .attributes
+                    .iter()
+                    .find_map(|attribute| match attribute {
+                        dotty_classfile::attribute::Attribute::Code(code) => Some(code),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(code.code.len(), 5);
+                assert_eq!(
+                    &code.code[..2],
+                    &[0x2a, 0xb4],
+                    "aload_0/getfield for {name}"
+                );
+                assert_eq!(code.code[4], return_opcode, "return opcode for {name}");
+                assert_eq!(code.max_locals, 1);
+                assert_eq!(
+                    code.max_stack,
+                    if matches!(
+                        accessor.value_type(),
+                        dotty_jvm::JvmType::Long | dotty_jvm::JvmType::Double
+                    ) {
+                        2
+                    } else {
+                        1
+                    },
+                    "getter stack bound for {name}"
+                );
+                let fieldref_index = u16::from_be_bytes([code.code[2], code.code[3]]);
+                let dotty_classfile::constant_pool::ConstantPoolEntry::Fieldref {
+                    class_index,
+                    name_and_type_index,
+                } = class_file
+                    .constant_pool
+                    .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+                        fieldref_index,
+                    ))
+                    .unwrap()
+                else {
+                    panic!("getter must read a Fieldref");
+                };
+                assert_eq!(
+                    class_file.constant_pool.class_name(*class_index).unwrap(),
+                    class_metadata.identity().internal_name()
+                );
+                let (field_name, field_descriptor) = class_file
+                    .constant_pool
+                    .name_and_type(*name_and_type_index)
+                    .unwrap();
+                assert_eq!(field_name, accessor.field_name());
+                assert_eq!(field_descriptor, accessor.field_descriptor());
+            }
+            generated_classes.push((
+                generated.internal_name().to_owned(),
+                generated.bytes().to_vec(),
+            ));
+        }
+
+        if require_jdk21_or_skip() {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let output = std::env::temp_dir().join(format!(
+                "dotty-jvm-accessor-getters-{}-{nonce}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&output).unwrap();
+            for (internal_name, bytes) in generated_classes {
+                fs::write(output.join(format!("{internal_name}.class")), bytes).unwrap();
+            }
+            let harness = output.join("AccessorGetterHarness.java");
+            fs::write(
+                &harness,
+                "public final class AccessorGetterHarness { public static void main(String[] args) { Measurement first = new Measurement(7, 1.5d); Measurement second = new Measurement(-4, -2.25d); if (first.id() != 7 || first.value() != 1.5d || second.id() != -4 || second.value() != -2.25d || first.marker() != 9) throw new AssertionError(\"Measurement getters\"); Mixed mixed = new Mixed(true, Long.MIN_VALUE + 17, 3.25f); if (!mixed.enabled() || mixed.count() != Long.MIN_VALUE + 17 || mixed.ratio() != 3.25f) throw new AssertionError(\"Mixed getters\"); Ref ref = new Ref(first); if (ref.item() != first) throw new AssertionError(\"reference getter\"); new Plain(99); } }\n",
+            )
+            .unwrap();
+            let javac = Command::new("javac")
+                .args(["-classpath", output.to_str().unwrap(), "-d"])
+                .arg(output.to_str().unwrap())
+                .arg(&harness)
+                .output()
+                .unwrap();
+            assert!(
+                javac.status.success(),
+                "javac rejected accessor getter harness\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&javac.stdout),
+                String::from_utf8_lossy(&javac.stderr)
+            );
+            let java = Command::new("java")
+                .args([
+                    "-Xverify:all",
+                    "-classpath",
+                    output.to_str().unwrap(),
+                    "AccessorGetterHarness",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                java.status.success(),
+                "java -Xverify:all rejected accessor getter harness\nstdout:\n{}\nstderr:\n{}",
                 String::from_utf8_lossy(&java.stdout),
                 String::from_utf8_lossy(&java.stderr)
             );

@@ -7,8 +7,8 @@ primary constructors. It targets the
 pinned Scala 3.9.0 reference at revision
 [`777528f19a58e794c9954a42f433373472ec57f8`](https://github.com/scala/scala3/tree/777528f19a58e794c9954a42f433373472ec57f8).
 It covers the real-source `Counter`, `PrivateFields`, and bounded constructor
-accessor backing-field initialization fixtures; it does not claim full Scala
-ABI, generated getter/setter, or TASTy support.
+accessor backing-field initialization and generated getter fixtures; it does
+not claim full Scala ABI, generated setter, or TASTy support.
 
 ## Reproducible source evidence
 
@@ -26,8 +26,16 @@ and the exact typed RHS root exposed by `SourceTypedIndex`.
 | `class LongConstant { private val number: Long = 9000000000L }` | `number` is a canonical private immutable Long field owned by `LongConstant`. | Its typed constant preserves the exact signed `i64` value and lowers to `lconst`/`ldc2_w` before `putfield number:J`. | `LongFields.scala` decodes the Long constant pool entry and executes the class with `java -Xverify:all`. |
 | `class NumericBox(initialF: Float, initialD: Double) { private var f: Float = initialF; private var d: Double = initialD }` | `f` and `d` are distinct canonical private mutable field symbols in source order. Constructor parameter references retain their exact constructor-owned identities. | Descriptor `(FD)V`; slots 1 and 2/3 load with `fload` and `dload`. The parent constructor runs once before the two `putfield` instructions. | `FloatDoubleFields.scala` checks source order, `(F)V`/`(D)V` setters, `()F`/`()D` getters, fresh-session deterministic bytes, and JDK execution. No Scala-generated accessors are emitted. |
 | `class NumericConstants { private val f: Float = 1.5f; private val d: Double = 3.5 }` | Both values remain canonical private immutable fields. | Typed literal roots preserve the Float/Double bit patterns and lower through `fconst_bits`/`dconst_bits` before exact `putfield` instructions. | The fixture verifies the `CONSTANT_Float` and `CONSTANT_Double` values and executes both getters under JDK 21. |
-| `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The source ordinal and exact JVM local slot are preserved in a checked accessor initializer. | Emission creates private-final `x:I` storage and copies the exact formal after the verified direct-super call; no source method or getter bytecode is added. |
-| `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same source ordering as `val`; the binding records mutability and local width. | Emission creates private `x:I` storage and initializes it from the exact formal; getter/setter methods remain deferred. |
+| `class C(val x: Int)` | The constructor parameter source tree maps canonically to a class-owned `Field`; `derived_symbol_at(constructor, source, tree)` returns a distinct constructor-owned `Parameter`. | The source ordinal and exact JVM local slot are preserved in a checked accessor initializer. | Emission creates private-final `x:I` storage, copies the exact formal after the verified direct-super call, and emits public `x()I` from that field. No source Method symbol is added. |
+| `class C(var x: Int)` | The same two identities exist. `MUTABLE` is on the class-owned field only, not the derived constructor parameter. | Same source ordering as `val`; the binding records mutability and local width. | Emission creates private `x:I` storage, initializes it from the exact formal, and emits public `x()I`; setter emission remains deferred. |
+
+The `constructor_accessor_getters_emit_verified_abi_methods` regression also
+decodes `Measurement`, `Mixed`, `Ref`, and `Plain` output. It checks public
+getter names and descriptors, private `Fieldref` ownership, exact load/read/
+return bytecode, stack/local bounds, source accessor order, and deterministic
+bytes. Its Java 21 harness invokes all primitive and planned-reference getters
+under `java -Xverify:all`; a plain constructor parameter has no generated
+field or getter, and a `var` receives no setter in this increment.
 
 The combined `FloatingPointCategory2.scala` acceptance batch contains both
 stateful classes and the calling `Runner` in one source session. It checks the
