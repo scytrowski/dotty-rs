@@ -249,20 +249,26 @@ body-field initializer references to their exact field symbols. These are
 Typer facts only; they do not implement Scala's generated getter/setter calls
 or prove runtime initialization safety.
 
-[`jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs) records the
-first current end-to-end failure for body-only classes, explicit empty
-constructors, and mixed constructor/body fields: `dotty-jvm` returns
-`UnsupportedJvmVisibility` for the public body field during plan validation.
-The test also asserts no class artifact is published. In the test assembler,
-these body-bearing zero-argument classes are planned as an empty-signature
-primary constructor before field visibility is validated; the separate
-`ImplicitNoArg` fast path accepts methods only and cannot carry fields. The
-backend's accepted
-field path is restricted to private storage and its generated accessor path
-currently covers primary-constructor accessors. Public class-body accessor
-emission, including backing-field flags, source-order initialization, getter
-and setter bytecode, call-site lowering, and collision checks, remains
-unsupported.
+[`jvm_source_compilation.rs`](../tests/jvm_source_compilation.rs) builds
+`PlainPublic` plans only from unqualified `ValDef`s in the exact source
+template body, after checking canonical `SourceSemanticIndex::definition_of`
+provenance and the exact source-to-typed RHS binding. The plan carries an
+immutable `JvmPublicBodyFieldSourceProof` checked against the source AST,
+semantic index, typed index, and caller-owned store. It records mutability and
+template order; `JvmCompilationUnit` checks both against the canonical public
+`Field` plans and rejects reordered public body fields. Metadata projects
+private backing-field flags without adding body-field getter/setter metadata.
+The source adapter collects fields for both
+body-only/no-argument and parameterized primary-constructor shapes. Direct
+constructor-initializer lowering and class-file emission still return
+`FieldEmissionUnsupported` for `PlainPublic`; this increment does not change
+initialization order or publish an artifact.
+
+Body-bearing zero-argument classes retain the `ImplicitNoArg` source shape and
+carry their checked field plans through metadata validation. Class emission
+still rejects those fields with `FieldEmissionUnsupported` until the
+initialization increment. Public class-body accessor emission, getter and
+setter bytecode, call-site lowering, and collision checks remain unsupported.
 
 The frontend preserves the `private[this]` qualifier in the source AST, but
 the shared symbol visibility is `Private`, just as it is for plain `private`;
@@ -275,10 +281,12 @@ stateful contract test.
 ## Scope and follow-up
 
 This audit covers ordinary initialized class-body primitive fields and the
-listed accessor/visibility forms. It does not establish behavior for lazy or
+listed accessor/visibility forms. Issue #1579 adds only their validated
+source-field plan and private backing metadata; it does not emit the planned
+class-body fields. It does not establish behavior for lazy or
 abstract members, overrides/bridges, traits, generic or reference-valued body
 fields, Java callers beyond the shown ABI, or combined Scala ABI/TASTy
-emission. It makes no changes to production code. Future emission work needs
-separate validated accessor metadata for body declarations, exact source and
-typed identities, ordered initializer lowering, generated-signature
+emission. Future emission work needs separate validated accessor metadata for
+body declarations, exact source and typed identities, ordered initializer
+lowering, generated-signature
 collision validation, and JDK verification/execution coverage.

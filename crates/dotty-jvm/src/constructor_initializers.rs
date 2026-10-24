@@ -513,6 +513,17 @@ pub(super) fn lower(
         .iter()
         .find(|plan| plan.class == class)
         .ok_or(JvmCodegenError::MissingClassPlan { class })?;
+    if let Some(field) = class_plan.fields.iter().find(|field| {
+        matches!(
+            field.source_visibility,
+            crate::JvmFieldSourceVisibility::PlainPublic(_)
+        )
+    }) {
+        return Err(JvmCodegenError::FieldEmissionUnsupported {
+            class,
+            field: field.field,
+        });
+    }
     if !matches!(
         class_plan.initialization,
         JvmClassInitializationPlan::PrimaryConstructor(_)

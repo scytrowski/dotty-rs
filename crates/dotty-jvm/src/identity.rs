@@ -818,17 +818,34 @@ fn field_metadata(
             actual: field.owner,
         });
     }
-    if field.visibility != Visibility::Private {
+    let expected_visibility = match plan.source_visibility {
+        crate::JvmFieldSourceVisibility::PlainPrivate
+        | crate::JvmFieldSourceVisibility::PrivateThis => Visibility::Private,
+        crate::JvmFieldSourceVisibility::PlainPublic(_) => Visibility::Public,
+    };
+    if field.visibility != expected_visibility {
         return Err(JvmCodegenError::UnsupportedJvmVisibility {
             symbol: plan.field,
             visibility: field.visibility,
         });
     }
-    if plan.source_visibility != crate::JvmFieldSourceVisibility::PlainPrivate {
-        return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
-            field: plan.field,
-            visibility: plan.source_visibility,
-        });
+    match plan.source_visibility {
+        crate::JvmFieldSourceVisibility::PlainPrivate => {}
+        crate::JvmFieldSourceVisibility::PrivateThis => {
+            return Err(JvmCodegenError::UnsupportedJvmFieldSourceVisibility {
+                field: plan.field,
+                visibility: plan.source_visibility,
+            });
+        }
+        crate::JvmFieldSourceVisibility::PlainPublic(proof)
+            if proof.class() != owner
+                || proof.field() != plan.field
+                || Some(proof.initializer()) != plan.initializer
+                || proof.mutable() != field.flags.contains(SymbolFlags::MUTABLE) =>
+        {
+            return Err(JvmCodegenError::InvalidPublicBodyFieldSourceProof { field: plan.field });
+        }
+        crate::JvmFieldSourceVisibility::PlainPublic(_) => {}
     }
     validate_field_flags(plan.field, field.flags)?;
 

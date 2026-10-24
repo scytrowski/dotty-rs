@@ -160,7 +160,7 @@ generic/reference-valued members, or secondary constructors.
 | Inferred direct or mutual field cycle | `complete_symbol` returns `RecursiveInferredFieldType`; recursion state and symbol completion roll back. | Reject before class artifact publication. |
 | `object` / `trait` field or non-field symbol | Typer context validation returns `FieldInitializerContextInvalid` with the actual owner/symbol kind. | This contract only covers top-level ordinary classes. |
 | Plain `private` visibility on an instance field | Namer records `Visibility::Private`; real-source integration projects this visibility to JVM `ACC_PRIVATE`. | Field metadata validates visibility from the canonical symbol. |
-| Public, `protected`, or `private[this]` instance field | Parser and Namer accept these source forms. The integration characterization observes `Visibility::Public`, `Visibility::Protected`, and `Visibility::Private` respectively; the shared visibility value does not preserve the `private[this]` qualifier. | Public and protected fail the canonical visibility check. The frontend must label object-private plans explicitly, and metadata rejects `PrivateThis` while accepting only plain `private`. |
+| Public, `protected`, or `private[this]` instance field | Parser and Namer accept these source forms. A source adapter marks an ordinary unqualified class-body declaration with `PlainPublic` only when its exact `Template.body` `ValDef` maps to the canonical class-owned field and a typed RHS. `Visibility::Public` alone is insufficient. The shared visibility value does not preserve the `private[this]` qualifier. | Public body fields validate to private backing-field metadata, but constructor-initializer lowering and class emission still reject them with `FieldEmissionUnsupported` until the initialization increment. Protected fields fail canonical visibility validation; metadata rejects `PrivateThis` while accepting only plain `private`. |
 | Qualified-private, lazy, static, or synthetic field | Not covered by the current source integration characterization; acceptance and exact canonical representation remain unclaimed here. | Reject with a contextual plan error until an explicit ABI contract covers the form. |
 | `val`/`var` constructor parameter | Namer retains separate class field and constructor parameter identities. | Keep both canonical identities; emit private backing storage and one exact post-super store from the constructor-owned formal. Emit the audited public getter and, for `var`, the public JVM setter from validated metadata; no source Method symbols are added. |
 | Duplicate same-named field declarations | Parser and Namer currently accept both declarations without diagnostics and create distinct class-owned `Field` IDs with the same name. This is a recorded frontend gap, not valid backend input. | Metadata rejects repeated field IDs and duplicate JVM field names with structured errors. |
@@ -176,8 +176,9 @@ The negative evidence remains executable: Typer tests
 integration tests for initializer conformance and rollback, constructor forms,
 visibility, self/forward references, duplicate fields, and the real-source JVM
 metadata boundary. Field metadata rejects wrong owners, non-field IDs,
-incomplete types, missing/mismatched initializers, public/lazy fields,
-references, duplicate symbols, and duplicate JVM names. The
+incomplete types, missing/mismatched initializers, public fields without the
+source-specific `PlainPublic` plan, lazy fields, references, duplicate symbols,
+and duplicate JVM names. The
 duplicate-field result is intentionally marked as an unresolved Namer gap;
 the backend must not treat the current absence of a diagnostic as evidence of
 a valid field plan.
@@ -189,12 +190,14 @@ Field plans and explicit primary-constructor metadata are implemented in
 The constructor plan
 retains private source evidence checked by `JvmPrimaryConstructorPlan::from_source`
 against the shared AST/index. Its inputs include the exact constructor and
-ordered derived parameter IDs. The field shape below remains unchanged:
+ordered derived parameter IDs. The field plan now distinguishes ordinary
+public class-body declarations from existing private fields:
 
 ```rust
 enum JvmFieldSourceVisibility {
     PlainPrivate,
     PrivateThis,
+    PlainPublic(JvmPublicBodyFieldSourceProof),
 }
 
 struct JvmFieldPlan {
@@ -217,7 +220,11 @@ field, method, constructor, and class-file structure validates successfully.
 exact constructor descriptor/access and source-ordered private primitive field
 initializers, including Long descriptor `J` and category-two parameter slots.
 `ImplicitNoArg` is reserved for the empty no-argument class
-subset and never implies fields or constructor parameters.
+subset and never implies fields or constructor parameters. The real-source
+test adapter collects class-body fields in template order for both
+`PrimaryConstructor` and no-argument source shapes. A `PlainPublic` plan is
+accepted as canonical source-field metadata only; direct initializer lowering
+and artifact emission remain explicitly deferred.
 
 The constructor metadata regressions in `jvm_stateful_class_contract.rs` cover
 `()V`, `(I)V`, `(ZI)V`, private access, canonical identity order, and the
