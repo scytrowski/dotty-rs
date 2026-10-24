@@ -32,7 +32,7 @@ method_outcomes:
   method=library/src/scala/collection/StringParsers.scala#tree=1007::site=library/src/scala/collection/StringParsers.scala:243:isExp::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1058::site=library/src/scala/collection/StringParsers.scala:245:expOK::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=1175::site=library/src/scala/collection/StringParsers.scala:240:isDecFloatLiteral::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
-  method=library/src/scala/collection/StringParsers.scala#tree=123::site=library/src/scala/collection/StringParsers.scala:41:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=129::blocker=TermNameNotFound::typed=false
+  method=library/src/scala/collection/StringParsers.scala#tree=123::site=library/src/scala/collection/StringParsers.scala:41:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=129::blocker=MemberNotFound::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=482::site=library/src/scala/collection/StringParsers.scala:109:step::attempt=library/src/scala/collection/StringParsers.scala#tree=550::blocker=MemberNotFound::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=641::site=library/src/scala/collection/StringParsers.scala:144:step::attempt=library/src/scala/collection/StringParsers.scala#tree=710::blocker=MemberNotFound::typed=false
   method=library/src/scala/collection/StringParsers.scala#tree=750::site=library/src/scala/collection/StringParsers.scala:186:rec::attempt=library/src/scala/collection/StringParsers.scala#tree=1361::blocker=ApplicationCalleeNotMethod::typed=false
@@ -216,6 +216,7 @@ resolver_observations:
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	prefix=dotty.tools.dotc.ast::namespace=term::name=tpd::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=dotty.tools.dotc.ast.tpd
   compiler/src/dotty/tools/backend/jvm/BCodeBodyBuilder.scala#tree=892	prefix=dotty.tools.dotc.ast.tpd$::namespace=type::name=Tree::space=Prefix	error	classloader error	-	-
   library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
+  library/src/scala/collection/StringParsers.scala#tree=129	prefix=scala::namespace=term::name=None::space=Prefix	external class success	-	-	kind=Object::origin=tasty::path=scala.None
   library/src/scala/collection/StringParsers.scala#tree=1361	prefix=scala::namespace=type::name=ImpureFunction1::space=Prefix	package type member unresolved	package resolved but member unresolved	-	-
   library/src/scala/collection/StringParsers.scala#tree=1361	prefix=scala::namespace=type::name=Function1::space=Prefix	external class success	-	-	kind=Trait::origin=tasty::path=scala.Function1
   library/src/scala/collection/StringParsers.scala#tree=1361	scala/annotation	package success	direct package evidence	package=scala/annotation::owner=scala	kind=Package::origin=synthetic::path=scala.annotation
@@ -230,19 +231,18 @@ resolver_observations:
   library/src/scala/collection/StringParsers.scala#tree=710	prefix=scala::namespace=type::name=Option::space=Prefix	external class success	-	-	kind=Class::origin=tasty::path=scala.Option
 blocker_counts:
   ApplicationCalleeNotMethod: count=11, files=1
-  MemberNotFound: count=2, files=1
+  MemberNotFound: count=3, files=1
   SymbolResolution: count=17, files=1
-  TermNameNotFound: count=1, files=1
 resolver_metrics:
   package_requests=88
   package_successes=37
   package_unresolved=51
   package_errors=0
-  member_requests=95
-  member_successes=22
+  member_requests=96
+  member_successes=23
   member_unresolved=58
   member_errors=15
-  class_symbol_successes=22
+  class_symbol_successes=23
 materialized_packages:
   dotty.tools.dotc
   dotty.tools.dotc.ast
@@ -254,10 +254,12 @@ materialized_classes:
   dotty.tools.dotc.ast.tpd
   java.lang.String
   scala.Function1
+  scala.None
   scala.Option
   scala.annotation.retainsCap
 materialized_members:
 materialized_objects:
   dotty.tools.dotc.ast::tpd
+  scala::None
 materialized_module_classes:
 materialized_module_members:
