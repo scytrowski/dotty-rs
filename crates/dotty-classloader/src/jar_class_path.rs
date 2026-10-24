@@ -2,8 +2,10 @@ use crate::binary_name::BinaryName;
 use crate::class_path::{ClassFormat, ClassOrigin, ClassPathEntry, ClassPathError, ClassResource};
 use crate::manifest;
 use crate::zip_archive::ZipArchive;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MANIFEST_ENTRY_NAME: &str = "META-INF/MANIFEST.MF";
 
@@ -11,6 +13,9 @@ const MANIFEST_ENTRY_NAME: &str = "META-INF/MANIFEST.MF";
 /// (JEP 238): `META-INF/versions/N/` directories with `N < 9` are not
 /// version directories at all.
 const MIN_VERSIONED_DIRECTORY: u16 = 9;
+const MAX_RESOURCE_CACHE_ENTRIES: usize = 512;
+const MAX_RESOURCE_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CACHED_RESOURCE_BYTES: usize = 1024 * 1024;
 
 /// A [`ClassPathEntry`] backed by a single JAR file, mapping
 /// `BinaryName` to the entry named `<internal name>.tasty`, preferred,
@@ -42,6 +47,26 @@ pub struct JarClassPath {
     release_version: u16,
     multi_release: bool,
     package_prefixes: HashSet<String>,
+    profile: JarResourceProfileCounters,
+    resource_cache: Mutex<JarResourceCache>,
+}
+
+#[derive(Default)]
+struct JarResourceCache {
+    entries: HashMap<BinaryName, Option<ClassResource>>,
+    insertion_order: VecDeque<BinaryName>,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct JarResourceProfileCounters {
+    find_class_calls: AtomicU64,
+    zip_entry_reads: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    cache_evictions: AtomicU64,
+    cached_entries: AtomicU64,
+    cached_bytes: AtomicU64,
 }
 
 impl JarClassPath {
@@ -64,7 +89,21 @@ impl JarClassPath {
             release_version,
             multi_release,
             package_prefixes,
+            profile: JarResourceProfileCounters::default(),
+            resource_cache: Mutex::new(JarResourceCache::default()),
         })
+    }
+
+    fn resource_profile(&self) -> crate::class_path::ClassPathResourceProfile {
+        crate::class_path::ClassPathResourceProfile {
+            jar_find_class_calls: self.profile.find_class_calls.load(Ordering::Relaxed),
+            zip_entry_reads: self.profile.zip_entry_reads.load(Ordering::Relaxed),
+            cache_hits: self.profile.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.profile.cache_misses.load(Ordering::Relaxed),
+            cache_evictions: self.profile.cache_evictions.load(Ordering::Relaxed),
+            cached_entries: self.profile.cached_entries.load(Ordering::Relaxed),
+            cached_bytes: self.profile.cached_bytes.load(Ordering::Relaxed),
+        }
     }
 
     /// The versioned entry names to probe, highest version first, for
@@ -90,39 +129,86 @@ impl JarClassPath {
     /// unversioned entry.
     fn read_versioned_entry(&self, entry_name: &str) -> Result<Option<Vec<u8>>, ClassPathError> {
         for versioned_entry_name in self.versioned_entry_names(entry_name) {
+            self.profile.zip_entry_reads.fetch_add(1, Ordering::Relaxed);
             if let Some(bytes) = self.archive.read_entry(&versioned_entry_name)? {
                 return Ok(Some(bytes));
             }
         }
 
+        self.profile.zip_entry_reads.fetch_add(1, Ordering::Relaxed);
         Ok(self.archive.read_entry(entry_name)?)
     }
 }
 
 impl ClassPathEntry for JarClassPath {
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError> {
+        self.profile
+            .find_class_calls
+            .fetch_add(1, Ordering::Relaxed);
         if !name.is_path_safe() {
             return Err(ClassPathError::invalid_binary_name(name.clone()));
         }
 
-        let tasty_entry_name = format!("{}.tasty", name.as_internal());
-        if let Some(bytes) = self.read_versioned_entry(&tasty_entry_name)? {
-            return Ok(Some(ClassResource::new(
-                bytes,
-                ClassFormat::Tasty,
-                ClassOrigin::Jar(self.path.clone()),
-            )));
+        let cached = self
+            .resource_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .get(name)
+            .cloned();
+        if let Some(resource) = cached {
+            self.profile.cache_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(resource);
+        }
+        self.profile.cache_misses.fetch_add(1, Ordering::Relaxed);
+
+        let resource = self.find_class_uncached(name)?;
+        let cacheable_bytes = resource
+            .as_ref()
+            .map_or(0, |resource| resource.bytes().len());
+        if cacheable_bytes <= MAX_CACHED_RESOURCE_BYTES {
+            let mut cache = self
+                .resource_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(existing) = cache.entries.get(name) {
+                // Another thread completed the same immutable lookup while this
+                // thread was reading the archive. Use its canonical cached value.
+                return Ok(existing.clone());
+            }
+
+            while cache.entries.len() >= MAX_RESOURCE_CACHE_ENTRIES
+                || cache.bytes + cacheable_bytes > MAX_RESOURCE_CACHE_BYTES
+            {
+                let Some(evicted_name) = cache.insertion_order.pop_front() else {
+                    break;
+                };
+                if let Some(evicted) = cache.entries.remove(&evicted_name) {
+                    cache.bytes -= evicted.as_ref().map_or(0, |entry| entry.bytes().len());
+                    self.profile.cache_evictions.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+
+            if cache.entries.len() < MAX_RESOURCE_CACHE_ENTRIES
+                && cache.bytes + cacheable_bytes <= MAX_RESOURCE_CACHE_BYTES
+            {
+                cache.insertion_order.push_back(name.clone());
+                cache.bytes += cacheable_bytes;
+                cache.entries.insert(name.clone(), resource.clone());
+                self.profile
+                    .cached_entries
+                    .store(cache.entries.len() as u64, Ordering::Relaxed);
+                self.profile
+                    .cached_bytes
+                    .store(cache.bytes as u64, Ordering::Relaxed);
+            }
         }
 
-        let class_entry_name = format!("{}.class", name.as_internal());
-        match self.read_versioned_entry(&class_entry_name)? {
-            Some(bytes) => Ok(Some(ClassResource::new(
-                bytes,
-                ClassFormat::Class,
-                ClassOrigin::Jar(self.path.clone()),
-            ))),
-            None => Ok(None),
-        }
+        Ok(resource)
+    }
+
+    fn resource_profile(&self) -> crate::class_path::ClassPathResourceProfile {
+        JarClassPath::resource_profile(self)
     }
 
     fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {
@@ -154,6 +240,32 @@ impl ClassPathEntry for JarClassPath {
             return Ok(false);
         }
         Ok(self.package_prefixes.contains(&package.join("/")))
+    }
+}
+
+impl JarClassPath {
+    fn find_class_uncached(
+        &self,
+        name: &BinaryName,
+    ) -> Result<Option<ClassResource>, ClassPathError> {
+        let tasty_entry_name = format!("{}.tasty", name.as_internal());
+        if let Some(bytes) = self.read_versioned_entry(&tasty_entry_name)? {
+            return Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Tasty,
+                ClassOrigin::Jar(self.path.clone()),
+            )));
+        }
+
+        let class_entry_name = format!("{}.class", name.as_internal());
+        match self.read_versioned_entry(&class_entry_name)? {
+            Some(bytes) => Ok(Some(ClassResource::new(
+                bytes,
+                ClassFormat::Class,
+                ClassOrigin::Jar(self.path.clone()),
+            ))),
+            None => Ok(None),
+        }
     }
 }
 
@@ -262,6 +374,86 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn caches_repeated_archive_resource_lookups_and_profiles_zip_reads() {
+        let jar_path = write_temp_jar(
+            "resource_profile",
+            &minimal_stored_zip(&[("Profiled.class", b"class bytes")]),
+        );
+        let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+        let name = BinaryName::from_internal("Profiled");
+
+        for _ in 0..2 {
+            assert!(class_path.find_class(&name).unwrap().is_some());
+        }
+
+        let profile = class_path.resource_profile();
+        assert_eq!(profile.jar_find_class_calls, 2);
+        assert_eq!(profile.zip_entry_reads, 2);
+        assert_eq!(profile.cache_hits, 1);
+        assert_eq!(profile.cache_misses, 1);
+        assert_eq!(profile.cached_entries, 1);
+        assert_eq!(profile.cached_bytes, b"class bytes".len() as u64);
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
+    fn resource_cache_is_local_to_each_archive_snapshot() {
+        let jar_path = write_temp_jar(
+            "resource_cache_snapshot",
+            &minimal_stored_zip(&[("Snapshot.class", b"old bytes")]),
+        );
+        let old_snapshot = JarClassPath::new(&jar_path, 21).unwrap();
+        let name = BinaryName::from_internal("Snapshot");
+        assert_eq!(
+            old_snapshot.find_class(&name).unwrap().unwrap().bytes(),
+            b"old bytes"
+        );
+
+        std::fs::write(
+            &jar_path,
+            minimal_stored_zip(&[("Snapshot.class", b"new bytes")]),
+        )
+        .unwrap();
+        assert_eq!(
+            old_snapshot.find_class(&name).unwrap().unwrap().bytes(),
+            b"old bytes"
+        );
+
+        let fresh_snapshot = JarClassPath::new(&jar_path, 21).unwrap();
+        assert_eq!(
+            fresh_snapshot.find_class(&name).unwrap().unwrap().bytes(),
+            b"new bytes"
+        );
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
+    fn does_not_retain_resources_above_the_individual_cache_limit() {
+        let large_class = vec![b'x'; MAX_CACHED_RESOURCE_BYTES + 1];
+        let jar_path = write_temp_jar(
+            "resource_cache_large_entry",
+            &minimal_stored_zip(&[("Large.class", &large_class)]),
+        );
+        let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+        let name = BinaryName::from_internal("Large");
+
+        for _ in 0..2 {
+            assert_eq!(
+                class_path.find_class(&name).unwrap().unwrap().bytes(),
+                large_class
+            );
+        }
+        let profile = class_path.resource_profile();
+        assert_eq!(profile.cache_hits, 0);
+        assert_eq!(profile.cache_misses, 2);
+        assert_eq!(profile.cached_entries, 0);
+
+        std::fs::remove_file(&jar_path).unwrap();
+    }
+
+    #[test]
     fn package_prefix_index_finds_nested_class_and_tasty_resources_only() {
         let jar_bytes = minimal_stored_zip(&[
             ("a/b/c/Leaf.class", b"class bytes"),
@@ -330,14 +522,19 @@ pub(crate) mod tests {
         let class_path = JarClassPath::new(&jar_path, 21).unwrap();
 
         assert!(class_path.contains_package_prefix(&["a"]).unwrap());
-        let error = class_path
-            .find_class(&BinaryName::from_internal("a/b/Unsupported"))
-            .expect_err("class lookup should encounter the unsupported method");
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported ZIP compression method 99")
-        );
+        for _ in 0..2 {
+            let error = class_path
+                .find_class(&BinaryName::from_internal("a/b/Unsupported"))
+                .expect_err("class lookup should encounter the unsupported method");
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported ZIP compression method 99")
+            );
+        }
+        let profile = class_path.resource_profile();
+        assert_eq!(profile.cache_misses, 2);
+        assert_eq!(profile.cached_entries, 0);
 
         std::fs::remove_file(&jar_path).unwrap();
     }
@@ -482,6 +679,13 @@ pub(crate) mod tests {
 
         assert_eq!(resource.format(), ClassFormat::Tasty);
         assert_eq!(resource.bytes(), b"tasty bytes");
+        let cached = class_path
+            .find_class(&BinaryName::from_internal("Both"))
+            .unwrap()
+            .expect("cached resource should be found");
+        assert_eq!(cached.format(), ClassFormat::Tasty);
+        assert_eq!(cached.bytes(), b"tasty bytes");
+        assert_eq!(class_path.resource_profile().cache_hits, 1);
 
         std::fs::remove_file(&jar_path).unwrap();
     }
@@ -494,11 +698,47 @@ pub(crate) mod tests {
         )
         .unwrap();
 
-        let resource = class_path
-            .find_class(&BinaryName::from_internal("DoesNotExist"))
-            .unwrap();
+        let name = BinaryName::from_internal("DoesNotExist");
+        for _ in 0..2 {
+            assert!(class_path.find_class(&name).unwrap().is_none());
+        }
+        let profile = class_path.resource_profile();
+        assert_eq!(profile.jar_find_class_calls, 2);
+        assert_eq!(profile.cache_hits, 1);
+        assert_eq!(profile.cache_misses, 1);
+        assert_eq!(profile.cached_entries, 1);
+        assert_eq!(profile.cached_bytes, 0);
+    }
 
-        assert!(resource.is_none());
+    #[test]
+    fn resource_cache_evicts_old_entries_to_stay_within_its_byte_limit() {
+        let payload = vec![b'x'; MAX_CACHED_RESOURCE_BYTES];
+        let entry_names: Vec<String> = (0..=MAX_RESOURCE_CACHE_BYTES / payload.len())
+            .map(|index| format!("cache/Entry{index}.class"))
+            .collect();
+        let entries: Vec<(&str, &[u8])> = entry_names
+            .iter()
+            .map(|name| (name.as_str(), payload.as_slice()))
+            .collect();
+        let jar_path = write_temp_jar("resource_cache_byte_limit", &minimal_stored_zip(&entries));
+        let class_path = JarClassPath::new(&jar_path, 21).unwrap();
+
+        for entry_name in &entry_names {
+            let internal = entry_name.strip_suffix(".class").unwrap();
+            assert!(
+                class_path
+                    .find_class(&BinaryName::from_internal(internal))
+                    .unwrap()
+                    .is_some()
+            );
+        }
+
+        let profile = class_path.resource_profile();
+        assert!(profile.cached_entries <= MAX_RESOURCE_CACHE_BYTES as u64 / payload.len() as u64);
+        assert!(profile.cached_bytes <= MAX_RESOURCE_CACHE_BYTES as u64);
+        assert_eq!(profile.cache_evictions, 1);
+
+        std::fs::remove_file(&jar_path).unwrap();
     }
 
     #[test]

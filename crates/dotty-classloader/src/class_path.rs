@@ -46,6 +46,41 @@ pub struct ClassResource {
     origin: ClassOrigin,
 }
 
+/// Archive-backed resource lookup work observed by a classpath entry.
+///
+/// These counters describe adapter calls and archive entry reads. They do
+/// not count physical filesystem I/O; in particular, [`crate::JarClassPath`]
+/// reads its archive into memory when it is constructed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClassPathResourceProfile {
+    /// Calls to `find_class` on a JAR-backed entry.
+    pub jar_find_class_calls: u64,
+    /// Individual ZIP entry reads performed while resolving classes.
+    pub zip_entry_reads: u64,
+    /// Lookups served by a bounded per-JAR resource cache.
+    pub cache_hits: u64,
+    /// Lookups that reached the JAR archive after missing the cache.
+    pub cache_misses: u64,
+    /// Cached entries evicted to honor configured bounds.
+    pub cache_evictions: u64,
+    /// Current number of entries retained by the per-JAR cache.
+    pub cached_entries: u64,
+    /// Current bytes retained by the per-JAR cache.
+    pub cached_bytes: u64,
+}
+
+impl ClassPathResourceProfile {
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.jar_find_class_calls += other.jar_find_class_calls;
+        self.zip_entry_reads += other.zip_entry_reads;
+        self.cache_hits += other.cache_hits;
+        self.cache_misses += other.cache_misses;
+        self.cache_evictions += other.cache_evictions;
+        self.cached_entries += other.cached_entries;
+        self.cached_bytes += other.cached_bytes;
+    }
+}
+
 impl ClassResource {
     pub fn new(bytes: Vec<u8>, format: ClassFormat, origin: ClassOrigin) -> Self {
         Self {
@@ -184,6 +219,12 @@ pub trait ClassPathEntry: Send + Sync {
     /// class-file bytes elsewhere on the classpath, not just a
     /// compiler-driven lookup, so it must never be resolved unchecked.
     fn find_class(&self, name: &BinaryName) -> Result<Option<ClassResource>, ClassPathError>;
+
+    /// Archive resource lookup counters for opt-in profiling and audits.
+    /// Entries without an internal resource cache report zero counters.
+    fn resource_profile(&self) -> ClassPathResourceProfile {
+        ClassPathResourceProfile::default()
+    }
 
     /// Whether this entry contains at least one direct class or TASTy
     /// resource in `package`. `false` means this entry provides no positive
@@ -416,6 +457,14 @@ impl ClassPathEntry for CompositeClassPath {
         }
 
         Ok(None)
+    }
+
+    fn resource_profile(&self) -> ClassPathResourceProfile {
+        let mut profile = ClassPathResourceProfile::default();
+        for entry in &self.entries {
+            profile.merge(entry.resource_profile());
+        }
+        profile
     }
 
     fn contains_package(&self, package: &[&str]) -> Result<bool, ClassPathError> {

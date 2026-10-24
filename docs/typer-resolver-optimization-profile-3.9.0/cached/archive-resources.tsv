@@ -1,0 +1,4 @@
+run	jar_find_class_calls	zip_entry_reads	cache_hits	cache_misses	cache_evictions	cached_entries	cached_bytes
+1	28835	2727	27447	1388	0	1388	4142233
+2	28835	2727	27447	1388	0	1388	4142233
+3	28835	2727	27447	1388	0	1388	4142233

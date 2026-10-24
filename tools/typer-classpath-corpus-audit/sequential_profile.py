@@ -148,7 +148,7 @@ def parse_run(log: str) -> dict:
         "files": {}, "methods": {}, "outcomes": {}, "match_probes": [], "match_probe_ids": [], "match_outcomes": {}, "resolver": {}, "match_phases": [], "match_resolver": [], "match_resolver_wrappers": [], "summary": {},
         "loads": {}, "resolver_counts": {}, "load_roots": [], "wrappers": {}, "rollback": {},
         "cheap_resolver": {}, "cheap_resolver_outcomes": {}, "resolver_stages": [], "match_resolver_stages": [],
-        "classpath_resources": {}, "resolver_profile": {}, "match_resolver_profiles": [],
+        "classpath_resources": {}, "archive_resources": {}, "resolver_profile": {}, "match_resolver_profiles": [],
         "repeated_requests": [],
         "classload_timings": {}, "match_classload_timings": [],
         "resolver_roots": [], "resolver_root_phases": [], "resolver_cache": {}, "match_resolver_cache": [],
@@ -241,6 +241,8 @@ def parse_run(log: str) -> dict:
             result["rollback"] = {key: int(value) for key, value in kvs(line).items()}
         elif line.startswith("AUDIT_CLASSPATH_RESOURCES "):
             result["classpath_resources"] = kvs(line)
+        elif line.startswith("AUDIT_ARCHIVE_RESOURCES "):
+            result["archive_resources"] = kvs(line)
         elif line.startswith("AUDIT_METHOD_RESOLVER "):
             values = kvs(line)
             key = (values["file"], values["tree"])
@@ -702,6 +704,17 @@ def write_report(out_dir: Path, runs: list[dict], run_walls: list[int], cache_st
         for run_index, run in enumerate(runs, 1)
     ]
     (out_dir / "classpath-resources.tsv").write_text("\n".join(classpath_rows) + "\n", encoding="utf-8")
+    archive_resource_keys = (
+        "jar_find_class_calls", "zip_entry_reads", "cache_hits", "cache_misses",
+        "cache_evictions", "cached_entries", "cached_bytes",
+    )
+    archive_rows = ["run\t" + "\t".join(archive_resource_keys)] + [
+        f"{run_index}\t" + "\t".join(
+            run.get("archive_resources", {}).get(key, "unknown") for key in archive_resource_keys
+        )
+        for run_index, run in enumerate(runs, 1)
+    ]
+    (out_dir / "archive-resources.tsv").write_text("\n".join(archive_rows) + "\n", encoding="utf-8")
 
     top_files = sorted(
         ((statistics.mean(vals), path) for path, vals in file_samples.items() if vals),
