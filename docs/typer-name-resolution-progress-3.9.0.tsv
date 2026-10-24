@@ -14,3 +14,4 @@ compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=335	TermNameNo
 compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=352	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
 compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=360	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
 compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=393	TermNameNotFound	LocalValueConformanceUnsupported	false	Scala 3.9 package.scala:76
+compiler/src/dotty/tools/dotc/config/CommandLineParser.scala#tree=467	TermNameNotFound	MemberNotFound	false	Scala 3.9.0 java.nio.file.Paths static qualifier oracle

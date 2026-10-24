@@ -9,7 +9,7 @@ use dotty_core::ast::{AstArena, TreeKind, Typed, Untyped};
 use dotty_core::types::{TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
     Definitions, Name, Namespace, Packages, SemanticStore, SourceId, SourceSemanticIndex,
-    SourceText, SymbolId, SymbolInfo, SymbolKind, TreeId, TypeId,
+    SourceText, SymbolFlags, SymbolId, SymbolInfo, SymbolKind, TreeId, TypeId,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -1032,6 +1032,113 @@ fn explicit_this_receiver_keeps_its_class_and_selected_method_identity() {
         "ThisType(Class:Counter)"
     );
     assert_eq!(typer.typed_ast().get(typed).ty, int_type);
+}
+
+#[test]
+fn java_class_import_qualifier_exposes_only_static_members() {
+    let mut fixture = Fixture::new(
+        "package lib { class JavaApi { def staticValue(): Int = 1; def instanceValue: Int = 2 } }; package app { import lib.JavaApi; object Use { def value: Int = JavaApi.staticValue() } }",
+    );
+    let java_api = fixture.symbol_named("JavaApi", SymbolKind::Class);
+    fixture.store.symbols.get_mut(java_api).flags = SymbolFlags::JAVA_DEFINED;
+    let static_value = fixture
+        .methods_named("staticValue")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(java_api))
+        .unwrap()
+        .1;
+    fixture.store.symbols.get_mut(static_value).flags = SymbolFlags::STATIC;
+    let (_, method, rhs) = fixture.method("value");
+    let int_type = fixture.definitions.int;
+
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    assert_eq!(call_target(&typer, typed), Some(static_value));
+    assert_eq!(typer.typed_ast().get(typed).ty, int_type);
+}
+
+#[test]
+fn cached_java_class_qualifier_is_still_rejected_as_a_value() {
+    let mut fixture = Fixture::new(
+        "package lib { class JavaApi { def staticValue(): Int = 1 } }; package app { import lib.JavaApi; object Use { def value: Int = JavaApi.staticValue() } }",
+    );
+    let java_api = fixture.symbol_named("JavaApi", SymbolKind::Class);
+    fixture.store.symbols.get_mut(java_api).flags = SymbolFlags::JAVA_DEFINED;
+    let static_value = fixture
+        .methods_named("staticValue")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(java_api))
+        .unwrap()
+        .1;
+    fixture.store.symbols.get_mut(static_value).flags = SymbolFlags::STATIC;
+    let (_, method, rhs) = fixture.method("value");
+    let TreeKind::Apply(application) = &fixture.ast.get(rhs).kind else {
+        panic!("source call should be an application")
+    };
+    let TreeKind::Select(selection) = &fixture.ast.get(application.function).kind else {
+        panic!("source function should select the static method")
+    };
+    let class_qualifier = selection.qualifier;
+
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    assert!(matches!(
+        typer.type_expression(class_qualifier, context),
+        Err(TyperError::TermNameNotFound { .. })
+    ));
+    typer.type_expression(rhs, context).unwrap();
+    let cached_qualifier = typer.type_expression(class_qualifier, context);
+    assert!(
+        matches!(
+            cached_qualifier,
+            Err(TyperError::UnsupportedTermReference {
+                symbol,
+                kind: SymbolKind::Class,
+                ..
+            }) if symbol == java_api
+        ),
+        "unexpected cached qualifier result: {cached_qualifier:?}"
+    );
+}
+
+#[test]
+fn java_class_import_qualifier_rejects_instance_members() {
+    let mut fixture = Fixture::new(
+        "package lib { class JavaApi { def instanceValue: Int = 2 } }; package app { import lib.JavaApi; object Use { def value: Int = JavaApi.instanceValue } }",
+    );
+    let java_api = fixture.symbol_named("JavaApi", SymbolKind::Class);
+    fixture.store.symbols.get_mut(java_api).flags = SymbolFlags::JAVA_DEFINED;
+    let (_, method, rhs) = fixture.method("value");
+
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    assert!(matches!(
+        typer.type_expression(rhs, context),
+        Err(TyperError::MemberNotFound { .. })
+    ));
+    assert!(typer.source_typed_index().get(SOURCE, rhs).is_none());
+}
+
+#[test]
+fn java_instance_receiver_keeps_instance_members() {
+    let mut fixture = Fixture::new(
+        "package lib { class JavaApi { def instanceValue: Int = 2 } }; package app { import lib.JavaApi; object Use { def value(api: JavaApi): Int = api.instanceValue } }",
+    );
+    let java_api = fixture.symbol_named("JavaApi", SymbolKind::Class);
+    fixture.store.symbols.get_mut(java_api).flags = SymbolFlags::JAVA_DEFINED;
+    let (_, method, rhs) = fixture.method("value");
+    let instance_value = fixture
+        .methods_named("instanceValue")
+        .into_iter()
+        .find(|(_, symbol, _)| fixture.store.symbols.get(*symbol).owner == Some(java_api))
+        .unwrap()
+        .1;
+
+    let mut typer = fixture.typer();
+    let context = typer.expression_context_for(method).unwrap();
+    let typed = typer.type_expression(rhs, context).unwrap();
+    assert_eq!(term_ref_symbol(&typer, typed), Some(instance_value));
 }
 
 #[test]
