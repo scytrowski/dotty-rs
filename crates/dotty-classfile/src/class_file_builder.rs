@@ -1337,6 +1337,14 @@ fn resolve_instruction(
             let index = pool.long(*value)?;
             code_builder::long_load(index).map_err(ClassFileBuildError::CodeBuilder)
         }
+        SymbolicInstruction::FloatBits(bits) => {
+            let index = pool.float(f32::from_bits(*bits))?;
+            code_builder::float_load(index).map_err(ClassFileBuildError::CodeBuilder)
+        }
+        SymbolicInstruction::DoubleBits(bits) => {
+            let index = pool.double(f64::from_bits(*bits))?;
+            code_builder::double_load(index).map_err(ClassFileBuildError::CodeBuilder)
+        }
         SymbolicInstruction::New(owner) => {
             validate_internal_name(owner)?;
             let index = pool.class(owner)?;

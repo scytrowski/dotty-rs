@@ -320,7 +320,12 @@ fn mark_reachable(entry: BasicBlockId, blocks: &mut [BasicBlock]) {
 fn is_return(instruction: Instruction) -> bool {
     matches!(
         instruction,
-        Instruction::Return | Instruction::IReturn | Instruction::AReturn | Instruction::LReturn
+        Instruction::Return
+            | Instruction::IReturn
+            | Instruction::AReturn
+            | Instruction::LReturn
+            | Instruction::FReturn
+            | Instruction::DReturn
     )
 }
 

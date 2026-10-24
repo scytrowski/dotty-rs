@@ -9,8 +9,8 @@
 use super::{
     BranchInstruction, ClassReference, CodeElement, CodeSequence, CodeSequenceErrorKind,
     ConstantPoolIndexOperand, FieldReference, Instruction, LabelId, Ldc2Constant, LdcConstant,
-    LocalIndex, SpecialMethodReference, StaticMethodReference, ValidatedCodeSequence,
-    VirtualMethodReference,
+    LocalIndex, SmallDoubleConstant, SmallFloatConstant, SpecialMethodReference,
+    StaticMethodReference, ValidatedCodeSequence, VirtualMethodReference,
 };
 use crate::constant_pool::{ConstantPool, ConstantPoolEntry, ConstantPoolIndex, PoolRefError};
 use crate::descriptor::{DescriptorError, FieldType};
@@ -33,10 +33,14 @@ pub enum ConstantPoolOperandKind {
     StaticOrSpecialMethodReference,
     /// A `CONSTANT_Integer` entry.
     IntegerConstant,
+    /// A `CONSTANT_Float` entry.
+    FloatConstant,
     /// A category-one reference-valued loadable constant.
     ReferenceConstant,
     /// A `CONSTANT_Long` entry.
     LongConstant,
+    /// A `CONSTANT_Double` entry.
+    DoubleConstant,
 }
 
 impl fmt::Display for ConstantPoolOperandKind {
@@ -47,8 +51,10 @@ impl fmt::Display for ConstantPoolOperandKind {
             Self::VirtualMethodReference => "a Methodref entry",
             Self::StaticOrSpecialMethodReference => "a Methodref or InterfaceMethodref entry",
             Self::IntegerConstant => "an Integer entry",
+            Self::FloatConstant => "a Float entry",
             Self::ReferenceConstant => "a category-one reference constant",
             Self::LongConstant => "a Long entry",
+            Self::DoubleConstant => "a Double entry",
         })
     }
 }
@@ -522,13 +528,26 @@ fn write_instruction(
             super::SmallLongConstant::Zero => 0x09,
             super::SmallLongConstant::One => 0x0a,
         }),
+        Instruction::FConst(value) => writer.write_u1(match value {
+            SmallFloatConstant::Zero => 0x0b,
+            SmallFloatConstant::One => 0x0c,
+            SmallFloatConstant::Two => 0x0d,
+        }),
+        Instruction::DConst(value) => writer.write_u1(match value {
+            SmallDoubleConstant::Zero => 0x0e,
+            SmallDoubleConstant::One => 0x0f,
+        }),
         Instruction::Ldc(value) => write_ldc(writer, value, constant_pool)?,
         Instruction::Ldc2(value) => write_ldc2(writer, value, constant_pool)?,
         Instruction::ILoad(index) => write_local(writer, index, 0x15, 0x1a),
         Instruction::LLoad(index) => write_local(writer, index, 0x16, 0x1e),
+        Instruction::FLoad(index) => write_local(writer, index, 0x17, 0x22),
+        Instruction::DLoad(index) => write_local(writer, index, 0x18, 0x26),
         Instruction::ALoad(index) => write_local(writer, index, 0x19, 0x2a),
         Instruction::IStore(index) => write_local(writer, index, 0x36, 0x3b),
         Instruction::LStore(index) => write_local(writer, index, 0x37, 0x3f),
+        Instruction::FStore(index) => write_local(writer, index, 0x38, 0x43),
+        Instruction::DStore(index) => write_local(writer, index, 0x39, 0x47),
         Instruction::AStore(index) => write_local(writer, index, 0x3a, 0x4b),
         Instruction::IAdd => writer.write_u1(0x60),
         Instruction::ISub => writer.write_u1(0x64),
@@ -624,6 +643,8 @@ fn write_instruction(
         Instruction::IReturn => writer.write_u1(0xac),
         Instruction::AReturn => writer.write_u1(0xb0),
         Instruction::LReturn => writer.write_u1(0xad),
+        Instruction::FReturn => writer.write_u1(0xae),
+        Instruction::DReturn => writer.write_u1(0xaf),
     }
     Ok(())
 }
@@ -653,6 +674,7 @@ fn write_ldc(
 ) -> Result<(), AssembleError> {
     let (operand, expected) = match constant {
         LdcConstant::Integer(index) => (index, ConstantPoolOperandKind::IntegerConstant),
+        LdcConstant::Float(index) => (index, ConstantPoolOperandKind::FloatConstant),
         LdcConstant::Reference(index) => (index, ConstantPoolOperandKind::ReferenceConstant),
     };
     let index = operand.get();
@@ -661,6 +683,7 @@ fn write_ldc(
         .ok_or(AssembleError::InvalidConstantPoolOperand { index, expected })?;
     let valid = match constant {
         LdcConstant::Integer(_) => matches!(entry, ConstantPoolEntry::Integer(_)),
+        LdcConstant::Float(_) => matches!(entry, ConstantPoolEntry::Float(_)),
         LdcConstant::Reference(_) => match entry {
             ConstantPoolEntry::String { .. }
             | ConstantPoolEntry::Class { .. }
@@ -690,14 +713,16 @@ fn write_ldc2(
 ) -> Result<(), AssembleError> {
     let operand = constant.index();
     let index = operand.get();
+    let expected = match constant {
+        Ldc2Constant::Long(_) => ConstantPoolOperandKind::LongConstant,
+        Ldc2Constant::Double(_) => ConstantPoolOperandKind::DoubleConstant,
+    };
     let entry = pool
         .get(index)
-        .ok_or(AssembleError::InvalidConstantPoolOperand {
-            index,
-            expected: ConstantPoolOperandKind::LongConstant,
-        })?;
+        .ok_or(AssembleError::InvalidConstantPoolOperand { index, expected })?;
     let valid = match (constant, entry) {
         (Ldc2Constant::Long(_), ConstantPoolEntry::Long(_)) => true,
+        (Ldc2Constant::Double(_), ConstantPoolEntry::Double(_)) => true,
         (
             Ldc2Constant::Long(_),
             ConstantPoolEntry::Dynamic {
@@ -708,13 +733,11 @@ fn write_ldc2(
             dynamic_value_kind(pool, index, *name_and_type_index)?
                 == Some(super::JvmValueKind::Long)
         }
+        (Ldc2Constant::Double(_), _) => false,
         _ => false,
     };
     if !valid {
-        return Err(AssembleError::InvalidConstantPoolOperand {
-            index,
-            expected: ConstantPoolOperandKind::LongConstant,
-        });
+        return Err(AssembleError::InvalidConstantPoolOperand { index, expected });
     }
     writer.write_u1(0x14);
     writer.write_u2(index.0);
@@ -829,8 +852,8 @@ mod tests {
     use super::*;
     use crate::bytecode::{
         ClassReference, ConstantPoolIndexOperand, FieldReference, Ldc2Constant, LdcConstant,
-        SmallIntConstant, SmallLongConstant, SpecialMethodReference, StaticMethodReference,
-        VirtualMethodReference,
+        SmallDoubleConstant, SmallFloatConstant, SmallIntConstant, SmallLongConstant,
+        SpecialMethodReference, StaticMethodReference, VirtualMethodReference,
     };
     use crate::constant_pool_builder::ConstantPoolBuilder;
 
@@ -912,6 +935,173 @@ mod tests {
     }
 
     #[test]
+    fn encodes_float_double_constants_and_rejects_mismatched_pool_tags() {
+        let mut builder = ConstantPoolBuilder::new();
+        let float = builder.float(f32::from_bits(0x3fc0_0000)).unwrap();
+        let double = builder
+            .double(f64::from_bits(0x400c_0000_0000_0000))
+            .unwrap();
+        let long = builder.long(9).unwrap();
+        let pool = builder.finish().unwrap();
+        let instructions = [
+            Instruction::FConst(SmallFloatConstant::Zero),
+            Instruction::FConst(SmallFloatConstant::One),
+            Instruction::FConst(SmallFloatConstant::Two),
+            Instruction::DConst(SmallDoubleConstant::Zero),
+            Instruction::DConst(SmallDoubleConstant::One),
+            Instruction::Ldc(LdcConstant::Float(operand(float))),
+            Instruction::Ldc2(Ldc2Constant::Double(operand(double))),
+            Instruction::FReturn,
+            Instruction::DReturn,
+        ];
+        assert_eq!(
+            assemble(&instructions, &pool).unwrap(),
+            [
+                0x0b,
+                0x0c,
+                0x0d,
+                0x0e,
+                0x0f,
+                0x12,
+                float.0 as u8,
+                0x14,
+                double.0.to_be_bytes()[0],
+                double.0.to_be_bytes()[1],
+                0xae,
+                0xaf,
+            ]
+        );
+
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc(LdcConstant::Integer(operand(float)))],
+                &pool
+            ),
+            Err(AssembleError::InvalidConstantPoolOperand {
+                index: float,
+                expected: ConstantPoolOperandKind::IntegerConstant,
+            })
+        );
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc(LdcConstant::Float(operand(double)))],
+                &pool
+            ),
+            Err(AssembleError::InvalidConstantPoolOperand {
+                index: double,
+                expected: ConstantPoolOperandKind::FloatConstant,
+            })
+        );
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc2(Ldc2Constant::Long(operand(double)))],
+                &pool
+            ),
+            Err(AssembleError::InvalidConstantPoolOperand {
+                index: double,
+                expected: ConstantPoolOperandKind::LongConstant,
+            })
+        );
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc2(Ldc2Constant::Double(operand(long)))],
+                &pool
+            ),
+            Err(AssembleError::InvalidConstantPoolOperand {
+                index: long,
+                expected: ConstantPoolOperandKind::DoubleConstant,
+            })
+        );
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc2(Ldc2Constant::Double(operand(
+                    ConstantPoolIndex(double.0 + 1)
+                )))],
+                &pool,
+            ),
+            Err(AssembleError::InvalidConstantPoolOperand {
+                index: ConstantPoolIndex(double.0 + 1),
+                expected: ConstantPoolOperandKind::DoubleConstant,
+            })
+        );
+    }
+
+    #[test]
+    fn encodes_float_ldc_index_width_at_255_and_256() {
+        let narrow_entries = vec![Some(ConstantPoolEntry::Integer(0)); 254]
+            .into_iter()
+            .chain([Some(ConstantPoolEntry::Float(f32::from_bits(0x3fc0_0000)))])
+            .collect();
+        let narrow_pool = ConstantPool::from_entries(narrow_entries);
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc(LdcConstant::Float(operand(
+                    ConstantPoolIndex(255)
+                )))],
+                &narrow_pool,
+            )
+            .unwrap(),
+            [0x12, 0xff]
+        );
+
+        let wide_entries = vec![Some(ConstantPoolEntry::Integer(0)); 255]
+            .into_iter()
+            .chain([Some(ConstantPoolEntry::Float(f32::from_bits(0x3fc0_0000)))])
+            .collect();
+        let wide_pool = ConstantPool::from_entries(wide_entries);
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc(LdcConstant::Float(operand(
+                    ConstantPoolIndex(256)
+                )))],
+                &wide_pool,
+            )
+            .unwrap(),
+            [0x13, 0x01, 0x00]
+        );
+    }
+
+    #[test]
+    fn encodes_float_and_double_at_the_last_valid_constant_pool_indexes() {
+        let float_entries = vec![Some(ConstantPoolEntry::Integer(0)); 65_533]
+            .into_iter()
+            .chain([Some(ConstantPoolEntry::Float(f32::from_bits(0x3fc0_0000)))])
+            .collect();
+        let float_pool = ConstantPool::from_entries(float_entries);
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc(LdcConstant::Float(operand(
+                    ConstantPoolIndex(65_534)
+                )))],
+                &float_pool,
+            )
+            .unwrap(),
+            [0x13, 0xff, 0xfe]
+        );
+
+        let double_entries = vec![Some(ConstantPoolEntry::Integer(0)); 65_532]
+            .into_iter()
+            .chain([
+                Some(ConstantPoolEntry::Double(f64::from_bits(
+                    0x3ff8_0000_0000_0000,
+                ))),
+                None,
+            ])
+            .collect();
+        let double_pool = ConstantPool::from_entries(double_entries);
+        assert_eq!(
+            assemble(
+                &[Instruction::Ldc2(Ldc2Constant::Double(operand(
+                    ConstantPoolIndex(65_533)
+                )))],
+                &double_pool,
+            )
+            .unwrap(),
+            [0x14, 0xff, 0xfd]
+        );
+    }
+
+    #[test]
     fn encodes_local_forms_at_compact_narrow_and_wide_boundaries() {
         let pool = ConstantPool::default();
         let instructions = [
@@ -921,16 +1111,44 @@ mod tests {
             Instruction::ILoad(LocalIndex::new(255)),
             Instruction::ILoad(LocalIndex::new(256)),
             Instruction::LLoad(LocalIndex::new(65535)),
+            Instruction::FLoad(LocalIndex::new(0)),
+            Instruction::FLoad(LocalIndex::new(3)),
+            Instruction::FLoad(LocalIndex::new(4)),
+            Instruction::FLoad(LocalIndex::new(255)),
+            Instruction::FLoad(LocalIndex::new(256)),
+            Instruction::FLoad(LocalIndex::new(65535)),
+            Instruction::DLoad(LocalIndex::new(0)),
+            Instruction::DLoad(LocalIndex::new(3)),
+            Instruction::DLoad(LocalIndex::new(4)),
+            Instruction::DLoad(LocalIndex::new(255)),
+            Instruction::DLoad(LocalIndex::new(256)),
+            Instruction::DLoad(LocalIndex::new(65535)),
             Instruction::ALoad(LocalIndex::new(2)),
             Instruction::IStore(LocalIndex::new(1)),
             Instruction::LStore(LocalIndex::new(256)),
+            Instruction::FStore(LocalIndex::new(0)),
+            Instruction::FStore(LocalIndex::new(3)),
+            Instruction::FStore(LocalIndex::new(4)),
+            Instruction::FStore(LocalIndex::new(255)),
+            Instruction::FStore(LocalIndex::new(256)),
+            Instruction::FStore(LocalIndex::new(65535)),
+            Instruction::DStore(LocalIndex::new(0)),
+            Instruction::DStore(LocalIndex::new(3)),
+            Instruction::DStore(LocalIndex::new(4)),
+            Instruction::DStore(LocalIndex::new(255)),
+            Instruction::DStore(LocalIndex::new(256)),
+            Instruction::DStore(LocalIndex::new(65535)),
             Instruction::AStore(LocalIndex::new(255)),
         ];
         assert_eq!(
             assemble(&instructions, &pool).unwrap(),
             [
                 0x1a, 0x1d, 0x15, 0x04, 0x15, 0xff, 0xc4, 0x15, 0x01, 0x00, 0xc4, 0x16, 0xff, 0xff,
-                0x2c, 0x3c, 0xc4, 0x37, 0x01, 0x00, 0x3a, 0xff,
+                0x22, 0x25, 0x17, 0x04, 0x17, 0xff, 0xc4, 0x17, 0x01, 0x00, 0xc4, 0x17, 0xff, 0xff,
+                0x26, 0x29, 0x18, 0x04, 0x18, 0xff, 0xc4, 0x18, 0x01, 0x00, 0xc4, 0x18, 0xff, 0xff,
+                0x2c, 0x3c, 0xc4, 0x37, 0x01, 0x00, 0x43, 0x46, 0x38, 0x04, 0x38, 0xff, 0xc4, 0x38,
+                0x01, 0x00, 0xc4, 0x38, 0xff, 0xff, 0x47, 0x4a, 0x39, 0x04, 0x39, 0xff, 0xc4, 0x39,
+                0x01, 0x00, 0xc4, 0x39, 0xff, 0xff, 0x3a, 0xff,
             ]
         );
     }

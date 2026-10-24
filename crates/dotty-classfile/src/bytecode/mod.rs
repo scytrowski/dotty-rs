@@ -30,50 +30,58 @@
 //!
 //! | Instruction | Opcode / JVMS §6.5 | Operand width | Stack effect |
 //! | --- | --- | --- | --- |
-//! | `AConstNull` | [`aconst_null`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.aconst_null) `0x01` | 0 | `[] -> [reference]` |
-//! | `IConst(MinusOne..Five)` | [`iconst_m1`..`iconst_5`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iconst_i) `0x02`..`0x08` | 0 | `[] -> [int]` |
-//! | `Bipush(i8)` | [`bipush`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.bipush) `0x10` | 1 signed | `[] -> [int]` |
-//! | `Sipush(i16)` | [`sipush`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.sipush) `0x11` | 2 signed | `[] -> [int]` |
-//! | `LConst(Zero..One)` | [`lconst_0`..`lconst_1`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lconst_i) `0x09`..`0x0a` | 0 | `[] -> [long]` (2 slots) |
-//! | `Ldc(Integer/Reference)` | [`ldc`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ldc) `0x12` (u1 index), [`ldc_w`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ldc_w) `0x13` (u2 index) | 1 or 2 | `[] -> [int/reference]` |
-//! | `Ldc2(Long)` | [`ldc2_w`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ldc2_w) `0x14` | 2 | `[] -> [long]` (2 slots) |
-//! | `ILoad` | [`iload`, `iload_0`..`iload_3`, `wide iload`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iload) `0x15`, `0x1a`..`0x1d`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [int]` |
-//! | `LLoad` | [`lload`, `lload_0`..`lload_3`, `wide lload`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lload) `0x16`, `0x1e`..`0x21`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [long]` (2 slots) |
-//! | `ALoad` | [`aload`, `aload_0`..`aload_3`, `wide aload`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.aload) `0x19`, `0x2a`..`0x2d`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [reference]` |
-//! | `IStore` | [`istore`, `istore_0`..`istore_3`, `wide istore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.istore) `0x36`, `0x3b`..`0x3e`, `0xc4` | 0, 1, or `wide` + 2 | `[int] -> []` |
-//! | `LStore` | [`lstore`, `lstore_0`..`lstore_3`, `wide lstore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lstore) `0x37`, `0x3f`..`0x42`, `0xc4` | 0, 1, or `wide` + 2 | `[long] -> []` |
-//! | `AStore` | [`astore`, `astore_0`..`astore_3`, `wide astore`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.astore) `0x3a`, `0x4b`..`0x4e`, `0xc4` | 0, 1, or `wide` + 2 | `[reference] -> []` |
-//! | `IAdd` | [`iadd`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iadd) `0x60` | 0 | `[int, int] -> [int]` |
-//! | `ISub` | [`isub`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.isub) `0x64` | 0 | `[int, int] -> [int]` |
-//! | `IMul` | [`imul`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.imul) `0x68` | 0 | `[int, int] -> [int]` |
-//! | `IDiv` | [`idiv`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.idiv) `0x6c` | 0 | `[int, int] -> [int]` |
-//! | `IRem` | [`irem`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.irem) `0x70` | 0 | `[int, int] -> [int]` |
-//! | `IAnd` | [`iand`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.iand) `0x7e` | 0 | `[int, int] -> [int]` |
-//! | `IOr` | [`ior`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ior) `0x80` | 0 | `[int, int] -> [int]` |
-//! | `IXor` | [`ixor`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ixor) `0x82` | 0 | `[int, int] -> [int]` |
-//! | `Dup` | [`dup`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.dup) `0x59` | 0 | `[category-1] -> [category-1, category-1]` |
-//! | `Pop` | [`pop`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.pop) `0x57` | 0 | `[category-1] -> []` |
-//! | `GetField(FieldReference)` | [`getfield`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.getfield) `0xb4` | 2 | `[reference] -> [field value]` |
-//! | `PutField(FieldReference)` | [`putfield`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.putfield) `0xb5` | 2 | `[reference, field value] -> []` |
-//! | `GetStatic(FieldReference)` | [`getstatic`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.getstatic) `0xb2` | 2 | `[] -> [field value]` |
-//! | `PutStatic(FieldReference)` | [`putstatic`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.putstatic) `0xb3` | 2 | `[field value] -> []` |
-//! | `InvokeVirtual(VirtualMethodReference)` | [`invokevirtual`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.invokevirtual) `0xb6` | 2 | `[receiver, arguments] -> [result if non-void]` |
-//! | `InvokeSpecial(SpecialMethodReference)` | [`invokespecial`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.invokespecial) `0xb7` | 2 | `[receiver, arguments] -> [result if non-void]` |
-//! | `InvokeStatic(StaticMethodReference)` | [`invokestatic`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.invokestatic) `0xb8` | 2 | `[arguments] -> [result if non-void]` |
-//! | `New(ClassReference)` | [`new`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.new) `0xbb` | 2 | `[] -> [reference]` |
-//! | `Return` | [`return`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.return) `0xb1` | 0 | `[] -> terminal` |
-//! | `IReturn` | [`ireturn`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.ireturn) `0xac` | 0 | `[int] -> terminal` |
-//! | `AReturn` | [`areturn`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.areturn) `0xb0` | 0 | `[reference] -> terminal` |
-//! | `LReturn` | [`lreturn`](https://docs.oracle.com/javase/specs/jvms/se26/html/jvms-6.html#jvms-6.5.lreturn) `0xad` | 0 | `[long] -> terminal` |
+//! | `AConstNull` | [`aconst_null`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.aconst_null) `0x01` | 0 | `[] -> [reference]` |
+//! | `IConst(MinusOne..Five)` | [`iconst_m1`..`iconst_5`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.iconst_i) `0x02`..`0x08` | 0 | `[] -> [int]` |
+//! | `Bipush(i8)` | [`bipush`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.bipush) `0x10` | 1 signed | `[] -> [int]` |
+//! | `Sipush(i16)` | [`sipush`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.sipush) `0x11` | 2 signed | `[] -> [int]` |
+//! | `LConst(Zero..One)` | [`lconst_0`..`lconst_1`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.lconst_i) `0x09`..`0x0a` | 0 | `[] -> [long]` (2 slots) |
+//! | `Ldc(Integer/Reference)` | [`ldc`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc) `0x12` (u1 index), [`ldc_w`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc_w) `0x13` (u2 index) | 1 or 2 | `[] -> [int/reference]` |
+//! | `Ldc2(Long)` | [`ldc2_w`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ldc2_w) `0x14` | 2 | `[] -> [long]` (2 slots) |
+//! | `ILoad` | [`iload`, `iload_0`..`iload_3`, `wide iload`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.iload) `0x15`, `0x1a`..`0x1d`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [int]` |
+//! | `LLoad` | [`lload`, `lload_0`..`lload_3`, `wide lload`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.lload) `0x16`, `0x1e`..`0x21`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [long]` (2 slots) |
+//! | `ALoad` | [`aload`, `aload_0`..`aload_3`, `wide aload`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.aload) `0x19`, `0x2a`..`0x2d`, `0xc4` | 0, 1, or `wide` + 2 | `[] -> [reference]` |
+//! | `IStore` | [`istore`, `istore_0`..`istore_3`, `wide istore`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.istore) `0x36`, `0x3b`..`0x3e`, `0xc4` | 0, 1, or `wide` + 2 | `[int] -> []` |
+//! | `LStore` | [`lstore`, `lstore_0`..`lstore_3`, `wide lstore`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.lstore) `0x37`, `0x3f`..`0x42`, `0xc4` | 0, 1, or `wide` + 2 | `[long] -> []` |
+//! | `AStore` | [`astore`, `astore_0`..`astore_3`, `wide astore`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.astore) `0x3a`, `0x4b`..`0x4e`, `0xc4` | 0, 1, or `wide` + 2 | `[reference] -> []` |
+//! | `IAdd` | [`iadd`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.iadd) `0x60` | 0 | `[int, int] -> [int]` |
+//! | `ISub` | [`isub`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.isub) `0x64` | 0 | `[int, int] -> [int]` |
+//! | `IMul` | [`imul`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.imul) `0x68` | 0 | `[int, int] -> [int]` |
+//! | `IDiv` | [`idiv`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.idiv) `0x6c` | 0 | `[int, int] -> [int]` |
+//! | `IRem` | [`irem`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.irem) `0x70` | 0 | `[int, int] -> [int]` |
+//! | `IAnd` | [`iand`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.iand) `0x7e` | 0 | `[int, int] -> [int]` |
+//! | `IOr` | [`ior`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ior) `0x80` | 0 | `[int, int] -> [int]` |
+//! | `IXor` | [`ixor`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ixor) `0x82` | 0 | `[int, int] -> [int]` |
+//! | `Dup` | [`dup`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.dup) `0x59` | 0 | `[category-1] -> [category-1, category-1]` |
+//! | `Pop` | [`pop`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.pop) `0x57` | 0 | `[category-1] -> []` |
+//! | `GetField(FieldReference)` | [`getfield`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.getfield) `0xb4` | 2 | `[reference] -> [field value]` |
+//! | `PutField(FieldReference)` | [`putfield`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.putfield) `0xb5` | 2 | `[reference, field value] -> []` |
+//! | `GetStatic(FieldReference)` | [`getstatic`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.getstatic) `0xb2` | 2 | `[] -> [field value]` |
+//! | `PutStatic(FieldReference)` | [`putstatic`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.putstatic) `0xb3` | 2 | `[field value] -> []` |
+//! | `InvokeVirtual(VirtualMethodReference)` | [`invokevirtual`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.invokevirtual) `0xb6` | 2 | `[receiver, arguments] -> [result if non-void]` |
+//! | `InvokeSpecial(SpecialMethodReference)` | [`invokespecial`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.invokespecial) `0xb7` | 2 | `[receiver, arguments] -> [result if non-void]` |
+//! | `InvokeStatic(StaticMethodReference)` | [`invokestatic`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.invokestatic) `0xb8` | 2 | `[arguments] -> [result if non-void]` |
+//! | `New(ClassReference)` | [`new`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.new) `0xbb` | 2 | `[] -> [reference]` |
+//! | `Return` | [`return`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.return) `0xb1` | 0 | `[] -> terminal` |
+//! | `IReturn` | [`ireturn`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.ireturn) `0xac` | 0 | `[int] -> terminal` |
+//! | `AReturn` | [`areturn`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.areturn) `0xb0` | 0 | `[reference] -> terminal` |
+//! | `LReturn` | [`lreturn`](https://docs.oracle.com/javase/specs/jvms/se21/html/jvms-6.html#jvms-6.5.lreturn) `0xad` | 0 | `[long] -> terminal` |
+//!
+//! | Float/double instructions | JVMS 21 forms |
+//! | --- | --- |
+//! | `FConst(Zero..Two)` / `DConst(Zero..One)` | `fconst_0..2` `0x0b..0x0d`; `dconst_0..1` `0x0e..0x0f` |
+//! | `Ldc(Float)` / `Ldc2(Double)` | `ldc` / `ldc_w` `0x12` / `0x13`; `ldc2_w` `0x14` |
+//! | `FLoad` / `DLoad`, `FStore` / `DStore` | `fload` `0x17`, `dload` `0x18`, `fstore` `0x38`, `dstore` `0x39`; compact `_0.._3` and `wide` forms follow the local index |
+//! | `FReturn` / `DReturn` | `freturn` `0xae`; `dreturn` `0xaf` |
 //!
 //! The [`Instruction`] enum covers the straight-line instruction families
 //! listed above. [`code_sequence::BranchInstruction`] additionally models
 //! symbolic `goto`/`goto_w`, integer conditional branches, and reference
 //! identity/null branches. It does not choose branch widths or emit branch
-//! bytes. Float and double instructions, `invokeinterface`, `invokedynamic`,
-//! switches, `jsr`/`ret`, exception handlers, monitor operations, array
-//! operations, conversions, numeric comparisons, and all other JVM instructions are intentionally
-//! unsupported. There are no catch-all opcode or raw-byte variants, so
+//! bytes. Float/double arithmetic, conversions, comparisons, symbolic CFG
+//! transfers and automatic frames remain unsupported, as do `invokeinterface`,
+//! `invokedynamic`, switches, `jsr`/`ret`, exception handlers, monitor
+//! operations, array operations, and all other JVM instructions outside the
+//! table above. There are no catch-all opcode or raw-byte variants, so
 //! unsupported instructions cannot silently enter the model.
 //!
 //! [`ConstantPoolIndex`]: crate::constant_pool::ConstantPoolIndex
@@ -255,8 +263,12 @@ cp_reference_operand!(
 pub enum JvmValueKind {
     /// A category-one integer value.
     Int,
+    /// A category-one float value.
+    Float,
     /// A category-two long value.
     Long,
+    /// A category-two double value.
+    Double,
     /// A category-one reference value.
     Reference,
 }
@@ -266,6 +278,8 @@ pub enum JvmValueKind {
 pub enum LdcConstant {
     /// A `CONSTANT_Integer` entry.
     Integer(ConstantPoolIndexOperand),
+    /// A `CONSTANT_Float` entry.
+    Float(ConstantPoolIndexOperand),
     /// A reference-valued loadable entry such as `CONSTANT_String` or
     /// `CONSTANT_Class`. The eventual assembler validates the actual tag.
     Reference(ConstantPoolIndexOperand),
@@ -276,6 +290,7 @@ impl LdcConstant {
     pub const fn kind(self) -> JvmValueKind {
         match self {
             Self::Integer(_) => JvmValueKind::Int,
+            Self::Float(_) => JvmValueKind::Float,
             Self::Reference(_) => JvmValueKind::Reference,
         }
     }
@@ -283,7 +298,7 @@ impl LdcConstant {
     /// Returns the already-assigned constant-pool operand.
     pub const fn index(self) -> ConstantPoolIndexOperand {
         match self {
-            Self::Integer(index) | Self::Reference(index) => index,
+            Self::Integer(index) | Self::Float(index) | Self::Reference(index) => index,
         }
     }
 }
@@ -291,8 +306,10 @@ impl LdcConstant {
 /// A category-two constant loaded with `ldc2_w`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ldc2Constant {
-    /// A `CONSTANT_Long` entry. Double constants are outside this v1 subset.
+    /// A `CONSTANT_Long` entry.
     Long(ConstantPoolIndexOperand),
+    /// A `CONSTANT_Double` entry.
+    Double(ConstantPoolIndexOperand),
 }
 
 impl Ldc2Constant {
@@ -300,13 +317,14 @@ impl Ldc2Constant {
     pub const fn kind(self) -> JvmValueKind {
         match self {
             Self::Long(_) => JvmValueKind::Long,
+            Self::Double(_) => JvmValueKind::Double,
         }
     }
 
     /// Returns the already-assigned constant-pool operand.
     pub const fn index(self) -> ConstantPoolIndexOperand {
         match self {
-            Self::Long(index) => index,
+            Self::Long(index) | Self::Double(index) => index,
         }
     }
 }
@@ -341,6 +359,28 @@ pub enum SmallLongConstant {
     One,
 }
 
+/// The immediately representable Float constants used by `fconst_0` through
+/// `fconst_2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SmallFloatConstant {
+    /// `fconst_0`.
+    Zero,
+    /// `fconst_1`.
+    One,
+    /// `fconst_2`.
+    Two,
+}
+
+/// The immediately representable Double constants used by `dconst_0` and
+/// `dconst_1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SmallDoubleConstant {
+    /// `dconst_0`.
+    Zero,
+    /// `dconst_1`.
+    One,
+}
+
 /// A typed member of the v1 JVM straight-line instruction subset.
 ///
 /// Local operands are slot indices; constant-pool operands are validated,
@@ -359,6 +399,10 @@ pub enum Instruction {
     Sipush(i16),
     /// Pushes zero or one using `lconst_0` or `lconst_1`.
     LConst(SmallLongConstant),
+    /// Pushes zero, one, or two using the corresponding `fconst` instruction.
+    FConst(SmallFloatConstant),
+    /// Pushes zero or one using the corresponding `dconst` instruction.
+    DConst(SmallDoubleConstant),
     /// Loads an integer or reference from a category-one constant-pool entry.
     Ldc(LdcConstant),
     /// Loads a long from a category-two constant-pool entry.
@@ -367,12 +411,20 @@ pub enum Instruction {
     ILoad(LocalIndex),
     /// Loads a long local.
     LLoad(LocalIndex),
+    /// Loads a float local.
+    FLoad(LocalIndex),
+    /// Loads a double local.
+    DLoad(LocalIndex),
     /// Loads a reference local.
     ALoad(LocalIndex),
     /// Stores an integer local.
     IStore(LocalIndex),
     /// Stores a long local.
     LStore(LocalIndex),
+    /// Stores a float local.
+    FStore(LocalIndex),
+    /// Stores a double local.
+    DStore(LocalIndex),
     /// Stores a reference local.
     AStore(LocalIndex),
     /// Adds two integers.
@@ -419,6 +471,10 @@ pub enum Instruction {
     AReturn,
     /// Returns a long from a method.
     LReturn,
+    /// Returns a float from a method.
+    FReturn,
+    /// Returns a double from a method.
+    DReturn,
 }
 
 #[cfg(test)]
@@ -462,15 +518,21 @@ mod tests {
     #[test]
     fn ldc_operands_preserve_their_value_category() {
         let integer = LdcConstant::Integer(cp(1));
+        let float = LdcConstant::Float(cp(4));
         let reference = LdcConstant::Reference(cp(2));
         let long = Ldc2Constant::Long(cp(3));
+        let double = Ldc2Constant::Double(cp(5));
 
         assert_eq!(integer.kind(), JvmValueKind::Int);
+        assert_eq!(float.kind(), JvmValueKind::Float);
         assert_eq!(reference.kind(), JvmValueKind::Reference);
         assert_eq!(long.kind(), JvmValueKind::Long);
+        assert_eq!(double.kind(), JvmValueKind::Double);
         assert_eq!(integer.index().get(), ConstantPoolIndex(1));
+        assert_eq!(float.index().get(), ConstantPoolIndex(4));
         assert_eq!(reference.index().get(), ConstantPoolIndex(2));
         assert_eq!(long.index().get(), ConstantPoolIndex(3));
+        assert_eq!(double.index().get(), ConstantPoolIndex(5));
     }
 
     #[test]
@@ -500,14 +562,25 @@ mod tests {
             Instruction::Sipush(i16::MAX),
             Instruction::LConst(SmallLongConstant::Zero),
             Instruction::LConst(SmallLongConstant::One),
+            Instruction::FConst(SmallFloatConstant::Zero),
+            Instruction::FConst(SmallFloatConstant::One),
+            Instruction::FConst(SmallFloatConstant::Two),
+            Instruction::DConst(SmallDoubleConstant::Zero),
+            Instruction::DConst(SmallDoubleConstant::One),
             Instruction::Ldc(ldc_int),
+            Instruction::Ldc(LdcConstant::Float(cp(9))),
             Instruction::Ldc(ldc_ref),
             Instruction::Ldc2(ldc_long),
+            Instruction::Ldc2(Ldc2Constant::Double(cp(10))),
             Instruction::ILoad(local),
             Instruction::LLoad(local),
+            Instruction::FLoad(local),
+            Instruction::DLoad(local),
             Instruction::ALoad(local),
             Instruction::IStore(local),
             Instruction::LStore(local),
+            Instruction::FStore(local),
+            Instruction::DStore(local),
             Instruction::AStore(local),
             Instruction::IAdd,
             Instruction::ISub,
@@ -527,6 +600,8 @@ mod tests {
             Instruction::IReturn,
             Instruction::AReturn,
             Instruction::LReturn,
+            Instruction::FReturn,
+            Instruction::DReturn,
         ];
         assert_eq!(
             instructions,
@@ -545,14 +620,25 @@ mod tests {
                 Instruction::Sipush(i16::MAX),
                 Instruction::LConst(SmallLongConstant::Zero),
                 Instruction::LConst(SmallLongConstant::One),
+                Instruction::FConst(SmallFloatConstant::Zero),
+                Instruction::FConst(SmallFloatConstant::One),
+                Instruction::FConst(SmallFloatConstant::Two),
+                Instruction::DConst(SmallDoubleConstant::Zero),
+                Instruction::DConst(SmallDoubleConstant::One),
                 Instruction::Ldc(LdcConstant::Integer(cp(6))),
+                Instruction::Ldc(LdcConstant::Float(cp(9))),
                 Instruction::Ldc(LdcConstant::Reference(cp(7))),
                 Instruction::Ldc2(Ldc2Constant::Long(cp(8))),
+                Instruction::Ldc2(Ldc2Constant::Double(cp(10))),
                 Instruction::ILoad(local),
                 Instruction::LLoad(local),
+                Instruction::FLoad(local),
+                Instruction::DLoad(local),
                 Instruction::ALoad(local),
                 Instruction::IStore(local),
                 Instruction::LStore(local),
+                Instruction::FStore(local),
+                Instruction::DStore(local),
                 Instruction::AStore(local),
                 Instruction::IAdd,
                 Instruction::ISub,
@@ -572,6 +658,8 @@ mod tests {
                 Instruction::IReturn,
                 Instruction::AReturn,
                 Instruction::LReturn,
+                Instruction::FReturn,
+                Instruction::DReturn,
             ]
         );
         assert_eq!(field.index().get(), ConstantPoolIndex(1));

@@ -2662,3 +2662,194 @@ fn reference_comparison_branches_verify_and_execute() {
         );
     }
 }
+
+#[test]
+fn float_double_straight_line_instructions_verify_and_execute_with_jdk() {
+    if !require_jdk_or_skip() {
+        return;
+    }
+
+    let mut builder = ClassFileBuilder::new(
+        "FloatingPoint",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    builder
+        .add_static_method("floatValue", "()F", |code| {
+            code.fconst_bits(0x3fc0_0000)?;
+            code.freturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("floatNegativeZero", "()F", |code| {
+            code.fconst_bits(0x8000_0000)?;
+            code.freturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("floatNan", "()F", |code| {
+            code.fconst_bits(0x7fc0_0001)?;
+            code.freturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("floatRoundTrip", "(F)F", |code| {
+            code.fload(0)?;
+            code.freturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("floatLocal", "()F", |code| {
+            code.fconst_bits(0x3f00_0000)?;
+            code.fstore(2)?;
+            code.fload(2)?;
+            code.freturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("doubleValue", "()D", |code| {
+            code.dconst_bits(0x400c_0000_0000_0000)?;
+            code.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("doubleNegativeZero", "()D", |code| {
+            code.dconst_bits(0x8000_0000_0000_0000)?;
+            code.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("doubleNan", "()D", |code| {
+            code.dconst_bits(0x7ff8_0000_0000_0001)?;
+            code.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("doubleRoundTrip", "(D)D", |code| {
+            code.dload(0)?;
+            code.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+    builder
+        .add_static_method("doubleLocal", "()D", |code| {
+            code.dconst_bits(0x4000_0000_0000_0000)?;
+            code.dstore(2)?;
+            code.dload(2)?;
+            code.dreturn()?;
+            Ok(())
+        })
+        .unwrap();
+
+    let directory = TempDir::new();
+    let class_path = directory.path().to_string_lossy().into_owned();
+    let class_bytes = builder.encode().unwrap();
+    let class_file = decode_and_validate(&class_bytes);
+    assert_eq!(
+        class_file.version,
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        }
+    );
+    for (method_name, expected_start, expected_return) in [
+        ("floatRoundTrip", 0x22, 0xae),
+        ("floatLocal", 0x12, 0xae),
+        ("doubleRoundTrip", 0x26, 0xaf),
+        ("doubleLocal", 0x14, 0xaf),
+    ] {
+        let method_code = code(method_named(&class_file, method_name));
+        assert_eq!(method_code.code[0], expected_start, "{method_name}");
+        assert_eq!(
+            *method_code.code.last().unwrap(),
+            expected_return,
+            "{method_name}"
+        );
+    }
+    assert_eq!(code(method_named(&class_file, "floatLocal")).code[2], 0x45);
+    assert_eq!(code(method_named(&class_file, "floatLocal")).code[3], 0x24);
+    assert_eq!(code(method_named(&class_file, "doubleLocal")).code[3], 0x49);
+    assert_eq!(code(method_named(&class_file, "doubleLocal")).code[4], 0x28);
+    fs::write(directory.path().join("FloatingPoint.class"), &class_bytes).unwrap();
+
+    let javap = run(
+        "javap",
+        &["-c", "-v", "-classpath", &class_path, "FloatingPoint"],
+    );
+    assert!(
+        javap.status.success(),
+        "javap rejected the Float/Double class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javap.stdout),
+        String::from_utf8_lossy(&javap.stderr)
+    );
+    let javap_output = String::from_utf8_lossy(&javap.stdout);
+    for mnemonic in [
+        "ldc", "ldc2_w", "fload_0", "dload_0", "fstore_2", "dstore_2", "freturn", "dreturn",
+    ] {
+        assert!(
+            javap_output.contains(mnemonic),
+            "javap is missing {mnemonic}:\n{javap_output}"
+        );
+    }
+
+    let harness_path = directory.path().join("FloatingPointHarness.java");
+    fs::write(
+        &harness_path,
+        r#"public final class FloatingPointHarness {
+    public static void main(String[] args) {
+        if (FloatingPoint.floatValue() != 1.5f) throw new AssertionError("float constant");
+        if (FloatingPoint.doubleValue() != 3.5) throw new AssertionError("double constant");
+        if (Float.floatToRawIntBits(FloatingPoint.floatNegativeZero()) != 0x80000000) throw new AssertionError("float negative zero");
+        if (Double.doubleToRawLongBits(FloatingPoint.doubleNegativeZero()) != 0x8000000000000000L) throw new AssertionError("double negative zero");
+        if (!Float.isNaN(FloatingPoint.floatNan()) || !Double.isNaN(FloatingPoint.doubleNan())) throw new AssertionError("NaN constants");
+        if (Float.floatToRawIntBits(FloatingPoint.floatRoundTrip(Float.intBitsToFloat(0x80000000))) != 0x80000000) throw new AssertionError("float parameter");
+        if (Double.doubleToRawLongBits(FloatingPoint.doubleRoundTrip(Double.longBitsToDouble(0x8000000000000000L))) != 0x8000000000000000L) throw new AssertionError("double parameter");
+        if (FloatingPoint.floatLocal() != 0.5f || FloatingPoint.doubleLocal() != 2.0) throw new AssertionError("typed locals");
+        System.out.println("Float/Double straight-line verification passed");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let harness_path = harness_path.to_string_lossy().into_owned();
+    let javac = run(
+        "javac",
+        &["-classpath", &class_path, "-d", &class_path, &harness_path],
+    );
+    assert!(
+        javac.status.success(),
+        "javac rejected the Float/Double harness\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&javac.stdout),
+        String::from_utf8_lossy(&javac.stderr)
+    );
+    let execution = run(
+        "java",
+        &[
+            "-Xverify:all",
+            "-classpath",
+            &class_path,
+            "FloatingPointHarness",
+        ],
+    );
+    assert!(
+        execution.status.success(),
+        "java -Xverify:all rejected or failed to execute Float/Double class\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&execution.stdout),
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&execution.stdout)
+            .contains("Float/Double straight-line verification passed")
+    );
+}

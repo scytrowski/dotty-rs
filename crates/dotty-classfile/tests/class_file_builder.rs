@@ -2456,6 +2456,109 @@ fn interns_wide_integer_and_long_constants_for_typed_methods() {
 }
 
 #[test]
+fn typed_float_double_constants_keep_raw_bits_and_choose_exact_immediates() {
+    let mut builder = ClassFileBuilder::new(
+        "example/FloatingConstants",
+        ClassFileVersion {
+            major: 65,
+            minor: 0,
+        },
+    )
+    .unwrap();
+    for (name, bits) in [
+        ("floatPositiveZero", 0x0000_0000),
+        ("floatOne", 0x3f80_0000),
+        ("floatTwo", 0x4000_0000),
+        ("floatNegativeZero", 0x8000_0000),
+        ("floatNanA", 0x7fc0_0001),
+        ("floatNanB", 0x7fc0_0002),
+        ("floatInfinity", 0x7f80_0000),
+    ] {
+        builder
+            .add_static_method(name, "()F", move |code| {
+                code.fconst_bits(bits)?;
+                code.freturn()?;
+                Ok(())
+            })
+            .unwrap();
+    }
+    for (name, bits) in [
+        ("doublePositiveZero", 0x0000_0000_0000_0000),
+        ("doubleOne", 0x3ff0_0000_0000_0000),
+        ("doubleNegativeZero", 0x8000_0000_0000_0000),
+        ("doubleNanA", 0x7ff8_0000_0000_0001),
+        ("doubleNanB", 0x7ff8_0000_0000_0002),
+        ("doubleInfinity", 0x7ff0_0000_0000_0000),
+    ] {
+        builder
+            .add_static_method(name, "()D", move |code| {
+                code.dconst_bits(bits)?;
+                code.dreturn()?;
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    let bytes = builder.encode().unwrap();
+    let class_file = decode(&bytes);
+    for (name, opcode, return_opcode) in [
+        ("floatPositiveZero", 0x0b, 0xae),
+        ("floatOne", 0x0c, 0xae),
+        ("floatTwo", 0x0d, 0xae),
+        ("doublePositiveZero", 0x0e, 0xaf),
+        ("doubleOne", 0x0f, 0xaf),
+    ] {
+        assert_eq!(
+            code_attribute(method_named(&class_file, name)).code,
+            [opcode, return_opcode]
+        );
+    }
+
+    for (name, bits) in [
+        ("floatNegativeZero", 0x8000_0000),
+        ("floatNanA", 0x7fc0_0001),
+        ("floatNanB", 0x7fc0_0002),
+        ("floatInfinity", 0x7f80_0000),
+    ] {
+        let code = code_attribute(method_named(&class_file, name));
+        assert_eq!(code.code[0], 0x12, "{name}");
+        assert_eq!(code.code[2], 0xae, "{name}");
+        let index = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from(code.code[1]));
+        assert!(matches!(
+            class_file.constant_pool.get(index),
+            Some(ConstantPoolEntry::Float(value)) if value.to_bits() == bits
+        ));
+    }
+
+    for (name, bits) in [
+        ("doubleNegativeZero", 0x8000_0000_0000_0000),
+        ("doubleNanA", 0x7ff8_0000_0000_0001),
+        ("doubleNanB", 0x7ff8_0000_0000_0002),
+        ("doubleInfinity", 0x7ff0_0000_0000_0000),
+    ] {
+        let code = code_attribute(method_named(&class_file, name));
+        assert_eq!(code.code[0], 0x14, "{name}");
+        assert_eq!(code.code[3], 0xaf, "{name}");
+        let index = dotty_classfile::constant_pool::ConstantPoolIndex(u16::from_be_bytes([
+            code.code[1],
+            code.code[2],
+        ]));
+        assert!(matches!(
+            class_file.constant_pool.get(index),
+            Some(ConstantPoolEntry::Double(value)) if value.to_bits() == bits
+        ));
+        assert_eq!(
+            class_file
+                .constant_pool
+                .get(dotty_classfile::constant_pool::ConstantPoolIndex(
+                    index.0 + 1
+                )),
+            None
+        );
+    }
+}
+
+#[test]
 fn interns_symbolic_calls_once_and_reuses_stable_instruction_indices() {
     let mut builder = ClassFileBuilder::new(
         "example/Calls",
