@@ -1940,6 +1940,7 @@ fn primary_constructor_parameter_and_private_var_remain_separate_identities() {
 fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols() {
     let source_text = "class Measurement(val id: Int, var value: Double); class Mixed(val enabled: Boolean, var count: Long); class Ref(val item: Measurement)";
     with_source(source_text, |ast, source, index, definitions, typer| {
+        let mut class_plans = Vec::new();
         for (class_name, fields) in [
             (
                 "Measurement",
@@ -1987,7 +1988,7 @@ fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols(
             assert_eq!(parameter_trees.len(), fields.len());
             let mut parameters = Vec::with_capacity(parameter_trees.len());
             for (parameter_tree, (name, expected_type, expected_symbol, mutable)) in
-                parameter_trees.into_iter().zip(fields)
+                parameter_trees.iter().copied().zip(fields)
             {
                 let TreeKind::ValDef(parameter_definition) = &ast.get(parameter_tree).kind else {
                     panic!("constructor parameter source node should be a ValDef");
@@ -2094,23 +2095,64 @@ fn val_and_var_constructor_parameters_have_distinct_field_and_parameter_symbols(
                     }
                 }
             }
-            assert!(
-                matches!(
-                    JvmPrimaryConstructorPlan::from_source(
-                        class,
-                        constructor,
-                        parameters,
-                        ast,
-                        index
-                    ),
-                    Err(dotty_jvm::JvmCodegenError::InvalidPrimaryConstructor {
-                        issue: dotty_jvm::JvmConstructorIssue::SourceShape,
-                        ..
-                    })
-                ),
-                "the current JVM constructor planner rejects public parameter accessors at source-shape validation"
-            );
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap();
+            assert_eq!(proof.accessor_bindings().len(), parameter_trees.len());
+            for (ordinal, (binding, tree)) in proof
+                .accessor_bindings()
+                .iter()
+                .zip(&parameter_trees)
+                .enumerate()
+            {
+                assert_eq!(binding.class(), class);
+                assert_eq!(binding.constructor(), constructor);
+                assert_eq!(binding.source_id(), source);
+                assert_eq!(binding.source_parameter(), *tree);
+                assert_eq!(binding.field(), index.symbol_at(source, *tree).unwrap());
+                assert_eq!(
+                    binding.parameter(),
+                    index.derived_symbol_at(constructor, source, *tree).unwrap()
+                );
+                assert_eq!(binding.source_ordinal(), ordinal);
+                assert_eq!(binding.is_mutable(), ordinal == 1);
+            }
+            if class_name != "Ref" {
+                class_plans.push(JvmClassPlan {
+                    class,
+                    methods: Vec::new(),
+                    fields: Vec::new(),
+                    initialization: JvmClassInitializationPlan::PrimaryConstructor(proof.clone()),
+                });
+                typer.complete_symbol(constructor).unwrap();
+                let metadata = class_plans
+                    .last()
+                    .unwrap()
+                    .metadata(typer.store(), definitions)
+                    .unwrap();
+                assert_eq!(metadata.accessor_bindings(), proof.accessor_bindings());
+            }
         }
+        let unit = JvmCompilationUnit {
+            store: typer.store(),
+            typed_ast: typer.typed_ast(),
+            classes: class_plans,
+        };
+        let metadata = unit.metadata(definitions).unwrap();
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(
+            metadata
+                .iter()
+                .map(|class| class.accessor_bindings().len())
+                .collect::<Vec<_>>(),
+            [2, 2],
+            "same-batch primitive accessor metadata remains canonical"
+        );
     });
 }
 
@@ -2219,6 +2261,97 @@ fn constructor_accessor_source_selections_record_current_typer_boundary() {
             }
         }
     });
+}
+
+#[test]
+fn mixed_plain_and_accessor_constructor_parameters_keep_source_ordinals() {
+    with_source(
+        "class Mixed(first: Int, val second: Long, var enabled: Boolean)",
+        |ast, source, index, definitions, typer| {
+            let class = symbol_named(ast, index, source, typer, "Mixed");
+            typer.complete_symbol(class).unwrap();
+            let template = ast
+                .iter()
+                .find_map(|(_, node)| match &node.kind {
+                    TreeKind::Template(template) => Some(template),
+                    _ => None,
+                })
+                .unwrap();
+            let constructor = index.symbol_at(source, template.constructor).unwrap();
+            let TreeKind::DefDef(definition) = &ast.get(template.constructor).kind else {
+                panic!("primary constructor should be a DefDef");
+            };
+            let parameter_trees = &definition.value_param_clauses[0];
+            assert_eq!(parameter_trees.len(), 3);
+            let parameters = parameter_trees
+                .iter()
+                .map(|tree| {
+                    let field_or_parameter = index.symbol_at(source, *tree).unwrap();
+                    let formal = index.derived_symbol_at(constructor, source, *tree).unwrap();
+                    typer.complete_symbol(field_or_parameter).unwrap();
+                    typer.complete_symbol(formal).unwrap();
+                    formal
+                })
+                .collect::<Vec<_>>();
+            typer.complete_symbol(constructor).unwrap();
+            let proof = JvmPrimaryConstructorPlan::from_source(
+                class,
+                constructor,
+                parameters.clone(),
+                ast,
+                index,
+            )
+            .unwrap();
+            assert_eq!(proof.parameters(), parameters);
+            assert_eq!(proof.accessor_bindings().len(), 2);
+            let [second, enabled] = proof.accessor_bindings() else {
+                panic!("the plain first parameter must not become an accessor");
+            };
+            assert_eq!(second.source_ordinal(), 1);
+            assert_eq!(
+                second.field(),
+                index.symbol_at(source, parameter_trees[1]).unwrap()
+            );
+            assert_eq!(second.parameter(), parameters[1]);
+            assert!(!second.is_mutable());
+            assert_eq!(enabled.source_ordinal(), 2);
+            assert_eq!(
+                enabled.field(),
+                index.symbol_at(source, parameter_trees[2]).unwrap()
+            );
+            assert_eq!(enabled.parameter(), parameters[2]);
+            assert!(enabled.is_mutable());
+            assert_eq!(
+                typer
+                    .store()
+                    .symbols
+                    .get(index.symbol_at(source, parameter_trees[0]).unwrap())
+                    .kind,
+                SymbolKind::Parameter,
+                "plain constructor input remains distinct from source accessor fields"
+            );
+
+            let metadata = JvmClassPlan {
+                class,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                initialization: JvmClassInitializationPlan::PrimaryConstructor(proof),
+            }
+            .metadata(typer.store(), definitions)
+            .unwrap();
+            assert_eq!(metadata.accessor_bindings().len(), 2);
+            let constructor_metadata = metadata.constructor().unwrap();
+            assert_eq!(
+                constructor_metadata
+                    .parameters()
+                    .iter()
+                    .map(|parameter| parameter.slot())
+                    .collect::<Vec<_>>(),
+                [1, 2, 4],
+                "JVM parameter slots still account for Long's two slots"
+            );
+        },
+    );
 }
 
 #[test]
@@ -4371,8 +4504,6 @@ fn ordinary_primary_constructor_metadata_uses_derived_parameters_and_void_result
 fn primary_constructor_source_proof_rejects_wrong_identities_and_unsupported_forms() {
     use dotty_jvm::{JvmCodegenError, JvmConstructorIssue, JvmPrimaryConstructorPlan};
     for text in [
-        "class C(val x: Int)",
-        "class C(var x: Int)",
         "class C(x: Int = 1)",
         "class C(using x: Int)",
         "class C[A](x: Int)",

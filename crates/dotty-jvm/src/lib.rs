@@ -26,8 +26,8 @@ mod constructor_call;
 mod constructor_initializers;
 mod descriptor;
 pub use constructor::{
-    JvmConstructorArgumentBinding, JvmConstructorIssue, JvmConstructorMetadata,
-    JvmDirectSuperConstructorPlan, JvmPrimaryConstructorPlan,
+    JvmConstructorAccessorBinding, JvmConstructorArgumentBinding, JvmConstructorIssue,
+    JvmConstructorMetadata, JvmDirectSuperConstructorPlan, JvmPrimaryConstructorPlan,
 };
 pub use constructor_initializers::{
     JvmConstructorFieldInitializer, JvmConstructorFieldInitializerPlan,
@@ -334,6 +334,7 @@ pub struct JvmClassMetadata {
     superclass: Option<JvmSuperclassPlan>,
     fields: Vec<JvmFieldMetadata>,
     constructor: Option<JvmConstructorMetadata>,
+    accessor_bindings: Vec<JvmConstructorAccessorBinding>,
     methods: Vec<JvmMethodMetadata>,
     dispatch_methods: Vec<JvmMethodDispatchMetadata>,
 }
@@ -1598,6 +1599,13 @@ impl JvmClassMetadata {
     /// Explicit primary constructor metadata, when the frontend supplied a plan.
     pub fn constructor(&self) -> Option<&JvmConstructorMetadata> {
         self.constructor.as_ref()
+    }
+
+    /// Semantically validated source field to constructor-formal bindings for
+    /// the class's primary-constructor accessors. These are proof records for
+    /// later JVM-only planning, not generated fields or methods.
+    pub fn accessor_bindings(&self) -> &[JvmConstructorAccessorBinding] {
+        &self.accessor_bindings
     }
     /// Class identity, preserving its canonical semantic symbol.
     pub const fn identity(&self) -> &JvmClassIdentity {
