@@ -3,8 +3,9 @@
 use dotty_core::ast::{TreeKind, UntypedNode};
 use dotty_core::types::{ClassInfo, TermRefTarget, Type, TypeRefTarget};
 use dotty_core::{
-    Definitions, NoResolver, Packages, SemanticStore, SourceId, SourceText, SymbolInfo, SymbolKind,
-    TreeId, Untyped,
+    Definitions, MemberRequest, Name, Namespace, NoResolver, Packages, ResolutionError,
+    ResolverCheckpoint, SemanticStore, SourceId, SourceText, Symbol, SymbolFlags, SymbolInfo,
+    SymbolKind, SymbolLinks, SymbolOrigin, SymbolResolver, TreeId, Untyped, Visibility,
 };
 use dotty_lexer::ContextualScanner;
 use dotty_namer::name_compilation_unit;
@@ -13,6 +14,41 @@ use dotty_typer::{ExpressionContext, SourceTyper, TyperError};
 const NULL_REFERENCE_IDENTITY_SOURCE: &str =
     include_str!("../../../tests/fixtures/jvm/NullReferenceIdentity.scala");
 const NULL_TYPING_SOURCE: &str = include_str!("fixtures/null-typing/NullTyping.scala");
+
+struct ScalaTypeResolver {
+    package: dotty_core::SymbolId,
+    requested_name: &'static str,
+    result: dotty_core::SymbolId,
+    member_requests: Vec<Name>,
+}
+
+impl SymbolResolver for ScalaTypeResolver {
+    fn checkpoint(&self) -> ResolverCheckpoint {
+        ResolverCheckpoint::new(0)
+    }
+
+    fn rollback_to(&mut self, _store: &mut SemanticStore, _checkpoint: ResolverCheckpoint) {}
+
+    fn resolve_member(
+        &mut self,
+        store: &mut SemanticStore,
+        request: &MemberRequest,
+    ) -> Result<Option<dotty_core::SymbolId>, ResolutionError> {
+        self.member_requests.push(request.name);
+        Ok(
+            (store.names.resolve(request.name.text()) == self.requested_name)
+                .then_some(self.result),
+        )
+    }
+
+    fn resolve_package(
+        &mut self,
+        _store: &mut SemanticStore,
+        path: &[&str],
+    ) -> Result<Option<dotty_core::SymbolId>, ResolutionError> {
+        Ok((path == ["scala"]).then_some(self.package))
+    }
+}
 
 fn class_definition(
     parsed: &dotty_parser::ParseResult,
@@ -113,6 +149,96 @@ fn types_a_small_source_program_with_no_resolver_or_jdk_fixture() {
         typer.typed_ast().get(typed).kind,
         TreeKind::Literal(_)
     ));
+}
+
+#[test]
+fn source_type_lookup_accepts_default_scala_alias_with_a_canonical_target_name() {
+    let text = "object C { def value: Traversable }";
+    let source = SourceId::from_index(0);
+    let mut store = SemanticStore::new();
+    let definitions = Definitions::bootstrap(&mut store);
+    let scanner = ContextualScanner::new(text).unwrap();
+    let parsed = dotty_parser::parse_compilation_unit(
+        SourceText::new(text).unwrap(),
+        source,
+        scanner,
+        &mut store.names,
+    );
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let mut packages = Packages::new();
+    let index = name_compilation_unit(
+        &parsed.ast,
+        parsed.root,
+        source,
+        "default-scala-type.scala",
+        &mut store,
+        &mut packages,
+    )
+    .unwrap();
+    let scala_name = Name::new(store.names.intern("scala"), Namespace::Term);
+    let scala_package = store.symbols.alloc(Symbol {
+        name: scala_name,
+        owner: None,
+        kind: SymbolKind::Package,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Builtin,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    // Classpath resolvers may normalize a Scala package alias to its canonical
+    // target symbol, whose name need not match the source spelling.
+    let target_name = Name::new(store.names.intern("Iterable"), Namespace::Type);
+    let target = store.symbols.alloc(Symbol {
+        name: target_name,
+        owner: Some(scala_package),
+        kind: SymbolKind::Class,
+        flags: SymbolFlags::EMPTY,
+        visibility: Visibility::Public,
+        info: SymbolInfo::Missing,
+        origin: SymbolOrigin::Builtin,
+        annotations: Vec::new(),
+        position: None,
+        links: SymbolLinks::default(),
+    });
+    let method = parsed
+        .ast
+        .iter()
+        .find_map(|(tree, node)| {
+            let TreeKind::DefDef(definition) = &node.kind else {
+                return None;
+            };
+            (store.names.resolve(definition.name.as_name().text()) == "value")
+                .then(|| index.symbol_at(source, tree).unwrap())
+        })
+        .expect("source should contain method value");
+    let mut typer = SourceTyper::new(
+        &parsed.ast,
+        source,
+        &index,
+        &mut store,
+        definitions,
+        &packages,
+    )
+    .with_resolver(Box::new(ScalaTypeResolver {
+        package: scala_package,
+        requested_name: "Traversable",
+        result: target,
+        member_requests: Vec::new(),
+    }));
+
+    let ty = typer.complete_symbol(method).unwrap();
+
+    assert!(matches!(
+        typer.store().types.get(ty),
+        Type::TypeRef {
+            target: TypeRefTarget::Symbol(symbol),
+            ..
+        } if *symbol == target
+    ));
+    assert_eq!(typer.store().symbols.get(target).owner, Some(scala_package));
 }
 
 #[test]
