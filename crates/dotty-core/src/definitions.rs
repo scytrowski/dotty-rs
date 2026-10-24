@@ -28,6 +28,7 @@ pub struct IntPrimitiveOperatorSymbols {
     pub multiply: SymbolId,
     pub divide: SymbolId,
     pub remainder: SymbolId,
+    pub bitwise_and: SymbolId,
     pub less_than: SymbolId,
     pub less_or_equal: SymbolId,
     pub greater_than: SymbolId,
@@ -35,7 +36,8 @@ pub struct IntPrimitiveOperatorSymbols {
 }
 
 impl IntPrimitiveOperatorSymbols {
-    /// Returns the nine supported method identities in the audit order.
+    /// Returns the nine method identities supported by the bounded JVM
+    /// intrinsic subset, in audit order.
     pub const fn all(self) -> [SymbolId; 9] {
         [
             self.plus,
@@ -43,6 +45,23 @@ impl IntPrimitiveOperatorSymbols {
             self.multiply,
             self.divide,
             self.remainder,
+            self.less_than,
+            self.less_or_equal,
+            self.greater_than,
+            self.greater_or_equal,
+        ]
+    }
+
+    /// Returns every source-typing operator identity registered on `Int`, in
+    /// audit order. Some of these operations are not yet JVM backend intrinsics.
+    pub const fn source_all(self) -> [SymbolId; 10] {
+        [
+            self.plus,
+            self.minus,
+            self.multiply,
+            self.divide,
+            self.remainder,
+            self.bitwise_and,
             self.less_than,
             self.less_or_equal,
             self.greater_than,
@@ -705,6 +724,10 @@ impl Definitions {
                 result: self.int,
             },
             IntOperatorSpec {
+                spelling: "&",
+                result: self.int,
+            },
+            IntOperatorSpec {
                 spelling: "<",
                 result: self.boolean,
             },
@@ -790,7 +813,7 @@ impl Definitions {
             }
         };
 
-        let mut found = [None; 9];
+        let mut found = [None; 10];
         if let Some(scope) = scope {
             for (index, spec) in specs.iter().enumerate() {
                 let name = Name::new(store.names.intern(spec.spelling), Namespace::Term);
@@ -883,7 +906,7 @@ impl Definitions {
         } else {
             store.scopes.alloc(Scope::new(Some(int_class)))
         };
-        let mut ids = [None; 9];
+        let mut ids = [None; 10];
         for (index, spec) in specs.into_iter().enumerate() {
             if let Some(symbol) = found[index] {
                 ids[index] = Some(symbol);
@@ -935,10 +958,11 @@ impl Definitions {
             multiply: ids[2],
             divide: ids[3],
             remainder: ids[4],
-            less_than: ids[5],
-            less_or_equal: ids[6],
-            greater_than: ids[7],
-            greater_or_equal: ids[8],
+            bitwise_and: ids[5],
+            less_than: ids[6],
+            less_or_equal: ids[7],
+            greater_than: ids[8],
+            greater_or_equal: ids[9],
         })
     }
 
@@ -983,6 +1007,10 @@ impl Definitions {
                 result: self.int,
             },
             IntOperatorSpec {
+                spelling: "&",
+                result: self.int,
+            },
+            IntOperatorSpec {
                 spelling: "<",
                 result: self.boolean,
             },
@@ -999,7 +1027,7 @@ impl Definitions {
                 result: self.boolean,
             },
         ];
-        let mut ids = [None; 9];
+        let mut ids = [None; 10];
         for (index, spec) in specs.iter().enumerate() {
             let name = Name::new(store.names.get(spec.spelling)?, Namespace::Term);
             for &symbol in store.scopes.get(info.declarations).lookup_all(&name) {
@@ -1038,10 +1066,11 @@ impl Definitions {
             multiply: ids[2]?,
             divide: ids[3]?,
             remainder: ids[4]?,
-            less_than: ids[5]?,
-            less_or_equal: ids[6]?,
-            greater_than: ids[7]?,
-            greater_or_equal: ids[8]?,
+            bitwise_and: ids[5]?,
+            less_than: ids[6]?,
+            less_or_equal: ids[7]?,
+            greater_than: ids[8]?,
+            greater_or_equal: ids[9]?,
         })
     }
 
@@ -2031,6 +2060,7 @@ mod tests {
             registered
         );
         assert_eq!(registered.all().len(), 9);
+        assert_eq!(registered.source_all().len(), 10);
 
         for (symbol, spelling, result) in [
             (registered.plus, "+", definitions.int),
@@ -2038,6 +2068,7 @@ mod tests {
             (registered.multiply, "*", definitions.int),
             (registered.divide, "/", definitions.int),
             (registered.remainder, "%", definitions.int),
+            (registered.bitwise_and, "&", definitions.int),
             (registered.less_than, "<", boolean),
             (registered.less_or_equal, "<=", boolean),
             (registered.greater_than, ">", boolean),
